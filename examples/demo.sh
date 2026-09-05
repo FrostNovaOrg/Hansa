@@ -5,6 +5,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 BH="$ROOT/bin/bellhop"
 WORK=${BELLHOP_DEMO_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/bellhop-demo.XXXXXX")}
+mkdir -p "$WORK"
 echo "demo workspace: $WORK"
 
 # 1. A fictional product repository.
