@@ -8,6 +8,8 @@
   "wake_cmd": "",
   "claude_bin": "claude",
   "worktrees_dir": ".worktrees",
+  "session_watchdog": true,
+  "session_watchdog_interval": 5,
   "lanes": {
     "api": {
       "repo": "../widget-service",

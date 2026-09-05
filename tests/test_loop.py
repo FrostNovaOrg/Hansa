@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bellhop import card, decisions, desk_ops, ledger, ring, sampling, seal, sentinel, watch  # noqa: E402
+from bellhop import __version__, card, decisions, desk_ops, ledger, ring, sampling, seal, sentinel, watch  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.packet import PacketError, parse_packet  # noqa: E402
 from bellhop.util import BellhopError, read, read_json, write  # noqa: E402
@@ -174,7 +174,7 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("Cold-start reading list", out.stdout)
         out = subprocess.run([str(ROOT / "bin" / "bellhop"), "--version"], capture_output=True, text=True)
-        self.assertIn("bellhop 0.1.0", out.stdout)
+        self.assertIn(f"bellhop {__version__}", out.stdout)
 
 
 if __name__ == "__main__":

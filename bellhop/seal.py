@@ -6,7 +6,7 @@ from typing import Dict, List
 from .config import FRAMEWORK_ROOT, Desk
 from .util import BellhopError, sha256_file, ts, write
 
-SEALED_FRAMEWORK = ("bellhop", "bin", "template/.claude", "template/templates")
+SEALED_FRAMEWORK = ("bellhop", "bin", "bellhop_main.py", "template/.claude", "template/templates", "skills", "agents", "hooks", ".claude-plugin", ".mcp.json")
 SEALED_DESK = ("frozen", "rules", ".claude", "templates")
 
 
@@ -42,6 +42,14 @@ def seal(desk: Desk) -> Path:
     return p
 
 
+VENDORED_PREFIXES = ("framework:bellhop/", "framework:bellhop_main.py", "framework:template/templates/")
+
+
+def running_from_vendored_copy() -> bool:
+    """True when this code runs from a desk's `.bellhop/` copy rather than a full checkout."""
+    return (FRAMEWORK_ROOT / "VERSION").exists() and not (FRAMEWORK_ROOT / ".claude-plugin").exists()
+
+
 def verify(desk: Desk) -> List[str]:
     p = manifest_path(desk)
     if not p.exists():
@@ -53,6 +61,10 @@ def verify(desk: Desk) -> List[str]:
         h, name = line.split("  ", 1)
         recorded[name] = h
     current = compute(desk)
+    if running_from_vendored_copy():
+        # The vendored copy carries only the package, the entry point, and the templates.
+        recorded = {n: h for n, h in recorded.items() if not n.startswith("framework:") or n.startswith(VENDORED_PREFIXES)}
+        current = {n: h for n, h in current.items() if not n.startswith("framework:") or n.startswith(VENDORED_PREFIXES)}
     changed = [n for n, h in current.items() if recorded.get(n) != h]
     changed += [n for n in recorded if n not in current]
     return sorted(changed)

@@ -12,14 +12,5 @@
       "Bash(git push --force:*)",
       "Bash(rm -rf:*)"
     ]
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "sh .claude/hooks/session-start.sh" }
-        ]
-      }
-    ]
   }
 }

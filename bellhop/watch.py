@@ -203,8 +203,10 @@ def watch_once(desk: Desk, archive: bool = True) -> Optional[dict]:
 def watch_loop(desk: Desk, interval: int = 5, archive: bool = True) -> None:
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT, _handle_term)
+    from . import daemon as daemon_mod
     while not _stop:
         try:
+            daemon_mod.touch_heartbeat(desk, 'resident')
             result = watch_once(desk, archive=archive)
         except BellhopError as exc:
             append(desk.bells_logs / "watchdog.log", f"{ts()}\tRED\t{exc}\n")

@@ -8,6 +8,8 @@ from . import __version__
 from . import accept as accept_mod
 from . import archive as archive_mod
 from . import card as card_mod
+from . import daemon as daemon_mod
+from . import hooks as hooks_mod
 from . import decisions as decisions_mod
 from . import desk_ops
 from . import ledger as ledger_mod
@@ -179,6 +181,48 @@ def cmd_coldstart(args):
     print(desk_ops.coldstart(desk), end="")
 
 
+def cmd_daemon(args):
+    desk = _desk(args)
+    if args.daemon_cmd == "install":
+        report = daemon_mod.install(desk, load=args.load, python=args.python)
+        print(f"platform: {report['platform']}")
+        print("service files written:")
+        for f in report["files"]:
+            print(f"  {f}")
+        if report["loaded"]:
+            print("loaded: yes")
+        else:
+            print("loaded: no" + (" (errors below)" if report["errors"] else " (run again with --load, or run these commands):"))
+            for c in report["load_commands"]:
+                print(f"  {c}")
+        for e in report["errors"]:
+            print(f"  error: {e}")
+        _commit(desk, args, ["state/.daemon.json"], "resident service installed")
+        if report["errors"]:
+            sys.exit(1)
+    elif args.daemon_cmd == "uninstall":
+        report = daemon_mod.uninstall(desk)
+        print("removed:\n  " + "\n  ".join(report["removed"]) if report["removed"] else "no service files to remove")
+        for e in report["errors"]:
+            print(f"  note: {e}")
+    elif args.daemon_cmd == "status":
+        print(daemon_mod.status_text(desk), end="")
+        s = daemon_mod.status(desk)
+        sys.exit(0 if (s["heartbeat_fresh"] or not s["installed"]) else 1)
+    elif args.daemon_cmd == "files":
+        for path, content in daemon_mod.service_files(desk, daemon_mod.platform_name(), args.python).items():
+            print(f"===== {path}\n{content}")
+
+
+def cmd_mcp(args):
+    from . import mcp_server
+    sys.exit(mcp_server.main(Path(args.desk) if args.desk else None))
+
+
+def cmd_hook(args):
+    sys.exit(hooks_mod.main(args.event))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bellhop", description="File-based operations for a team of Claude Code agents.")
     p.add_argument("--version", action="version", version=f"bellhop {__version__}")
@@ -220,6 +264,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("seal", help="record or verify seals"); s.add_argument("--verify", action="store_true"); s.set_defaults(fn=cmd_seal)
     sub.add_parser("close", help="daily close").set_defaults(fn=cmd_close)
     sub.add_parser("coldstart", help="print the reading list and check state files").set_defaults(fn=cmd_coldstart)
+
+    s = sub.add_parser("daemon", help="resident watchdog and sentinel service"); ss = s.add_subparsers(dest="daemon_cmd", required=True)
+    i = ss.add_parser("install", help="vendor Bellhop into the desk and write service files"); i.add_argument("--load", action="store_true", help="also load the services now")
+    i.add_argument("--python", help="python interpreter for the service (default: this one)")
+    ss.add_parser("uninstall", help="unload and remove the service files")
+    ss.add_parser("status", help="installed? running? heartbeat? (exit 1 if installed but no fresh heartbeat)")
+    f = ss.add_parser("files", help="print the service files without writing them"); f.add_argument("--python")
+    s.set_defaults(fn=cmd_daemon)
+
+    sub.add_parser("mcp", help="run the MCP server on stdio (used by the Claude Code plugin)").set_defaults(fn=cmd_mcp)
+    s = sub.add_parser("hook", help="Claude Code hook entry point"); s.add_argument("event", choices=["session-start", "stop"]); s.set_defaults(fn=cmd_hook)
     return p
 
 

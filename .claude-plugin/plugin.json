@@ -1,0 +1,19 @@
+{
+  "name": "bellhop",
+  "description": "File-based, auditable operations for a team of Claude Code agents: task packets, bells, one fresh worker session per task, receipts, an append-only ledger, a sentinel, and a resident watchdog.",
+  "version": "0.2.0",
+  "author": {
+    "name": "FrostNova"
+  },
+  "homepage": "https://github.com/FrostNovaOrg/Hansa",
+  "repository": "https://github.com/FrostNovaOrg/Hansa",
+  "license": "AGPL-3.0-or-later OR LicenseRef-Bellhop-Commercial",
+  "keywords": [
+    "agents",
+    "operations",
+    "dispatch",
+    "audit",
+    "watchdog",
+    "multi-agent"
+  ]
+}

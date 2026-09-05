@@ -18,6 +18,8 @@ DESK_DEFAULTS = {
     "wake_cmd": "",
     "claude_bin": "claude",
     "worktrees_dir": ".worktrees",
+    "session_watchdog": True,
+    "session_watchdog_interval": 5,
     "lanes": {},
 }
 
