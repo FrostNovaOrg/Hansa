@@ -1,0 +1,46 @@
+"""Dry-run worker used by tests and the demo.
+
+It behaves like a well-mannered worker: reads the prompt, makes one small commit in the
+worktree, writes a receipt that answers every acceptance item, and prints a JSON result
+line shaped like the Claude Code CLI's `--output-format json` result.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    worktree = Path(os.environ["BELLHOP_WORKTREE"])
+    receipt = Path(os.environ["BELLHOP_RECEIPT"])
+    packet = Path(os.environ["BELLHOP_PACKET"])
+    task_id = os.environ["BELLHOP_ID"]
+    mode = os.environ.get("BELLHOP_STUB_MODE", "ok")
+    if mode == "crash":
+        print("stub worker: simulated crash", file=sys.stderr)
+        return 1
+    note = worktree / f"bellhop-stub-{task_id}.txt"
+    note.write_text(f"work for {task_id}\n", encoding="utf-8")
+    subprocess.run(["git", "add", note.name], cwd=worktree, check=True)
+    subprocess.run(["git", "-c", "user.name=stub", "-c", "user.email=stub@example.invalid", "commit", "-q", "-m", f"stub: {task_id}"], cwd=worktree, check=True)
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=worktree, capture_output=True, text=True).stdout.strip()
+    acceptance = []
+    for line in packet.read_text(encoding="utf-8").splitlines():
+        if line.startswith("  - ") or line.startswith("- "):
+            acceptance.append(line.strip()[2:])
+    body = [f"# Receipt {task_id}", "", f"- base: {os.environ.get('BELLHOP_BASE', 'see packet')}", f"- head: {head}", f"- changed: {note.name}", "", "## Acceptance", ""]
+    for a in acceptance:
+        body.append(f"- {a} — checked: `echo ok` → `ok`")
+    body += ["", "## Doubts", "", "- none", "", "## Not done", "", "- nothing left out"]
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text("\n".join(body) + "\n", encoding="utf-8")
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
+                      "duration_ms": 1200, "total_cost_usd": 0.0, "session_id": "stub", "model": "stub"}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

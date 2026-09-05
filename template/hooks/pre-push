@@ -1,0 +1,7 @@
+#!/bin/sh
+# Installed by Bellhop into lane repositories. Workers must not push; the coordinator's merge sets BELLHOP_MERGE=1.
+if [ "${BELLHOP_MERGE:-}" != "1" ]; then
+  echo "bellhop: push refused from a lane checkout (set BELLHOP_MERGE=1 from the coordinator's merge step)" >&2
+  exit 1
+fi
+exit 0
