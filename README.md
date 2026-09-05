@@ -74,4 +74,11 @@ Early. The scripts run and are tested in dry-run mode; the shape of the desk is 
 
 ## License
 
-Not chosen yet. Until a license file is added, all rights reserved.
+Bellhop is dual-licensed.
+
+- **Open source:** [GNU AGPL v3 or later](LICENSE). Use it, change it, share it; if you run a modified version as a network service or distribute it, the AGPL asks you to share your source under the same terms.
+- **Commercial:** [Bellhop Commercial License](LICENSE-COMMERCIAL.md) from FrostNova, for embedding Bellhop in proprietary products or services without AGPL obligations.
+
+`SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Bellhop-Commercial`
+
+Copyright (c) 2026 FrostNova.
