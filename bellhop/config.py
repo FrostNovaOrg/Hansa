@@ -32,6 +32,22 @@ ARCHIVE_ROSTER = (
     ".gitignore",
 )
 
+# Commands a task packet must not ask a worker to run. A worker told to cut a release,
+# deploy, or push is doing the coordinator's job with none of the coordinator's gates --
+# and a packet that slipped one in reads exactly like one that did not. Matched
+# case-insensitively as regular expressions against each line of the packet body.
+# `bellhop dispatch --allow <pattern>` waives one of these for one packet and stores
+# nothing, so the next packet is gated again.
+PACKET_FORBIDDEN_PATTERNS = (
+    r"build\.sh",
+    r"release\.sh",
+    r"deploy\.sh",
+    r"publish\.sh",
+    r"git push",
+    r"npm publish",
+    r"docker push",
+)
+
 DESK_DEFAULTS = {
     "commit_prefix": "[desk]",
     "archive_roster": list(ARCHIVE_ROSTER),
@@ -40,6 +56,9 @@ DESK_DEFAULTS = {
     "weekly_seed": "",
     "ledger_entry_max_bytes": 1200,
     "acceptance_bytes": 3000,
+    "packet_bytes": 3000,
+    "packet_budget_minutes": 45,
+    "packet_forbidden_patterns": list(PACKET_FORBIDDEN_PATTERNS),
     "ledger_entry_bytes": 800,
     "inflight_line_chars": 160,
     "closings_line_chars": 200,

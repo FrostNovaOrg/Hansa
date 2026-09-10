@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from .util import BellhopError, read, slugify
 
@@ -118,3 +118,164 @@ def render_packet(template: str, **fields) -> str:
     for k, v in fields.items():
         out = out.replace("{{" + k + "}}", str(v))
     return out
+
+
+# --------------------------------------------------------------------------
+# The dispatch side: the id, the fixed head, the body, the fixed tail
+# --------------------------------------------------------------------------
+# A packet has three parts and only one of them is written by hand. The front
+# matter and the head paragraph are computed (the id from the counter, the base
+# from git); the body is the coordinator's own sentences, copied in verbatim; the
+# tail is fixed prose that every worker needs and nobody should retype. Splitting
+# them this way is what makes `bellhop dispatch` one turn instead of four: the
+# only part that needs a human is the part in the middle.
+
+HEADING_RE = re.compile(r"^#{1,6}\s+")
+ACCEPTANCE_HEADING_RE = re.compile(r"^#{1,6}\s+acceptance\b", re.I)
+BULLET_RE = re.compile(r"^\s*[-*]\s+(.*\S)\s*$")
+
+
+def has_front_matter(text: str) -> bool:
+    """Does this text open its own `---` block?
+
+    A body that carries one would give the rendered packet two front-matter blocks,
+    and `parse_front_matter` would read the coordinator's block as the body. The
+    packet would still parse, so nothing would complain: a packet whose id and base
+    came from a stale copy-paste and a packet built from the real ones look identical
+    once written.
+    """
+    return text.lstrip("﻿").lstrip().startswith("---")
+
+
+def body_acceptance(body: str) -> List[str]:
+    """The bullets under the body's `## Acceptance` heading, in order.
+
+    One place, not two. When acceptance lived only in the front matter the coordinator
+    wrote the checks twice -- once for the machine and once in prose for the worker --
+    and the two drifted within a week.
+    """
+    items: List[str] = []
+    inside = False
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if ACCEPTANCE_HEADING_RE.match(line):
+            inside = True
+            continue
+        if inside and HEADING_RE.match(line):
+            break
+        if inside:
+            m = BULLET_RE.match(line)
+            if m:
+                items.append(m.group(1))
+    return items
+
+
+def next_id(desk) -> str:
+    """One past the highest packet id the desk has ever issued.
+
+    The inbox alone is not the counter: a packet that was archived out of the inbox
+    would let the next id repeat one already in the receipts, and two receipts under
+    one id are indistinguishable from one receipt that was written twice. Receipts and
+    rung bells are counted too, so the number only ever goes up.
+    """
+    highest = 0
+    if desk.inbox.exists():
+        for p in desk.inbox.rglob("*.md"):
+            m = re.match(r"^(\d+)-", p.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    if desk.receipts.exists():
+        for p in desk.receipts.iterdir():
+            m = re.match(r"^(\d+)[-.]", p.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    for d in (desk.bells_pending, desk.bells_rung):
+        if not d.exists():
+            continue
+        for p in d.glob("*.bell"):
+            # `<YYYYmmdd>-<HHMMSS>-<id>.bell`: the leading digits are the clock, not an id.
+            m = re.match(r"^\d{8}-\d{6}-(.+)\.bell$", p.name)
+            if m and m.group(1).isdigit():
+                highest = max(highest, int(m.group(1)))
+    return f"{highest + 1:03d}"
+
+
+def display_pattern(pattern: str) -> str:
+    """A forbidden-command pattern as a person would type it (`build\\.sh` -> `build.sh`)."""
+    return re.sub(r"\\(.)", r"\1", pattern)
+
+
+def build_packet_text(
+    *,
+    id: str,
+    lane: str,
+    title: str,
+    base: str,
+    created: str,
+    body: str,
+    acceptance: Sequence[str],
+    budget_minutes: int = 45,
+    heavy: bool = False,
+    links: Sequence[tuple] = (),
+    forbidden: Sequence[str] = (),
+    receipt: str = "",
+) -> str:
+    """Fixed head + the body verbatim + fixed tail."""
+    title = " ".join(str(title).split())
+    if not title:
+        raise PacketError("a packet needs a title")
+    if has_front_matter(body):
+        raise PacketError(
+            "the body opens its own '---' block; `bellhop dispatch` writes the front matter "
+            "(id, lane, title, base, acceptance) and the body starts at its first heading"
+        )
+    if not acceptance:
+        raise PacketError(
+            "no acceptance items: the body needs an `## Acceptance` heading with one `- ` "
+            "bullet per check a command can run"
+        )
+
+    head = ["---", f"id: {id}", f"lane: {lane}", f"title: {title}", f"base: {base}",
+            f"created: {created}", f"budget_minutes: {budget_minutes}"]
+    if heavy:
+        # The watchdog may read this and start the worker with a stronger model or a
+        # longer leash; a packet that says nothing gets the lane's default.
+        head.append("effort: heavy")
+    for key, value in links:
+        head.append(f"{key}: {value}")
+    head.append("acceptance:")
+    head.extend(f"  - {item}" for item in acceptance)
+    head.append("---")
+
+    intro = [f"# {id} — {title}", "",
+             f"Lane `{lane}`, base `{base}`, written by `bellhop dispatch` at {created}."]
+    if heavy:
+        intro.append("Effort **heavy**: this one is worth a stronger model or a longer leash than the lane's default.")
+    for key, value in links:
+        if key.endswith("_receipt"):
+            intro.append(f"Its receipt is `{value}`.")
+        elif key == "continues":
+            intro.append(f"Continues packet **{value}**, which stopped without a receipt.")
+        elif key == "returns":
+            intro.append(f"Returns packet **{value}**: it reported, and the report was not accepted.")
+    intro.append("")
+    intro.append("Everything above this line is generated. Everything below it, until the last "
+                 "section, is what the coordinator wrote.")
+
+    tail = ["## How to report (fixed)", "",
+            f"- Write the receipt to `{receipt}`, from `templates/receipt.md`.",
+            "- For each acceptance item above: the command you ran and the output it printed. "
+            "A sentence with no command behind it is not a check.",
+            "- Do not write the receipt's machine header yourself. `bellhop receipt-header` "
+            "computes it by running the commands; a header that was typed is a header nobody ran.",
+            "- Commit on the lane branch in your own worktree. Do not push: the lane repository's "
+            "`pre-push` hook refuses it, and the coordinator's merge is where a push belongs.",
+            "- Stop and say so rather than working around a packet that contradicts itself, names "
+            "a file that is not there, or asks for something you cannot check.",
+            ]
+    if forbidden:
+        listed = ", ".join(f"`{display_pattern(p)}`" for p in forbidden)
+        tail.append(f"- Do not run, and do not add to a script something that runs: {listed}. "
+                    "Releasing and deploying are the coordinator's, with gates this packet does not carry.")
+
+    return "\n".join(head) + "\n\n" + "\n".join(intro) + "\n\n" + body.strip("\n") + "\n\n" + "\n".join(tail) + "\n"
