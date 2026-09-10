@@ -205,10 +205,12 @@ class PluginTest(unittest.TestCase):
     def test_hook_session_start_briefs_the_session(self):
         out = self.hook("session-start", stdin=json.dumps({"cwd": str(self.desk_dir)}))
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("dispatch card", out.stdout)
-        self.assertIn("watchdog", out.stdout)
+        # The reading list first, then the board it stands in for.
+        self.assertIn("Reading list, in order:", out.stdout)
+        self.assertIn("== card", out.stdout)
+        self.assertIn("== watchdog", out.stdout)
         self.assertIn(str(self.desk_dir), out.stdout)
-        self.assertIn("sentinel", out.stdout)
+        self.assertIn("== sentinel", out.stdout)
 
     def test_hook_is_silent_outside_a_desk(self):
         elsewhere = self.tmp / "not-a-desk"

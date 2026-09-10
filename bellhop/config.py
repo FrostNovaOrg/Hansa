@@ -91,6 +91,25 @@ DESK_DEFAULTS = {
     "status_question_patterns": [
         "what is waiting", "what's waiting", "status", "queue", "remaining", "done yet",
     ],
+    # -- the one page ------------------------------------------------------
+    "board_bytes": 2500,
+    # -- the principal's words --------------------------------------------
+    "intake_dedupe_minutes": 10,
+    # A prompt matching any of these is machine output, not the principal talking.
+    # The sentinel's wake command feeds its status text back in through the same
+    # channel a person types into, and in the hook's eyes the two look alike.
+    "intake_skip_patterns": [
+        r"^\s*\d{4}-\d{2}-\d{2}T[0-9:+\-]+ (GREEN|RED)\b",
+        r"^\s*(GREEN|RED \(\d+\)) \|",
+        r"^Continue from where you left off",
+        r"^<",
+    ],
+    # -- the hand-window gate ---------------------------------------------
+    "hand_gate": True,
+    "hand_window_minutes": 30,
+    # Commands that already have their own record. Matched on the first word's
+    # basename, so `bellhop merge` and `./bin/bellhop merge` both count.
+    "hand_allow_commands": ["bellhop"],
     "lanes": {},
 }
 

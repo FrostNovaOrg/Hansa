@@ -1,6 +1,11 @@
 # Lane worktrees: checkouts of other repositories that happen to live inside the desk.
 .worktrees/
 
+# The open hand-edit window. A live token, not history: the record of what happened
+# inside it is the append-only state/hand-ledger.md, which IS committed. A window
+# restored by a checkout would count as open, which is the one thing it must not do.
+state/.hand-window
+
 # Previous versions of state files, kept by `bellhop state` so an overwrite is recoverable.
 # They are local safety copies, not desk history: the history is in git.
 state/.previous/
