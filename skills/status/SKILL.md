@@ -1,13 +1,23 @@
 ---
 name: status
-description: Show the desk's state - sentinel checks, dispatch card, in-flight, pending bells, watchdog heartbeat. Use when asked "what is going on" or before dispatching.
+description: Show the desk's state - card, in flight, own list, debts, close-outs, intake, sentinel, bells, watchdog. Use when asked "what is going on" or before dispatching.
 ---
 
 # /bellhop:status
 
 `BH="${CLAUDE_PLUGIN_ROOT}/bin/bellhop"`.
 
-1. `$BH sentinel --no-wake` — print it as is. Red lines name what to fix; fix through the proper command (`card`, `ledger add`, `seal`), never by editing state files by hand.
-2. `$BH daemon status` — if installed but no fresh heartbeat, say so and point to `/bellhop:daemon`.
-3. `$BH card --show`, then `state/in-flight.md`.
-4. Answer the user's question in five lines or fewer: what is running, what is waiting, what is red, what you will do next.
+1. `$BH board` — **once**. One page, quoted from the files and byte-capped: card, in flight,
+   own list, debts, unread close-outs, the last intake titles, hot rules, the sentinel line,
+   pending bells, watchdog heartbeat.
+2. Do not open `state/*.md`, and do not run `card --show`, `sentinel` or `daemon status` to
+   confirm what the board just said. The board is the read. If it says a file is not on disk,
+   that is a finding, not a reason to go and look.
+3. Only if one number on the board is disputed, run the command that owns it:
+   `$BH sentinel --no-wake`, `$BH daemon status`, `$BH state closings unread`.
+4. Answer in five lines or fewer: what is running, what is waiting, what is red, what you will
+   do next. No task ids or file paths unless the principal used them first.
+
+Fix a red line through the command that owns the file (`state`, `card`, `ledger add`, `seal`),
+never by hand. A last line reading `(trimmed N bytes)` means rows were dropped, in this order:
+oldest debts, then intake titles, then close-outs; the card and in flight are never dropped.

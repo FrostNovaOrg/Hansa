@@ -342,11 +342,30 @@ class DeskTests(TZCase):
         self.assertIn("| 1 | 17% |", row)
 
     def test_intake_absent_is_na(self):
-        """Negative control: the hook that writes the book is on another branch."""
+        """Negative control: no book at all reads n/a, never 0.
+
+        The desk template now ships a header-only `state/intake.md` (the intake hook
+        declares its format there), so "absent" has to be made absent on purpose.
+        A desk that predates the hook, or one whose book was removed, still lands here.
+        """
+        book = self.desk.path(readings.INTAKE_FILE)
+        if book.exists():
+            book.unlink()
         self.task("001")
         body = self.report_text([self.coordinator_day()])
         self.assertIn(f"| Intake duplicates | {readings.NOT_AVAILABLE} |", body)
         self.assertIn(f"| Status questions | {readings.NOT_AVAILABLE} |", body)
+
+    def test_intake_book_with_no_entries_yet(self):
+        """A fresh desk from the template: the book exists, the hook has not run.
+
+        The question share is `n/a` (no entries to take a share of); the duplicate
+        count reads 0, which is what a book with no rows in it honestly holds.
+        """
+        self.task("001")
+        body = self.report_text([self.coordinator_day()])
+        self.assertIn("| Intake duplicates | 0 |", body)
+        self.assertIn(f"| Status questions | {readings.NOT_AVAILABLE} of 0 intake entries |", body)
 
     # -- the daily file ----------------------------------------------------
     def test_a_day_measured_twice_replaces_its_line(self):

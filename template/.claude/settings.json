@@ -9,5 +9,37 @@
       "Bash(git push --force:*)",
       "Bash(rm -rf:*)"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {"type": "command", "command": "bellhop hook session-start"}
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "bellhop hook intake"}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {"type": "command", "command": "bellhop hook pre-tool"}
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {"type": "command", "command": "bellhop hook stop"}
+        ]
+      }
+    ]
   }
 }

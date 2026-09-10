@@ -7,10 +7,13 @@ from pathlib import Path
 from . import __version__
 from . import accept as accept_mod
 from . import archive as archive_mod
+from . import board as board_mod
 from . import card as card_mod
 from . import daemon as daemon_mod
 from . import headers as headers_mod
+from . import hand as hand_mod
 from . import hooks as hooks_mod
+from . import intake as intake_mod
 from . import decisions as decisions_mod
 from . import desk_ops
 from . import lanes as lanes_mod
@@ -351,6 +354,32 @@ def cmd_mcp(args):
     sys.exit(mcp_server.main(Path(args.desk) if args.desk else None))
 
 
+def cmd_board(args):
+    """One page, read once. Everything a turn starts from, quoted from the files."""
+    print(board_mod.board_text(_desk(args), cap=args.bytes), end="")
+
+
+def cmd_intake(args):
+    desk = _desk(args)
+    if args.intake_cmd == "show":
+        try:
+            print(intake_mod.show_text(desk, args.number), end="")
+        except KeyError as exc:
+            raise BellhopError(str(exc).strip("'"))
+        return
+    print(intake_mod.list_text(desk, last=args.last), end="")
+
+
+def cmd_hand(args):
+    desk = _desk(args)
+    if args.hand_cmd == "open":
+        print(hand_mod.open_window(desk, minutes=args.minutes, reason=args.reason))
+    elif args.hand_cmd == "close":
+        print(hand_mod.close_window(desk))
+    else:
+        print(hand_mod.status_text(desk), end="")
+
+
 def cmd_hook(args):
     sys.exit(hooks_mod.main(args.event))
 
@@ -581,7 +610,22 @@ def build_parser() -> argparse.ArgumentParser:
     add_state_parser(sub)
 
     sub.add_parser("mcp", help="run the MCP server on stdio (used by the Claude Code plugin)").set_defaults(fn=cmd_mcp)
-    s = sub.add_parser("hook", help="Claude Code hook entry point"); s.add_argument("event", choices=["session-start", "stop"]); s.set_defaults(fn=cmd_hook)
+    s = sub.add_parser("board", help="the one page: everything a turn starts from, quoted and byte-capped")
+    s.add_argument("--bytes", type=int, help="byte cap for this run (default: config board_bytes)"); s.set_defaults(fn=cmd_board)
+
+    s = sub.add_parser("intake", help="the principal's words, as the UserPromptSubmit hook logged them"); ss = s.add_subparsers(dest="intake_cmd", required=True)
+    a = ss.add_parser("list", help="one line per entry"); a.add_argument("--last", type=int, help="only the last K entries")
+    a = ss.add_parser("show", help="print one entry in full"); a.add_argument("number", type=int)
+    s.set_defaults(fn=cmd_intake)
+
+    s = sub.add_parser("hand", help="the hand-edit window: lane repositories are gated until one is open"); ss = s.add_subparsers(dest="hand_cmd", required=True)
+    a = ss.add_parser("open", help="declare a hand-edit window"); a.add_argument("--minutes", type=int, help="default: config hand_window_minutes")
+    a.add_argument("--reason", required=True, help="why this cannot go to a worker")
+    ss.add_parser("close", help="close the window and record what happened inside it")
+    ss.add_parser("status", help="is a window open, and for how much longer")
+    s.set_defaults(fn=cmd_hand)
+
+    s = sub.add_parser("hook", help="Claude Code hook entry point"); s.add_argument("event", choices=sorted(hooks_mod.EVENTS)); s.set_defaults(fn=cmd_hook)
     return p
 
 
