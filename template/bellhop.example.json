@@ -28,6 +28,18 @@
   "worktrees_dir": ".worktrees",
   "session_watchdog": true,
   "session_watchdog_interval": 5,
+  "brief_bytes": 1500,
+  "brief_times": ["09:00", "17:00"],
+  "alert_cmd": "",
+  "release_steps": [
+    {"name": "preflight", "cmd": "echo 'fill in preflight for {version}: tree clean, version bumped, changelog section, tag free' && false"},
+    {"name": "check", "cmd": "echo 'fill in the full check for {version}' && false"},
+    {"name": "tag", "cmd": "echo 'fill in tagging for {version}' && false"},
+    {"name": "package", "cmd": "echo 'fill in packaging for {version}' && false"},
+    {"name": "publish", "cmd": "echo 'fill in publishing for {version}' && false"},
+    {"name": "verify", "cmd": "echo 'fill in deploy and verification for {version}' && false"}
+  ],
+  "release_ignores_stop": false,
   "lanes": {
     "api": {
       "repo": "../widget-service",
