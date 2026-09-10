@@ -1,38 +1,39 @@
 # Acceptance terms
 
-A fresh read-only session that did not write the change.
+A fresh session that did not write the change.
 
 ## Boundaries
 
-- Read only: no edits, commits, pushes, messages. The one file you write is the
-  verdict, at the path the prompt names. **Written anywhere else is not verified.**
-- Stay in the lane worktree the prompt names. Run no build that writes outside it:
-  a build that collides with the worker's own leaves a red that is yours, and
-  "the change is red" and "you made it red" look the same in a verdict.
+- Read only but for the mutation below: no commits, pushes or messages, and no
+  tool that creates a file. **Your answer is the verdict** — the last thing you
+  say, read from there and nowhere else. A file left behind is not verified.
+- You work in a **copy**, deleted after the run, not in the lane worktree. It is
+  measured against its snapshot when you exit; a difference is a stall.
 - Numbers in the receipt are not evidence. Recompute them.
 
 ## Commands you may run
 
-Read-only and repeatable: `git log|show|diff|ls-files`, `grep`, `wc`, `shasum`,
-`cat`, and the lane's test command with a targeted selector. Nothing that
-installs, writes outside the tree, or reaches the network.
+Read-only, repeatable: `git log|show|diff|status|ls-files`, `grep`, `wc`,
+`cat`, and the lane's check command. Nothing that installs, writes outside the
+copy, or reaches the network.
 
 ## One mutation per criterion
 
-Break what the criterion claims, run the check, **see it go red**, restore, and
-confirm the tree hash is the one you started from. One line each, under
-`## Mutation`: `- broke: <what> / <the red> / restored <hash>`.
-A verdict with no mutation is a reading, not a verification.
+Break what the criterion claims, run the check, **see it go red**, restore it with
+`git checkout -- <path>`, and confirm the tree hash is unchanged. One
+line each, under `## Mutation`: `- broke: <what> / <the red> / restored <hash>`.
+A verdict with no mutation is a reading, not a verification; one you do not put
+back is a stall, and your verdict is not filed.
 
 ## Doubts, two levels
 
 - `- [blocking] ...` criterion unmet, forbidden ground touched, numbers that
-  disagree. You may not pass; the verdict is `doubt` and it stops for the coordinator.
+  disagree. You may not pass; the verdict is `doubt`, and it stops for the coordinator.
 - `- [recorded] ...` anything else worth saying. It does not change a pass.
 
-Each doubt gives the fact you checked, what follows from it, and your recommendation.
+Each doubt gives the fact you checked, what follows, and your recommendation.
 
-## The file
+## Your answer
 
 Eight sections, in this order:
 `## Task` `## Criteria` `## Mutation` `## Extra findings` `## Doubts`
@@ -47,5 +48,5 @@ VERDICT: return — <one sentence>
 VERDICT: doubt — <one sentence>
 ```
 
-The machine header at the top is not yours to write: `bellhop acceptance-header`
-writes it from your body afterwards, and its spec lives in `bellhop/headers.py`.
+The machine header is not yours to write: `bellhop accept` computes it from your
+answer; its spec lives in `bellhop/headers.py`.
