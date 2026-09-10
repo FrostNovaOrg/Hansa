@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from bellhop import seal as seal_mod  # noqa: E402
 from bellhop import state  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import read, write  # noqa: E402
@@ -613,6 +614,65 @@ class CliTest(DeskCase):
         out = self.cli("ledger", "add", "--file", str(self.tmp / "nope.md"))
         self.assertEqual(out.returncode, 4)
         self.assertTrue(out.stderr.startswith("error:"), out.stderr)
+
+
+# --------------------------------------------------------------------------
+class SealTest(DeskCase):
+    """A hot-rule write is expected to change .claude/CLAUDE.md; the seal must not
+    call that tampering, and must still call everything else tampering."""
+
+    RULE = "read the lane file before writing the packet"
+
+    def qualify(self, root="R1"):
+        for i in range(3):
+            state.selfcatch_add(self.desk, root, "judgement", f"dispatched before reading the lane rules {i}")
+
+    def test_promoting_a_hot_rule_does_not_break_the_seal(self):
+        self.qualify()
+        seal_mod.seal(self.desk)
+        self.assertEqual(seal_mod.verify(self.desk), [])
+        state.hotrules_promote(self.desk, "R1", self.RULE)
+        self.assertIn(self.RULE, self.body(state.CLAUDE_MD), "the rule was not actually written")
+        self.assertEqual(seal_mod.verify(self.desk), [], "a promotion turned the seal red")
+
+    def test_retiring_a_hot_rule_does_not_break_the_seal(self):
+        self.qualify()
+        state.hotrules_promote(self.desk, "R1", self.RULE)
+        seal_mod.seal(self.desk)
+        state.hotrules_retire(self.desk, "R1", "the packet template now carries the lane file")
+        self.assertIn(self.RULE, self.body(state.HOT_RETIRED), "the register was not actually written")
+        self.assertEqual(seal_mod.verify(self.desk), [], "a retirement turned the seal red")
+
+    def test_the_retirement_register_is_not_in_the_manifest(self):
+        seal_mod.seal(self.desk)
+        manifest = read(seal_mod.manifest_path(self.desk))
+        self.assertNotIn("hot-rules-retired.md", manifest)
+        self.assertIn("desk:rules/card.md", manifest, "the rest of rules/ is still sealed")
+
+    # -- negative controls ------------------------------------------------
+    def test_a_line_outside_the_segment_still_breaks_the_seal(self):
+        seal_mod.seal(self.desk)
+        self.assertEqual(seal_mod.verify(self.desk), [])
+        write(self.root / state.CLAUDE_MD, self.body(state.CLAUDE_MD) + "\n- a line nobody declared\n")
+        self.assertEqual(seal_mod.verify(self.desk), ["desk:.claude/CLAUDE.md"])
+
+    def test_editing_a_line_above_the_segment_still_breaks_the_seal(self):
+        seal_mod.seal(self.desk)
+        text = self.body(state.CLAUDE_MD).replace("# Coordinator", "# Coordinator (quietly amended)", 1)
+        write(self.root / state.CLAUDE_MD, text)
+        self.assertEqual(seal_mod.verify(self.desk), ["desk:.claude/CLAUDE.md"])
+
+    def test_removing_a_marker_still_breaks_the_seal(self):
+        self.qualify()
+        state.hotrules_promote(self.desk, "R1", self.RULE)
+        seal_mod.seal(self.desk)
+        write(self.root / state.CLAUDE_MD, self.body(state.CLAUDE_MD).replace(state.HOT_END, "", 1))
+        self.assertEqual(seal_mod.verify(self.desk), ["desk:.claude/CLAUDE.md"])
+
+    def test_another_sealed_file_still_breaks_the_seal(self):
+        seal_mod.seal(self.desk)
+        write(self.root / "rules" / "card.md", read(self.root / "rules" / "card.md") + "\nsmuggled in\n")
+        self.assertEqual(seal_mod.verify(self.desk), ["desk:rules/card.md"])
 
 
 if __name__ == "__main__":

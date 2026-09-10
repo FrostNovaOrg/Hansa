@@ -201,10 +201,6 @@ HEADERS = {
     ),
 }
 
-# `.claude/` and `rules/` are sealed. A hot-rule write is a deliberate change to a
-# sealed file, so it comes with a reseal in the same commit, like any other.
-SEAL_NOTE = ".claude/ and rules/ are sealed; run `bellhop seal` in the same commit"
-
 HOT_START = "<!-- hot-rules start -->"
 HOT_END = "<!-- hot-rules end -->"
 
@@ -988,7 +984,6 @@ def hotrules_promote(desk: Desk, root: str, text: str) -> Result:
     return Result(
         note=f"hot rule promoted ({len(rows) + 1}/{max_lines} slots used) [previous version: {saved.name}]",
         echo=[new_line],
-        warnings=[SEAL_NOTE],
         paths=[path],
     )
 
@@ -1019,7 +1014,6 @@ def hotrules_retire(desk: Desk, root: str, reason: str) -> Result:
     return Result(
         note=f"hot rule retired [previous version: {saved.name}]; recorded in {HOT_RETIRED}",
         echo=[gone, record.rstrip("\n")],
-        warnings=[SEAL_NOTE],
         paths=[path, desk.path(HOT_RETIRED)],
     )
 
