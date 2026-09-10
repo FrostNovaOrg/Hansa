@@ -196,7 +196,7 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
     if archive:
         archive_mod.archive(
             desk,
-            [receipt, meta, rung, bell, desk.state / "in-flight.md", log_path, log_path.with_suffix(".prompt.md")],
+            [receipt, meta, rung, bell, desk.state / "in-flight.md", desk.state / "closings.md", log_path, log_path.with_suffix(".prompt.md")],
             f"receipt {packet.stem}" + (" (dead)" if dead else ""),
         )
     return footer
