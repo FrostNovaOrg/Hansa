@@ -15,6 +15,7 @@ from . import hand as hand_mod
 from . import hooks as hooks_mod
 from . import intake as intake_mod
 from . import decisions as decisions_mod
+from . import dispatch as dispatch_mod
 from . import desk_ops
 from . import lanes as lanes_mod
 from . import ledger as ledger_mod
@@ -69,6 +70,21 @@ def cmd_packet_new(args):
         raise BellhopError(f"packet exists: {path}")
     write(path, text)
     print(path)
+
+
+def cmd_dispatch(args):
+    """Write the packet, ring, start the in-flight row, refresh the card -- and echo four lines."""
+    desk = _desk(args)
+    report = dispatch_mod.dispatch(
+        desk, args.lane, args.title, args.body,
+        inflight=args.inflight or "", next_=args.next, continue_id=getattr(args, "continue"),
+        return_id=args.return_, heavy=args.heavy, allow=args.allow or [],
+        exception=args.exception, demo=args.demo, commit=not getattr(args, "no_commit", False),
+    )
+    if args.demo and report.packet_text:
+        print(report.packet_text, end="" if report.packet_text.endswith("\n") else "\n")
+    print(report.render())
+    sys.exit(report.code)
 
 
 def cmd_ring(args):
@@ -528,6 +544,21 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("packet", help="packet tools"); ss = s.add_subparsers(dest="packet_cmd", required=True)
     n = ss.add_parser("new", help="write a packet skeleton in the inbox"); n.add_argument("--lane", required=True); n.add_argument("--title", required=True)
     n.add_argument("--base", help="base commit (default HEAD)"); n.add_argument("--id"); n.add_argument("--budget", type=int, default=45); n.set_defaults(fn=cmd_packet_new)
+
+    s = sub.add_parser("dispatch", help="write the packet, ring, start the in-flight row, refresh the card")
+    s.add_argument("--lane", required=True)
+    s.add_argument("--title", required=True, help="a short title; the id and the slug are computed")
+    s.add_argument("--body", required=True, help="file holding the packet body ('-' reads stdin)")
+    s.add_argument("--inflight", help="the one human sentence on the in-flight row")
+    s.add_argument("--next", help="set the card's `next`; without it the card is not touched")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--continue", dest="continue", metavar="ID", help="pick up a packet that stopped without a receipt")
+    g.add_argument("--return", dest="return_", metavar="ID", help="re-send a packet whose receipt was refused")
+    s.add_argument("--heavy", action="store_true", help="mark the packet `effort: heavy`")
+    s.add_argument("--allow", action="append", metavar="PATTERN", help="waive one forbidden-command pattern for this packet only (repeatable)")
+    s.add_argument("--exception", metavar="REASON", help="dispatch under a stop-dispatch order; the reason is recorded and counted")
+    s.add_argument("--demo", action="store_true", help="render the packet to stdout and write nothing")
+    s.set_defaults(fn=cmd_dispatch)
 
     s = sub.add_parser("ring", help="ring a bell for a packet"); s.add_argument("packet"); s.set_defaults(fn=cmd_ring)
 

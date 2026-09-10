@@ -15,6 +15,22 @@ Say it in plain words. One task. Name the files or areas if you know them.
 
 List anything out of bounds (other modules, config, CI).
 
+## Acceptance
+
+- one line per check a command can run; `bellhop dispatch` lifts these into the front matter
+
 ## How to report
 
 Write the receipt from `templates/receipt.md`. For each acceptance item: the command you ran and what it printed.
+
+<!--
+The three body sections above (What to do / Do not touch / Acceptance) are all `bellhop
+dispatch` needs: write them to a file with no front matter and run
+
+    bellhop dispatch --lane <lane> --title "<short>" --body <file>
+
+which computes the id, reads the base from the lane, and adds this head and a fixed tail.
+`bellhop packet new` writes this whole file instead, front matter included, for the times a
+packet has to be assembled by hand -- then the acceptance items go in the front matter above
+and the section here is the human-readable copy of them.
+-->
