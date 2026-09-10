@@ -24,7 +24,10 @@ root = sys.argv[1]
 cfg = json.load(open("bellhop.json"))
 cfg["lanes"]["api"]["repo"] = "../widget-service"
 cfg["lanes"]["api"]["worker_cmd"] = f"python3 {root}/bellhop/stubworker.py"
-cfg["lanes"]["api"]["accept_cmd"] = f"python3 {root}/bellhop/stubaccept.py"
+# The stub verifier answers in the shape the checker wants only when it is asked to:
+# without `--good` it writes prose, `bellhop accept` retries once and then stalls on
+# `verdict format`, which is what 35 of 71 shadow runs did. Try it without the switch.
+cfg["lanes"]["api"]["accept_cmd"] = f"python3 {root}/bellhop/stubaccept.py --good"
 cfg["sample_rate"] = 1
 json.dump(cfg, open("bellhop.json", "w"), indent=2)
 PY

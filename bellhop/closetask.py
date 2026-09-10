@@ -746,8 +746,15 @@ class Closing:
     # -- 6. archive --------------------------------------------------------
     def archive_paths(self) -> List[Path]:
         desk = self.desk
+        # The checker's reading sits beside the verdict it read, so it follows that
+        # file's directory. A verdict taken from receipts/shadow/ under
+        # `accept_from_shadow` would otherwise name a reading in receipts/ that does
+        # not exist, and archive() passes over a missing untracked path in silence:
+        # the close would carry the verdict with no reading beside it and still look
+        # complete.
+        verdict_dir = self.verdict_file.parent if self.verdict_file else desk.receipts
         paths = [self.receipt, self.verdict_file,
-                 desk.receipts / f"{self.task}.acceptance.check.txt",
+                 verdict_dir / f"{self.task}.acceptance.check.txt",
                  self.record.path]
         paths += list(self.report.ledger_paths)
         paths += [desk.path(rel) for rel in (state_mod.CARD, state_mod.INFLIGHT, state_mod.DEBTS,

@@ -75,6 +75,15 @@ DESK_DEFAULTS = {
     # After the full board passes on the merged result, push the lane repository too.
     # Off by default; the desk's own `push` key is what covers the desk repository.
     "close_push_lane": False,
+    # -- acceptance: the case pack, the session, the shadow period ---------
+    "casepack_bytes": 6000,          # hard cap on the pack; over it, trim, never stop
+    "casepack_receipt_lines": 50,    # how much of the receipt body the pack carries
+    "accept_timeout_s": 900,         # the verifier's wall clock, then killpg
+    "accept_max_turns": 30,
+    "shadow_agreement": 0.9,         # switch criteria, read by `bellhop accept shadow-report`
+    "shadow_min_samples": 20,
+    "shadow_stall_rate": 0.1,
+    "shadow_median_s": 480,
     "sentinel_interval_minutes": 10,
     "wake_cmd": "",
     # How many times the wake command may fire against an unchanged board before the

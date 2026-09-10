@@ -275,13 +275,43 @@ def cmd_header_spec(args):
 
 
 def cmd_accept(args):
+    """`accept <id>`, and the three readings around it: record, shadow-report, status."""
     desk = _desk(args)
-    out = accept_mod.accept(desk, args.id)
-    print(out.relative_to(desk.root))
-    check = accept_mod.check_path(desk, args.id)
+    if args.target == "record":
+        if not args.id or not args.verdict:
+            raise BellhopError("usage: bellhop accept record <id> --verdict pass|return|doubt")
+        print(accept_mod.record(desk, args.id, args.verdict))
+        _commit(desk, args, [accept_mod.closings_path(desk)], f"coordinator verdict {args.id}")
+        return
+    if args.target == "shadow-report":
+        text, ready = accept_mod.shadow_report(desk)
+        print(text, end="")
+        sys.exit(0 if ready else 1)
+    if args.target == "status":
+        if not args.id:
+            raise BellhopError("usage: bellhop accept status <id>")
+        print(accept_mod.status_text(desk, args.id), end="")
+        return
+    task_id, shadow = args.target, args.shadow
+    meta = accept_mod.run_accept(desk, task_id, shadow=shadow, force=args.force)
+    check = accept_mod.check_path(desk, task_id, shadow)
+    if meta.get("verdict_path"):
+        print(Path(meta["verdict_path"]).relative_to(desk.root))
     if check.exists():
         print(f"{check.relative_to(desk.root)}: {read(check).strip().splitlines()[-1]}")
-    _commit(desk, args, [out, check, desk.bells_logs / f"accept-{args.id}.prompt.md"], f"acceptance {args.id}")
+    if meta["stall"]:
+        print(f"stalled at {meta['step']}: {meta['stall']}; {meta['reason']}", file=sys.stderr)
+    print(f"step {meta['step']} in {meta['duration_s']}s, verifier {meta['verifier_s']}s, "
+          f"cost={meta.get('cost_usd')}, pack {meta['case_pack_bytes']} bytes")
+    _commit(desk, args, [p for p in (accept_mod.verdict_path(desk, task_id, shadow), check,
+                                     accept_mod.meta_path(desk, task_id, shadow),
+                                     accept_mod.result_path(desk, task_id, shadow),
+                                     accept_mod.closings_path(desk, shadow),
+                                     accept_mod.pack_path(desk, task_id, shadow),
+                                     accept_mod.log_path(desk, task_id, shadow)) if p.exists()],
+            f"acceptance {task_id}" + (" (shadow)" if shadow else ""))
+    if meta["stall"]:
+        sys.exit(headers_mod.EXIT_RED)
 
 
 def cmd_merge(args):
@@ -647,7 +677,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_card)
 
     s = sub.add_parser("sample", help="is this id sampled for acceptance? (exit 0 yes, 3 no)"); s.add_argument("id"); s.set_defaults(fn=cmd_sample)
-    s = sub.add_parser("accept", help="run acceptance in a fresh read-only session"); s.add_argument("id"); s.set_defaults(fn=cmd_accept)
+    s = sub.add_parser("accept", help="run acceptance in a fresh read-only session, in a copy of the tree")
+    s.add_argument("target", metavar="id|record|shadow-report|status",
+                   help="a task id, or one of: record, shadow-report, status")
+    s.add_argument("id", nargs="?", help="the task id, when the first word is record or status")
+    s.add_argument("--shadow", action="store_true", help="verdict and closing go to the shadow files; nothing merges")
+    s.add_argument("--force", action="store_true", help="judge again over an existing verdict, or with no receipt header")
+    s.add_argument("--verdict", choices=list(headers_mod.VERDICTS), help="the coordinator's own verdict, for `record`")
+    s.set_defaults(fn=cmd_accept)
     s = sub.add_parser("receipt-header", help="compute a receipt's machine header from real commands and write it at the top")
     s.add_argument("--receipt", required=True); s.add_argument("--lane", required=True); s.add_argument("--task", help="packet id (default: the leading token of the receipt file name)")
     s.add_argument("--packet", help="packet file (default: found in the inbox by task id)"); s.add_argument("--result-json", help="worker result JSON (<id>.meta.json, or a CLI result object)")
