@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import archive as archive_mod
+from . import closetask as closetask_mod
 from . import headers as headers_mod
 from .config import Desk
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
@@ -186,6 +187,7 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
             values["dead"] = bool(dead)  # judged after the tree was measured, so patched in here
             footer["check_exit"] = values.get("check_exit")
             headers_mod.write_header(receipt, "receipt", values)
+        closetask_mod.settle_bell(desk, packet.id, title=packet.title, strict=False, refresh_card=False)
     meta = desk.receipts / f"{packet.id}.meta.json"
     write_json(meta, footer)
     _remove_inflight(desk, packet.stem)

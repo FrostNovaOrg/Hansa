@@ -9,6 +9,7 @@ from . import accept as accept_mod
 from . import archive as archive_mod
 from . import board as board_mod
 from . import card as card_mod
+from . import closetask as closetask_mod
 from . import daemon as daemon_mod
 from . import headers as headers_mod
 from . import hand as hand_mod
@@ -286,6 +287,27 @@ def cmd_merge(args):
     sha = merge_mod.merge(desk, args.id, push=args.push, verdict=args.verdict or "")
     print(f"merged at {sha}")
     _commit(desk, args, ["ledger", *STATE_FILES], f"merged {args.id} at {sha}")
+
+
+def cmd_close_task(args):
+    """Six named steps in one command; the last line says where it stopped."""
+    desk = _desk(args)
+    try:
+        closetask_mod.close_task(desk, args.id, next_card=args.next, note=args.note,
+                                 dry_run=args.dry_run,
+                                 commit=not getattr(args, "no_commit", False))
+    except closetask_mod.CloseStopped as exc:
+        print(exc.last_line)
+        sys.exit(exc.code)
+
+
+def cmd_settle_bell(args):
+    desk = _desk(args)
+    try:
+        closetask_mod.settle_bell(desk, args.id, title=args.title or "", say=print)
+    except state_mod.StateError as exc:
+        print(exc.render(), file=sys.stderr)
+        sys.exit(exc.code)
 
 
 def cmd_readings(args):
@@ -626,6 +648,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("merge", help="merge a lane branch into its target (coordinator only)"); s.add_argument("id"); s.add_argument("--push", action="store_true"); s.add_argument("--verdict"); s.set_defaults(fn=cmd_merge)
     s = sub.add_parser("readings", help="weekly readings"); s.add_argument("--week"); s.add_argument("--transcripts", action="append", metavar="PATH", help="a Claude Code transcript, or a directory of them; repeatable"); s.set_defaults(fn=cmd_readings)
+
+    s = sub.add_parser("close-task", help="close one task in one command: evidence, fileset, merge, ledger, state, archive")
+    s.add_argument("id"); s.add_argument("--next", help="what goes on the card as the next thing")
+    s.add_argument("--note", help="one sentence for the ledger entry")
+    s.add_argument("--dry-run", action="store_true", help="run the two gates and print what the rest would do; write nothing")
+    s.set_defaults(fn=cmd_close_task)
+
+    s = sub.add_parser("settle-bell", help="the three things done the moment a worker exits: tag in flight, refresh the card's queue, record the close-out")
+    s.add_argument("id"); s.add_argument("--title", help="the task's title, for the lines it writes")
+    s.set_defaults(fn=cmd_settle_bell)
     s = sub.add_parser("seal", help="record or verify seals"); s.add_argument("--verify", action="store_true"); s.set_defaults(fn=cmd_seal)
     sub.add_parser("close", help="daily close").set_defaults(fn=cmd_close)
     sub.add_parser("coldstart", help="print the reading list and check state files").set_defaults(fn=cmd_coldstart)

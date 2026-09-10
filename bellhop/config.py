@@ -68,6 +68,13 @@ DESK_DEFAULTS = {
     "hot_rule_max_lines": 10,
     "hot_rule_line_chars": 80,
     "previous_versions_keep": 30,
+    # `close-task`: a verdict written in shadow mode is a rehearsal, and a rehearsal
+    # does not close a task. Turn this on only while an acceptance pipeline is being
+    # run beside the real one and the desk has decided to take its word.
+    "accept_from_shadow": False,
+    # After the full board passes on the merged result, push the lane repository too.
+    # Off by default; the desk's own `push` key is what covers the desk repository.
+    "close_push_lane": False,
     "sentinel_interval_minutes": 10,
     "wake_cmd": "",
     # How many times the wake command may fire against an unchanged board before the
