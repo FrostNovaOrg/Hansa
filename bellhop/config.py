@@ -119,6 +119,22 @@ DESK_DEFAULTS = {
     ],
     # -- the one page ------------------------------------------------------
     "board_bytes": 2500,
+    # -- the principal's page ----------------------------------------------
+    # `bellhop brief` renders the same files the board does, ordered by what the
+    # principal can act on, under this cap. `alert_cmd` reads the page on stdin;
+    # empty means print only, and then nothing is recorded as sent.
+    "brief_bytes": 1500,
+    "brief_times": [],
+    "alert_cmd": "",
+    # -- releases ----------------------------------------------------------
+    # An ordered list of {"name": ..., "cmd": ...}; `{version}` in a command is
+    # replaced with the version. The steps are the desk's, never the skill's: a
+    # step written into a skill is a step a model can paraphrase. An empty list
+    # is an error rather than a release that exits 0 having released nothing.
+    "release_steps": [],
+    # A stop-dispatch order stops a release too, unless this desk's order means
+    # something narrower than "the desk is paused".
+    "release_ignores_stop": False,
     # -- the principal's words --------------------------------------------
     "intake_dedupe_minutes": 10,
     # A prompt matching any of these is machine output, not the principal talking.

@@ -8,6 +8,7 @@ from . import __version__
 from . import accept as accept_mod
 from . import archive as archive_mod
 from . import board as board_mod
+from . import brief as brief_mod
 from . import card as card_mod
 from . import closetask as closetask_mod
 from . import daemon as daemon_mod
@@ -22,6 +23,7 @@ from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import merge as merge_mod
 from . import readings as readings_mod
+from . import release as release_mod
 from . import ring as ring_mod
 from . import sampling
 from . import seal as seal_mod
@@ -397,6 +399,24 @@ def cmd_board(args):
     print(board_mod.board_text(_desk(args), cap=args.bytes), end="")
 
 
+def cmd_brief(args):
+    """The principal's page. `--send` fails loudly: a send that did not send must not exit 0."""
+    desk = _desk(args)
+    text = brief_mod.brief_text(desk, cap=args.bytes)
+    print(text, end="")
+    if args.send:
+        sent, why = brief_mod.send(desk, text)
+        print("send: " + why)
+        if not sent and (desk.cfg.get("alert_cmd") or "").strip():
+            sys.exit(1)
+
+
+def cmd_release(args):
+    code = release_mod.release(_desk(args), args.version, from_step=args.from_step, dry_run=args.dry_run)
+    if code:
+        sys.exit(code)
+
+
 def cmd_intake(args):
     desk = _desk(args)
     if args.intake_cmd == "show":
@@ -675,6 +695,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="run the MCP server on stdio (used by the Claude Code plugin)").set_defaults(fn=cmd_mcp)
     s = sub.add_parser("board", help="the one page: everything a turn starts from, quoted and byte-capped")
     s.add_argument("--bytes", type=int, help="byte cap for this run (default: config board_bytes)"); s.set_defaults(fn=cmd_board)
+
+    s = sub.add_parser("brief", help="the principal's page: what is waiting for you, the queue, today, money, decisions")
+    s.add_argument("--send", action="store_true", help="also pipe the page to alert_cmd and record state/.brief-sent")
+    s.add_argument("--bytes", type=int, help="byte cap for this run (default: config brief_bytes)"); s.set_defaults(fn=cmd_brief)
+
+    s = sub.add_parser("release", help="run the desk's release_steps in order, stopping at the first non-zero exit")
+    s.add_argument("version"); s.add_argument("--from", dest="from_step", metavar="STEP", help="resume from this step; earlier steps count as done")
+    s.add_argument("--dry-run", action="store_true", help="print the commands; run nothing, write nothing"); s.set_defaults(fn=cmd_release)
 
     s = sub.add_parser("intake", help="the principal's words, as the UserPromptSubmit hook logged them"); ss = s.add_subparsers(dest="intake_cmd", required=True)
     a = ss.add_parser("list", help="one line per entry"); a.add_argument("--last", type=int, help="only the last K entries")
