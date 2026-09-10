@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from .transcripts import PRICE_DEFAULTS
 from .util import BellhopError, read_json
 
 CONFIG_NAME = "bellhop.json"
@@ -54,6 +55,22 @@ DESK_DEFAULTS = {
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,
     "session_watchdog_interval": 5,
+    # Readings. `context_tail_tokens` is the line above which a turn is a long-context
+    # turn: such turns cost more than the rest, because each one re-sends the context.
+    # `prices` is merged over PRICE_DEFAULTS, key by key, so a
+    # desk can price one model without restating the table; an unpriced model reads
+    # `n/a` and is never guessed at.
+    "context_tail_tokens": 250000,
+    "prices": {},
+    "maintenance_lanes": ["desk"],
+    "desk_dirs": [
+        "state", "rules", "receipts", "ledger", "inbox", "bells", "reports", "seals",
+        "frozen", "templates", "scripts", "bellhop", "bin", "hooks", "skills", "agents",
+        "docs", "template", ".claude", ".bellhop",
+    ],
+    "status_question_patterns": [
+        "what is waiting", "what's waiting", "status", "queue", "remaining", "done yet",
+    ],
     "lanes": {},
 }
 
@@ -157,6 +174,20 @@ class Desk:
         elif not os.path.isabs(merged["worktree"]):
             merged["worktree"] = str((self.root / merged["worktree"]).resolve())
         return merged
+
+
+def price_table(desk: "Desk") -> dict:
+    """The desk's prices merged over the defaults, one model row at a time.
+
+    `merged.update(cfg)` would replace the whole table, so a desk that priced one
+    model would silently unprice every other one - and an unpriced model reads `n/a`,
+    which looks exactly like a model nobody has a price for.
+    """
+    table = {k: dict(v) for k, v in PRICE_DEFAULTS.items()}
+    for prefix, row in (desk.cfg.get("prices") or {}).items():
+        if isinstance(row, dict):
+            table.setdefault(prefix, {}).update(row)
+    return table
 
 
 def find_desk(start: Optional[Path] = None) -> Desk:

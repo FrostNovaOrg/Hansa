@@ -246,7 +246,10 @@ def cmd_readings(args):
     desk = _desk(args)
     out = readings_mod.report(desk, week=args.week, transcripts=args.transcripts)
     print(out.relative_to(desk.root))
-    _commit(desk, args, [out], f"readings {out.stem}")
+    daily = desk.path(readings_mod.READINGS_FILE)
+    if daily.exists():
+        print(daily.relative_to(desk.root))
+    _commit(desk, args, [out, daily], f"readings {out.stem}")
 
 
 def cmd_seal(args):
@@ -515,7 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kind", nargs="?", default="both", choices=["receipt", "acceptance", "both"]); s.set_defaults(fn=cmd_header_spec)
 
     s = sub.add_parser("merge", help="merge a lane branch into its target (coordinator only)"); s.add_argument("id"); s.add_argument("--push", action="store_true"); s.add_argument("--verdict"); s.set_defaults(fn=cmd_merge)
-    s = sub.add_parser("readings", help="weekly readings"); s.add_argument("--week"); s.add_argument("--transcripts", action="append", help="Claude Code project directory to summarise"); s.set_defaults(fn=cmd_readings)
+    s = sub.add_parser("readings", help="weekly readings"); s.add_argument("--week"); s.add_argument("--transcripts", action="append", metavar="PATH", help="a Claude Code transcript, or a directory of them; repeatable"); s.set_defaults(fn=cmd_readings)
     s = sub.add_parser("seal", help="record or verify seals"); s.add_argument("--verify", action="store_true"); s.set_defaults(fn=cmd_seal)
     sub.add_parser("close", help="daily close").set_defaults(fn=cmd_close)
     sub.add_parser("coldstart", help="print the reading list and check state files").set_defaults(fn=cmd_coldstart)
