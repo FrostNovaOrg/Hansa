@@ -24,6 +24,7 @@ from . import ledger as ledger_mod
 from . import merge as merge_mod
 from . import readings as readings_mod
 from . import release as release_mod
+from . import providers as providers_mod
 from . import ring as ring_mod
 from . import sampling
 from . import seal as seal_mod
@@ -375,6 +376,15 @@ def cmd_daemon(args):
         _commit(desk, args, ["state/.daemon.json"], "resident service installed")
         if report["errors"]:
             sys.exit(1)
+    elif args.daemon_cmd in ("load", "unload"):
+        report = daemon_mod.load(desk) if args.daemon_cmd == "load" else daemon_mod.unload(desk)
+        for c in report["commands"]:
+            print(f"  {c}")
+        print(f"{args.daemon_cmd}ed: {'yes' if report['loaded'] == (args.daemon_cmd == 'load') else 'no'}")
+        for e in report["errors"]:
+            print(f"  error: {e}")
+        if report["errors"]:
+            sys.exit(1)
     elif args.daemon_cmd == "uninstall":
         report = daemon_mod.uninstall(desk)
         print("removed:\n  " + "\n  ".join(report["removed"]) if report["removed"] else "no service files to remove")
@@ -387,6 +397,45 @@ def cmd_daemon(args):
     elif args.daemon_cmd == "files":
         for path, content in daemon_mod.service_files(desk, daemon_mod.platform_name(), args.python).items():
             print(f"===== {path}\n{content}")
+
+
+def cmd_provider(args):
+    """`provider check <lane>`: who answers a bell on this lane right now."""
+    desk = _desk(args)
+    when = providers_mod.parse_when(args.at) if args.at else None
+    report = providers_mod.check(desk, args.lane, when=when)
+    print(providers_mod.check_text(report), end="")
+    if args.heavy and report.get("heavy") is not None:
+        print(f"heavy: {report['heavy'].summary()}")
+    sys.exit(2 if report["problems"] else 0)
+
+
+def cmd_provider_guard(args):
+    """Does this command match the lane's allowlist? Exit 2 and a reason if not.
+
+    Called by a generic provider's permission hook or wrapper. It refuses with a
+    sentence rather than by killing the session: a turn that was cancelled and a turn
+    that finished leave the same silence behind them.
+    """
+    desk = _desk(args)
+    argv = list(args.command or [])
+    while argv and argv[0] == "--":
+        argv.pop(0)
+    if not argv:
+        print("refused: no command given (bellhop provider-guard --lane <lane> -- <command...>)")
+        sys.exit(2)
+    command = argv[0] if len(argv) == 1 else " ".join(argv)
+    try:
+        lane = desk.lane(args.lane)
+    except BellhopError as exc:
+        print(f"refused: {exc}")
+        sys.exit(2)
+    ok, reason = providers_mod.guard(desk, lane, command)
+    if ok:
+        print(f"allowed: {reason}")
+        sys.exit(0)
+    print(f"refused: {reason}")
+    sys.exit(2)
 
 
 def cmd_mcp(args):
@@ -682,9 +731,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("close", help="daily close").set_defaults(fn=cmd_close)
     sub.add_parser("coldstart", help="print the reading list and check state files").set_defaults(fn=cmd_coldstart)
 
+    s = sub.add_parser("provider", help="worker providers: who answers a bell, and with what")
+    ss = s.add_subparsers(dest="provider_cmd", required=True)
+    c = ss.add_parser("check", help="the effective provider and model for a lane, now and under --heavy (exit 2 when a named file is missing)")
+    c.add_argument("lane")
+    c.add_argument("--heavy", action="store_true", help="also print the heavy line on its own")
+    c.add_argument("--at", help="judge the schedule against this time (`2026-09-11T15:30`, `15:30`, `wed 15:30`)")
+    s.set_defaults(fn=cmd_provider)
+
+    s = sub.add_parser("provider-guard", help="does a command match the lane's allowlist? (exit 2 = refused, with a reason)")
+    s.add_argument("--lane", required=True)
+    s.add_argument("command", nargs=argparse.REMAINDER, help="-- followed by the command to check")
+    s.set_defaults(fn=cmd_provider_guard)
+
     s = sub.add_parser("daemon", help="resident watchdog and sentinel service"); ss = s.add_subparsers(dest="daemon_cmd", required=True)
     i = ss.add_parser("install", help="vendor Bellhop into the desk and write service files"); i.add_argument("--load", action="store_true", help="also load the services now")
     i.add_argument("--python", help="python interpreter for the service (default: this one)")
+    ss.add_parser("load", help="start the installed services now, without touching the files")
+    ss.add_parser("unload", help="stop the services, leaving the files installed")
     ss.add_parser("uninstall", help="unload and remove the service files")
     ss.add_parser("status", help="installed? running? heartbeat? (exit 1 if installed but no fresh heartbeat)")
     f = ss.add_parser("files", help="print the service files without writing them"); f.add_argument("--python")

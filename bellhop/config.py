@@ -98,6 +98,13 @@ DESK_DEFAULTS = {
     # reboot the operator starts them by hand.
     "autostart": False,
     "claude_bin": "claude",
+    # How a lane's `sandbox_profile` is applied. `{profile}` is replaced with the
+    # profile's absolute path and the result is prepended to the worker command, so on
+    # macOS this is "sandbox-exec -f {profile}"; another platform substitutes its own
+    # (`bwrap --bind ...`, `firejail --profile={profile}`). Empty and a lane that names
+    # a profile anyway is a refusal, not a launch: a worker that ran unsandboxed because
+    # the wrapper was blank leaves the same receipt as one that ran sandboxed.
+    "sandbox_wrapper": "",
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,
     "session_watchdog_interval": 5,
@@ -180,6 +187,30 @@ LANE_DEFAULTS = {
     "accept_cmd": "",
     "check_cmd": "",
     "worktree": "",
+    # -- providers (see docs/providers.md) ---------------------------------
+    # The model and effort a packet marked `effort: heavy` is raised to. `heavy_model`
+    # empty means the model does not change; `heavy_effort` empty means `effort` moves
+    # one rung up the ladder (low, medium, high, xhigh). A lane that declares neither
+    # gives a heavy packet exactly what an ordinary one gets, and `provider check
+    # --heavy` says so rather than letting the marker read as if it did something.
+    "heavy_model": "",
+    # Passed to providers that take it (`--effort` on Claude Code). Given explicitly or
+    # not at all: left off, the effort follows whatever this machine was last set to,
+    # and a run at `high` and a run that happened to be `high` read the same.
+    "effort": "",
+    "heavy_effort": "",
+    # A generic provider's command allowlist, enforced by `bellhop provider-guard`.
+    # Required for `provider: generic`: Claude Code brings its own permission gate,
+    # another vendor's CLI does not, and a lane with no allowlist may run anything.
+    "allowlist_file": "",
+    # A sandbox profile for this lane, applied through the desk's `sandbox_wrapper`.
+    "sandbox_profile": "",
+    # Time windows that move this lane to another provider or model, judged against the
+    # time the worker starts -- not the time the packet was dispatched. Each entry:
+    # {"name": "...", "days": "mon-fri", "from": "14:00", "to": "18:00",
+    #  "provider": "generic", "model": "...", "effort": "...", "heavy_model": "...",
+    #  "model_file": "state/lane-model-peak.txt"}. The first matching window wins.
+    "schedule": [],
 }
 
 FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent

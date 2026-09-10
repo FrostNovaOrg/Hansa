@@ -1,0 +1,77 @@
+# Command allowlist for a lane running a non-Claude provider.
+#
+# `bellhop provider-guard --lane <lane> -- <command...>` reads this file, exits 0 when
+# every segment of the command matches an `allow` rule and no `deny` rule, and exits 2
+# with `refused: <reason>` otherwise. Wire it into the CLI's own permission hook or
+# wrapper so the refusal reaches the model as a sentence: a session that was cancelled
+# because a tool call was denied, and a session that finished, leave the same silence.
+#
+# Syntax, one rule per line. These three are the same rule:
+#     git status:*
+#     allow git status:*
+#     allow Bash(git status:*)
+# `deny` beats `allow`, whatever the order. A rule ending in `:*` is a prefix rule and
+# matches at a word boundary (`git status:*` covers `git status --short`, not
+# `git statusx`); a rule without it must match the command exactly.
+#
+# Deny by default: a command that matches nothing here is refused. There is no rule that
+# means "everything", on purpose.
+#
+# Two things this list does NOT do, and the lane should not pretend otherwise:
+#   - it is not the push gate. The lane repository's `pre-push` hook refuses every push
+#     that does not carry BELLHOP_MERGE=1, and the worker has no credentials anyway. A
+#     rule that pretends to stop a push it cannot see is worse than one that says so.
+#   - it is not a file-write gate. That is the sandbox profile's job
+#     (`template/providers/sandbox.example.sb`).
+
+# -- reading the repository -------------------------------------------------
+allow ls:*
+allow cat:*
+allow head:*
+allow tail:*
+allow wc:*
+allow grep:*
+allow find:*
+allow sort:*
+allow uniq:*
+allow cut:*
+allow diff:*
+
+# -- git, read-only ---------------------------------------------------------
+# Listed one subcommand at a time rather than as `git:*`: this lane's worker commits
+# through its own wrapper, and a bare `git:*` would also cover `git reset --hard` and
+# `git checkout`, which throw work away in a worktree nobody is watching.
+allow git status:*
+allow git diff:*
+allow git log:*
+allow git show:*
+allow git ls-files:*
+allow git rev-parse:*
+allow git add:*
+allow git commit:*
+
+# -- the lane's own checks --------------------------------------------------
+allow ./check.sh:*
+allow python3:*
+allow node:*
+
+# -- refused outright -------------------------------------------------------
+# Each of these is a command that can lose work or reach the network, and each reads in
+# a log exactly like the harmless call next to it.
+deny git push:*
+deny git reset:*
+deny git checkout:*
+deny git clean:*
+deny rm:*
+deny kill:*
+deny curl:*
+deny wget:*
+deny ssh:*
+deny scp:*
+deny npm install:*
+deny npm publish:*
+deny pip install:*
+deny sudo:*
+deny ./build.sh:*
+deny ./release.sh:*
+deny ./deploy.sh:*

@@ -25,6 +25,7 @@
   "coordinator_transcript": "",
   "autostart": false,
   "claude_bin": "claude",
+  "sandbox_wrapper": "",
   "worktrees_dir": ".worktrees",
   "session_watchdog": true,
   "session_watchdog_interval": 5,
@@ -60,7 +61,13 @@
       "env_allow": [],
       "worker_cmd": "",
       "accept_cmd": "",
-      "check_cmd": "./check.sh"
+      "check_cmd": "./check.sh",
+      "heavy_model": "",
+      "effort": "",
+      "heavy_effort": "",
+      "allowlist_file": "",
+      "sandbox_profile": "",
+      "schedule": []
     }
   }
 }
