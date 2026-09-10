@@ -9,10 +9,11 @@ from typing import Optional
 from . import archive as archive_mod
 from . import closetask as closetask_mod
 from . import headers as headers_mod
+from . import providers as providers_mod
 from .config import Desk
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
 from .packet import Packet, parse_packet
-from .util import BellhopError, append, git, now, read, run, scrubbed_env, sha256_file, ts, write, write_json
+from .util import BellhopError, append, git, now, read, run, sha256_file, ts, write, write_json
 
 _stop = False
 
@@ -46,52 +47,27 @@ def build_worker_prompt(desk: Desk, packet: Packet, lane: dict, worktree: Path) 
 
 
 def _claude_cmd(desk: Desk, lane: dict, packet: Packet, prompt: str) -> list:
-    max_turns = packet.max_turns or lane["max_turns"]
-    cmd = [
-        desk.cfg["claude_bin"],
-        "-p",
-        prompt,
-        "--model",
-        lane["model"],
-        "--permission-mode",
-        lane["permission_mode"],
-        "--add-dir",
-        str(desk.root),
-        "--output-format",
-        "json",
-        "--max-turns",
-        str(max_turns),
-    ]
-    if lane.get("allowed_tools"):
-        cmd += ["--allowedTools", ",".join(lane["allowed_tools"])]
-    return cmd
+    """The Claude worker command line. The building lives in `providers.py`.
+
+    Kept as a name because it is the shape test's entry point: the lane's `allowed_tools`
+    have to reach the command line as `--allowedTools`, and a lane whose allowlist never
+    arrives produces a worker that can edit files and run nothing.
+    """
+    resolved = providers_mod.resolve(desk, lane, packet=packet)
+    return providers_mod.claude_command(desk, lane, packet, prompt, resolved)
 
 
-def _parse_result(stdout: str) -> Optional[dict]:
-    """Find the JSON result object in the worker's stdout (last JSON line wins)."""
-    result = None
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            result = obj
-    if result is None:
-        text = stdout.strip()
-        if text.startswith("{"):
-            try:
-                result = json.loads(text)
-            except json.JSONDecodeError:
-                result = None
-    return result
+def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt: str, log_path: Path,
+                  resolved: Optional[providers_mod.Resolved] = None) -> dict:
+    """Start one worker session and read what it printed.
 
-
-def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt: str, log_path: Path) -> dict:
-    env = scrubbed_env(lane.get("env_allow", []))
+    `resolved` says who answers -- the lane's provider, or whatever the schedule window
+    and the packet's `effort: heavy` made of it. `process_bell` resolves it before the
+    lane lock is taken, so a refusal leaves nothing half-done; a caller that passes
+    nothing gets the lane's own answer.
+    """
+    resolved = resolved or providers_mod.resolve(desk, lane, packet=packet)
+    env = providers_mod.worker_env(desk, lane, resolved)
     prompt_file = log_path.with_suffix(".prompt.md")
     write(prompt_file, prompt)
     env.update(
@@ -104,14 +80,12 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
             "BELLHOP_LANE": packet.lane,
             "BELLHOP_ID": packet.id,
             "BELLHOP_BASE": packet.base,
+            "BELLHOP_PROVIDER": resolved.provider,
+            "BELLHOP_MODEL": resolved.model,
         }
     )
-    if lane.get("worker_cmd"):
-        cmd = ["/bin/sh", "-c", lane["worker_cmd"]]
-        provider = lane.get("provider") or "custom"
-    else:
-        cmd = _claude_cmd(desk, lane, packet, prompt)
-        provider = "claude"
+    cmd = providers_mod.build_command(desk, lane, packet, prompt, resolved, worktree=worktree,
+                                      prompt_file=prompt_file, log_path=log_path)
     started = now()
     timeout = max(60, packet.budget_minutes * 60 * 2)
     try:
@@ -121,19 +95,37 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         stdout, stderr, code = "", f"worker launch failed: {exc}", 124
     duration = (now() - started).total_seconds()
     write(log_path, f"# bellhop worker log {packet.stem}\n\n## stdout\n{stdout}\n\n## stderr\n{stderr}\n")
-    result = _parse_result(stdout) if code == 0 or stdout else None
+    parsed = providers_mod.parse_result(stdout, resolved.provider)
+    raw = parsed.get("raw") or {}
+    # `n/a` is what a person reads; `null` is what the readings parse. `na_none` is the
+    # one place the two meet, and neither of them is `0`.
     return {
-        "provider": provider,
-        "model": (result or {}).get("model") or lane.get("model"),
-        "turns": (result or {}).get("num_turns"),
+        # After the schedule override and the heavy mapping, not before: the header has
+        # to say who actually answered. The model the CLI reported wins over the one we
+        # asked for, because that is the one that ran; when it reports none, the resolved
+        # model is the answer, never the lane's unresolved default.
+        "provider": resolved.provider,
+        "model": providers_mod.na_none(parsed["model"]) or resolved.model,
+        "model_asked": resolved.model,
+        "effort": resolved.effort or None,
+        "heavy": resolved.heavy,
+        "schedule_override": resolved.schedule_label or None,
+        "turns": providers_mod.na_none(parsed["turns"]),
+        # The wall clock, not the CLI's own number: it covers the launch and the exit too.
         "duration_s": round(duration, 1),
-        "cost_usd": (result or {}).get("total_cost_usd"),
-        "session_id": (result or {}).get("session_id"),
+        "cost_usd": providers_mod.na_none(parsed["cost_usd"]),
+        "stop_reason": providers_mod.na_none(parsed["stop_reason"]),
+        "session_id": raw.get("session_id"),
         "exit_code": code,
         "started_at": ts(started),
-        "is_error": bool((result or {}).get("is_error")) if result else code != 0,
-        "usage": (result or {}).get("usage"),
+        "is_error": bool(raw.get("is_error")) if raw else code != 0,
+        "usage": raw.get("usage"),
     }
+
+
+def _log(desk: Desk, line: str) -> None:
+    """One line in the watchdog log. Every provider decision leaves one."""
+    append(desk.bells_logs / "watchdog.log", f"{ts()}\t{line}\n")
 
 
 def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
@@ -146,12 +138,26 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
     packet = parse_packet(packet_path)
     lane = desk.lane(packet.lane)
     log_path = desk.bells_logs / f"{bell.stem}.log"
+    # Resolved here, before the lock and before the worktree is prepared: a refusal --
+    # a schedule window naming a lane-model file that is not there, a sandbox profile
+    # that is gone, a provider nobody registered -- must leave the bell in `pending/`
+    # with nothing half-done, so the watchdog can say why and try again once it is fixed.
+    #
+    # The clock is this minute's, not the packet's `created:` stamp. A bell can sit in
+    # `pending/` for hours; the first version of this compared the dispatch time, and a
+    # packet written at 09:00 and answered at 15:00 was started against the 09:00 window.
+    resolved = providers_mod.resolve(desk, lane, packet=packet)
+    providers_mod.sandbox_prefix(desk, lane)  # for the refusal, not the argv: built again at launch
+    for note in resolved.notes:
+        _log(desk, f"{note} ({bell.name})")
+    if resolved.overridden:
+        _log(desk, resolved.override_line(bell.name))
     with lane_lock(desk, packet.lane):
         worktree = prepare_worktree(desk, lane, packet.base)
         head_before = git(worktree, "rev-parse", "HEAD")
         append(desk.state / "in-flight.md", f"- [worker] {packet.stem} on {packet.lane} since {ts()}\n")
         prompt = build_worker_prompt(desk, packet, lane, worktree)
-        footer = launch_worker(desk, lane, packet, worktree, prompt, log_path)
+        footer = launch_worker(desk, lane, packet, worktree, prompt, log_path, resolved=resolved)
         head_after = git(worktree, "rev-parse", "HEAD")
         receipt = desk.receipts / f"{packet.stem}.md"
         wrote_receipt = receipt.exists()

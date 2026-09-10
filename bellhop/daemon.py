@@ -284,6 +284,57 @@ def install(desk: Desk, load: bool = False, python: Optional[str] = None) -> dic
     return report
 
 
+def _run_service_commands(desk: Desk, cmds: list, loaded: bool) -> dict:
+    """Run the platform's load or unload commands and record what happened.
+
+    The commands themselves are `load_commands` / `unload_commands` -- the same ones
+    `daemon install` prints -- so what a person runs by hand and what this runs are the
+    same list, and neither can drift from the other.
+    """
+    report = {"commands": [" ".join(c) for c in cmds], "errors": [], "loaded": loaded}
+    for cmd in cmds:
+        proc = _run_quiet(cmd)
+        if proc.returncode != 0:
+            report["errors"].append(f"{' '.join(cmd)} -> {proc.returncode}: {(proc.stderr or proc.stdout or '').strip()}")
+    if report["errors"]:
+        report["loaded"] = not loaded  # nothing moved
+    marker = read_json(marker_path(desk), None)
+    if marker is not None:
+        marker["loaded"] = report["loaded"]
+        marker["loaded_at"] = ts()
+        write_json(marker_path(desk), marker)
+    return report
+
+
+def _require_install(desk: Desk) -> dict:
+    marker = read_json(marker_path(desk), None)
+    if not marker:
+        raise BellhopError(
+            "no resident service installed for this desk (state/.daemon.json missing); "
+            "run `bellhop daemon install` first")
+    return marker
+
+
+def load(desk: Desk) -> dict:
+    """Start the installed services without touching the service files.
+
+    Separate from `install --load` on purpose: reinstalling to start something is how a
+    desk ends up with service files written under one `autostart` setting and running
+    under another. With `autostart` false the plists are written `Disabled: true`, so
+    this enables them for the session and then bootstraps; systemd gets a plain `start`.
+    """
+    marker = _require_install(desk)
+    platform = marker.get("platform", platform_name())
+    return _run_service_commands(desk, load_commands(desk, platform), True)
+
+
+def unload(desk: Desk) -> dict:
+    """Stop the services and leave the files where they are. `uninstall` removes them."""
+    marker = _require_install(desk)
+    platform = marker.get("platform", platform_name())
+    return _run_service_commands(desk, unload_commands(desk, platform), False)
+
+
 def uninstall(desk: Desk) -> dict:
     marker = read_json(marker_path(desk), None)
     if not marker:
@@ -320,6 +371,10 @@ def status(desk: Desk) -> dict:
     from . import __version__
     return {
         "installed": bool(marker),
+        # What `daemon load` / `daemon unload` last recorded, which is not the same
+        # reading as the live probe below: a service can be loaded and dead.
+        "loaded": (marker or {}).get("loaded"),
+        "loaded_at": (marker or {}).get("loaded_at"),
         "platform": platform,
         "label": (marker or {}).get("label"),
         "autostart": autostart(desk),
@@ -340,6 +395,10 @@ def status_text(desk: Desk) -> str:
     lines = [f"resident service: {'installed' if s['installed'] else 'not installed'} ({s['platform']})"]
     if s["installed"]:
         lines.append(f"  label: {s['label']}")
+        loaded = s["loaded"]
+        lines.append("  loaded: " + ("unknown" if loaded is None else ("yes" if loaded else "no"))
+                     + (f" (recorded {s['loaded_at']})" if s.get("loaded_at") else "")
+                     + ("" if loaded else " — `bellhop daemon load` starts it"))
         lines.append(f"  service running: {s['service_running'] if s['service_running'] is not None else 'unknown'}")
     lines.append(
         "  autostart: "
