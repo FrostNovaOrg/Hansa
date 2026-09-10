@@ -20,6 +20,7 @@ from . import ring as ring_mod
 from . import sampling
 from . import seal as seal_mod
 from . import sentinel as sentinel_mod
+from . import state as state_mod
 from . import watch as watch_mod
 from .config import find_desk
 from .packet import next_packet_id, parse_packet, render_packet
@@ -299,6 +300,138 @@ def cmd_hook(args):
     sys.exit(hooks_mod.main(args.event))
 
 
+def cmd_state(args):
+    """Thin layer over bellhop.state: run the op, print what changed, carry its exit code."""
+    desk = _desk(args)
+    try:
+        results = args.state_fn(desk, args)
+    except state_mod.WrapupStopped as exc:
+        for done in exc.done:
+            print(done.render())
+        print(exc.render(), file=sys.stderr)
+        sys.exit(exc.code)
+    except state_mod.StateError as exc:
+        print(exc.render(), file=sys.stderr)
+        sys.exit(exc.code)
+    if isinstance(results, state_mod.Result):
+        results = [results]
+    for result in results:
+        print(result.render())
+
+
+def _card_flags(ns, prefix=""):
+    return {k: getattr(ns, (prefix + k).replace("-", "_"), None) for k in state_mod.CARD_FLAGS}
+
+
+def add_state_parser(sub):
+    """`bellhop state <target> <op>` - one write entry for every state file."""
+    st = sub.add_parser("state", help="the single write entry for the desk's state files")
+    st.set_defaults(fn=cmd_state)
+    targets = st.add_subparsers(dest="state_target", required=True)
+
+    def ops(name, help_text):
+        return targets.add_parser(name, help=help_text).add_subparsers(dest="state_op", required=True)
+
+    o = ops("ledger", "append a ledger entry; the number is assigned here")
+    p = o.add_parser("add", help="append one entry from a file; over the byte cap it is compressed, then split")
+    p.add_argument("--file", required=True, help="file holding the entry ('-' reads stdin)")
+    p.add_argument("--ref", action="append", help="a task id this entry refers to (repeatable)")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.ledger_add(d, ns.file, refs=ns.ref or []))
+
+    o = ops("card", "the dispatch card")
+    p = o.add_parser("set", help="set only the given keys; what the keys mean lives in rules/card.md")
+    p.add_argument("--dispatchable", choices=["yes", "no"])
+    for k in ("next", "lane", "reason", "pool"):
+        p.add_argument(f"--{k}")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.card_set(d, **_card_flags(ns)))
+
+    o = ops("inflight", "who is doing what right now")
+    p = o.add_parser("start", help="add one line")
+    p.add_argument("--text", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.inflight_start(d, ns.text))
+    p = o.add_parser("finish", help="remove the line for a task and echo it")
+    p.add_argument("--task", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.inflight_finish(d, ns.task))
+    p = o.add_parser("tag", help="append a tag to the line for a task")
+    p.add_argument("--task", required=True)
+    p.add_argument("--tag", default="settled-awaiting-close")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.inflight_tag(d, ns.task, ns.tag))
+
+    o = ops("debts", "what is owed")
+    p = o.add_parser("add", help="add one debt line")
+    p.add_argument("--text", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.debts_add(d, ns.text))
+    p = o.add_parser("settle", help="move the matching line to state/debts-settled.md")
+    p.add_argument("--match", required=True)
+    p.add_argument("--keep", action="store_true", help="leave a struck-through copy in place")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.debts_settle(d, ns.match, keep=ns.keep))
+    p = o.add_parser("set", help="replace the matching line in place, keeping its position")
+    p.add_argument("--match", required=True)
+    p.add_argument("--text", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.debts_set(d, ns.match, ns.text))
+
+    o = ops("todo", "things only the principal can do")
+    p = o.add_parser("add", help="add one line; it must carry a `why only you:` clause")
+    p.add_argument("--text", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.todo_add(d, ns.text))
+    p = o.add_parser("settle", help="move the matching open line to Done")
+    p.add_argument("--match", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.todo_settle(d, ns.match))
+
+    o = ops("own", "the coordinator's own work list")
+    p = o.add_parser("add", help="add one line")
+    p.add_argument("--text", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.own_add(d, ns.text))
+    p = o.add_parser("settle", help="remove the matching line")
+    p.add_argument("--match", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.own_settle(d, ns.match))
+    o.add_parser("list", help="print the open lines").set_defaults(state_fn=lambda d, ns: state_mod.own_list(d))
+
+    o = ops("selfcatch", "mistakes the coordinator caught in itself")
+    p = o.add_parser("add", help="append one catch")
+    p.add_argument("--root", required=True)
+    p.add_argument("--kind", required=True, choices=list(state_mod.SELFCATCH_KINDS))
+    p.add_argument("--cause", required=True, help="one sentence; a stub or the root id itself is refused")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.selfcatch_add(d, ns.root, ns.kind, ns.cause))
+    p = o.add_parser("hook-hit", help="count a hook hit; the human count is never touched")
+    p.add_argument("--root", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.selfcatch_hook_hit(d, ns.root))
+    o.add_parser("table", help="print the per-root counts, recomputed from the rows").set_defaults(
+        state_fn=lambda d, ns: state_mod.selfcatch_table(d))
+
+    o = ops("hotrules", "the ten rule slots in .claude/CLAUDE.md")
+    p = o.add_parser("promote", help="put one rule in a slot")
+    p.add_argument("--root", required=True)
+    p.add_argument("--text", required=True, help="one line; no date, no task id, no incident/failure")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.hotrules_promote(d, ns.root, ns.text))
+    p = o.add_parser("retire", help="remove a rule and record it with its reason")
+    p.add_argument("--root", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.hotrules_retire(d, ns.root, ns.reason))
+    o.add_parser("list", help="print the segment").set_defaults(state_fn=lambda d, ns: state_mod.hotrules_list(d))
+
+    o = ops("closings", "the one-line close-out register")
+    p = o.add_parser("add", help="append one close-out line")
+    p.add_argument("--task", required=True)
+    p.add_argument("--line", required=True)
+    p.set_defaults(state_fn=lambda d, ns: state_mod.closings_add(d, ns.task, ns.line))
+    p = o.add_parser("unread", help="print the lines after the pointer and advance it")
+    p.add_argument("--peek", action="store_true", help="print them without advancing the pointer")
+    p.set_defaults(state_fn=lambda d, ns: state_mod.closings_unread(d, advance=not ns.peek))
+
+    p = targets.add_parser("wrapup", help="own list, then in flight, then debts, then the card, in that order")
+    p.add_argument("--own")
+    p.add_argument("--inflight-finish", dest="inflight_finish")
+    p.add_argument("--debts-add", dest="debts_add")
+    p.add_argument("--card-dispatchable", dest="card_dispatchable", choices=["yes", "no"])
+    for k in ("next", "lane", "reason", "pool"):
+        p.add_argument(f"--card-{k}", dest=f"card_{k}")
+    p.set_defaults(state_op="wrapup", state_fn=lambda d, ns: state_mod.wrapup(
+        d, own=ns.own, inflight_finish_id=ns.inflight_finish, debts_add_text=ns.debts_add,
+        card=_card_flags(ns, "card_")))
+    return st
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bellhop", description="File-based operations for a team of Claude Code agents.")
     p.add_argument("--version", action="version", version=f"bellhop {__version__}")
@@ -366,6 +499,8 @@ def build_parser() -> argparse.ArgumentParser:
     ss.add_parser("status", help="installed? running? heartbeat? (exit 1 if installed but no fresh heartbeat)")
     f = ss.add_parser("files", help="print the service files without writing them"); f.add_argument("--python")
     s.set_defaults(fn=cmd_daemon)
+
+    add_state_parser(sub)
 
     sub.add_parser("mcp", help="run the MCP server on stdio (used by the Claude Code plugin)").set_defaults(fn=cmd_mcp)
     s = sub.add_parser("hook", help="Claude Code hook entry point"); s.add_argument("event", choices=["session-start", "stop"]); s.set_defaults(fn=cmd_hook)

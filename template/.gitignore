@@ -1,0 +1,6 @@
+# Previous versions of state files, kept by `bellhop state` so an overwrite is recoverable.
+# They are local safety copies, not desk history: the history is in git.
+state/.previous/
+
+__pycache__/
+*.pyc

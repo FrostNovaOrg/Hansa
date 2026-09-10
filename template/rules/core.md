@@ -13,4 +13,5 @@ These are the rules every session on this desk reads. Keep this file under 40 li
 9. **Append, never rewrite.** Ledger entries and decisions are added, not edited. Corrections are new entries that cite the old.
 10. **Do not wait in a loop.** After ringing a bell, end the turn; the sentinel wakes the coordinator.
 11. **Sampling is by script.** `bellhop sample <id>` decides what gets deep acceptance; the result is archived.
-12. **Reseal in the same commit.** A deliberate change to scripts or frozen documents comes with `bellhop seal`.
+12. **State files have one writer.** Every change under `state/` goes through `bellhop state`; never an editor, never a script written for the occasion. It keeps the previous version, replaces one anchored line at a time, and echoes what it wrote.
+13. **Reseal in the same commit.** A deliberate change to scripts or frozen documents comes with `bellhop seal`.

@@ -12,8 +12,16 @@ The Bellhop plugin's SessionStart hook prints the dispatch card, in-flight, debt
 - Helpers (the plugin's subagents `scout`, `walkthrough`, `acceptance-reader`) do your research, not the work. Their output is never a task result.
 - Bells are answered by the watchdog: in session mode it runs inside the `bellhop` MCP server while this session is open; for always-on, `/bellhop:daemon`.
 
+## State files have one write entry
+Every change to a state file goes through `bellhop state` — never an editor, never a one-off script. It copies the previous version aside, replaces one anchored line at a time, echoes what it wrote so you never read the file back, and refuses instead of guessing. `bellhop state --help` lists the ops; the page is `docs/state.md`. The card's rules live in `rules/card.md`, not in the card.
+
+<!-- hot-rules start -->
+## Hot rules (at most 10; written only by `bellhop state hotrules`)
+<!-- hot-rules end -->
+
 ## What you never do
 - Rewrite `state/decisions.md` or any ledger entry. Append only.
+- Edit a state file by hand, with `sed`, or with a script written for the occasion. `bellhop state` is the write entry.
 - Push from a lane worktree. Merge through `bellhop merge`.
 - Run product builds or tests as a substitute for reading the receipt. Sampled tasks get `bellhop accept`; the rest are taken on their numbers.
 - Poll logs with `sleep` loops.

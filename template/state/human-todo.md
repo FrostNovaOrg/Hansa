@@ -1,6 +1,5 @@
 # Only the principal can do these
-
-Each line: what, and why only you. Move to "Done" when closed; do not delete.
+(one line each, under Open: `- <what> - why only you: <reason>`; a line with no `why only you:` clause is refused. Settled lines move to Done, never deleted.)
 
 ## Open
 

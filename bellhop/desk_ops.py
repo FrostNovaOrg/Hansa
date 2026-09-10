@@ -71,6 +71,7 @@ def coldstart(desk: Desk) -> str:
         ("state/in-flight.md", "who is doing what"),
         ("state/debts.md", "what is owed"),
         ("state/human-todo.md", "what only the principal can do"),
+        ("state/own-list.md", "the coordinator's own work"),
         ("state/decisions.md", "what the principal decided, verbatim"),
         ("rules/core.md", "the rules every session follows"),
         ("state/.sentinel/status.txt", "last sentinel status"),
