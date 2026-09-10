@@ -9,6 +9,7 @@ from . import accept as accept_mod
 from . import archive as archive_mod
 from . import card as card_mod
 from . import daemon as daemon_mod
+from . import headers as headers_mod
 from . import hooks as hooks_mod
 from . import decisions as decisions_mod
 from . import desk_ops
@@ -21,8 +22,8 @@ from . import seal as seal_mod
 from . import sentinel as sentinel_mod
 from . import watch as watch_mod
 from .config import find_desk
-from .packet import next_packet_id, render_packet
-from .util import BellhopError, slugify, ts, write
+from .packet import next_packet_id, parse_packet, render_packet
+from .util import BellhopError, read, slugify, ts, write
 
 
 def _desk(args):
@@ -135,11 +136,86 @@ def cmd_sample(args):
     sys.exit(0 if hit else 3)
 
 
+def _desk_or_none(args):
+    """The checkers read a file, not a desk; a desk only supplies the soft caps."""
+    try:
+        return _desk(args)
+    except BellhopError:
+        return None
+
+
+def cmd_receipt_header(args):
+    desk = _desk(args)
+    receipt = Path(args.receipt)
+    packet = None
+    if args.packet:
+        packet = parse_packet(Path(args.packet))
+    else:
+        task = args.task or receipt.stem.split("-", 1)[0]
+        try:
+            packet = headers_mod.find_task_packet(desk, task)
+        except BellhopError:
+            packet = None  # no packet means no base; the header says so instead of guessing
+    try:
+        if args.dry_run:
+            values = headers_mod.compute_receipt_values(desk, receipt, args.lane, packet=packet,
+                                                        task=args.task, result=args.result_json)
+            print(headers_mod.render_header("receipt", values), end="")
+            return
+        values, action = headers_mod.write_receipt_header(desk, receipt, args.lane, packet=packet,
+                                                          task=args.task, result=args.result_json)
+    except BellhopError as exc:
+        print(f"bellhop: {exc}", file=sys.stderr)
+        sys.exit(headers_mod.EXIT_MALFORMED)
+    print(headers_mod.render_header("receipt", values), end="")
+    print(f"header {action} in {receipt}")
+
+
+def cmd_acceptance_header(args):
+    desk = _desk_or_none(args)
+    path = Path(args.file)
+    try:
+        if args.dry_run:
+            values = headers_mod.compute_acceptance_values(path, desk=desk, lane=args.lane, task=args.task)
+            print(headers_mod.render_header("acceptance", values), end="")
+            return
+        values, action = headers_mod.write_acceptance_header(path, desk=desk, lane=args.lane, task=args.task)
+    except BellhopError as exc:
+        print(f"bellhop: {exc}", file=sys.stderr)
+        sys.exit(headers_mod.EXIT_MALFORMED)
+    print(headers_mod.render_header("acceptance", values), end="")
+    print(f"header {action} in {path}")
+
+
+def cmd_check_receipt(args):
+    packet = parse_packet(Path(args.packet)) if args.packet else None
+    report = headers_mod.check_receipt(Path(args.file), packet=packet)
+    print(report.text(), end="")
+    sys.exit(report.code)
+
+
+def cmd_check_acceptance(args):
+    desk = _desk_or_none(args)
+    cap = int(desk.cfg.get("acceptance_bytes", headers_mod.DEFAULT_ACCEPTANCE_BYTES)) if desk else headers_mod.DEFAULT_ACCEPTANCE_BYTES
+    report = headers_mod.check_acceptance(Path(args.file), max_bytes=cap)
+    print(report.text(), end="")
+    sys.exit(report.code)
+
+
+def cmd_header_spec(args):
+    for kind in (["receipt", "acceptance"] if args.kind == "both" else [args.kind]):
+        print(f"### The `{headers_mod.FENCES[kind]}` block\n")
+        print(headers_mod.spec_table(kind))
+
+
 def cmd_accept(args):
     desk = _desk(args)
     out = accept_mod.accept(desk, args.id)
     print(out.relative_to(desk.root))
-    _commit(desk, args, [out, desk.bells_logs / f"accept-{args.id}.prompt.md"], f"acceptance {args.id}")
+    check = accept_mod.check_path(desk, args.id)
+    if check.exists():
+        print(f"{check.relative_to(desk.root)}: {read(check).strip().splitlines()[-1]}")
+    _commit(desk, args, [out, check, desk.bells_logs / f"accept-{args.id}.prompt.md"], f"acceptance {args.id}")
 
 
 def cmd_merge(args):
@@ -259,6 +335,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sample", help="is this id sampled for acceptance? (exit 0 yes, 3 no)"); s.add_argument("id"); s.set_defaults(fn=cmd_sample)
     s = sub.add_parser("accept", help="run acceptance in a fresh read-only session"); s.add_argument("id"); s.set_defaults(fn=cmd_accept)
+    s = sub.add_parser("receipt-header", help="compute a receipt's machine header from real commands and write it at the top")
+    s.add_argument("--receipt", required=True); s.add_argument("--lane", required=True); s.add_argument("--task", help="packet id (default: the leading token of the receipt file name)")
+    s.add_argument("--packet", help="packet file (default: found in the inbox by task id)"); s.add_argument("--result-json", help="worker result JSON (<id>.meta.json, or a CLI result object)")
+    s.add_argument("--dry-run", action="store_true", help="print the header, write nothing"); s.set_defaults(fn=cmd_receipt_header)
+
+    s = sub.add_parser("acceptance-header", help="read an acceptance verdict's body and write its machine header at the top")
+    s.add_argument("--file", required=True); s.add_argument("--lane", help="lane, so paths outside its worktree can be counted"); s.add_argument("--task")
+    s.add_argument("--dry-run", action="store_true", help="print the header, write nothing"); s.set_defaults(fn=cmd_acceptance_header)
+
+    s = sub.add_parser("check-receipt", help="check a receipt's header (exit 1 on a red finding)")
+    s.add_argument("file"); s.add_argument("--packet", help="packet file, to check the base"); s.set_defaults(fn=cmd_check_receipt)
+
+    s = sub.add_parser("check-acceptance", help="check an acceptance verdict's header (exit 1 on a red finding)")
+    s.add_argument("file"); s.set_defaults(fn=cmd_check_acceptance)
+
+    s = sub.add_parser("header-spec", help="print the header spec straight from the code")
+    s.add_argument("kind", nargs="?", default="both", choices=["receipt", "acceptance", "both"]); s.set_defaults(fn=cmd_header_spec)
+
     s = sub.add_parser("merge", help="merge a lane branch into its target (coordinator only)"); s.add_argument("id"); s.add_argument("--push", action="store_true"); s.add_argument("--verdict"); s.set_defaults(fn=cmd_merge)
     s = sub.add_parser("readings", help="weekly readings"); s.add_argument("--week"); s.add_argument("--transcripts", action="append", help="Claude Code project directory to summarise"); s.set_defaults(fn=cmd_readings)
     s = sub.add_parser("seal", help="record or verify seals"); s.add_argument("--verify", action="store_true"); s.set_defaults(fn=cmd_seal)

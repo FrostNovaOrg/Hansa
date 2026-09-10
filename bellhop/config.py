@@ -14,6 +14,7 @@ DESK_DEFAULTS = {
     "sample_rate": 3,
     "weekly_seed": "",
     "ledger_entry_max_bytes": 1200,
+    "acceptance_bytes": 3000,
     "sentinel_interval_minutes": 10,
     "wake_cmd": "",
     "claude_bin": "claude",
@@ -39,6 +40,7 @@ LANE_DEFAULTS = {
     "env_allow": [],
     "worker_cmd": "",
     "accept_cmd": "",
+    "check_cmd": "",
     "worktree": "",
 }
 

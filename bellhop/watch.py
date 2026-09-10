@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import archive as archive_mod
+from . import headers as headers_mod
 from .config import Desk
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
 from .packet import Packet, parse_packet
@@ -151,21 +152,40 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
         prompt = build_worker_prompt(desk, packet, lane, worktree)
         footer = launch_worker(desk, lane, packet, worktree, prompt, log_path)
         head_after = git(worktree, "rev-parse", "HEAD")
-        dirty = git(worktree, "status", "--porcelain")
-    receipt = desk.receipts / f"{packet.stem}.md"
-    # A worker that leaves uncommitted changes behind has not finished: the work is
-    # unreachable from the lane branch, nothing can be merged or accepted, and the next
-    # task on the lane cannot start because `prepare_worktree` refuses a dirty worktree.
-    dead = footer["exit_code"] != 0 or footer.get("is_error") or not receipt.exists() or bool(dirty)
-    footer.update({"bell": bell.name, "id": packet.id, "lane": packet.lane, "base": packet.base,
-                   "head_before": head_before, "head_after": head_after, "dead": bool(dead),
-                   "dirty_worktree": bool(dirty), "packet_sha256": data.get("sha256"), "finished_at": ts()})
-    if receipt.exists():
+        receipt = desk.receipts / f"{packet.stem}.md"
+        wrote_receipt = receipt.exists()
+        if not wrote_receipt:
+            write(receipt, f"# DEAD TASK {packet.stem}\n\nThe worker exited with code {footer['exit_code']} and wrote no receipt. See bells/logs/{log_path.name}.\n")
+        # The machine header is computed here, still inside the lane lock: it runs the
+        # lane's check command in the worktree, and a second task starting on the lane
+        # would race it. It also counts what the worker left uncommitted, and that count
+        # is the one this function judges on: `left_in_tree` is measured once, in
+        # headers.py, and read from there. A worker that leaves uncommitted changes has
+        # not finished — the work is unreachable from the lane branch, nothing can be
+        # merged or accepted, and the next task cannot start because `prepare_worktree`
+        # refuses a dirty worktree.
+        try:
+            values = headers_mod.compute_receipt_values(desk, receipt, packet.lane, packet=packet, result=footer)
+            left = values.get("left_in_tree")
+            header_note = "ok"
+        except BellhopError as exc:
+            values, left, header_note = None, None, f"failed: {exc}"
+        # Three readings, not two: clean, dirty, and could-not-look. An unmeasurable tree
+        # is treated as dead, because the next task cannot start in it either.
+        dirty = None if left is None else int(left) > 0
+        dead = footer["exit_code"] != 0 or footer.get("is_error") or not wrote_receipt or dirty is not False
+        footer.update({"bell": bell.name, "id": packet.id, "lane": packet.lane, "base": packet.base,
+                       "head_before": head_before, "head_after": head_after, "dead": bool(dead),
+                       "dirty_worktree": dirty, "packet_sha256": data.get("sha256"),
+                       "finished_at": ts(), "header": header_note})
+        # The JSON footer stays as it was; every key in it is also a key in the header,
+        # and the header adds the numbers a checker needs.
         append(receipt, "\n---\nbellhop: " + json.dumps({k: footer[k] for k in
                ("provider", "model", "turns", "duration_s", "cost_usd", "exit_code", "dead", "dirty_worktree", "head_after")}) + "\n")
-    else:
-        write(receipt, f"# DEAD TASK {packet.stem}\n\nThe worker exited with code {footer['exit_code']} and wrote no receipt. See bells/logs/{log_path.name}.\n\n---\nbellhop: "
-              + json.dumps({k: footer[k] for k in ("provider", "model", "turns", "duration_s", "cost_usd", "exit_code", "dead", "dirty_worktree", "head_after")}) + "\n")
+        if values is not None:
+            values["dead"] = bool(dead)  # judged after the tree was measured, so patched in here
+            footer["check_exit"] = values.get("check_exit")
+            headers_mod.write_header(receipt, "receipt", values)
     meta = desk.receipts / f"{packet.id}.meta.json"
     write_json(meta, footer)
     _remove_inflight(desk, packet.stem)
