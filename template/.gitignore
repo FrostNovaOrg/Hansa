@@ -16,3 +16,5 @@ bells/logs/*.log
 
 __pycache__/
 *.pyc
+state/.sentinel/
+state/.daily-clear-*
