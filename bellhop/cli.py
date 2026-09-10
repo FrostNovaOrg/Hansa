@@ -13,6 +13,7 @@ from . import headers as headers_mod
 from . import hooks as hooks_mod
 from . import decisions as decisions_mod
 from . import desk_ops
+from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import merge as merge_mod
 from . import readings as readings_mod
@@ -68,8 +69,23 @@ def cmd_packet_new(args):
 
 def cmd_ring(args):
     desk = _desk(args)
-    bell = ring_mod.ring(desk, Path(args.packet))
+    bell = ring_mod.ring(desk, Path(args.packet), commit=not getattr(args, "no_commit", False))
     print(f"rung: {bell.relative_to(desk.root)}")
+
+
+def cmd_lane(args):
+    desk = _desk(args)
+    try:
+        if args.lane_cmd == "reset":
+            report = lanes_mod.lane_reset(desk, args.lane, dry_run=args.dry_run, force=args.force)
+        else:
+            report = lanes_mod.lane_align(desk, args.lane)
+    except lanes_mod.LaneBlocked as exc:
+        print(f"🛑 {exc}")
+        sys.exit(2)
+    for line in report["steps"]:
+        print(f"  {line}")
+    print(report["last"])
 
 
 def cmd_watch(args):
@@ -250,7 +266,11 @@ def cmd_seal(args):
 def cmd_close(args):
     desk = _desk(args)
     print(desk_ops.close(desk))
-    _commit(desk, args, ["ledger", "state/.sentinel/status.txt", *STATE_FILES], "day close")
+    # No paths: the close archives the whole roster. Desk configuration -- bellhop.json,
+    # rules/, .claude/ -- is edited by hand between tasks and no other command claims it,
+    # so this is where it enters git. A day that ends with an untracked rule change is a
+    # day whose history and whose desk say different things.
+    _commit(desk, args, [], "day close")
 
 
 def cmd_coldstart(args):
@@ -446,6 +466,14 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--base", help="base commit (default HEAD)"); n.add_argument("--id"); n.add_argument("--budget", type=int, default=45); n.set_defaults(fn=cmd_packet_new)
 
     s = sub.add_parser("ring", help="ring a bell for a packet"); s.add_argument("packet"); s.set_defaults(fn=cmd_ring)
+
+    s = sub.add_parser("lane", help="lane worktree maintenance"); ss = s.add_subparsers(dest="lane_cmd", required=True)
+    r = ss.add_parser("reset", help="discard a lane's uncommitted work and put its branch back on the task base")
+    r.add_argument("lane"); r.add_argument("--dry-run", action="store_true", help="print what it would do, change nothing")
+    r.add_argument("--force", action="store_true", help="proceed even if the lane is busy or holds unmerged commits")
+    a = ss.add_parser("align", help="fast-forward a clean, fully merged lane branch onto its base branch")
+    a.add_argument("lane")
+    s.set_defaults(fn=cmd_lane)
 
     s = sub.add_parser("watch", help="answer bells (watchdog)"); s.add_argument("--loop", action="store_true"); s.add_argument("--once", action="store_true")
     s.add_argument("--interval", type=int, default=5); s.add_argument("--no-archive", action="store_true"); s.set_defaults(fn=cmd_watch)

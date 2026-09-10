@@ -33,7 +33,8 @@
         "Glob",
         "Edit",
         "Write",
-        "Bash"
+        "Bash(git:*)",
+        "Bash(./check.sh:*)"
       ],
       "env_allow": [],
       "worker_cmd": "",
