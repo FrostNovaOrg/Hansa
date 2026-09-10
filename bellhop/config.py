@@ -30,7 +30,12 @@ LANE_DEFAULTS = {
     "model": "opus",
     "permission_mode": "acceptEdits",
     "max_turns": 80,
-    "allowed_tools": [],
+    # A worker is told to run the lane's checks and commit on the lane branch. In
+    # print mode `acceptEdits` auto-approves file edits only; every other tool call is
+    # refused with no one to ask, so a lane without an allowlist produces a worker that
+    # can edit files and nothing else. Narrow this per lane once the repository's own
+    # guardrails (worktree, pre-push hook, scrubbed environment) are in place.
+    "allowed_tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
     "env_allow": [],
     "worker_cmd": "",
     "accept_cmd": "",

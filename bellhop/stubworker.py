@@ -24,8 +24,9 @@ def main() -> int:
         return 1
     note = worktree / f"bellhop-stub-{task_id}.txt"
     note.write_text(f"work for {task_id}\n", encoding="utf-8")
-    subprocess.run(["git", "add", note.name], cwd=worktree, check=True)
-    subprocess.run(["git", "-c", "user.name=stub", "-c", "user.email=stub@example.invalid", "commit", "-q", "-m", f"stub: {task_id}"], cwd=worktree, check=True)
+    if mode != "nocommit":  # "nocommit" leaves the change uncommitted, like a worker denied `git commit`
+        subprocess.run(["git", "add", note.name], cwd=worktree, check=True)
+        subprocess.run(["git", "-c", "user.name=stub", "-c", "user.email=stub@example.invalid", "commit", "-q", "-m", f"stub: {task_id}"], cwd=worktree, check=True)
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=worktree, capture_output=True, text=True).stdout.strip()
     acceptance = []
     for line in packet.read_text(encoding="utf-8").splitlines():

@@ -130,6 +130,57 @@ class LoopTest(unittest.TestCase):
         checks = {c[0]: c for c in sentinel.run_checks(self.desk)}
         self.assertTrue(checks["dead-tasks"][1])
 
+    def test_uncommitted_work_is_a_dead_task(self):
+        """A worker that edits but never commits leaves the lane wedged; it is not a success."""
+        p = self.packet("005", "Leave work uncommitted")
+        ring.ring(self.desk, p)
+        os.environ["BELLHOP_STUB_MODE"] = "nocommit"
+        self.desk.cfg["lanes"]["api"]["env_allow"] = ["BELLHOP_STUB_MODE"]
+        try:
+            result = watch.watch_once(self.desk)
+        finally:
+            os.environ.pop("BELLHOP_STUB_MODE", None)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["head_before"], result["head_after"])
+        self.assertTrue(result["dirty_worktree"])
+        self.assertTrue(result["dead"], "a dirty lane worktree must be reported as a dead task")
+        meta = read_json(self.desk.receipts / "005.meta.json")
+        self.assertTrue(meta["dead"])
+        self.assertTrue(meta["dirty_worktree"])
+        self.assertIn('"dirty_worktree": true', read(self.desk.receipts / "005-leave-work-uncommitted.md"))
+        card.refresh_card(self.desk, ready="no", reason="dead task 005")
+        checks = {c[0]: c for c in sentinel.run_checks(self.desk)}
+        self.assertFalse(checks["dead-tasks"][1])
+
+    def test_default_lane_lets_a_worker_run_checks_and_commit(self):
+        """`acceptEdits` alone refuses every Bash call in print mode, so lanes need an allowlist."""
+        from bellhop.config import LANE_DEFAULTS
+        from bellhop.watch import _claude_cmd
+        self.assertIn("Bash", LANE_DEFAULTS["allowed_tools"])
+        example = read_json(ROOT / "template" / "bellhop.example.json")
+        self.assertIn("Bash", example["lanes"]["api"]["allowed_tools"])
+        lane = dict(self.desk.lane("api"))
+        lane["allowed_tools"] = LANE_DEFAULTS["allowed_tools"]
+        cmd = _claude_cmd(self.desk, lane, parse_packet(self.packet("006", "Cmd shape")), "prompt")
+        self.assertIn("--allowedTools", cmd)
+        self.assertIn("Bash", cmd[cmd.index("--allowedTools") + 1].split(","))
+
+    def test_second_task_starts_from_its_own_base(self):
+        """An existing lane worktree must be reset to the new packet's base, not left where it was."""
+        from bellhop import lanes
+        ring.ring(self.desk, self.packet("007", "First"))
+        card.refresh_card(self.desk, ready="yes", next="007", lane="api", reason="")
+        first = watch.watch_once(self.desk)
+        self.assertFalse(first["dead"])
+        # a new base appears on main while the lane branch still carries task 007
+        write(self.repo / "NOTE.md", "moved on\n")
+        git(self.repo, "add", "NOTE.md")
+        git(self.repo, "commit", "-q", "-m", "main moves on")
+        new_base = git(self.repo, "rev-parse", "--short", "HEAD")
+        wt = lanes.prepare_worktree(self.desk, self.desk.lane("api"), new_base)
+        self.assertEqual(git(wt, "rev-parse", "HEAD"), git(self.repo, "rev-parse", new_base))
+        self.assertFalse((wt / "bellhop-stub-007.txt").exists())
+
     def test_ledger_and_decisions_are_append_only(self):
         ledger.add(self.desk, "first", "body")
         ledger.add(self.desk, "second", "body")

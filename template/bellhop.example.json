@@ -18,7 +18,14 @@
       "model": "opus",
       "permission_mode": "acceptEdits",
       "max_turns": 80,
-      "allowed_tools": [],
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "Write",
+        "Bash"
+      ],
       "env_allow": [],
       "worker_cmd": "",
       "accept_cmd": ""

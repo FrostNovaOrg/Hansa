@@ -151,17 +151,21 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
         prompt = build_worker_prompt(desk, packet, lane, worktree)
         footer = launch_worker(desk, lane, packet, worktree, prompt, log_path)
         head_after = git(worktree, "rev-parse", "HEAD")
+        dirty = git(worktree, "status", "--porcelain")
     receipt = desk.receipts / f"{packet.stem}.md"
-    dead = footer["exit_code"] != 0 or footer.get("is_error") or not receipt.exists()
+    # A worker that leaves uncommitted changes behind has not finished: the work is
+    # unreachable from the lane branch, nothing can be merged or accepted, and the next
+    # task on the lane cannot start because `prepare_worktree` refuses a dirty worktree.
+    dead = footer["exit_code"] != 0 or footer.get("is_error") or not receipt.exists() or bool(dirty)
     footer.update({"bell": bell.name, "id": packet.id, "lane": packet.lane, "base": packet.base,
                    "head_before": head_before, "head_after": head_after, "dead": bool(dead),
-                   "packet_sha256": data.get("sha256"), "finished_at": ts()})
+                   "dirty_worktree": bool(dirty), "packet_sha256": data.get("sha256"), "finished_at": ts()})
     if receipt.exists():
         append(receipt, "\n---\nbellhop: " + json.dumps({k: footer[k] for k in
-               ("provider", "model", "turns", "duration_s", "cost_usd", "exit_code", "dead", "head_after")}) + "\n")
+               ("provider", "model", "turns", "duration_s", "cost_usd", "exit_code", "dead", "dirty_worktree", "head_after")}) + "\n")
     else:
         write(receipt, f"# DEAD TASK {packet.stem}\n\nThe worker exited with code {footer['exit_code']} and wrote no receipt. See bells/logs/{log_path.name}.\n\n---\nbellhop: "
-              + json.dumps({k: footer[k] for k in ("provider", "model", "turns", "duration_s", "cost_usd", "exit_code", "dead", "head_after")}) + "\n")
+              + json.dumps({k: footer[k] for k in ("provider", "model", "turns", "duration_s", "cost_usd", "exit_code", "dead", "dirty_worktree", "head_after")}) + "\n")
     meta = desk.receipts / f"{packet.id}.meta.json"
     write_json(meta, footer)
     _remove_inflight(desk, packet.stem)
