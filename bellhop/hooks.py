@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import daemon as daemon_mod
+from . import state as state_mod
 from .config import Desk, find_desk
 from .util import BellhopError, read
 
@@ -48,6 +49,19 @@ def session_start() -> int:
     hb = daemon_mod.heartbeat_age(desk)
     if pending and (hb is None or hb > 120):
         out.append(f"\nNOTE: {pending} pending bell(s) and no fresh watchdog heartbeat. The session watchdog starts with the bellhop MCP server; for always-on, run /bellhop:daemon.")
+    try:
+        hot = state_mod.hot_rule_lines(desk)
+    except Exception:
+        hot = []
+    if hot:
+        out.append("\n== hot rules ==")
+        out.extend(hot)
+    try:
+        unread = max(len(state_mod.closings_rows(desk)) - state_mod.closings_pointer(desk), 0)
+    except Exception:
+        unread = 0
+    if unread:
+        out.append(f"\n== close-outs ==\n{unread} unread (`bellhop state closings unread`)")
     dec = desk.state / "decisions.md"
     if dec.exists():
         heads = [l for l in read(dec).splitlines() if l.startswith("## ")][-3:]

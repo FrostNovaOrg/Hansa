@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from .config import Desk
 from .util import BellhopError, slugify, today, ts, write
+
+
+def next_seq(desk: Desk, day: Optional[str] = None) -> int:
+    """One past the highest entry number in that day's folder.
+
+    Both `bellhop ledger add` and `bellhop state ledger add` take the number from
+    here, so the entry number is never accepted from the caller and never reused.
+    """
+    folder = desk.ledger / (day or today())
+    highest = 0
+    if folder.exists():
+        for p in folder.glob("*.md"):
+            m = re.match(r"^(\d+)-", p.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    return highest + 1
 
 
 def add(desk: Desk, title: str, body: str, refs: Iterable[str] = (), day: Optional[str] = None) -> Path:
@@ -13,7 +30,7 @@ def add(desk: Desk, title: str, body: str, refs: Iterable[str] = (), day: Option
     day = day or today()
     folder = desk.ledger / day
     folder.mkdir(parents=True, exist_ok=True)
-    seq = len(list(folder.glob("*.md"))) + 1
+    seq = next_seq(desk, day)
     path = folder / f"{seq:03d}-{slugify(title)}.md"
     while path.exists():
         seq += 1
