@@ -119,12 +119,24 @@ def _search_path(python: str, claude_bin: str) -> str:
     return ":".join(dirs)
 
 
+def autostart(desk: Desk) -> bool:
+    """Do the resident services come up on their own at boot or login?
+
+    Default no. A desk whose services come back by themselves after a reboot answers
+    bells against whatever state the machine came up in, and the operator finds out from
+    the receipts. The default is that a person brings them back: `daemon install --load`,
+    or the load commands `daemon install` prints.
+    """
+    return bool(desk.cfg.get("autostart", False))
+
+
 def service_files(desk: Desk, platform: str, python: Optional[str] = None) -> Dict[Path, str]:
     python = python or sys.executable
     main = str(desk.path(VENDOR_DIR, "bellhop_main.py"))
     logs = desk.bells_logs
     path_env = _search_path(python, desk.cfg["claude_bin"])
     lab = label(desk)
+    auto = autostart(desk)
     files: Dict[Path, str] = {}
     sdir = service_dir(platform)
     if platform == "launchd":
@@ -133,8 +145,10 @@ def service_files(desk: Desk, platform: str, python: Optional[str] = None) -> Di
             "ProgramArguments": [python, main, "--desk", str(desk.root), "watch", "--loop"],
             "WorkingDirectory": str(desk.root),
             "EnvironmentVariables": {"PATH": path_env, "HOME": str(Path.home()), "LANG": "en_US.UTF-8"},
-            "RunAtLoad": True,
-            "KeepAlive": True,
+            # RunAtLoad starts it when the agent is loaded (which login does by itself);
+            # KeepAlive brings it back after any exit, which also means "at boot".
+            "RunAtLoad": auto,
+            "KeepAlive": auto,
             "StandardOutPath": str(logs / "daemon.out.log"),
             "StandardErrorPath": str(logs / "daemon.err.log"),
         }
@@ -143,20 +157,33 @@ def service_files(desk: Desk, platform: str, python: Optional[str] = None) -> Di
             "ProgramArguments": [python, main, "--desk", str(desk.root), "sentinel"],
             "WorkingDirectory": str(desk.root),
             "EnvironmentVariables": {"PATH": path_env, "HOME": str(Path.home()), "LANG": "en_US.UTF-8"},
-            "RunAtLoad": True,
+            "RunAtLoad": auto,
             "StartInterval": int(desk.cfg["sentinel_interval_minutes"]) * 60,
             "StandardOutPath": str(logs / "sentinel.out.log"),
             "StandardErrorPath": str(logs / "sentinel.err.log"),
         }
+        if not auto:
+            # A StartInterval job that login loads would tick anyway, so with autostart
+            # off both jobs are written disabled and the load commands enable them for
+            # this session. Loaded-but-idle and not-loaded look the same to the operator
+            # otherwise, and only one of them survives a reboot.
+            watch["Disabled"] = True
+            sentinel["Disabled"] = True
         files[sdir / f"{lab}.plist"] = plistlib.dumps(watch, sort_keys=False).decode("utf-8")
         files[sdir / f"{lab}.sentinel.plist"] = plistlib.dumps(sentinel, sort_keys=False).decode("utf-8")
     elif platform == "systemd":
         unit = lab
+        # No [Install] section means `systemctl --user enable` has nothing to hook into,
+        # so the unit can only be started by hand. With autostart on it is wanted by the
+        # user's default target and comes up at login.
+        watch_install = "\n[Install]\nWantedBy=default.target\n" if auto else ""
+        timer_install = "\n[Install]\nWantedBy=timers.target\n" if auto else ""
+        boot_sec = "OnBootSec=2min\n" if auto else ""
         files[sdir / f"{unit}.service"] = (
             "[Unit]\nDescription=Bellhop watchdog for %s\nAfter=default.target\n\n[Service]\nType=simple\n"
             "WorkingDirectory=%s\nEnvironment=PATH=%s\nEnvironment=LANG=C.UTF-8\nExecStart=%s %s --desk %s watch --loop\n"
-            "Restart=always\nRestartSec=5\nStandardOutput=append:%s\nStandardError=append:%s\n\n[Install]\nWantedBy=default.target\n"
-            % (desk.root, desk.root, path_env, python, main, desk.root, logs / "daemon.out.log", logs / "daemon.err.log")
+            "Restart=always\nRestartSec=5\nStandardOutput=append:%s\nStandardError=append:%s\n%s"
+            % (desk.root, desk.root, path_env, python, main, desk.root, logs / "daemon.out.log", logs / "daemon.err.log", watch_install)
         )
         files[sdir / f"{unit}-sentinel.service"] = (
             "[Unit]\nDescription=Bellhop sentinel for %s\n\n[Service]\nType=oneshot\nWorkingDirectory=%s\nEnvironment=PATH=%s\n"
@@ -164,8 +191,8 @@ def service_files(desk: Desk, platform: str, python: Optional[str] = None) -> Di
             % (desk.root, desk.root, path_env, python, main, desk.root, logs / "sentinel.out.log", logs / "sentinel.err.log")
         )
         files[sdir / f"{unit}-sentinel.timer"] = (
-            "[Unit]\nDescription=Run the Bellhop sentinel every %d minutes\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=%dmin\nUnit=%s-sentinel.service\n\n[Install]\nWantedBy=timers.target\n"
-            % (int(desk.cfg["sentinel_interval_minutes"]), int(desk.cfg["sentinel_interval_minutes"]), unit)
+            "[Unit]\nDescription=Run the Bellhop sentinel every %d minutes\n\n[Timer]\n%sOnUnitActiveSec=%dmin\nUnit=%s-sentinel.service\n%s"
+            % (int(desk.cfg["sentinel_interval_minutes"]), boot_sec, int(desk.cfg["sentinel_interval_minutes"]), unit, timer_install)
         )
     else:
         raise BellhopError(f"no resident-service support for platform {sys.platform}; run `bellhop watch --loop` under your own supervisor")
@@ -173,26 +200,48 @@ def service_files(desk: Desk, platform: str, python: Optional[str] = None) -> Di
 
 
 def load_commands(desk: Desk, platform: str) -> list:
+    """What starts the services *now*. With autostart off, this is the only thing that does."""
     lab = label(desk)
     sdir = service_dir(platform)
     uid = os.getuid()
+    auto = autostart(desk)
     if platform == "launchd":
+        cmds = []
+        for target in (lab, f"{lab}.sentinel"):
+            plist = sdir / (f"{lab}.plist" if target == lab else f"{lab}.sentinel.plist")
+            if not auto:
+                cmds.append(["launchctl", "enable", f"gui/{uid}/{target}"])
+            cmds.append(["launchctl", "bootstrap", f"gui/{uid}", str(plist)])
+            if not auto:
+                cmds.append(["launchctl", "kickstart", f"gui/{uid}/{target}"])
+        return cmds
+    if auto:
         return [
-            ["launchctl", "bootstrap", f"gui/{uid}", str(sdir / f"{lab}.plist")],
-            ["launchctl", "bootstrap", f"gui/{uid}", str(sdir / f"{lab}.sentinel.plist")],
+            ["systemctl", "--user", "daemon-reload"],
+            ["systemctl", "--user", "enable", "--now", f"{lab}.service", f"{lab}-sentinel.timer"],
         ]
     return [
         ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "enable", "--now", f"{lab}.service", f"{lab}-sentinel.timer"],
+        ["systemctl", "--user", "start", f"{lab}.service", f"{lab}-sentinel.timer"],
     ]
 
 
 def unload_commands(desk: Desk, platform: str) -> list:
     lab = label(desk)
     uid = os.getuid()
+    auto = autostart(desk)
     if platform == "launchd":
-        return [["launchctl", "bootout", f"gui/{uid}/{lab}"], ["launchctl", "bootout", f"gui/{uid}/{lab}.sentinel"]]
-    return [["systemctl", "--user", "disable", "--now", f"{lab}.service", f"{lab}-sentinel.timer"]]
+        cmds = [["launchctl", "bootout", f"gui/{uid}/{lab}"], ["launchctl", "bootout", f"gui/{uid}/{lab}.sentinel"]]
+        if not auto:
+            # Put the job back where the plist says it should be: `launchctl enable` is
+            # remembered across reboots, so leaving it enabled would quietly undo the
+            # autostart setting for the next install.
+            cmds.append(["launchctl", "disable", f"gui/{uid}/{lab}"])
+            cmds.append(["launchctl", "disable", f"gui/{uid}/{lab}.sentinel"])
+        return cmds
+    if auto:
+        return [["systemctl", "--user", "disable", "--now", f"{lab}.service", f"{lab}-sentinel.timer"]]
+    return [["systemctl", "--user", "stop", f"{lab}.service", f"{lab}-sentinel.timer"]]
 
 
 def marker_path(desk: Desk) -> Path:
@@ -213,9 +262,17 @@ def install(desk: Desk, load: bool = False, python: Optional[str] = None) -> dic
         "vendored_version": vendored_version(desk),
         "python": python or sys.executable,
         "installed_at": ts(),
+        "autostart": autostart(desk),
         "loaded": False,
     }
-    report = {"platform": platform, "files": [str(p) for p in files], "load_commands": [" ".join(c) for c in load_commands(desk, platform)], "loaded": False, "errors": []}
+    report = {
+        "platform": platform,
+        "files": [str(p) for p in files],
+        "load_commands": [" ".join(c) for c in load_commands(desk, platform)],
+        "autostart": autostart(desk),
+        "loaded": False,
+        "errors": [],
+    }
     if load:
         for cmd in load_commands(desk, platform):
             proc = _run_quiet(cmd)
@@ -265,6 +322,8 @@ def status(desk: Desk) -> dict:
         "installed": bool(marker),
         "platform": platform,
         "label": (marker or {}).get("label"),
+        "autostart": autostart(desk),
+        "autostart_at_install": (marker or {}).get("autostart"),
         "loaded_at_install": (marker or {}).get("loaded"),
         "service_running": running,
         "heartbeat_age_s": None if hb is None else round(hb),
@@ -282,6 +341,14 @@ def status_text(desk: Desk) -> str:
     if s["installed"]:
         lines.append(f"  label: {s['label']}")
         lines.append(f"  service running: {s['service_running'] if s['service_running'] is not None else 'unknown'}")
+    lines.append(
+        "  autostart: "
+        + ("yes (comes up at boot/login)" if s["autostart"] else "no (after a reboot, start them by hand: bellhop daemon install --load)")
+    )
+    if s["installed"] and s["autostart_at_install"] is not None and s["autostart_at_install"] != s["autostart"]:
+        lines.append(
+            f"    the installed service files were written with autostart={'yes' if s['autostart_at_install'] else 'no'}; reinstall to apply the change"
+        )
     lines.append(f"  heartbeat: {'none' if s['heartbeat_age_s'] is None else str(s['heartbeat_age_s']) + 's ago'}{' (fresh)' if s['heartbeat_fresh'] else ''}")
     lines.append(f"  vendored version: {s['vendored_version'] or '-'} (framework {s['framework_version']}){' STALE, reinstall' if s['vendored_stale'] else ''}")
     return "\n".join(lines) + "\n"

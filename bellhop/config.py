@@ -51,6 +51,26 @@ DESK_DEFAULTS = {
     "previous_versions_keep": 30,
     "sentinel_interval_minutes": 10,
     "wake_cmd": "",
+    # How many times the wake command may fire against an unchanged board before the
+    # sentinel stops waking and asks for a person. A wake that repeats forever against a
+    # stuck coordinator and a wake that is working look the same in the log.
+    "wake_max_repeats": 3,
+    # A command that exits 0 when the coordinator is busy and non-zero when it is idle.
+    # Unset means "unknown": the wake still fires, but the daily clear and the idle
+    # compaction refuse to act, because clearing blind is what loses a half-finished task.
+    "busy_probe_cmd": "",
+    # "HH:MM-HH:MM" local time, empty = off. Inside it the sentinel tries on every run and
+    # clears on the first idle one; one exact minute is missed whenever a run slips.
+    "daily_clear_window": "",
+    "clear_cmd": "",
+    # Compaction stays off until someone has read what it costs; see docs/sentinel.md.
+    "idle_compact": False,
+    "compact_cmd": "",
+    "compact_threshold_tokens": 250000,
+    "coordinator_transcript": "",
+    # Resident services do not come up at boot or login unless this is true; after a
+    # reboot the operator starts them by hand.
+    "autostart": False,
     "claude_bin": "claude",
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,

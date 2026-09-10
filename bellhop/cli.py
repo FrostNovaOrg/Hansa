@@ -22,6 +22,7 @@ from . import sampling
 from . import seal as seal_mod
 from . import sentinel as sentinel_mod
 from . import state as state_mod
+from . import stopdispatch as stop_mod
 from . import watch as watch_mod
 from .config import find_desk
 from .packet import next_packet_id, parse_packet, render_packet
@@ -111,9 +112,35 @@ def cmd_archive(args):
 
 def cmd_sentinel(args):
     desk = _desk(args)
-    green, text = sentinel_mod.sentinel(desk, wake=not args.no_wake)
+    green, text = sentinel_mod.sentinel(desk, wake=not args.no_wake, dry_run=args.dry_run)
     print(text, end="")
     sys.exit(0 if green else 1)
+
+
+def cmd_stop_dispatch(args):
+    """The switch that stops dispatch is a file, so it works without anyone reading it."""
+    desk = _desk(args)
+    if args.stop_cmd == "set":
+        order = stop_mod.set_stop(desk, args.reason, by=args.by)
+        print(f"dispatch stopped at {order['stopped_at']}: {order['reason']}")
+        print(f"  {stop_mod.stop_path(desk)}")
+        _commit(desk, args, [stop_mod.STOP_FILE], f"dispatch stopped: {order['reason']}")
+    elif args.stop_cmd == "lift":
+        order = stop_mod.lift(desk, note=args.note or "")
+        print(f"dispatch allowed again (stopped at {order['stopped_at']}, {len(order['exceptions'])} exception(s))")
+        print(f"  close-out: {order['closing']}")
+        _commit(desk, args, [stop_mod.STOP_FILE, "state/closings.md"], "dispatch stop lifted")
+    elif args.stop_cmd == "exception":
+        order = stop_mod.add_exception(desk, args.reason)
+        n = len(order["exceptions"])
+        print(f"exception {n} recorded in {stop_mod.stop_path(desk).name}: {order['exceptions'][-1]}")
+        if n >= stop_mod.PIERCED_AT:
+            print(f"the stop order has now been pierced {n} times; the sentinel is red until it is lifted or obeyed")
+        _commit(desk, args, [stop_mod.STOP_FILE], f"dispatch stop exception {n}")
+    else:
+        print(stop_mod.status_text(desk), end="")
+        allowed, _reason = stop_mod.dispatch_allowed(desk)
+        sys.exit(0 if allowed else 1)
 
 
 def cmd_ledger(args):
@@ -286,6 +313,11 @@ def cmd_daemon(args):
     if args.daemon_cmd == "install":
         report = daemon_mod.install(desk, load=args.load, python=args.python)
         print(f"platform: {report['platform']}")
+        print(
+            "autostart: "
+            + ("yes (the services come up at boot/login)" if report["autostart"]
+               else "no (after a reboot, start them by hand with the load commands below)")
+        )
         print("service files written:")
         for f in report["files"]:
             print(f"  {f}")
@@ -483,7 +515,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("archive", help="commit desk files"); s.add_argument("-m", "--message", required=True); s.add_argument("paths", nargs="+"); s.set_defaults(fn=cmd_archive)
 
-    s = sub.add_parser("sentinel", help="run the checks"); s.add_argument("--no-wake", action="store_true"); s.set_defaults(fn=cmd_sentinel)
+    s = sub.add_parser("sentinel", help="run the checks; every run logs one line to state/sentinel.log")
+    s.add_argument("--no-wake", action="store_true", help="run the checks but never run wake_cmd")
+    s.add_argument("--dry-run", action="store_true", help="say what would happen (wake, clear, compact) and write nothing")
+    s.set_defaults(fn=cmd_sentinel)
+
+    s = sub.add_parser("stop-dispatch", help="the stop-dispatch switch: a file whose presence stops dispatch")
+    ss = s.add_subparsers(dest="stop_cmd", required=True)
+    a = ss.add_parser("set", help="stop dispatch until someone lifts it")
+    a.add_argument("--reason", required=True, help="why; without it nobody else can decide whether to lift it")
+    a.add_argument("--by", default="coordinator")
+    a = ss.add_parser("lift", help="allow dispatch again and record the close-out")
+    a.add_argument("--note", help="anything to add to the close-out line")
+    a = ss.add_parser("exception", help="dispatch anyway, once, and write it into the order")
+    a.add_argument("--reason", required=True)
+    ss.add_parser("status", help="print the order (exit 1 while dispatch is stopped)")
+    s.set_defaults(fn=cmd_stop_dispatch)
 
     s = sub.add_parser("ledger", help="ledger entries"); ss = s.add_subparsers(dest="ledger_cmd", required=True)
     a = ss.add_parser("add"); a.add_argument("--title", required=True); a.add_argument("--body", help="entry body (default: stdin)"); a.add_argument("--ref", action="append")
