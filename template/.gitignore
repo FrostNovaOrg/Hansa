@@ -23,3 +23,5 @@ __pycache__/
 *.pyc
 state/.sentinel/
 state/.daily-clear-*
+state/.brief-sent
+state/.release-*.json
