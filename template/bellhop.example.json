@@ -4,6 +4,7 @@
   "sample_rate": 3,
   "weekly_seed": "",
   "ledger_entry_max_bytes": 1200,
+  "acceptance_bytes": 3000,
   "sentinel_interval_minutes": 10,
   "wake_cmd": "",
   "claude_bin": "claude",
@@ -28,7 +29,8 @@
       ],
       "env_allow": [],
       "worker_cmd": "",
-      "accept_cmd": ""
+      "accept_cmd": "",
+      "check_cmd": "./check.sh"
     }
   }
 }
