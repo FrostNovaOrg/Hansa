@@ -41,6 +41,7 @@ class DeskCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="bellhop-skills2-test.")).resolve()
         self.root = self.tmp / "desk"
         shutil.copytree(ROOT / "template", self.root)
+        self.strip_runtime_dirs()
         (self.root / "bellhop.example.json").rename(self.root / "bellhop.json")
         self.cfg = json.loads(read(self.root / "bellhop.json"))
         self.cfg.setdefault("lanes", {})
@@ -48,6 +49,25 @@ class DeskCase(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def strip_runtime_dirs(self):
+        """Start every sandbox from exactly the tracked template.
+
+        `desk_ops.init_desk` creates `bells/`, `inbox/`, `receipts/` and the rest as
+        empty directories, and git does not track empty directories - so one stray
+        `bellhop init` pointed at the checkout leaves them in `template/`, invisible
+        to `git status`, and `copytree` then copies them into the sandbox. This module
+        tests the difference between a desk that has those directories and one that
+        does not, so the shape has to be set here rather than inherited: **a checkout
+        that has been init'd over and a clean one look the same in `git status`.**
+        """
+        for d in ("bells", "inbox", "receipts", "ledger", "reports", "seals"):
+            shutil.rmtree(self.root / d, ignore_errors=True)
+
+    def desk_dirs(self):
+        """The runtime directories a real desk has, as `bellhop init` makes them."""
+        for d in ("bells/pending", "bells/rung", "bells/logs", "inbox", "receipts"):
+            (self.root / d).mkdir(parents=True, exist_ok=True)
 
     def save_cfg(self):
         write(self.root / "bellhop.json", json.dumps(self.cfg, indent=2) + "\n")
@@ -89,7 +109,7 @@ class BriefPage(DeskCase):
 
     def test_queue_shows_card_bells_and_the_stop_order(self):
         state_mod.card_set(self.desk, dispatchable="yes", next="ship the health endpoint", lane="api")
-        (self.root / "bells" / "pending").mkdir(parents=True)
+        self.desk_dirs()
         write_json(self.root / "bells" / "pending" / "20260911-120000-017.bell",
                    {"id": "017", "lane": "api", "created_at": ts()})
         text = brief_mod.brief_text(self.desk, cap=100000)
@@ -106,9 +126,14 @@ class BriefPage(DeskCase):
     def test_counts_read_the_files_and_say_n_a_when_there_is_no_file(self):
         day = self.today()
         # no bells directory at all: that is not "no bells today"
+        self.assertFalse((self.root / "bells").exists())
         self.assertIn("dispatched n/a", brief_mod.brief_text(self.desk, cap=100000))
 
-        (self.root / "bells" / "rung").mkdir(parents=True)
+        # a desk that has the directory and nothing in it reads 0, not n/a - the
+        # other half of the same distinction, and the state every real desk is in
+        self.desk_dirs()
+        self.assertIn("dispatched 0", brief_mod.brief_text(self.desk, cap=100000))
+
         write_json(self.root / "bells" / "rung" / "20260101-090000-016.bell",
                    {"id": "016", "created_at": "2026-01-01T09:00:00+0000"})
         write_json(self.root / "bells" / "rung" / "20260101-100000-017.bell",
