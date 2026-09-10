@@ -45,6 +45,10 @@ def prepare_worktree(desk: Desk, lane: dict, base: str) -> Path:
         dirty = git(wt, "status", "--porcelain")
         if dirty:
             raise BellhopError(f"lane worktree is dirty, refusing to start a task:\n{dirty}")
+        # The first task creates the worktree with `-B branch base`; every later task must
+        # start from its own packet's base too, or it silently inherits the previous task's
+        # commits and the receipt's `base` and the acceptance diff both become fiction.
+        git(wt, "checkout", "-q", "-B", branch, base)
     return wt
 
 
