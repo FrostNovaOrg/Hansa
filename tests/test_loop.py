@@ -156,14 +156,14 @@ class LoopTest(unittest.TestCase):
         """`acceptEdits` alone refuses every Bash call in print mode, so lanes need an allowlist."""
         from bellhop.config import LANE_DEFAULTS
         from bellhop.watch import _claude_cmd
-        self.assertIn("Bash", LANE_DEFAULTS["allowed_tools"])
+        self.assertTrue(any(t.startswith("Bash(") for t in LANE_DEFAULTS["allowed_tools"]))
         example = read_json(ROOT / "template" / "bellhop.example.json")
-        self.assertIn("Bash", example["lanes"]["api"]["allowed_tools"])
+        self.assertTrue(any(t.startswith("Bash(") for t in example["lanes"]["api"]["allowed_tools"]))
         lane = dict(self.desk.lane("api"))
         lane["allowed_tools"] = LANE_DEFAULTS["allowed_tools"]
         cmd = _claude_cmd(self.desk, lane, parse_packet(self.packet("006", "Cmd shape")), "prompt")
         self.assertIn("--allowedTools", cmd)
-        self.assertIn("Bash", cmd[cmd.index("--allowedTools") + 1].split(","))
+        self.assertTrue(any(t.startswith("Bash(") for t in cmd[cmd.index("--allowedTools") + 1].split(",")))
 
     def test_second_task_starts_from_its_own_base(self):
         """An existing lane worktree must be reset to the new packet's base, not left where it was."""

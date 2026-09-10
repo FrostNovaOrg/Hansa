@@ -8,8 +8,33 @@ from .util import BellhopError, read_json
 
 CONFIG_NAME = "bellhop.json"
 
+# Everything the desk archives lives under one of these names. `git add -A` would also
+# sweep up a scratch file left at the desk root, a note someone was still writing, or a
+# lane worktree; the roster says once, in one place, which files are the desk's own.
+# Anything outside it never reaches a commit, so keep new desk directories out of it
+# unless they are meant to be archived.
+ARCHIVE_ROSTER = (
+    "inbox",
+    "bells",
+    "receipts",
+    "ledger",
+    "state",
+    "reports",
+    "seals",
+    "rules",
+    "bellhop.json",
+    ".claude",
+    # Sealed or tracked from the first commit: a change here that never reaches a commit
+    # looks exactly like no change at all, and the seal manifest would disagree with the
+    # working tree with nothing in the history to explain it.
+    "frozen",
+    "templates",
+    ".gitignore",
+)
+
 DESK_DEFAULTS = {
     "commit_prefix": "[desk]",
+    "archive_roster": list(ARCHIVE_ROSTER),
     "push": False,
     "sample_rate": 3,
     "weekly_seed": "",
@@ -42,9 +67,16 @@ LANE_DEFAULTS = {
     # A worker is told to run the lane's checks and commit on the lane branch. In
     # print mode `acceptEdits` auto-approves file edits only; every other tool call is
     # refused with no one to ask, so a lane without an allowlist produces a worker that
-    # can edit files and nothing else. Narrow this per lane once the repository's own
-    # guardrails (worktree, pre-push hook, scrubbed environment) are in place.
-    "allowed_tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+    # can edit files and nothing else.
+    #
+    # Claude Code matches a `Bash(cmd:*)` rule against the literal start of the command
+    # line, so `Bash(git status:*)` does not cover `git -C <path> status` -- and a worker
+    # in a worktree writes `-C` all day. `Bash(git:*)` covers git with or without `-C`.
+    # It also covers `git push`, on purpose: the push gate is the lane repository's
+    # pre-push hook plus the scrubbed environment (no credentials), not this list. An
+    # allowlist that pretends to stop a push it cannot see is worse than one that says so.
+    # Add the lane's own check commands per lane; do not fall back to a bare `Bash`.
+    "allowed_tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git:*)", "Bash(./check.sh:*)"],
     "env_allow": [],
     "worker_cmd": "",
     "accept_cmd": "",

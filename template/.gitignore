@@ -1,6 +1,18 @@
+# Lane worktrees: checkouts of other repositories that happen to live inside the desk.
+.worktrees/
+
 # Previous versions of state files, kept by `bellhop state` so an overwrite is recoverable.
 # They are local safety copies, not desk history: the history is in git.
 state/.previous/
+
+# Lane locks. A lock that reached a commit would make the lane look busy forever in
+# every fresh clone of the desk, with no worker anywhere to release it.
+bells/.locks/
+
+# Raw worker output: large, noisy, and reproducible from the receipt. The .json result
+# files and the .prompt.md files beside them stay tracked -- they carry the numbers the
+# receipt footer is built from and the exact words the worker was given.
+bells/logs/*.log
 
 __pycache__/
 *.pyc

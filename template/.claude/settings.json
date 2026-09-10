@@ -1,12 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(bellhop *)",
-      "Bash(./bin/bellhop *)",
-      "Bash(git status:*)",
-      "Bash(git log:*)",
-      "Bash(git diff:*)",
-      "Bash(git show:*)"
+      "Bash(bellhop:*)",
+      "Bash(./bin/bellhop:*)",
+      "Bash(git:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",
