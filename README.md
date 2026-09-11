@@ -1,137 +1,249 @@
 # Bellhop
 
-**A file-based, auditable operations framework for running a team of Claude Code agents.**
+**Auditable operations for a team of Claude Code agents.**
 
-Bellhop is the paperwork layer for an AI-run engineering desk. A human principal sets direction, a resident *coordinator* session writes task packets, a watchdog opens one fresh *worker* session per task, a *verifier* judges the result in a session that did not write it, and every step leaves a file behind: the packet, the bell that triggered it, the worker's receipt, the verdict, the coordinator's ledger entry, the principal's decision. Nothing important lives only in a chat window.
+A human principal sets direction. One coordinator dispatches small tasks to fresh
+worker sessions, a separate verifier checks the results, and scripts handle the
+queue, records, merge gates and supervision. Decisions, task packets, receipts
+and the next action survive in files and Git history when a session ends.
 
-It was distilled from a working setup with a coordinator and parallel worker lanes. The names are generic, the example service is fictional, and no part of it depends on a particular product.
+[Try the demo](#try-the-demo) · [Set up a desk](#set-up-a-desk) ·
+[How it works](#how-the-desk-works) · [Documentation](#documentation)
 
-The historical source desk used several models; individual model assignments
-are incomplete. See [measurement provenance](docs/measurement-provenance.md).
-For a new project, start with the [Claude Code workflow contract](docs/replicate-claude-workflow.md).
+## How the desk works
 
-## The model in one picture
+Claude Code sessions make judgments and do the work. Bellhop scripts dispatch,
+measure, record and supervise.
 
+**Task flow — from a recorded decision to acceptance and closing.**
+
+```mermaid
+flowchart TB
+    principal(["Principal<br/>Direction + decisions"])
+    coordinator["Coordinator<br/>Claude Code · one per desk"]
+    watchdog["Watchdog · script<br/>Bounded worker launches"]
+
+    subgraph lanes["Parallel workers"]
+        workerA["Worker A · Claude Code<br/>Fresh session · lane A"]
+        workerB["Worker B · Claude Code<br/>Fresh session · lane B"]
+    end
+
+    settled["Settle + archive · script<br/>Receipt · header · run metadata"]
+    verifier["Verifier · Claude Code<br/>Fresh session · detached copy"]
+    close["close-task · script<br/>Checked merge + bookkeeping"]
+    held["Not closed<br/>Coordinator resolves the reason"]
+    records[("Files + Git history<br/>Result recorded · board refreshed")]
+
+    principal --> coordinator
+    coordinator -->|dispatch| watchdog
+    watchdog --> workerA & workerB
+    workerA & workerB -->|check · commit · receipt| settled
+    settled -->|coordinator runs accept| verifier
+    verifier -->|PASS · coordinator closes| close
+    verifier -->|RETURN / DOUBT / stall| held
+    close --> records
+
+    classDef human fill:#f3e8ff,stroke:#7e22ce,color:#3b0764
+    classDef agent fill:#eff6ff,stroke:#2563eb,color:#172554
+    classDef script fill:#f1f5f9,stroke:#64748b,color:#0f172a
+    classDef record fill:#ecfdf5,stroke:#059669,color:#064e3b
+    classDef held fill:#fffbeb,stroke:#d97706,color:#78350f
+    class principal human
+    class coordinator,workerA,workerB,verifier agent
+    class watchdog,settled,close script
+    class records record
+    class held held
 ```
- Principal (human)
-   │  state/decisions.md (verbatim, append-only) · `bellhop brief` reads it back
-   ▼
- Coordinator (resident Claude Code session, one per desk)
-   │  `bellhop dispatch` → packet + bell + in-flight row + card, in one command
-   ▼
- Watchdog (plain script, no model)
-   │  one bell → one fresh worker session in the lane's worktree, at the packet's base
-   ▼
- Worker (ephemeral session, any provider)
-   │  writes receipts/<id>-<slug>.md and exits; the watchdog writes its machine header
-   ▼
- Verifier (fresh read-only session on a detached copy) → receipts/<id>.acceptance.md
-   ▼
- `bellhop close-task` → evidence, file set, merge with the full board, ledger, state, one commit
-   │
- Sentinel (plain script, on a timer) → one log line per run, wakes the coordinator behind two gates
+
+**Supervision loop — runs alongside tasks, not after them.**
+
+```mermaid
+flowchart LR
+    signals[("Desk state<br/>+ heartbeat")]
+    sentinel["Sentinel · script<br/>Busy gate + repeat brake"]
+    coordinator["Coordinator<br/>Resumes from the board"]
+
+    signals -. observed on a timer .-> sentinel
+    sentinel -. configured wake .-> coordinator
+    coordinator -->|dispatch / accept / close| signals
+
+    classDef record fill:#ecfdf5,stroke:#059669,color:#064e3b
+    classDef script fill:#fffbeb,stroke:#d97706,color:#78350f
+    classDef agent fill:#eff6ff,stroke:#2563eb,color:#172554
+    class signals record
+    class sentinel script
+    class coordinator agent
 ```
 
-Helpers (Claude Code subagents) exist only for the coordinator's own work: scouting a codebase before writing a packet, walking through a UI, drafting text. They never own a task.
+**Files are the source of truth throughout the loop.** Each handoff leaves a record;
+the coordinator reads the board again when it resumes. Helpers (Claude Code
+subagents) support the coordinator's research, walkthroughs and drafts; they do not
+own worker tasks or replace their receipts.
 
-Why each of those exists, with the numbers behind it: [docs/rationale.md](docs/rationale.md).
+- **Parallel work, serialized records.** The default is two concurrent workers,
+  configurable with `max_parallel_workers`. Lane claims prevent overlap on one
+  lane; shared state and Git updates use the desk lock. Heartbeats continue while
+  workers run. See [concurrency and recovery](docs/concurrency.md).
+- **Independent acceptance before every merge.** The verifier has its own model
+  settings and may make reversible mutations in its disposable copy. Sampling
+  selects extra review; `return`, `doubt` or a stalled run stops closing. See
+  [acceptance](docs/acceptance.md) and [close-task](docs/close-task.md).
+- **Supervision is a separate loop.** The sentinel observes throughout execution;
+  a configured wake command resumes the coordinator when its gates allow it.
+  See [sentinel](docs/sentinel.md). The diagram assumes the
+  [Claude Code workflow contract](docs/replicate-claude-workflow.md).
 
-## What you get
+## Try the demo
 
-| Piece | What it is |
-|---|---|
-| `bellhop` CLI | The desk's mechanics: dispatch and ring, watch and archive, headers and their checkers, acceptance, `close-task`, `state`, `board`, `brief`, `readings`, sentinel, seals, providers, daemon |
-| `skills/` | Thirteen slash commands for the coordinator: init, dispatch, intake, status, close, readings, daemon, shutdown, resume, return, condense, brief, release |
-| `agents/` | Three read-only helpers: `scout`, `walkthrough`, `acceptance-reader` |
-| `hooks/` | `SessionStart` prints the reading list and the board; `UserPromptSubmit` logs the principal's words; `PreToolUse` gates hand edits; `Stop` warns about unanswered bells |
-| MCP server | Eight desk tools over stdio, plus the session-mode watchdog |
-| `template/` | A ready-to-copy desk: directories, state files, rules, coordinator identity, permissions, provider examples |
-| `docs/` | Rationale, design, plugin packaging, dispatch, headers, acceptance, close-task, state, hooks, sentinel, providers, metrics, security, operations |
-| `examples/` | A fictional `widget-service` with two lanes and a dry-run demo |
+Requirements: **Git and Python 3.9+ on macOS or Linux**. The framework uses only the
+Python standard library. Configure a Git author name and email before creating a
+desk, since initialization and the workflow make commits.
 
-Python 3.9+ standard library only. Workers are launched through a provider adapter — `claude` by default, `generic` for any other vendor's CLI ([docs/providers.md](docs/providers.md)).
-
-## Quick start
-
-### As a Claude Code plugin
-
-The repository is also the marketplace, so installing takes two commands:
-
+```sh
+git clone https://github.com/FrostNovaOrg/Hansa.git bellhop
+cd bellhop
+./examples/demo.sh
 ```
+
+The demo creates a temporary fictional product and desk, then runs dispatch,
+worker execution, acceptance, checked merge and daily close. It uses stub sessions,
+calls no model API, and prints the workspace path so you can inspect the receipts
+and commit history afterwards.
+
+## Set up a desk
+
+Real agent runs require **Claude Code installed and authenticated** on the host.
+Keep the coordination desk separate from the product repository it manages.
+
+### Install the Claude Code plugin
+
+Run these commands inside Claude Code:
+
+```text
 /plugin marketplace add FrostNovaOrg/Hansa
 /plugin install bellhop@bellhop
 ```
 
-Then run `/bellhop:init .` in an empty directory to turn it into a desk. `/bellhop:daemon` makes the watchdog always-on. Details in [docs/plugin.md](docs/plugin.md).
+Open Claude Code in an **empty desk directory**, then run:
 
-### From a checkout
-
-```sh
-git clone <this repo> bellhop && cd bellhop
-./bin/bellhop init ../my-desk                    # copy the template, initialise git
-cd ../my-desk
-$EDITOR bellhop.json                             # point a lane at a repository
-../bellhop/bin/bellhop provider check api        # who answers this lane, and with what
-../bellhop/bin/bellhop dispatch --lane api --title "Add /health endpoint" --body body.md
-../bellhop/bin/bellhop watch --once              # or run it under launchd/systemd
-../bellhop/bin/bellhop accept 001                # judge it in a fresh, read-only session
-../bellhop/bin/bellhop close-task 001            # evidence, file set, merge, ledger, state, commit
-../bellhop/bin/bellhop sentinel
+```text
+/bellhop:init .
 ```
 
-To see the whole loop without spending a single API call:
+The plugin supplies task skills, coordinator helpers, hooks and an MCP server.
+The MCP server hosts a session watchdog; resident services are configured
+separately. See [plugin installation and supervision](docs/plugin.md).
 
-```sh
-./examples/demo.sh
-```
+### Configure the first lane
 
-### Applying it to a new project
+Edit the generated `bellhop.json` and `rules/lanes/<lane>.md` for the product.
+Start with one small task on one lane.
 
-In this order, and no faster:
-
-1. **`init`** — make the desk, commit it, read `bellhop.json`.
-2. **Point one lane** at the repository, write `rules/lanes/<lane>.md` (build, check, what not to touch), and run `bellhop provider check <lane>` until it exits 0.
-3. **Run one real task end to end** by hand: `dispatch` → `watch --once` → `accept` → `close-task`. One task teaches you more about your allowlist and your check command than any amount of configuration.
-4. **`readings`** — after a week, read what it cost. Context per turn, full-chain cost per task and repair share are the three that change decisions; choose the coordinator's model from your numbers, not from anyone else's.
-5. **Then the daemon.** `bellhop daemon install` last, once the loop works while you are watching. A watchdog answering bells you have not yet seen answered is how a desk runs away from you.
-
-## Commands
-
-The plugin gives the coordinator thirteen slash commands. Each one is a short procedure; the mechanics stay in the CLI.
-
-| Command | Purpose |
+| Setting | What to establish |
 |---|---|
-| `/bellhop:init` | Turn an empty directory into a desk and configure its lanes |
-| `/bellhop:dispatch` | Write a packet body; one command computes the rest, rings, and ends the turn |
-| `/bellhop:intake` | Take in one settled task: read the closing line, decide, `close-task` |
-| `/bellhop:status` | The board, once: card, in flight, debts, close-outs, bells, heartbeat |
-| `/bellhop:return` | Hand one task back to its lane in four fixed sections, criteria unchanged |
-| `/bellhop:brief` | The principal's page: what is waiting for them, the queue, today, money, decisions |
-| `/bellhop:close` | Daily close: seals, sentinel, one summary line in the ledger |
-| `/bellhop:readings` | The weekly report, with the outcome numbers filled in by hand |
-| `/bellhop:condense` | Weekly shrink: recount self-catches, retire hot rules, settle stale debts |
-| `/bellhop:release` | Run the desk's release steps in order, stop at the first failure, resume from it |
-| `/bellhop:shutdown` | Pause the desk: stop dispatch, settle what is running, close, write the resume list |
-| `/bellhop:resume` | The reverse, in order: services, sentinel dry run, the readings gap, lift, the card |
-| `/bellhop:daemon` | Install, load, unload, check, or remove the resident watchdog and sentinel |
+| `lanes.<lane>.repo` / `branch` | The product repository and integration branch |
+| `lanes.<lane>.check_cmd` / `allowed_tools` | A meaningful full check and the tool permissions needed to run it and commit |
+| `lanes.<lane>.model` | The worker model available through your Claude Code installation |
+| `accept_model` / `accept_effort` | Independent verifier settings; non-empty lane overrides take precedence |
+| `max_parallel_workers` | Start at `1`; the shipped default is `2` |
+| `wake_cmd` / `busy_probe_cmd` | The host's actual wake and busy-state adapters, before relying on automatic resumption |
 
-The CLI carries the verbs a skill calls: `dispatch`, `ring`, `watch`, `archive`, `receipt-header`, `check-receipt`, `acceptance-header`, `check-acceptance`, `header-spec`, `accept` (with `record`, `shadow-report`, `status`), `sample`, `merge`, `close-task`, `settle-bell`, `state`, `board`, `brief`, `intake`, `hand`, `stop-dispatch`, `lane`, `provider check`, `provider-guard`, `readings`, `release`, `sentinel`, `seal`, `close`, `coldstart`, `daemon` (`install`, `load`, `unload`, `status`, `uninstall`, `files`), `mcp`, `hook`.
+Record standing decisions, seal the desk, then use `/bellhop:dispatch` for a task
+with explicit scope and observable acceptance criteria. On return,
+`/bellhop:intake` runs acceptance and `close-task`. Close that task before reusing
+its lane. The [replication guide](docs/replicate-claude-workflow.md) covers this
+first run and the failure cases to exercise.
 
-## Design principles
+<details>
+<summary>Use the CLI from a checkout</summary>
 
-1. **Files, not chat.** Every instruction, result, and approval is a file in a git repository. If it is not in a file, it did not happen.
-2. **One task, one fresh session.** Workers start cold, read a short list, do one thing, write one receipt, and exit. No long-lived worker state.
-3. **Append, never rewrite.** The ledger and the decisions log only grow. Rewriting state is done by scripts that keep the previous version.
-4. **Guardrails at the repository layer.** Workers get a worktree, a pre-push guard, and a scrubbed environment. These are cooperating-agent guardrails, not OS isolation or removal of the OS user's credentials. The model's own tool gate is the second line of defence, not the first.
-5. **Machines check what machines can check.** The sentinel, seals, and the machine headers catch drift; rules that a script can enforce are not written as rules.
-6. **Gates block once; they never remind.** A hook that only warns changes nothing — one that fired on every edit moved no habit. One hook can refuse a call; nothing else nags.
-7. **Measure outcomes; use process numbers only to diagnose.** Time from bug report to release and defects found after release are the score. Commit counts are a symptom.
+From the `bellhop` checkout created above:
 
-Read [docs/rationale.md](docs/rationale.md) for why each piece looks the way it does, and [docs/design.md](docs/design.md) for the specification.
+```sh
+./bin/bellhop init ../my-desk
+cd ../my-desk
+```
 
-## Status
+Configure `bellhop.json` and the lane rules first. Create `body.md` with
+`## What to do`, `## Do not touch` and `## Acceptance` sections; each acceptance
+bullet must name an observable result for your product. Then:
 
-Early. The scripts run and are tested in dry-run mode; the shape of the desk is stable; the Claude Code integration tracks the current CLI. Expect breaking changes before 1.0.
+```sh
+../bellhop/bin/bellhop provider check api
+../bellhop/bin/bellhop seal
+../bellhop/bin/bellhop dispatch --lane api --title "A small first task" --body body.md
+../bellhop/bin/bellhop watch --once
+../bellhop/bin/bellhop accept 001
+../bellhop/bin/bellhop close-task 001
+../bellhop/bin/bellhop sentinel --no-wake
+```
+
+`001` is the first task on a fresh desk; use the ID printed by `dispatch` for later
+tasks. `watch --once` waits for one worker. Do not also run it to supervise a desk
+whose session or resident watchdog is already handling the queue.
+
+</details>
+
+### Add continuous supervision
+
+After the first real task passes end to end, exercise two independent lanes and
+verify the host's wake path after the coordinator ends its turn. Use
+`/bellhop:daemon` when you need the queue handled while no Claude Code session is
+open. Keep these two jobs distinct:
+
+| Component | Responsibility |
+|---|---|
+| Watchdog | Starts workers, preserves heartbeats, settles receipts and archives |
+| Sentinel | Observes state on a timer, records status, and invokes a configured wake command when permitted |
+
+Installing a watchdog alone does not configure wake delivery. On upgrades, refresh
+any vendored resident copy as well as the plugin, at an idle boundary. See
+[concurrency and recovery](docs/concurrency.md) and [sentinel setup](docs/sentinel.md).
+
+## Operate the desk
+
+| Intent | Claude Code commands |
+|---|---|
+| Dispatch and receive work | `/bellhop:dispatch`, `/bellhop:intake`, `/bellhop:return` |
+| Read current state | `/bellhop:status`, `/bellhop:brief` |
+| Close the day and review costs | `/bellhop:close`, `/bellhop:readings` |
+| Pause and resume | `/bellhop:shutdown`, `/bellhop:resume` |
+| Release through the configured steps | `/bellhop:release` |
+
+The [plugin reference](docs/plugin.md) lists every skill, helper, hook and MCP tool.
+`./bin/bellhop --help` lists CLI commands; each subcommand has its own `--help`.
+
+The implementation is in [`bellhop/`](bellhop/); reusable desk files are in
+[`template/`](template/). Claude Code assets live in [`skills/`](skills/),
+[`agents/`](agents/) and [`hooks/`](hooks/). [`examples/`](examples/) and
+[`tests/`](tests/) exercise the file and Git workflow.
+
+## Documentation
+
+| To understand or change… | Read |
+|---|---|
+| The workflow on a new project | [Claude Code replication guide](docs/replicate-claude-workflow.md) |
+| The decisions behind the architecture | [Rationale](docs/rationale.md) · [Design](docs/design.md) |
+| Dispatch, acceptance and closing contracts | [Dispatch](docs/dispatch.md) · [Acceptance](docs/acceptance.md) · [Close-task](docs/close-task.md) |
+| State, parallelism and recovery | [State writer](docs/state.md) · [Concurrency](docs/concurrency.md) · [Sentinel](docs/sentinel.md) |
+| Installation and execution settings | [Plugin](docs/plugin.md) · [Claude Code](docs/claude-code.md) · [Provider seam](docs/providers.md) |
+| Costs and historical evidence | [Metrics](docs/metrics.md) · [Model provenance](docs/measurement-provenance.md) |
+| Permissions and boundaries | [Security model](docs/security.md) |
+
+## Origin and current limits
+
+Bellhop was distilled from a working desk with a coordinator and several worker
+lanes. Its observations are not a benchmark of any model.
+The template's `opus` alias is a configuration default, not historical attribution.
+See [measurement provenance](docs/measurement-provenance.md).
+
+The project is **early, before 1.0**, and breaking changes are possible. Tests and
+the demo exercise real local Git operations with stub agents; they do not prove
+model quality, host-specific wake delivery or reliable unattended operation on
+another project. Worktrees and tool grants are not OS filesystem isolation.
+Configure a real `check_cmd`: an empty one retains the existing `not-run` merge
+fallback. Interrupted or orphaned work needs explicit recovery; see the
+[deployment and recovery boundaries](docs/concurrency.md).
 
 ## License
 
