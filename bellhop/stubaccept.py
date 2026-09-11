@@ -62,7 +62,7 @@ def good_body(pack: str, verdict: str = "pass", blocking: bool = False) -> str:
     lines = ["## Task", "", f"{os.environ.get('BELLHOP_ID', '?')} (stub acceptance)", "", "## Criteria", ""]
     lines += [f"- [{mark}] {it} — stub read the diff" for it in items]
     lines += ["", "## Mutation", ""]
-    lines += [f"- broke: {it} / the check went red / restored, tree hash unchanged" for it in items]
+    lines += [f"- broke: {it} / the check went red / restored" for it in items]
     lines += ["", "## Extra findings", "", "- none", "", "## Doubts", ""]
     lines += ["- [blocking] the stub was told to raise one" if blocking else "- [recorded] the stub is not a reader"]
     lines += ["", "## Hygiene", "", "- file set equal", "", "## Recommendation", "",

@@ -23,8 +23,8 @@ The last line is `✅ dispatched <id> <bell>` or `🛑 stopped at: <step> — <r
 stopped, fix that step; nothing after it ran. Exit 2 refused (nothing written), 3 the bell was
 taken, 4 part-way (the echo says what to finish by hand). See [dispatch.md](../../docs/dispatch.md).
 
-After dispatch, keep that packet unchanged. Provenance errors are diagnosed with
-`$BH accept status <id>`; restore the original evidence or scope a new task, not a new hash.
+After dispatch, keep that packet unchanged. The scripts check its identity automatically;
+follow a refusal's recovery reason. Use `$BH accept status <id>` only when more diagnosis is needed.
 
 ## Writing the body: seven rules
 

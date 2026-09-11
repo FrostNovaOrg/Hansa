@@ -33,6 +33,6 @@ the original. The script inherits its criteria, forbids and Required context unc
 4. `$BH dispatch --lane <original-lane> --title "<return title>" --return <id> --body <file>`.
    The command records the new id, bell, in-flight row and card. Read its output and end
    the turn; do not repeat those state writes or edit the original packet.
-5. If provenance is refused, run `$BH accept status <id>`. Restore original packet/worker
-   evidence from history; never invent missing hashes. If recovery is impossible, scope
-   a new task after resolving the lane's existing work through the normal recovery commands.
+5. If refused, follow the command's recovery reason. Use `$BH accept status <id>` only
+   when more diagnosis is needed. If original evidence cannot be recovered, scope a new
+   task after resolving the lane's existing work through the normal recovery commands.

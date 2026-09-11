@@ -4,7 +4,6 @@ import shutil
 from pathlib import Path
 
 from . import ledger as ledger_mod
-from . import seal as seal_mod
 from . import sentinel as sentinel_mod
 from .card import read_card
 from .config import CONFIG_NAME, FRAMEWORK_ROOT, Desk
@@ -45,14 +44,10 @@ def init_desk(target: Path, force: bool = False) -> Desk:
 
 
 def close(desk: Desk) -> str:
-    try:
-        changed = seal_mod.verify(desk)
-    except BellhopError:
-        changed = []
-        seal_note = "no seals manifest yet (run `bellhop seal`)"
-    else:
-        seal_note = "seals hold" if not changed else f"{len(changed)} sealed file(s) changed"
-    green, text = sentinel_mod.sentinel(desk, wake=False)
+    # The sentinel owns the seal scan. Reuse its report for the ledger and caller
+    # instead of walking every sealed file twice during the same close.
+    green, text, checks = sentinel_mod.run_sentinel(desk, wake=False)
+    seal_note = next(detail for name, _, detail in checks if name == "seals")
     count, size = ledger_mod.stats(desk)
     receipts_today = [p for p in desk.receipts.glob("*.meta.json") if (read_json(p, {}).get("finished_at", "").startswith(today()))]
     dead_today = [p for p in receipts_today if read_json(p, {}).get("dead")]

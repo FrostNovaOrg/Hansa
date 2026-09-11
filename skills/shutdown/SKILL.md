@@ -31,7 +31,8 @@ back; only one of them survives a `/clear`.
    missed at once.
 6. Verify, each line from its own command and none from memory:
    - `$BH board` - pending bells 0, every in-flight line tagged
-   - `$BH seal --verify` - green
+   - seals - use step 4's close report; rerun `$BH seal --verify` only if sealed files
+     changed afterward or that report is unavailable
    - `git status --short` - clean; `git log --oneline @{u}..HEAD` - the unpushed count
      (with `push: false` a non-zero count is the normal state, so report the number
      rather than calling it red)

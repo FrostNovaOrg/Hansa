@@ -486,9 +486,16 @@ def _run_cmd(cmd: str, text: Optional[str] = None) -> None:
 
 
 def sentinel(desk: Desk, wake: bool = True, dry_run: bool = False, at: Optional[datetime] = None) -> Tuple[bool, str]:
+    green, report, _ = run_sentinel(desk, wake=wake, dry_run=dry_run, at=at)
+    return green, report
+
+
+def run_sentinel(desk: Desk, wake: bool = True, dry_run: bool = False,
+                 at: Optional[datetime] = None) -> Tuple[bool, str, List[Check]]:
     """Run the checks, decide the three actions, log exactly one line.
 
-    Returns (green, report). With `dry_run` nothing is written and no command is run; the
+    Returns (green, report, checks) so callers can reuse findings without rescanning.
+    With `dry_run` nothing is written and no command is run; the
     report says what would have happened, and the read-only busy probe still runs so the
     answer it prints is the real one.
     """
@@ -522,7 +529,7 @@ def sentinel(desk: Desk, wake: bool = True, dry_run: bool = False, at: Optional[
     if dry_run:
         return green, (
             "[dry-run] nothing written, no command run\n" + text + f"[dry-run] log line: {one_line}\n"
-        )
+        ), checks
 
     write(desk.state / ".sentinel" / "status.txt", text)
     with (desk.state / ".sentinel" / "history.log").open("a", encoding="utf-8") as fh:
@@ -544,4 +551,4 @@ def sentinel(desk: Desk, wake: bool = True, dry_run: bool = False, at: Optional[
         _run_cmd(desk.cfg["clear_cmd"])
     if compact_action.done:
         _run_cmd(desk.cfg["compact_cmd"])
-    return green, text
+    return green, text, checks

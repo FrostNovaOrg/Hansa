@@ -51,7 +51,7 @@ REMINDER = (
     "Reminder: your previous answer was rejected on shape, not on judgement. "
     "The last line must be `VERDICT: pass`, `VERDICT: return - <one sentence>` or "
     "`VERDICT: doubt - <one sentence>`; at least one mutation line must sit under "
-    "`## Mutation`, shaped `- broke: <what> / <the red> / restored <hash>`; and a "
+    "`## Mutation`, shaped `- broke: <what> / <the red> / restored`; and a "
     "blocking doubt may not sit under a pass. Send the whole verdict again, in the "
     "eight sections. What the checker found: "
 )
@@ -746,10 +746,10 @@ def shadow_report(desk: Desk) -> Tuple[str, bool]:
 
 
 def status_text(desk: Desk, task_id: str) -> str:
-    """The last run's meta: the step it reached, what it cost, where the log is."""
+    """Live integrity results and run diagnostics; raw digests stay in metadata."""
     try:
         current_hash = verify_worker_packet(desk, parse_packet(find_packet(desk, task_id)))
-        binding = f"packet provenance: verified {current_hash}\n"
+        binding = "packet provenance: verified\n"
     except (BellhopError, OSError, ValueError) as exc:
         current_hash = None
         binding = f"packet provenance: blocked — {exc}\n"
@@ -762,8 +762,11 @@ def status_text(desk: Desk, task_id: str) -> str:
             raise ValueError("expected an object")
     except (OSError, ValueError) as exc:
         return binding + f"acceptance metadata: unreadable — {exc}; restore the record or rerun acceptance\n"
-    if current_hash and meta.get("packet_sha256") != current_hash:
-        binding += f"acceptance binding: missing or stale; run bellhop accept {task_id} --force after resolving packet provenance\n"
+    if current_hash:
+        if meta.get("packet_sha256") != current_hash:
+            binding += f"acceptance binding: missing or stale; run bellhop accept {task_id} --force\n"
+        else:
+            binding += "acceptance binding: verified\n"
     rows = [
         ("id", meta.get("id")), ("lane", meta.get("lane")), ("mode", meta.get("mode")),
         ("step", meta.get("step")), ("ok", "yes" if meta.get("ok") else "no"),
@@ -772,7 +775,6 @@ def status_text(desk: Desk, task_id: str) -> str:
         ("duration_s", meta.get("duration_s")), ("verifier_s", meta.get("verifier_s")),
         ("cost_usd", meta.get("cost_usd")), ("turns", meta.get("turns")),
         ("case_pack_bytes", meta.get("case_pack_bytes")),
-        ("packet_sha256", meta.get("packet_sha256") or "missing"),
         ("case_pack_trims", ", ".join(t["part"] for t in meta.get("case_pack_trims") or []) or "none"),
         ("verdict_path", meta.get("verdict_path") or "-"), ("log", meta.get("log")),
     ]

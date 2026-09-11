@@ -568,6 +568,20 @@ class AcceptTest(unittest.TestCase):
         self.assertIn("log: ", text)
         self.assertIn("duration_s: ", text)
         self.assertIn("case_pack_bytes: ", text)
+        self.assertIn("packet provenance: verified\n", text)
+        self.assertIn("acceptance binding: verified\n", text)
+        meta_path = accept_mod.meta_path(self.desk, "001")
+        meta = read_json(meta_path)
+        self.assertRegex(meta["packet_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn(meta["packet_sha256"], text)
+        self.assertNotIn("packet_sha256:", text)
+
+        meta.pop("packet_sha256")
+        write_json(meta_path, meta)
+        text = accept_mod.status_text(self.desk, "001")
+        self.assertIn("acceptance binding: missing or stale", text)
+        self.assertIn("bellhop accept 001 --force", text)
+        self.assertNotIn("acceptance binding: verified", text)
 
     def test_a_receipt_with_no_header_has_no_head_to_judge(self):
         stripped = headers.strip_header(read(self.receipt), headers.FENCE_RECEIPT)

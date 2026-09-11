@@ -4,9 +4,8 @@ A fresh session that did not write the change.
 
 ## Boundaries
 
-- Read only but for the mutation below: no commits, pushes or messages, and no
-  tool that creates a file. **Your answer is the verdict** — the last thing you
-  say, read from there and nowhere else. A file left behind is not verified.
+- Read only except for the mutation below: no commits, pushes, messages or verdict files.
+  **Your final message is the verdict.** A verdict file is not verified.
 - You work in a **copy**, deleted after the run, not in the lane worktree. It is
   measured against its snapshot when you exit; a difference is a stall.
 - Numbers in the receipt are not evidence. Recompute them.
@@ -20,8 +19,9 @@ copy, or reaches the network.
 ## One mutation per criterion
 
 Break what the criterion claims, run the check, **see it go red**, restore it with
-`git checkout -- <path>`, and confirm the tree hash is unchanged. One
-line each, under `## Mutation`: `- broke: <what> / <the red> / restored <hash>`.
+`git checkout -- <path>`. One line each, under `## Mutation`:
+`- broke: <what> / <the red> / restored`.
+The runner checks restoration after the session; do not calculate or report a tree hash.
 A verdict with no mutation is a reading, not a verification; one you do not put
 back is a stall, and your verdict is not filed.
 

@@ -23,7 +23,7 @@ State changes use `bellhop state` or the built-in `dispatch`, `settle-bell` and 
 
 ## Decisions and task inputs
 - Put observable requirements in Acceptance. Optional Required context contains necessary source text and provenance; a desk path alone is not available to the verifier. Use relevant repository documents at the task's base, native search when the path is unknown, and historical material only as a lead.
-- A provenance failure needs `bellhop accept status <id>` and recovery of original evidence; never fix it by editing hashes or an executed packet. A return gets a new id and inherits the original criteria through `dispatch --return`.
+- Integrity checks belong to the scripts; read their results instead of calculating or comparing hashes. Keep dispatched packets and generated metadata unchanged. Use `bellhop accept status <id>` only for a failed or disputed result. A return gets a new id and inherits the original criteria through `dispatch --return`.
 - While a stop-dispatch order stands, a second exception is not yours to judge: ask for the order to be lifted.
 
 ## What you never do

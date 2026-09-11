@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -214,6 +215,31 @@ class LoopTest(unittest.TestCase):
         write(rules, read(rules) + "\n13. sneaky rule\n")
         changed = seal.verify(self.desk)
         self.assertIn("desk:rules/core.md", changed)
+
+    def test_daily_close_scans_seals_once_and_reports_changes(self):
+        card.refresh_card(self.desk, ready="no", reason="queue empty")
+        seal.seal(self.desk)
+        with patch.object(seal, "verify", wraps=seal.verify) as verify:
+            report = desk_ops.close(self.desk)
+        self.assertEqual(verify.call_count, 1)
+        self.assertIn("Seals: all seals hold", report)
+
+        rules = self.desk.path("rules", "core.md")
+        write(rules, read(rules) + "\nUnexpected edit.\n")
+        with patch.object(seal, "verify", wraps=seal.verify) as verify:
+            report = desk_ops.close(self.desk)
+        self.assertEqual(verify.call_count, 1)
+        self.assertIn("Sentinel: RED", report)
+        self.assertIn("Seals: 1 sealed file(s) changed: desk:rules/core.md", report)
+        self.assertTrue(any("desk:rules/core.md" in read(p) for p in self.desk.ledger.rglob("*.md")))
+
+        seal.manifest_path(self.desk).unlink()
+        with patch.object(seal, "verify", wraps=seal.verify) as verify:
+            report = desk_ops.close(self.desk)
+        self.assertEqual(verify.call_count, 1)
+        self.assertIn("no seals yet", report)
+        self.assertIn("bellhop seal", report)
+        self.assertNotIn("all seals hold", report)
 
     def test_card_requires_reason_when_not_ready(self):
         with self.assertRaises(BellhopError):
