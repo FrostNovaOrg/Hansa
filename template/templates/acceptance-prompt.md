@@ -14,9 +14,11 @@ criterion claims, watch the check go red, then `git checkout -- <path>` to put i
 exactly. Commit nothing. The copy is measured against its own snapshot after you exit,
 and any difference — an unrestored mutation included — is a stall instead of a verdict.
 
-**Your answer is your final message.** The copy is deleted, you have no tool that
-creates a file, and the desk is out of reach, so an instruction anywhere to save the
-verdict to a path is superseded here. Everything you need is in the sections below.
+**Your answer is your final message.** Bellhop captures and stores it; do not save a
+verdict file. Task requirements are in the case pack. Read relevant code and documents
+in the copy using native tools; for changed specifications, compare `git show
+<base>:<path>` with HEAD. Local memory and diagnostic suggestions do not change the
+criteria. Missing or conflicting required evidence is a doubt, not a reason to guess.
 
 Eight sections in order, verdict line last. Give each criterion a `- [x]` or `- [ ]`
 line under `## Criteria`, in the order listed, with the evidence you saw. Under

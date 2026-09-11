@@ -33,7 +33,8 @@ from typing import List, Optional, Tuple
 from . import headers as headers_mod
 from .locking import acceptance_session, serialized
 from .config import FRAMEWORK_ROOT, Desk
-from .packet import Packet, parse_packet
+from .packet import (CONTEXT_WORDS, FORBID_WORDS, Packet, packet_section,
+                     parse_packet, verify_worker_packet)
 from .util import BellhopError, append, git, now, read, run, scrubbed_env, ts, write, write_json
 
 # -- names -----------------------------------------------------------------
@@ -65,8 +66,8 @@ GIT_TOOLS = ("Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(
 # the mutation gate exists to refuse. So it edits -- inside the copy, which is thrown
 # away, with `git checkout` to restore exactly, and the recheck as the backstop: an
 # unrestored mutation is a stall, not a verdict.
-# There is no `Write` and the desk is not reachable, so the verdict still cannot be
-# saved anywhere. It is the session's final message.
+# These are auto-approved grants, not a complete tool inventory or OS isolation.
+# The verifier is instructed to return its verdict as the final message.
 MUTATION_TOOLS = ("Edit", "Bash(git checkout:*)")
 VERIFIER_TOOLS = ",".join(READ_TOOLS + GIT_TOOLS + MUTATION_TOOLS)
 
@@ -116,8 +117,8 @@ def closings_path(desk: Desk, shadow: bool = False) -> Path:
 
 def find_packet(desk: Desk, task_id: str) -> Path:
     hits = [p for p in desk.inbox.rglob(f"{task_id}-*.md")]
-    if not hits:
-        raise BellhopError(f"no packet with id {task_id} under {desk.inbox}")
+    if len(hits) != 1:
+        raise BellhopError(f"expected one packet with id {task_id} under {desk.inbox}; found {len(hits)}")
     return hits[0]
 
 
@@ -163,26 +164,6 @@ def _stall_closing(task_id: str, lane: str, step: str, log: Path) -> str:
 
 
 # -- the case pack ---------------------------------------------------------
-
-_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*$")
-_FORBID_WORDS = ("do not touch", "don't touch", "forbid", "out of bounds", "not to touch")
-
-
-def packet_section(body: str, starts: Tuple[str, ...]) -> Tuple[str, str]:
-    """(the named section, the rest of the prose). A heading matches on its opening
-    words, because a packet is written by a person and `## Do not touch (yet)` is the
-    same section as `## Do not touch`."""
-    section: List[str] = []
-    rest: List[str] = []
-    target = False
-    for line in body.splitlines():
-        m = _HEADING_RE.match(line)
-        if m:
-            title = m.group(1).strip().lower()
-            target = any(title.startswith(s) for s in starts)
-        (section if target else rest).append(line)
-    return "\n".join(section).strip(), "\n".join(rest).strip()
-
 
 def cut_utf8(text: str, limit: int) -> str:
     """Cut on a character boundary. A pack that stops inside a multi-byte character
@@ -239,16 +220,17 @@ def head_matter(desk: Desk, packet: Packet, head: str, base: str) -> Tuple[str, 
 def build_case_pack(instructions: str, packet: Packet, lane: dict, receipt_body: str, terms: str,
                     files: List[str], cap: int, receipt_lines: int) -> Tuple[str, List[dict]]:
     """Assemble the pack here, in the script. The coordinator does not hand it over and
-    the verifier is not sent to fetch it: the session cannot reach the desk, so a pack
-    that names a path it cannot open and a pack that omits the material read alike.
+    the verifier is not granted desk access, so a path there is not a substitute
+    for required material in the pack.
 
-    Trimming order is fixed: the receipt body first, then the packet's prose outside
-    the criteria (its own prose before its forbids), and never the criteria.
+    Trim the receipt body first, then background prose. Criteria, forbids and
+    Required context are kept intact; an oversized floor is refused by the caller.
     """
     lines = receipt_body.splitlines()
     dropped = max(0, len(lines) - receipt_lines)
     body = "\n".join(lines[:receipt_lines])
-    forbids, prose = packet_section(packet.body, _FORBID_WORDS)
+    forbids, prose = packet_section(packet.body, FORBID_WORDS)
+    required, prose = packet_section(prose, CONTEXT_WORDS)
     head_matter = instructions.strip()
     parts = [
         _Part("criteria", "## Criteria", "\n".join(f"- {a}" for a in packet.acceptance), rank=0),
@@ -257,8 +239,10 @@ def build_case_pack(instructions: str, packet: Packet, lane: dict, receipt_body:
         _Part("receipt", f"## Receipt body ({min(len(lines), receipt_lines)} of {len(lines)} lines)",
               body, rank=1),
         _Part("packet", "## Packet, the rest of it", prose, rank=2),
-        _Part("forbids", "## Forbids (verbatim from the packet)", forbids, rank=3),
+        _Part("forbids", "## Forbids (verbatim from the packet)", forbids, rank=0),
     ]
+    if required:
+        parts.insert(1, _Part("required_context", "## Required context (verbatim from the packet)", required))
     if lane.get("check_cmd"):
         parts.insert(2, _Part("check", "## The lane's check command",
                               f"`{lane['check_cmd']}` - you may run it here, in the copy.", rank=0))
@@ -272,7 +256,7 @@ def build_case_pack(instructions: str, packet: Packet, lane: dict, receipt_body:
         the budget too. A cap that is off by the punctuation is a cap that stops runs."""
         return len(head_matter.encode("utf-8")) + sum(p.size() for p in parts) + 1
 
-    for rank in (1, 2, 3):
+    for rank in (1, 2):
         for part in [p for p in parts if p.rank == rank]:
             if total() <= cap:
                 break
@@ -437,7 +421,12 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
     if not receipt.exists():
         raise BellhopError(f"no receipt yet for {packet.stem}")
     out = verdict_path(desk, packet.id, shadow)
-    if out.exists() and not force and verdict_stands(desk, packet.id, shadow):
+    binding_error = None
+    try:
+        packet_hash = verify_worker_packet(desk, packet)
+    except BellhopError as exc:
+        packet_hash, binding_error = None, str(exc)
+    if not binding_error and out.exists() and not force and verdict_stands(desk, packet.id, shadow):
         raise BellhopError(f"a verdict for {packet.id} already stands at {out}; "
                            "pass --force to judge it again")
 
@@ -452,6 +441,7 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
         "case_pack_bytes": None, "case_pack_trims": [], "instructions_from": None,
         "copy": None, "head": None, "base": None,
         "tree_before": None, "tree_after": None, "status_after": None,
+        "packet_sha256": packet_hash,
     }
     cap = int(desk.cfg.get("casepack_bytes", 6000))
     receipt_lines = int(desk.cfg.get("casepack_receipt_lines", 50))
@@ -474,6 +464,8 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
         return meta
 
     # -- prepare: the copy, then the case pack -----------------------------
+    if binding_error:
+        return finish("prepare", "packet provenance", binding_error)
     values = _receipt_header(receipt)
     head = values.get("head") or ""
     base = values.get("base") or packet.base
@@ -501,8 +493,9 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
         meta["case_pack_bytes"] = len(pack.encode("utf-8"))
         if meta["case_pack_bytes"] > cap:
             return finish("prepare", "case pack over the cap",
-                          f"{meta['case_pack_bytes']} bytes after trimming, cap {cap}; the criteria "
-                          "are never trimmed, so the criteria alone are over the cap")
+                          f"{meta['case_pack_bytes']} bytes after trimming, cap {cap}; required material "
+                          "cannot be trimmed. Adjust casepack_bytes or dispatch a smaller task; "
+                          "do not rewrite the executed packet")
         pack_file = pack_path(desk, packet.id, shadow)
         write(pack_file, pack)
 
@@ -565,6 +558,10 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
 
             # -- recheck ---------------------------------------------------
             meta["step"] = "recheck"
+            try:
+                verify_worker_packet(desk, packet)
+            except BellhopError as exc:
+                return finish("recheck", "packet provenance", str(exc))
             try:
                 status_after, tree_after = _tree_state(copy)
             except BellhopError as exc:
@@ -750,10 +747,23 @@ def shadow_report(desk: Desk) -> Tuple[str, bool]:
 
 def status_text(desk: Desk, task_id: str) -> str:
     """The last run's meta: the step it reached, what it cost, where the log is."""
+    try:
+        current_hash = verify_worker_packet(desk, parse_packet(find_packet(desk, task_id)))
+        binding = f"packet provenance: verified {current_hash}\n"
+    except (BellhopError, OSError, ValueError) as exc:
+        current_hash = None
+        binding = f"packet provenance: blocked — {exc}\n"
     present = [p for p in (meta_path(desk, task_id, False), meta_path(desk, task_id, True)) if p.exists()]
     if not present:
-        return f"no acceptance run recorded for {task_id}\n"
-    meta = json.loads(read(max(present, key=lambda p: p.stat().st_mtime)))
+        return f"no acceptance run recorded for {task_id}\n" + binding
+    try:
+        meta = json.loads(read(max(present, key=lambda p: p.stat().st_mtime)))
+        if not isinstance(meta, dict):
+            raise ValueError("expected an object")
+    except (OSError, ValueError) as exc:
+        return binding + f"acceptance metadata: unreadable — {exc}; restore the record or rerun acceptance\n"
+    if current_hash and meta.get("packet_sha256") != current_hash:
+        binding += f"acceptance binding: missing or stale; run bellhop accept {task_id} --force after resolving packet provenance\n"
     rows = [
         ("id", meta.get("id")), ("lane", meta.get("lane")), ("mode", meta.get("mode")),
         ("step", meta.get("step")), ("ok", "yes" if meta.get("ok") else "no"),
@@ -762,7 +772,8 @@ def status_text(desk: Desk, task_id: str) -> str:
         ("duration_s", meta.get("duration_s")), ("verifier_s", meta.get("verifier_s")),
         ("cost_usd", meta.get("cost_usd")), ("turns", meta.get("turns")),
         ("case_pack_bytes", meta.get("case_pack_bytes")),
+        ("packet_sha256", meta.get("packet_sha256") or "missing"),
         ("case_pack_trims", ", ".join(t["part"] for t in meta.get("case_pack_trims") or []) or "none"),
         ("verdict_path", meta.get("verdict_path") or "-"), ("log", meta.get("log")),
     ]
-    return "".join(f"{k}: {v}\n" for k, v in rows)
+    return binding + "\nlast acceptance run:\n" + "".join(f"{k}: {v}\n" for k, v in rows)

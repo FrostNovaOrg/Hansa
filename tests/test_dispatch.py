@@ -269,6 +269,9 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("no receipt", out)
         # control: with a receipt on the desk the same command goes through
         write(self.desk.receipts / "001-add-health-check-note.md", "# receipt\n")
+        write_json(self.desk.receipts / "001.meta.json", {
+            "packet_sha256": packet_mod.parse_packet(
+                self.desk.inbox / "api" / "001-add-health-check-note.md").sha256})
         code, out = self.dispatch("Return 001", self.body, "--return", "001")
         self.assertEqual(code, 0, out)
         pkt = packet_mod.parse_packet(self.desk.inbox / "api" / "002-return-001.md")
@@ -284,6 +287,36 @@ class DispatchTest(unittest.TestCase):
                                        continue_id="001", return_id="001")
         self.assertEqual(report.code, 2)
         self.assertIn("opposites", report.last)
+
+    def test_return_inherits_required_material_without_retyping_criteria(self):
+        body = self.body_file(BODY + "\n## Required context\n\n### Approved source\nRetry limit: 3.\n")
+        code, out = self.dispatch("Original", body)
+        self.assertEqual(code, 0, out)
+        original = self.desk.inbox / "api" / "001-original.md"
+        before = read(original)
+        prior = packet_mod.parse_packet(original)
+        write(self.desk.receipts / "001-original.md", "# receipt\n")
+        write_json(self.desk.receipts / "001.meta.json", {"packet_sha256": prior.sha256})
+        returned = self.body_file("## Criteria (unchanged)\nSee original.\n\n"
+                                  "## Why returned\nThe note is missing.\n\n"
+                                  "## Change\nAdd the note.\n\n"
+                                  "## Do not change\nKeep existing behavior.\n", "return.md")
+        code, out = self.dispatch("Return original", returned, "--return", "001")
+        self.assertEqual(code, 0, out)
+        new = packet_mod.parse_packet(self.desk.inbox / "api" / "002-return-original.md")
+        self.assertEqual(new.acceptance, prior.acceptance)
+        self.assertEqual(new.base, prior.base)
+        self.assertIn("Retry limit: 3.", new.body)
+        self.assertIn("`check.sh`, and the lane rules.", new.body)
+        self.assertEqual(read(original), before)
+        changed = self.body_file(BODY.replace("note.md", "different.md"), "changed.md")
+        code, out = self.dispatch("Changed criteria", changed, "--return", "001")
+        self.assertEqual(code, 2)
+        self.assertIn("keep the original acceptance", out)
+        write(original, before + "\nAnother requirement.\n")
+        code, out = self.dispatch("Changed packet", returned, "--return", "001")
+        self.assertEqual(code, 2)
+        self.assertIn("return packet provenance", out)
 
     def test_continue_needs_a_packet_that_exists(self):
         code, out = self.dispatch("x", self.body, "--continue", "042")

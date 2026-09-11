@@ -15,8 +15,10 @@ description: Show the desk's state - card, in flight, own list, debts, close-out
    that is a finding, not a reason to go and look.
 3. Only if one number on the board is disputed, run the command that owns it:
    `$BH sentinel --no-wake`, `$BH daemon status`, `$BH state closings unread`.
-4. Answer in five lines or fewer: what is running, what is waiting, what is red, what you will
-   do next. No task ids or file paths unless the principal used them first.
+4. For a task with stalled or disputed acceptance, `$BH accept status <id>` checks current
+   packet provenance and reports the last run. Use its recovery reason, not old PASS text.
+5. Give a compact status: what is running, waiting, red, and what happens next. Preserve
+   the actionable diagnostic; use the user's requested level of detail.
 
 Fix a red line through the command that owns the file (`state`, `card`, `ledger add`, `seal`),
 never by hand. A last line reading `(trimmed N bytes)` means rows were dropped, in this order:

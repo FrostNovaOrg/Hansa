@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from .util import BellhopError, read, slugify
+from .util import BellhopError, read, sha256_file, slugify
 
 REQUIRED = ("id", "lane", "title", "base")
 
@@ -26,6 +28,7 @@ class Packet:
     body: str = ""
     path: Optional[Path] = None
     extra: dict = field(default_factory=dict)
+    sha256: str = ""
 
     @property
     def slug(self) -> str:
@@ -72,7 +75,8 @@ def parse_packet(path: Path) -> Packet:
     path = Path(path)
     if not path.exists():
         raise PacketError(f"packet not found: {path}")
-    data, body = parse_front_matter(read(path))
+    raw = path.read_bytes()
+    data, body = parse_front_matter(raw.decode("utf-8").replace("\r\n", "\n"))
     problems = [k for k in REQUIRED if not data.get(k)]
     acceptance = data.get("acceptance")
     if not isinstance(acceptance, list) or not acceptance:
@@ -101,7 +105,61 @@ def parse_packet(path: Path) -> Packet:
         body=body,
         path=path,
         extra=extra,
+        sha256=hashlib.sha256(raw).hexdigest(),
     )
+
+
+def verify_worker_packet(desk, packet: Packet) -> str:
+    """Bind the parsed packet to the bytes the worker was actually dispatched.
+
+    Missing historical evidence is not permission to hash today's packet and call
+    it yesterday's input. The caller supplies the stage-specific diagnostic.
+    """
+    recovery = ("restore the original packet/worker metadata from Git history, or dispatch a new task; "
+                "do not edit hashes or use --force to bypass this check")
+    path = desk.receipts / f"{packet.id}.meta.json"
+    try:
+        meta = json.loads(read(path))
+    except (OSError, ValueError) as exc:
+        raise PacketError(f"worker packet evidence missing or unreadable ({path.name}); {recovery}") from exc
+    expected = meta.get("packet_sha256") if isinstance(meta, dict) else None
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise PacketError(f"worker packet_sha256 missing or invalid ({path.name}); {recovery}")
+    if not packet.sha256 or packet.sha256 != expected:
+        raise PacketError(f"packet differs from the worker's recorded input; {recovery}")
+    try:
+        current = sha256_file(packet.path)
+    except OSError as exc:
+        raise PacketError(f"packet disappeared after it was read; {recovery}") from exc
+    if current != packet.sha256:
+        raise PacketError(f"packet changed after it was read; {recovery}")
+    return expected
+
+
+FORBID_WORDS = ("do not touch", "do not change", "don't touch", "forbid", "out of bounds", "not to touch")
+CONTEXT_WORDS = ("required context",)
+
+
+def packet_section(body: str, starts: tuple) -> tuple:
+    """Extract named sections, including their nested headings, in source order."""
+    section, rest = [], []
+    level = None
+    fence = None
+    for line in body.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        in_code = fence is not None
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1] and not marker[2].strip():
+                fence = None
+        elif marker:
+            fence = (marker[1][0], len(marker[1]))
+        heading = None if in_code or marker else re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", line)
+        if heading:
+            depth, title = len(heading.group(1)), heading.group(2).lower()
+            if level is None or depth <= level:
+                level = depth if any(title.startswith(s) for s in starts) else None
+        (section if level is not None else rest).append(line)
+    return "\n".join(section).strip(), "\n".join(rest).strip()
 
 
 def next_packet_id(inbox: Path) -> str:

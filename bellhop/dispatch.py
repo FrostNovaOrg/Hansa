@@ -375,7 +375,7 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
                       "the body opens its own '---' block. `bellhop dispatch` writes the front "
                       "matter; the body starts at its first heading")
     acceptance = packet_mod.body_acceptance(body)
-    if not acceptance:
+    if not acceptance and not return_id:
         raise Stopped(STEP_PACKET,
                       "the body has no acceptance items: add an `## Acceptance` heading with one "
                       "`- ` bullet per check a command can run")
@@ -414,7 +414,22 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
             raise Stopped(STEP_PACKET,
                           f"packet {resume_id} has no receipt; nothing came back to refuse. "
                           f"Use --continue {resume_id} to pick up where it stopped")
-        base = packet_mod.parse_packet(prior).base
+        prior_packet = packet_mod.parse_packet(prior)
+        base = prior_packet.base
+        if return_id:
+            try:
+                packet_mod.verify_worker_packet(desk, prior_packet)
+            except BellhopError as exc:
+                raise Stopped(STEP_PACKET, f"return packet provenance: {exc}")
+            if acceptance and acceptance != prior_packet.acceptance:
+                raise Stopped(STEP_PACKET, "a return must keep the original acceptance items; "
+                              "omit the Acceptance section to inherit them, or scope a new task")
+            acceptance = prior_packet.acceptance
+            for names in (packet_mod.FORBID_WORDS, packet_mod.CONTEXT_WORDS):
+                inherited, _ = packet_mod.packet_section(prior_packet.body, names)
+                if inherited:
+                    body = body.rstrip() + "\n\n" + inherited + "\n"
+            report.notes.append("↩ acceptance, forbids and required context inherited from the original packet")
         key = "continues" if continue_id else "returns"
         links.append((key, resume_id))
         links.append((f"{key}_receipt", str(receipt.relative_to(desk.root)) if receipt else "none"))

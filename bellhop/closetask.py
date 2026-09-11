@@ -53,7 +53,7 @@ from .accept import find_packet
 from .locking import acceptance_lock, desk_lock, serialized
 from .lanes import lane_lock
 from .config import Desk
-from .packet import parse_packet
+from .packet import parse_packet, verify_worker_packet
 from .util import BellhopError, git, read, ts, write_json
 
 STEPS = ("evidence", "fileset", "merge", "ledger", "state", "archive")
@@ -497,6 +497,14 @@ class Closing:
         for warn in report.warns:
             self.detail(f"warn (receipt): {warn}")
         self.receipt_values = _header(self.receipt, "receipt")
+        try:
+            packet_hash = verify_worker_packet(desk, self.packet)
+        except BellhopError as exc:
+            self.stop("evidence", f"packet provenance: {exc}; see bellhop accept status {task}")
+        recorded_hash = self.record.data.get("packet_sha256")
+        if recorded_hash and recorded_hash != packet_hash:
+            self.stop("evidence", "packet differs from the input of this partial close; restore its original evidence")
+        self.record.data["packet_sha256"] = packet_hash
 
         path, where = verdict_path(desk, task)
         if path is None:
@@ -509,21 +517,24 @@ class Closing:
                       EXIT_ENVIRONMENT)
         self.verdict_file = path
         meta_file = path.with_name(f"{task}.acceptance.meta.json")
-        if meta_file.exists():
-            try:
-                meta = json.loads(read(meta_file))
-                if not isinstance(meta, dict) or meta.get("ok") is not True or meta.get("stall"):
-                    self.stop("evidence", "acceptance run is incomplete or stalled; run acceptance again")
-                if (_full_sha(self.repo, meta.get("head") or "") !=
-                        _full_sha(self.repo, self.receipt_values.get("head") or "") or
-                        _full_sha(self.repo, meta.get("base") or "") != _full_sha(self.repo, self.packet.base)):
-                    self.stop("evidence", "acceptance base/head does not match the current receipt and packet")
-            except (ValueError, OSError) as exc:
-                self.stop("evidence", f"cannot read acceptance metadata: {exc}")
-            except CloseStopped:
-                raise
-            except BellhopError as exc:
-                self.stop("evidence", f"cannot resolve acceptance base/head: {exc}")
+        if not meta_file.exists():
+            self.stop("evidence", f"acceptance packet binding missing; run bellhop accept {task} --force")
+        try:
+            meta = json.loads(read(meta_file))
+            if not isinstance(meta, dict) or meta.get("ok") is not True or meta.get("stall"):
+                self.stop("evidence", "acceptance run is incomplete or stalled; run acceptance again")
+            if meta.get("packet_sha256") != packet_hash:
+                self.stop("evidence", f"acceptance packet binding missing or stale; run bellhop accept {task} --force")
+            if (_full_sha(self.repo, meta.get("head") or "") !=
+                    _full_sha(self.repo, self.receipt_values.get("head") or "") or
+                    _full_sha(self.repo, meta.get("base") or "") != _full_sha(self.repo, self.packet.base)):
+                self.stop("evidence", "acceptance base/head does not match the current receipt and packet")
+        except (ValueError, OSError) as exc:
+            self.stop("evidence", f"cannot read acceptance metadata: {exc}; see bellhop accept status {task}")
+        except CloseStopped:
+            raise
+        except BellhopError as exc:
+            self.stop("evidence", f"cannot resolve acceptance base/head: {exc}")
         cap = int(desk.cfg.get("acceptance_bytes", headers_mod.DEFAULT_ACCEPTANCE_BYTES))
         report = headers_mod.check_acceptance(path, max_bytes=cap)
         if report.reds:

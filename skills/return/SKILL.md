@@ -5,10 +5,8 @@ description: Write a return packet - hand one task back to its lane without touc
 
 # /bellhop:return
 
-`BH="${CLAUDE_PLUGIN_ROOT}/bin/bellhop"`. A return is not a new packet. The criteria
-already exist; rewriting them while returning is how a task ends up accepted against a
-standard nobody agreed to. Returns with no fixed form produced
-a different document each time.
+`BH="${CLAUDE_PLUGIN_ROOT}/bin/bellhop"`. A return creates a new packet id linked to
+the original. The script inherits its criteria, forbids and Required context unchanged.
 
 1. Read the receipt first (`/bellhop:intake` if it has not been taken in). A return
    written without the receipt's numbers is an opinion.
@@ -30,13 +28,11 @@ a different document each time.
    What already passed and must survive the second attempt.
    ```
 
-3. Keep the body under the config cap `packet_bytes`. Over it, cut prose - never a
-   section. Four sections and three sections are different documents.
-4. `$BH dispatch --return <id> --body <file>`. That is the only entry point; do not
-   write a fresh packet and do not edit the original one.
-5. Record it once:
-   `$BH state closings add --task <id> --line "returned: <the one sentence>"` so it
-   shows on the principal's page, then `$BH state ledger add --file -` with what came
-   back, which criterion, and what was sent out again.
-6. `$BH state card set --dispatchable no --reason "waiting on the return of <id>"`,
-   then end your turn. The watchdog answers the bell.
+3. Keep the body within the `packet_bytes` guide. Omit `## Acceptance`: the script
+   copies the original items. Changed criteria require a newly scoped task, not a return.
+4. `$BH dispatch --lane <original-lane> --title "<return title>" --return <id> --body <file>`.
+   The command records the new id, bell, in-flight row and card. Read its output and end
+   the turn; do not repeat those state writes or edit the original packet.
+5. If provenance is refused, run `$BH accept status <id>`. Restore original packet/worker
+   evidence from history; never invent missing hashes. If recovery is impossible, scope
+   a new task after resolving the lane's existing work through the normal recovery commands.

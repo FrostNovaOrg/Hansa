@@ -9,8 +9,10 @@ description: Write a packet body and dispatch it to a lane in one command. Use w
 
 1. **Write the body** to a scratch file: `## What to do`, `## Do not touch`, `## Acceptance`
    (one `- ` bullet per check a command can run). No front matter — the command writes it.
-   If the change touches code you have not read this session, ask the `scout` subagent for a
-   brief first; do not read the repository yourself.
+   Use an existing relevant reading; ask `scout` for a brief when investigation is needed.
+   Keep criteria self-contained. An optional `## Required context` section carries necessary
+   original source text and its provenance; it survives acceptance trimming. A link alone
+   does not copy an external document. Do not create a context section when criteria suffice.
 2. `$BH dispatch --lane <lane> --title "<six words>" --body <file> --inflight "<one sentence>"`
    — add `--next "<what follows>"` to refresh the card, `--demo` to look without writing.
 3. **Read the four lines it prints**: packet path, bell, the in-flight row as the file has it,
@@ -20,6 +22,9 @@ description: Write a packet body and dispatch it to a lane in one command. Use w
 The last line is `✅ dispatched <id> <bell>` or `🛑 stopped at: <step> — <reason>`. If it
 stopped, fix that step; nothing after it ran. Exit 2 refused (nothing written), 3 the bell was
 taken, 4 part-way (the echo says what to finish by hand). See [dispatch.md](../../docs/dispatch.md).
+
+After dispatch, keep that packet unchanged. Provenance errors are diagnosed with
+`$BH accept status <id>`; restore the original evidence or scope a new task, not a new hash.
 
 ## Writing the body: seven rules
 

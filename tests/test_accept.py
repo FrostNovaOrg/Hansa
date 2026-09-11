@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from bellhop import accept as accept_mod  # noqa: E402
 from bellhop import desk_ops, headers, ledger, ring, watch  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
+from bellhop.packet import parse_packet  # noqa: E402
 from bellhop.util import read, read_json, write, write_json  # noqa: E402
 
 GIT_ID = ["-c", "user.name=test", "-c", "user.email=test@example.invalid"]
@@ -222,14 +223,77 @@ class AcceptTest(unittest.TestCase):
         self.assertNotIn(accept_mod.TRIM_MARK, self.pack())
 
     def test_the_packet_prose_is_trimmed_after_the_receipt(self):
-        write(self.packet_path, read(self.packet_path).replace(
-            "Add a note file.", "Add a note file. " + ("Background prose. " * 400)))
-        write(self.receipt, read(self.receipt) + "\n" + ("receipt prose\n" * 200))
-        meta = self.run_accept("--good", casepack_bytes=4500, casepack_receipt_lines=400)
-        parts = [t["part"] for t in meta["case_pack_trims"] if t["reason"] == "case-pack cap"]
+        packet = parse_packet(self.packet_path)
+        packet.body = packet.body.replace("Add a note file.", "Background prose. " * 400)
+        instructions, _ = accept_mod.head_matter(self.desk, packet, self.base, self.base)
+        pack, trims = accept_mod.build_case_pack(
+            instructions, packet, self.desk.lane("api"), "receipt prose\n" * 200,
+            read(accept_mod.terms_path(self.desk)), ["note.md"], 4500, 400)
+        parts = [t["part"] for t in trims if t["reason"] == "case-pack cap"]
         self.assertEqual(parts[:2], ["receipt", "packet"])
-        self.assertIn("- the note file exists", self.pack())
-        self.assertLessEqual(len(self.pack().encode("utf-8")), 4500)
+        self.assertIn("- the note file exists", pack)
+        self.assertIn("The release script.", pack)
+        self.assertLessEqual(len(pack.encode("utf-8")), 4500)
+
+    def test_packet_changes_are_a_prepare_stall_even_with_force(self):
+        original = read(self.packet_path)
+        write(self.packet_path, original.replace("the note file exists", "any file exists"))
+        meta = self.run_accept("--good", force=True)
+        self.assertEqual((meta["step"], meta["stall"], meta["attempts"]),
+                         ("prepare", "packet provenance", 0))
+        self.assertIn("restore the original", meta["reason"])
+        self.assertIn("packet provenance: blocked", accept_mod.status_text(self.desk, "001"))
+        write(self.packet_path, original)
+        meta = self.run_accept("--good")
+        self.assertTrue(meta["ok"], meta)
+        self.assertEqual(meta["packet_sha256"], parse_packet(self.packet_path).sha256)
+
+    def test_missing_worker_hash_is_not_invented_from_current_packet(self):
+        path = self.desk.receipts / "001.meta.json"
+        original = read(path)
+        for value in ({}, {"packet_sha256": "bad"}, []):
+            write_json(path, value)
+            meta = self.run_accept("--good")
+            self.assertEqual(meta["stall"], "packet provenance")
+            self.assertEqual(meta["attempts"], 0)
+        write(path, original)
+        self.assertTrue(self.run_accept("--good")["ok"])
+
+    def test_packet_changed_during_verification_invalidates_the_run(self):
+        run_session = accept_mod.run_session
+        def changed(*args, **kwargs):
+            result = run_session(*args, **kwargs)
+            write(self.packet_path, read(self.packet_path) + "\nChanged during verification.\n")
+            return result
+        with patch.object(accept_mod, "run_session", side_effect=changed):
+            meta = self.run_accept("--good")
+        self.assertEqual((meta["step"], meta["stall"]), ("recheck", "packet provenance"))
+        self.assertFalse(meta["ok"])
+        self.assertFalse(Path(meta["copy"]).exists())
+
+    def test_required_context_and_forbids_are_preserved_or_prepare_refuses(self):
+        path = self.write_packet(pid="002", title="Required context")
+        required = "```text\n# Original source heading\n" + "required original text\n" * 350 + "```\n"
+        write(path, read(path) + "\n## Required context\n\n### Source excerpt\n" + required)
+        ring.ring(self.desk, path)
+        watch.watch_once(self.desk)
+        desk = self.desk_with(casepack_bytes=6000)
+        meta = accept_mod.run_accept(desk, "002")
+        self.assertEqual(meta["stall"], "case pack over the cap")
+        self.assertEqual(meta["attempts"], 0)
+        self.assertNotIn("required_context", [t["part"] for t in meta["case_pack_trims"]])
+        desk = self.desk_with(casepack_bytes=20000)
+        meta = accept_mod.run_accept(desk, "002", force=True)
+        self.assertTrue(meta["ok"], meta)
+        pack = read(accept_mod.pack_path(desk, "002"))
+        self.assertIn(required.strip(), pack)
+        self.assertIn("The release script.", pack)
+
+    def test_status_handles_bad_metadata_without_a_model_run(self):
+        write(accept_mod.meta_path(self.desk, "001"), "not json")
+        status = accept_mod.status_text(self.desk, "001")
+        self.assertIn("acceptance metadata: unreadable", status)
+        self.assertIn("packet provenance: verified", status)
 
     def test_trimming_cuts_on_a_character_boundary(self):
         text = "—" * 10  # three bytes each

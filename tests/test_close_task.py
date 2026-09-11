@@ -109,6 +109,11 @@ class CloseTaskCase(unittest.TestCase):
         p = p / f"{task}.acceptance.md"
         write(p, text)
         headers.write_acceptance_header(p, desk=self.desk, lane="api", task=task)
+        # A synthetic verifier result with the same input identity as the real worker.
+        write(p.with_name(f"{task}.acceptance.meta.json"), json.dumps({
+            "ok": True, "stall": None, "base": self.base, "head": self.footer["head_after"],
+            "packet_sha256": self.footer["packet_sha256"],
+        }))
         return p
 
     def close(self, task="001", **kwargs):
@@ -290,7 +295,8 @@ class CloseTaskCase(unittest.TestCase):
         self.verdict()
         before = self.main_sha()
         meta = self.desk.receipts / "001.acceptance.meta.json"
-        write(meta, json.dumps({"ok": True, "stall": None, "head": self.base, "base": self.base}))
+        write(meta, json.dumps({"ok": True, "stall": None, "head": self.base, "base": self.base,
+                               "packet_sha256": self.footer["packet_sha256"]}))
         report, lines = self.close()
         self.assertIsInstance(report, closetask.CloseStopped)
         self.assertIn("base/head does not match", lines[-1])
@@ -305,6 +311,51 @@ class CloseTaskCase(unittest.TestCase):
         self.assertEqual(lines[-1], "🛑 stopped at: evidence — " + stopped.reason)
         self.assertEqual(self.ledger_files(), [])
         self.assertEqual(self.record()["stopped_at"], "evidence")
+
+    def test_changed_packet_cannot_reuse_an_acceptance_for_the_same_head(self):
+        self.verdict()
+        before = self.main_sha()
+        original = read(self.packet_path)
+        write(self.packet_path, original.replace("the note file exists", "any file exists"))
+        stopped, _ = self.close()
+        self.assertIn("packet provenance", stopped.reason)
+        self.assertEqual(self.main_sha(), before)
+        self.assertEqual(self.ledger_files(), [])
+        write(self.packet_path, original)
+        report, _ = self.close()
+        self.assertNotIsInstance(report, closetask.CloseStopped)
+        self.assertEqual(self.record()["packet_sha256"], self.footer["packet_sha256"])
+
+    def test_unbound_and_stale_acceptance_records_cannot_close(self):
+        self.verdict()
+        meta = self.desk.receipts / "001.acceptance.meta.json"
+        original = read(meta)
+        before = self.main_sha()
+        for value in (None, {}, {"packet_sha256": "0" * 64}):
+            if value is None:
+                meta.unlink()
+            else:
+                data = json.loads(original)
+                data.pop("packet_sha256")
+                data.update(value)
+                write(meta, json.dumps(data))
+            stopped, _ = self.close()
+            self.assertIn("packet binding", stopped.reason)
+            self.assertEqual(self.main_sha(), before)
+            self.assertEqual(self.ledger_files(), [])
+        write(meta, original)
+        report, _ = self.close()
+        self.assertNotIsInstance(report, closetask.CloseStopped)
+
+    def test_repeated_close_still_checks_packet_provenance(self):
+        self.verdict()
+        self.close()
+        before, ledger = self.main_sha(), self.ledger_files()
+        write(self.packet_path, read(self.packet_path) + "\nNew requirement.\n")
+        stopped, _ = self.close()
+        self.assertIn("packet provenance", stopped.reason)
+        self.assertEqual(self.main_sha(), before)
+        self.assertEqual(self.ledger_files(), ledger)
 
     def test_a_return_verdict_is_recorded_and_does_not_close(self):
         self.verdict(verdict="return", reason="the note is in the wrong directory")
