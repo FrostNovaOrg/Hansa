@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -74,21 +75,23 @@ class Server:
         self._log("session watchdog started (yields while a resident watchdog is alive)")
 
     def _watch_loop(self) -> None:
-        interval = int(self.desk.cfg.get("session_watchdog_interval", 5))
-        while not self._stop.is_set():
-            try:
-                if daemon_mod.resident_alive(self.desk):
-                    self._stop.wait(interval * 4)
-                    continue
-                daemon_mod.touch_heartbeat(self.desk, "session")
-                result = watch_mod.watch_once(self.desk)
-                if result:
-                    append(self.desk.bells_logs / "watchdog.log",
-                           f"{ts()}\t{'DEAD' if result['dead'] else 'OK'}\t{result['id']}\t{result['lane']}\t{result['duration_s']}s\tsession\n")
-                    continue
-            except Exception as exc:  # keep the thread alive
-                append(self.desk.bells_logs / "watchdog.log", f"{ts()}\tRED\tsession watchdog: {exc}\n")
-            self._stop.wait(interval)
+        interval = max(0.05, float(self.desk.cfg.get("session_watchdog_interval", 5)))
+        pool = watch_mod.WatchPool(self.desk)
+        try:
+            while not self._stop.is_set() or pool.active:
+                try:
+                    resident = daemon_mod.resident_alive(self.desk)
+                    if not resident:
+                        daemon_mod.touch_heartbeat(self.desk, "session")
+                    pool.tick(dispatch=not self._stop.is_set() and not resident)
+                except Exception as exc:  # keep the thread alive
+                    append(self.desk.bells_logs / "watchdog.log", f"{ts()}\tRED\tsession watchdog: {exc}\n")
+                if self._stop.is_set():
+                    time.sleep(interval)  # drain without spinning on an already-set Event
+                else:
+                    self._stop.wait(interval)
+        finally:
+            pool.close()
 
     # -- tools -------------------------------------------------------------
     def _need_desk(self) -> Desk:

@@ -12,12 +12,13 @@ description: Take in one settled task - read its closing line, decide accept or 
    `receipts/<id>-<slug>.md` and read the numbers in its header block: base, head,
    files changed, the lane check's exit code, cost, turns. Do not re-run the worker's
    checks yourself.
-2. **Decide.** `$BH sample <id>`: exit 0 means this one is checked in depth, so run
-   `$BH accept <id>` and read `receipts/<id>.acceptance.md`; exit 3 means take it on
-   its numbers. The verdict file is what the next step reads, and its last line is
-   `VERDICT: pass | return | doubt`. Returning it is a verdict, not a message: make
-   the file say `VERDICT: return — <one sentence>` and still run step 3, which
-   records the refusal as a close-out and merges nothing.
+2. **Accept every task.** Run `$BH accept <id>` and read
+   `receipts/<id>.acceptance.md`. `$BH sample <id>` selects additional review
+   (exit 0 selected, exit 3 not selected); it never permits skipping acceptance.
+   The verdict file is what the next step reads, with `VERDICT: pass | return | doubt`.
+   If it says `return` or `doubt`, run step 3 to record the refusal and stop; it
+   merges nothing. A stalled run needs diagnosis through `$BH accept status <id>`;
+   leftover verdict text from a stalled run is not approval.
 3. **Close it.** `$BH close-task <id> --next "<what happens next>" --note "<one
    sentence for the ledger>"`. One command, six named steps: evidence, fileset, merge
    with the full board run on the merged result, ledger, state, one commit. It stops

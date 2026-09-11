@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,7 @@ from . import closetask as closetask_mod
 from . import headers as headers_mod
 from . import providers as providers_mod
 from .config import Desk
+from .locking import desk_lock, serialized, worker_limit, worker_slot
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
 from .packet import Packet, parse_packet
 from .util import BellhopError, append, git, now, read, run, sha256_file, ts, write, write_json
@@ -89,8 +91,9 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
     started = now()
     timeout = max(60, packet.budget_minutes * 60 * 2)
     try:
-        proc = run(cmd, cwd=worktree, env=env, timeout=timeout)
-        stdout, stderr, code = proc.stdout or "", proc.stderr or "", proc.returncode
+        from .accept import run_session
+        session = run_session(cmd, worktree, env, timeout)
+        stdout, stderr, code = session["stdout"], session["stderr"], session["exit_code"]
     except Exception as exc:  # timeout or launch failure
         stdout, stderr, code = "", f"worker launch failed: {exc}", 124
     duration = (now() - started).total_seconds()
@@ -129,6 +132,8 @@ def _log(desk: Desk, line: str) -> None:
 
 
 def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
+    if not bell.exists():
+        raise BellhopError(f"bell already claimed or completed: {bell.name}")
     data = json.loads(read(bell))
     packet_path = desk.root / data["packet"]
     if not packet_path.exists():
@@ -152,10 +157,22 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
         _log(desk, f"{note} ({bell.name})")
     if resolved.overridden:
         _log(desk, resolved.override_line(bell.name))
-    with lane_lock(desk, packet.lane):
-        worktree = prepare_worktree(desk, lane, packet.base)
-        head_before = git(worktree, "rev-parse", "HEAD")
-        append(desk.state / "in-flight.md", f"- [worker] {packet.stem} on {packet.lane} since {ts()}\n")
+    with worker_slot(desk), lane_lock(desk, packet.lane):
+        with desk_lock(desk):
+            # A competing watchdog may have completed this bell since our first read.
+            if not bell.exists():
+                raise BellhopError(f"bell already claimed or completed: {bell.name}")
+            if sha256_file(packet_path) != data.get("sha256"):
+                raise BellhopError(f"packet changed before launch: {packet_path}")
+            started_marker = desk.path("bells", ".locks", "started", bell.name + ".json")
+            if started_marker.exists():
+                raise BellhopError(f"unfinished launch recorded for {bell.name}; inspect the worker and receipt before recovery")
+            worktree = prepare_worktree(desk, lane, packet.base)
+            head_before = git(worktree, "rev-parse", "HEAD")
+            from . import state as state_mod
+            state_mod.backup(desk, desk.state / "in-flight.md")
+            append(desk.state / "in-flight.md", f"- [worker] {packet.stem} on {packet.lane} since {ts()}\n")
+            write_json(started_marker, {"bell": bell.name, "lane": packet.lane, "started_at": ts()})
         prompt = build_worker_prompt(desk, packet, lane, worktree)
         footer = launch_worker(desk, lane, packet, worktree, prompt, log_path, resolved=resolved)
         head_after = git(worktree, "rev-parse", "HEAD")
@@ -193,25 +210,30 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
             values["dead"] = bool(dead)  # judged after the tree was measured, so patched in here
             footer["check_exit"] = values.get("check_exit")
             headers_mod.write_header(receipt, "receipt", values)
-        closetask_mod.settle_bell(desk, packet.id, title=packet.title, strict=False, refresh_card=False)
-    meta = desk.receipts / f"{packet.id}.meta.json"
-    write_json(meta, footer)
-    _remove_inflight(desk, packet.stem)
-    rung = desk.bells_rung / bell.name
-    bell.rename(rung)
-    if archive:
-        archive_mod.archive(
-            desk,
-            [receipt, meta, rung, bell, desk.state / "in-flight.md", desk.state / "closings.md", log_path, log_path.with_suffix(".prompt.md")],
-            f"receipt {packet.stem}" + (" (dead)" if dead else ""),
-        )
+        with desk_lock(desk):
+            closetask_mod.settle_bell(desk, packet.id, title=packet.title, strict=False, refresh_card=False)
+            meta = desk.receipts / f"{packet.id}.meta.json"
+            write_json(meta, footer)
+            _remove_inflight(desk, packet.stem)
+            rung = desk.bells_rung / bell.name
+            bell.rename(rung)
+            started_marker.unlink()
+            if archive:
+                archive_mod.archive(
+                    desk,
+                    [receipt, meta, rung, bell, desk.state / "in-flight.md", desk.state / "closings.md", log_path, log_path.with_suffix(".prompt.md")],
+                    f"receipt {packet.stem}" + (" (dead)" if dead else ""),
+                )
     return footer
 
 
+@serialized
 def _remove_inflight(desk: Desk, stem: str) -> None:
     p = desk.state / "in-flight.md"
     if not p.exists():
         return
+    from . import state as state_mod
+    state_mod.backup(desk, p)
     lines = [l for l in read(p).splitlines() if f"[worker] {stem} " not in l]
     body = "\n".join(lines).rstrip("\n") + "\n"
     if not any(l.startswith("- ") for l in lines):
@@ -232,19 +254,65 @@ def watch_once(desk: Desk, archive: bool = True) -> Optional[dict]:
     return None
 
 
+class WatchPool:
+    """Bounded lane concurrency; tick never waits for a model session.
+
+    The slot locks also bound cooperating watch processes on the same desk. Lane
+    claims last through settlement and archival. A crash leaves the lane claim for
+    an operator to inspect, because an orphaned worker may still be running.
+    """
+    def __init__(self, desk: Desk, archive: bool = True):
+        self.desk, self.archive = desk, archive
+        self.limit = worker_limit(desk)
+        self.executor = ThreadPoolExecutor(max_workers=self.limit, thread_name_prefix="bellhop-worker")
+        self.active = {}  # Future -> (bell, lane)
+
+    def tick(self, dispatch: bool = True):
+        for future, (bell, lane) in list(self.active.items()):
+            if not future.done():
+                continue
+            del self.active[future]
+            try:
+                result = future.result()
+                _log(self.desk, f"{'DEAD' if result['dead'] else 'OK'}\t{result['id']}\t"
+                     f"{lane}\t{result['duration_s']}s\tcost={result.get('cost_usd')}")
+            except Exception as exc:
+                _log(self.desk, f"RED\t{bell.name}: {exc}")
+        if not dispatch:
+            return
+        lanes = {lane for _, lane in self.active.values()}
+        for bell in pending_bells(self.desk):
+            if len(self.active) >= self.limit:
+                break
+            try:
+                data = json.loads(read(bell))
+                lane = data["lane"]
+                if lane in lanes or lane_is_busy(self.desk, lane):
+                    continue
+                future = self.executor.submit(process_bell, self.desk, bell, self.archive)
+                self.active[future] = (bell, lane)
+                lanes.add(lane)
+            except (OSError, ValueError, KeyError) as exc:
+                _log(self.desk, f"RED\t{bell.name}: {exc}")
+
+    def close(self):
+        # Graceful shutdown drains started workers; it never abandons their receipts.
+        self.executor.shutdown(wait=True)
+        self.tick(dispatch=False)
+
+
 def watch_loop(desk: Desk, interval: int = 5, archive: bool = True) -> None:
+    global _stop
+    _stop = False
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT, _handle_term)
     from . import daemon as daemon_mod
-    while not _stop:
-        try:
-            daemon_mod.touch_heartbeat(desk, 'resident')
-            result = watch_once(desk, archive=archive)
-        except BellhopError as exc:
-            append(desk.bells_logs / "watchdog.log", f"{ts()}\tRED\t{exc}\n")
-            result = None
-        if result:
-            append(desk.bells_logs / "watchdog.log",
-                   f"{ts()}\t{'DEAD' if result['dead'] else 'OK'}\t{result['id']}\t{result['lane']}\t{result['duration_s']}s\tcost={result.get('cost_usd')}\n")
-        else:
-            time.sleep(interval)
+    pool = WatchPool(desk, archive)
+    try:
+        while not _stop or pool.active:
+            daemon_mod.touch_heartbeat(desk, "resident")
+            pool.tick(dispatch=not _stop)
+            if not _stop or pool.active:
+                time.sleep(max(0.05, interval))
+    finally:
+        pool.close()

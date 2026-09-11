@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Dict
 
+from .locking import serialized
 from .config import Desk
 from .util import BellhopError, read, ts, write
 
@@ -27,6 +28,7 @@ def read_card(desk: Desk) -> Dict[str, str]:
     return data
 
 
+@serialized
 def refresh_card(desk: Desk, **fields) -> Dict[str, str]:
     p = card_path(desk)
     current = read_card(desk) if p.exists() else {}
@@ -45,5 +47,8 @@ def refresh_card(desk: Desk, **fields) -> Dict[str, str]:
     if current.get("ready", "no").lower() == "yes" and not current.get("next"):
         raise BellhopError("a card with ready: yes must name `next`")
     body = "\n".join(f"{k}: {current.get(k, '')}" for k in KEYS)
+    if p.exists():
+        from .state import backup
+        backup(desk, p)
     write(p, f"{title}\n\n{body}\n{footer}")
     return current

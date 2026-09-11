@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -50,7 +51,19 @@ def read(path: Path) -> str:
 def write(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # Readers (board, sentinel, watchdog) must not observe half a JSON/card rewrite.
+    # Writers still need a lock around read/modify/write and a backup where required.
+    previous_mode = path.stat().st_mode & 0o777 if path.exists() else None
+    fd, temporary = tempfile.mkstemp(prefix=".bellhop-write-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if previous_mode is not None:
+            os.chmod(temporary, previous_mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def append(path: Path, text: str) -> None:

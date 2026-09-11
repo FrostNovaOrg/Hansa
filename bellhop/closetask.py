@@ -50,6 +50,8 @@ from . import ledger as ledger_mod
 from . import merge as merge_mod
 from . import state as state_mod
 from .accept import find_packet
+from .locking import acceptance_lock, desk_lock, serialized
+from .lanes import lane_lock
 from .config import Desk
 from .packet import parse_packet
 from .util import BellhopError, git, read, ts, write_json
@@ -284,6 +286,7 @@ def _fit_closing(desk: Desk, line: str) -> str:
 # --------------------------------------------------------------------------
 # settle-bell: the three things done the moment the worker exits
 # --------------------------------------------------------------------------
+@serialized
 def settle_bell(desk: Desk, task_id: str, title: str = "", strict: bool = True,
                 refresh_card: bool = True,
                 say: Optional[Callable[[str], None]] = None) -> List[state_mod.Result]:
@@ -505,6 +508,22 @@ class Closing:
             self.stop("evidence", f"no acceptance verdict for {task}; run `bellhop accept {task}`",
                       EXIT_ENVIRONMENT)
         self.verdict_file = path
+        meta_file = path.with_name(f"{task}.acceptance.meta.json")
+        if meta_file.exists():
+            try:
+                meta = json.loads(read(meta_file))
+                if not isinstance(meta, dict) or meta.get("ok") is not True or meta.get("stall"):
+                    self.stop("evidence", "acceptance run is incomplete or stalled; run acceptance again")
+                if (_full_sha(self.repo, meta.get("head") or "") !=
+                        _full_sha(self.repo, self.receipt_values.get("head") or "") or
+                        _full_sha(self.repo, meta.get("base") or "") != _full_sha(self.repo, self.packet.base)):
+                    self.stop("evidence", "acceptance base/head does not match the current receipt and packet")
+            except (ValueError, OSError) as exc:
+                self.stop("evidence", f"cannot read acceptance metadata: {exc}")
+            except CloseStopped:
+                raise
+            except BellhopError as exc:
+                self.stop("evidence", f"cannot resolve acceptance base/head: {exc}")
         cap = int(desk.cfg.get("acceptance_bytes", headers_mod.DEFAULT_ACCEPTANCE_BYTES))
         report = headers_mod.check_acceptance(path, max_bytes=cap)
         if report.reds:
@@ -755,6 +774,8 @@ class Closing:
         verdict_dir = self.verdict_file.parent if self.verdict_file else desk.receipts
         paths = [self.receipt, self.verdict_file,
                  verdict_dir / f"{self.task}.acceptance.check.txt",
+                 verdict_dir / f"{self.task}.acceptance.meta.json",
+                 verdict_dir / f"{self.task}.acceptance.json",
                  self.record.path]
         paths += list(self.report.ledger_paths)
         paths += [desk.path(rel) for rel in (state_mod.CARD, state_mod.INFLIGHT, state_mod.DEBTS,
@@ -807,7 +828,16 @@ def close_task(desk: Desk, task_id: str, next_card: Optional[str] = None,
                            EXIT_MALFORMED)
     if note is not None and "\n" in note:
         raise CloseStopped("arguments", "--note is one sentence, on one line", EXIT_MALFORMED)
-    closing = Closing(desk, task_id, next_card=next_card, note=note, dry_run=dry_run,
-                      commit=commit, say=say)
-    closing.say(f"── close {task_id}" + (" (dry run)" if dry_run else ""))
-    return closing.run()
+    try:
+        packet = parse_packet(find_packet(desk, task_id))
+    except BellhopError:
+        with desk_lock(desk):
+            # Preserve the evidence step's diagnostic and recovery record.
+            Closing(desk, task_id, dry_run=dry_run, say=say).evidence()
+        raise  # evidence always raises here
+    # Always claim the lane before the desk mutex; workers use the same order.
+    with acceptance_lock(desk, task_id), lane_lock(desk, packet.lane), desk_lock(desk):
+        closing = Closing(desk, task_id, next_card=next_card, note=note, dry_run=dry_run,
+                          commit=commit, say=say)
+        closing.say(f"── close {task_id}" + (" (dry run)" if dry_run else ""))
+        return closing.run()

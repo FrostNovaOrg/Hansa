@@ -38,6 +38,7 @@ from typing import Dict, List, Optional, Sequence
 from . import ledger as ledger_mod
 from . import state as state_mod
 from . import transcripts as tr
+from .locking import serialized
 from .config import Desk, price_table
 from .headers import FENCE_ACCEPTANCE, FENCE_RECEIPT, parse_header
 from .util import iso_week, read, read_json, run, write
@@ -476,6 +477,7 @@ def day_line(day: str, reading: Optional[tr.Reading], closed: int, chain_reading
     return "| " + " | ".join(cells) + " |"
 
 
+@serialized
 def write_day_lines(desk: Desk, rows: Dict[str, str]) -> Optional[Path]:
     """Append the day's line, or replace the one already there. Same day, same line.
 

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import ledger as ledger_mod
+from .locking import serialized
 from .config import Desk
 from .util import append, read, slugify, today, ts, write
 
@@ -369,6 +370,7 @@ def section_bounds(lines: Sequence[str], heading: str) -> Tuple[int, int]:
     return start + 1, end
 
 
+@serialized
 def edit(desk: Desk, rel: str, mutate: Callable[[List[str]], Result], create: bool = False) -> Result:
     """Read, let `mutate` raise or change the lines, back up, write. Rules 1 and 3."""
     path = _path(desk, rel, create=create)
@@ -418,6 +420,7 @@ def _render_entry(title: str, body: str, refs: Sequence[str], when: str) -> str:
     return f"# {title}\n\n- time: {when}\n- refs: {ref_text}\n\n{body}\n"
 
 
+@serialized
 def ledger_add(desk: Desk, entry_file, refs: Sequence[str] = (), day: Optional[str] = None) -> Result:
     """Add one ledger entry. The number comes from the last existing entry, never from the caller."""
     if entry_file == "-":
@@ -779,6 +782,7 @@ ROW = re.compile(r"^- (?P<time>\S+) \[(?P<root>[^\]]+)\] (?P<kind>\w+) \| (?P<ca
 HOOK_ROW = re.compile(r"^- (?P<time>\S+) \[(?P<root>[^\]]+)\]\s*$")
 
 
+@serialized
 def selfcatch_add(desk: Desk, root: str, kind: str, cause: str) -> Result:
     root = (root or "").strip()
     if not root:
@@ -801,6 +805,7 @@ def selfcatch_add(desk: Desk, root: str, kind: str, cause: str) -> Result:
     return Result(note=f"self-catch +1 ({root}, {kind})", echo=[line], paths=[desk.path(SELFCATCH)])
 
 
+@serialized
 def selfcatch_hook_hit(desk: Desk, root: str) -> Result:
     root = (root or "").strip()
     if not root:
@@ -928,6 +933,7 @@ def retired_roots(desk: Desk) -> set:
     return out
 
 
+@serialized
 def hotrules_promote(desk: Desk, root: str, text: str) -> Result:
     root = (root or "").strip()
     if not root:
@@ -988,6 +994,7 @@ def hotrules_promote(desk: Desk, root: str, text: str) -> Result:
     )
 
 
+@serialized
 def hotrules_retire(desk: Desk, root: str, reason: str) -> Result:
     root = (root or "").strip()
     if not root:
@@ -1027,6 +1034,7 @@ def hotrules_list(desk: Desk) -> Result:
 # --------------------------------------------------------------------------
 # close-outs
 # --------------------------------------------------------------------------
+@serialized
 def closings_add(desk: Desk, task: str, line: str) -> Result:
     task = (task or "").strip()
     if not task:
@@ -1059,6 +1067,7 @@ def closings_pointer(desk: Desk) -> int:
         return 0
 
 
+@serialized
 def closings_unread(desk: Desk, advance: bool = True) -> Result:
     rows = closings_rows(desk)
     seen = min(closings_pointer(desk), len(rows))
@@ -1081,6 +1090,7 @@ def closings_unread(desk: Desk, advance: bool = True) -> Result:
 WRAPUP_ORDER = ("own", "in-flight", "debts", "card")
 
 
+@serialized
 def wrapup(
     desk: Desk,
     own: Optional[str] = None,

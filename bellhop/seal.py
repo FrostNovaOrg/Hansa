@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List
 
+from .locking import serialized
 from .config import FRAMEWORK_ROOT, Desk
 from .state import HOT_END, HOT_START
 from .util import BellhopError, sha256_bytes, sha256_file, ts, write
@@ -75,6 +76,7 @@ def compute(desk: Desk) -> Dict[str, str]:
     return out
 
 
+@serialized
 def seal(desk: Desk) -> Path:
     entries = compute(desk)
     lines = [f"# sealed {ts()} framework={FRAMEWORK_ROOT}"] + [f"{h}  {name}" for name, h in sorted(entries.items())]

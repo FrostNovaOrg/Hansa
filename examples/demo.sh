@@ -55,12 +55,10 @@ PY
 "$BH" watch --once
 echo "--- receipt ---"; sed -n '1,14p' receipts/001-add-health-check-note.md; echo "..."; tail -2 receipts/001-add-health-check-note.md
 
-# 6. Intake: sample, accept, ledger, card, merge.
+# 6. Every merge requires acceptance. Sampling only selects additional review.
 "$BH" sample 001 || true
 "$BH" accept 001
-"$BH" ledger add --title "received 001 add health check note" --ref 001 --body "Receipt read; acceptance PASS (stub); merged." >/dev/null
-"$BH" card --ready no --next "" --lane api --reason "queue empty; waiting on the principal" >/dev/null
-"$BH" merge 001 --verdict "PASS (stub)"
+"$BH" close-task 001 --note "Acceptance passed with the stub verifier."
 
 # 7. Sentinel, readings, close.
 "$BH" sentinel --no-wake || true

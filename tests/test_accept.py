@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -528,6 +529,54 @@ class AcceptTest(unittest.TestCase):
         out = self.cli("accept", "shadow-report")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("switch: ready", out.stdout)
+
+    def test_forced_rerun_marks_old_pass_incomplete_before_session_starts(self):
+        self.assertTrue(self.run_accept("--good")["ok"])
+
+        def interrupted(*args):
+            current = read_json(accept_mod.meta_path(self.desk, "001"))
+            self.assertIs(current["ok"], False)
+            raise RuntimeError("interrupted verifier")
+
+        with patch.object(accept_mod, "run_session", side_effect=interrupted):
+            meta = self.run_accept("--good")
+        self.assertFalse(meta["ok"])
+        self.assertIn("interrupted verifier", meta["reason"])
+        from bellhop.closetask import close_task, CloseStopped
+        with self.assertRaisesRegex(CloseStopped, "incomplete or stalled"):
+            close_task(self.desk, "001", say=lambda line: None)
+
+    def test_verifier_settings_are_independent_of_worker_and_report_unknown_honestly(self):
+        self.cfg["lanes"]["api"].update({"accept_cmd": "", "model": "worker-only-model",
+            "provider": "generic", "heavy_model": "worker-heavy-model", "effort": "low"})
+        self.desk = Desk(self.desk_dir, dict(self.cfg, accept_model="verifier-model", accept_effort="high"))
+        original = accept_mod.run_session
+        commands = []
+
+        def stub_session(cmd, cwd, env, timeout):
+            commands.append(cmd)
+            result = original([sys.executable, str(ROOT / "bellhop/stubaccept.py"), "--good", "--json"],
+                              cwd, env, timeout)
+            data = json.loads(result["stdout"])
+            data.pop("model", None)  # no actual model ID was reported
+            result["stdout"] = json.dumps(data)
+            return result
+
+        with patch.object(accept_mod, "run_session", side_effect=stub_session):
+            meta = accept_mod.run_accept(self.desk, "001")
+        self.assertTrue(meta["ok"], meta)
+        cmd = commands[0]
+        self.assertEqual(cmd[cmd.index("--model") + 1], "verifier-model")
+        self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
+        self.assertNotIn("--add-dir", cmd)
+        self.assertEqual(meta["provider"], "claude")
+        self.assertEqual(meta["model_asked"], "verifier-model")
+        self.assertIsNone(meta["model"])
+        self.desk.cfg["lanes"]["api"].update(accept_model="lane-verifier", accept_effort="medium")
+        with patch.object(accept_mod, "run_session", side_effect=stub_session):
+            meta = accept_mod.run_accept(self.desk, "001", force=True)
+        self.assertEqual(meta["model_asked"], "lane-verifier")
+        self.assertEqual(meta["effort"], "medium")
 
     def test_cli_exits_red_on_a_stall(self):
         self.desk_with(accept_cmd=f"{STUB} --touch-tree --good")

@@ -43,6 +43,7 @@ from typing import List, Optional, Sequence, Tuple
 from . import packet as packet_mod
 from . import ring as ring_mod
 from . import state as state_mod
+from .locking import serialized
 from .config import Desk
 from .util import BellhopError, append, git, now, read, run, slugify, ts, write
 
@@ -237,6 +238,7 @@ def exception_count(path: Path) -> int:
     return len(re.findall(r"^- \d+ \|", read(path), flags=re.M))
 
 
+@serialized
 def record_exception(desk: Desk, path: Path, reason: str, what: str) -> Tuple[int, str]:
     """Append one numbered exception line and hand back its number and the line."""
     n = exception_count(path) + 1
@@ -309,6 +311,7 @@ def inflight_row(desk: Desk, task_id: str) -> Optional[str]:
 # --------------------------------------------------------------------------
 # the command
 # --------------------------------------------------------------------------
+@serialized
 def dispatch(
     desk: Desk,
     lane: str,

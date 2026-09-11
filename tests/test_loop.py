@@ -37,7 +37,7 @@ class LoopTest(unittest.TestCase):
         cfg = read_json(self.desk_dir / "bellhop.json")
         cfg["lanes"]["api"]["repo"] = "../widget-service"
         cfg["lanes"]["api"]["worker_cmd"] = f"python3 {ROOT}/bellhop/stubworker.py"
-        cfg["lanes"]["api"]["accept_cmd"] = f"python3 {ROOT}/bellhop/stubaccept.py"
+        cfg["lanes"]["api"]["accept_cmd"] = f"python3 {ROOT}/bellhop/stubaccept.py --good"
         write(self.desk_dir / "bellhop.json", json.dumps(cfg, indent=2))
         git(self.desk_dir, "add", "-A")
         git(self.desk_dir, "commit", "-q", "-m", "configure")
@@ -104,7 +104,7 @@ class LoopTest(unittest.TestCase):
         # acceptance in a "fresh session" (stub)
         from bellhop import accept as accept_mod
         out = accept_mod.accept(self.desk, "001")
-        self.assertIn("PASS", read(out))
+        self.assertIn("VERDICT: pass", read(out))
         # merge
         from bellhop import merge as merge_mod
         sha = merge_mod.merge(self.desk, "001", verdict="PASS")

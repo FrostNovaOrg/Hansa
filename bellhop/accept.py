@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import headers as headers_mod
+from .locking import acceptance_session, serialized
 from .config import FRAMEWORK_ROOT, Desk
 from .packet import Packet, parse_packet
 from .util import BellhopError, append, git, now, read, run, scrubbed_env, ts, write, write_json
@@ -124,6 +125,7 @@ def find_packet(desk: Desk, task_id: str) -> Path:
 # One append-only line per run. This helper is deliberately small: a state module is
 # being built on another branch and will take it over.
 
+@serialized
 def append_closing(desk: Desk, line: str, shadow: bool = False) -> Path:
     path = closings_path(desk, shadow)
     cap = int(desk.cfg.get("closings_line_chars", CLOSING_MAX))
@@ -422,6 +424,7 @@ def verdict_stands(desk: Desk, task_id: str, shadow: bool = False) -> bool:
     return bool(lines) and not any(l.startswith("red") for l in lines)
 
 
+@acceptance_session
 def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = False) -> dict:
     """Run acceptance for one task and return the run's meta.
 
@@ -454,6 +457,13 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
     receipt_lines = int(desk.cfg.get("casepack_receipt_lines", 50))
     timeout_s = int(desk.cfg.get("accept_timeout_s", 900))
     max_turns = int(desk.cfg.get("accept_max_turns", 30))
+    model_asked = str(lane.get("accept_model") or desk.cfg["accept_model"])
+    effort = str(lane.get("accept_effort") or desk.cfg.get("accept_effort") or "")
+    meta.update({"model_asked": None if lane.get("accept_cmd") else model_asked,
+                 "effort": None if lane.get("accept_cmd") else effort or None})
+    # Invalidate a previous PASS before a forced rerun. A crash must leave a run
+    # marked incomplete, not an apparently current successful verdict.
+    write_json(meta_path(desk, packet.id, shadow), meta)
 
     def finish(step: str, stall: Optional[str] = None, reason: Optional[str] = None) -> dict:
         meta.update({"step": step, "ok": stall is None, "stall": stall, "reason": reason,
@@ -505,7 +515,8 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
         if status_before:
             return finish("snapshot", "the copy was not clean", status_before[:400])
 
-        # No BELLHOP_DESK and no --add-dir: the session cannot reach the desk at all.
+        # No desk grant in the command or environment. This is a permission boundary,
+        # not filesystem isolation: the process still runs as the same OS user.
         env = scrubbed_env(lane.get("env_allow", []))
         env.update({
             "BELLHOP_ID": packet.id, "BELLHOP_LANE": packet.lane, "BELLHOP_BASE": base,
@@ -520,11 +531,13 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
             meta["step"] = "verifier"
             if lane.get("accept_cmd"):
                 cmd = ["/bin/sh", "-c", lane["accept_cmd"]]
-                provider = lane.get("provider") or "custom"
+                provider = "custom"
             else:
-                cmd = [desk.cfg["claude_bin"], "-p", read(pack_file), "--model", lane["model"],
+                cmd = [desk.cfg["claude_bin"], "-p", read(pack_file), "--model", model_asked,
                        "--allowedTools", allowed_tools(lane), "--output-format", "json",
                        "--max-turns", str(max_turns)]
+                if effort:
+                    cmd += ["--effort", effort]
                 provider = "claude"
             session = run_session(cmd, copy, env, timeout_s)
             transcript.append(f"## attempt {attempt} (exit {session['exit_code']}, "
@@ -540,7 +553,7 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
                 "result": None, "exit_code": session["exit_code"], "timed_out": session["timed_out"],
                 "note": "the session printed no result object; the verdict was read from stdout"})
             if result:
-                meta.update({"model": result.get("model") or lane.get("model"),
+                meta.update({"model": result.get("model"),
                              "turns": result.get("num_turns"), "cost_usd": result.get("total_cost_usd"),
                              "session_id": result.get("session_id")})
             if session["timed_out"]:

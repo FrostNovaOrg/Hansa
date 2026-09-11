@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 
+from .locking import serialized
 from .config import Desk
 from .packet import parse_packet
 from .util import BellhopError, git, read, read_json, run
@@ -32,6 +33,7 @@ def install_prepush_hook(repo: Path) -> Path:
     return hook
 
 
+@serialized
 def prepare_worktree(desk: Desk, lane: dict, base: str) -> Path:
     repo = Path(lane["repo"])
     if not repo.exists():
@@ -140,6 +142,7 @@ def _lane_worktree(desk: Desk, lane: dict) -> Path:
     return wt
 
 
+@serialized
 def lane_reset(desk: Desk, lane_name: str, dry_run: bool = False, force: bool = False) -> dict:
     """Throw away everything uncommitted in a lane worktree and put its branch back."""
     lane = desk.lane(lane_name)
@@ -183,6 +186,7 @@ def lane_reset(desk: Desk, lane_name: str, dry_run: bool = False, force: bool = 
                     f"{len(dirty)} uncommitted path(s) discarded"}
 
 
+@serialized
 def lane_align(desk: Desk, lane_name: str) -> dict:
     """Fast-forward an idle, clean, fully merged lane branch onto its base branch head.
 

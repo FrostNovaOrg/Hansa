@@ -275,6 +275,27 @@ class CloseTaskCase(unittest.TestCase):
     # ==================================================================
     # 1. evidence
     # ==================================================================
+    def test_stalled_acceptance_metadata_blocks_an_old_passing_file(self):
+        self.verdict()
+        before = self.main_sha()
+        meta = self.desk.receipts / "001.acceptance.meta.json"
+        write(meta, json.dumps({"ok": False, "stall": "timeout", "head": self.footer["head_after"],
+                               "base": self.base}))
+        report, lines = self.close()
+        self.assertIsInstance(report, closetask.CloseStopped)
+        self.assertIn("incomplete or stalled", lines[-1])
+        self.assertEqual(self.main_sha(), before)
+
+    def test_acceptance_for_another_head_does_not_close(self):
+        self.verdict()
+        before = self.main_sha()
+        meta = self.desk.receipts / "001.acceptance.meta.json"
+        write(meta, json.dumps({"ok": True, "stall": None, "head": self.base, "base": self.base}))
+        report, lines = self.close()
+        self.assertIsInstance(report, closetask.CloseStopped)
+        self.assertIn("base/head does not match", lines[-1])
+        self.assertEqual(self.main_sha(), before)
+
     def test_missing_verdict_stops_with_a_hint(self):
         stopped, lines = self.close()
         self.assertIsInstance(stopped, closetask.CloseStopped)

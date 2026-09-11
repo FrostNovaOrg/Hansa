@@ -27,11 +27,9 @@ Why this shape, from a desk that ran three vendors' CLIs on three lanes:
 - **`effort: heavy` on a packet raises the model or the effort one notch.** One
   dispatch path, one marker, no second command.
 
-TODO(accept.py): the verifier's launcher in `accept.py` still builds its own `claude`
-command line and parses its own JSON. It should call `resolve()` for the model and
-effort (so a `heavy` packet raises the verifier too, not only the worker),
-`build_command()` for the command, and `parse_result()` for the result. `accept.py` is
-landing on another branch, so this module leaves the seam named rather than editing it.
+The verifier remains a separate Claude Code session. `accept_model` and
+`accept_effort` deliberately do not inherit worker providers, schedules or --heavy.
+Worker settings describe execution; acceptance has its own budget and authority.
 """
 from __future__ import annotations
 

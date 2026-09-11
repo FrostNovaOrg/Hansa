@@ -6,6 +6,10 @@ Bellhop is the paperwork layer for an AI-run engineering desk. A human principal
 
 It was distilled from a working setup with a coordinator and parallel worker lanes. The names are generic, the example service is fictional, and no part of it depends on a particular product.
 
+The historical source desk used several models; individual model assignments
+are incomplete. See [measurement provenance](docs/measurement-provenance.md).
+For a new project, start with the [Claude Code workflow contract](docs/replicate-claude-workflow.md).
+
 ## The model in one picture
 
 ```
@@ -118,7 +122,7 @@ The CLI carries the verbs a skill calls: `dispatch`, `ring`, `watch`, `archive`,
 1. **Files, not chat.** Every instruction, result, and approval is a file in a git repository. If it is not in a file, it did not happen.
 2. **One task, one fresh session.** Workers start cold, read a short list, do one thing, write one receipt, and exit. No long-lived worker state.
 3. **Append, never rewrite.** The ledger and the decisions log only grow. Rewriting state is done by scripts that keep the previous version.
-4. **Guardrails at the repository layer.** Workers get a worktree, no push rights, and a scrubbed environment. The model's own tool gate is the second line of defence, not the first.
+4. **Guardrails at the repository layer.** Workers get a worktree, a pre-push guard, and a scrubbed environment. These are cooperating-agent guardrails, not OS isolation or removal of the OS user's credentials. The model's own tool gate is the second line of defence, not the first.
 5. **Machines check what machines can check.** The sentinel, seals, and the machine headers catch drift; rules that a script can enforce are not written as rules.
 6. **Gates block once; they never remind.** A hook that only warns changes nothing — one that fired on every edit moved no habit. One hook can refuse a call; nothing else nags.
 7. **Measure outcomes; use process numbers only to diagnose.** Time from bug report to release and defects found after release are the score. Commit counts are a symptom.

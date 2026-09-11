@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
+from .locking import serialized
 from .config import Desk
 from .util import BellhopError, slugify, today, ts, write
 
@@ -24,6 +25,7 @@ def next_seq(desk: Desk, day: Optional[str] = None) -> int:
     return highest + 1
 
 
+@serialized
 def add(desk: Desk, title: str, body: str, refs: Iterable[str] = (), day: Optional[str] = None) -> Path:
     if not title.strip():
         raise BellhopError("ledger entry needs a title")

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
 from .config import ARCHIVE_ROSTER, Desk
+from .locking import serialized
 from .util import BellhopError, git, run
 
 
@@ -30,6 +31,7 @@ def _ignored(desk: Desk, rels: Sequence[str]) -> set:
     return {line.strip() for line in (proc.stdout or "").splitlines() if line.strip()}
 
 
+@serialized
 def archive(desk: Desk, paths: Iterable[Path] = (), message: str = "", push: Optional[bool] = None) -> str:
     """Commit desk files by roster.
 
@@ -67,11 +69,11 @@ def archive(desk: Desk, paths: Iterable[Path] = (), message: str = "", push: Opt
     if not rel:
         raise BellhopError("nothing to archive")
     git(desk.root, "add", "--", *rel)
-    staged = git(desk.root, "diff", "--cached", "--name-only")
+    staged = git(desk.root, "diff", "--cached", "--name-only", "--", *rel)
     if not staged:
         return git(desk.root, "rev-parse", "HEAD")
     prefix = desk.cfg["commit_prefix"]
-    git(desk.root, "commit", "-q", "-m", f"{prefix} {message}")
+    git(desk.root, "commit", "--only", "-q", "-m", f"{prefix} {message}", "--", *rel)
     sha = git(desk.root, "rev-parse", "--short", "HEAD")
     if desk.cfg["push"] if push is None else push:
         proc = run(["git", "-C", str(desk.root), "push", "-q"], check=False)

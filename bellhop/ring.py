@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 
 from . import archive as archive_mod
+from .locking import serialized
 from .config import Desk
 from .packet import parse_packet
 from .util import BellhopError, sha256_file, stamp, ts, write_json
 
 
+@serialized
 def ring(desk: Desk, packet_path: Path, commit: bool = True) -> Path:
     packet_path = Path(packet_path).resolve()
     try:

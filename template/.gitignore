@@ -25,3 +25,6 @@ state/.sentinel/
 state/.daily-clear-*
 state/.brief-sent
 state/.release-*.json
+
+# Incomplete atomic writes after a process crash are not desk history.
+.bellhop-write-*

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .locking import serialized
 from .config import Desk
 from .util import BellhopError, append, read, ts
 
@@ -12,6 +13,7 @@ def decisions_path(desk: Desk) -> Path:
     return desk.state / "decisions.md"
 
 
+@serialized
 def decide(desk: Desk, words: str, who: str = "principal", scope: str = "", expires: str = "until revoked",
            standing: bool = False, recorded_by: str = "coordinator") -> str:
     if not words.strip():

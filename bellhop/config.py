@@ -80,6 +80,9 @@ DESK_DEFAULTS = {
     "casepack_receipt_lines": 50,    # how much of the receipt body the pack carries
     "accept_timeout_s": 900,         # the verifier's wall clock, then killpg
     "accept_max_turns": 30,
+    # Claude Code verifier settings, independent of worker providers/schedules.
+    "accept_model": "opus",
+    "accept_effort": "",
     "shadow_agreement": 0.9,         # switch criteria, read by `bellhop accept shadow-report`
     "shadow_min_samples": 20,
     "shadow_stall_rate": 0.1,
@@ -90,7 +93,7 @@ DESK_DEFAULTS = {
     # sentinel stops waking and asks for a person. A wake that repeats forever against a
     # stuck coordinator and a wake that is working look the same in the log.
     "wake_max_repeats": 3,
-    # A command that exits 0 when the coordinator is busy and non-zero when it is idle.
+    # Exit 0 = busy, exactly 1 = idle; every other exit is a failed probe (busy).
     # Unset means "unknown": the wake still fires, but the daily clear and the idle
     # compaction refuse to act, because clearing blind is what loses a half-finished task.
     "busy_probe_cmd": "",
@@ -117,6 +120,7 @@ DESK_DEFAULTS = {
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,
     "session_watchdog_interval": 5,
+    "max_parallel_workers": 2,
     # Readings. `context_tail_tokens` is the line above which a turn is a long-context
     # turn: such turns cost more than the rest, because each one re-sends the context.
     # `prices` is merged over PRICE_DEFAULTS, key by key, so a
@@ -194,6 +198,8 @@ LANE_DEFAULTS = {
     "env_allow": [],
     "worker_cmd": "",
     "accept_cmd": "",
+    "accept_model": "",
+    "accept_effort": "",
     "check_cmd": "",
     "worktree": "",
     # -- providers (see docs/providers.md) ---------------------------------

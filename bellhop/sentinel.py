@@ -254,10 +254,12 @@ def probe_busy(desk: Desk) -> Tuple[str, str]:
     if proc.returncode == 0:
         first = (proc.stdout or "").strip().splitlines()
         return BUSY, "busy probe says busy" + (f": {first[0][:80]}" if first else "")
+    if proc.returncode == 1:
+        return IDLE, "busy probe says idle"
     if proc.returncode in SHELL_NOT_RUNNABLE:
         err = ((proc.stderr or "").strip().splitlines() or [""])[0][:80]
         return BUSY, f"busy probe could not be run (exit {proc.returncode}: {err}); counted as busy"
-    return IDLE, "busy probe says idle"
+    return BUSY, f"busy probe failed (exit {proc.returncode}); counted as busy"
 
 
 # --------------------------------------------------------------------------

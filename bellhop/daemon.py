@@ -37,7 +37,7 @@ HEARTBEAT = "bells/.heartbeat"
 def touch_heartbeat(desk: Desk, who: str = "resident") -> None:
     p = desk.path(HEARTBEAT)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f"{who} {ts()}\n", encoding="utf-8")
+    write(p, f"{who} {ts()}\n")
 
 
 def heartbeat_age(desk: Desk) -> Optional[float]:

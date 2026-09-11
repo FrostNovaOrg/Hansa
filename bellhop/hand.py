@@ -37,6 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .locking import serialized
 from .config import Desk
 from .util import BellhopError, append, read, write
 
@@ -84,6 +85,7 @@ def _ensure_ledger(desk: Desk) -> Path:
     return p
 
 
+@serialized
 def note(desk: Desk, line: str) -> None:
     """Append one row. Append-only: this file is never rewritten."""
     append(_ensure_ledger(desk), "- " + line + "\n")
@@ -133,6 +135,7 @@ def window(desk: Desk) -> Dict[str, object]:
     }
 
 
+@serialized
 def open_window(desk: Desk, minutes: Optional[int] = None, reason: str = "") -> str:
     reason = (reason or "").strip()
     if not reason:
@@ -166,6 +169,7 @@ def open_window(desk: Desk, minutes: Optional[int] = None, reason: str = "") -> 
     return closed_note + "hand window open for %d minutes: %s" % (minutes, reason)
 
 
+@serialized
 def close_window(desk: Desk) -> str:
     """No window is not an error. It is also not a reason to write a closing row."""
     p = window_path(desk)

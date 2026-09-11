@@ -317,9 +317,9 @@ def cmd_accept(args):
 
 def cmd_merge(args):
     desk = _desk(args)
-    sha = merge_mod.merge(desk, args.id, push=args.push, verdict=args.verdict or "")
+    sha = merge_mod.merge(desk, args.id, push=args.push, verdict=args.verdict or "",
+                          commit=not getattr(args, "no_commit", False))
     print(f"merged at {sha}")
-    _commit(desk, args, ["ledger", *STATE_FILES], f"merged {args.id} at {sha}")
 
 
 def cmd_close_task(args):
@@ -752,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("header-spec", help="print the header spec straight from the code")
     s.add_argument("kind", nargs="?", default="both", choices=["receipt", "acceptance", "both"]); s.set_defaults(fn=cmd_header_spec)
 
-    s = sub.add_parser("merge", help="merge a lane branch into its target (coordinator only)"); s.add_argument("id"); s.add_argument("--push", action="store_true"); s.add_argument("--verdict"); s.set_defaults(fn=cmd_merge)
+    s = sub.add_parser("merge", help="compatibility alias for close-task (requires a passing acceptance file)"); s.add_argument("id"); s.add_argument("--push", action="store_true"); s.add_argument("--verdict"); s.set_defaults(fn=cmd_merge)
     s = sub.add_parser("readings", help="weekly readings"); s.add_argument("--week"); s.add_argument("--transcripts", action="append", metavar="PATH", help="a Claude Code transcript, or a directory of them; repeatable"); s.set_defaults(fn=cmd_readings)
 
     s = sub.add_parser("close-task", help="close one task in one command: evidence, fileset, merge, ledger, state, archive")
