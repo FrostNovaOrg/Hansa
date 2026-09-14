@@ -1,5 +1,11 @@
 # Coordinator
 
+If this desk enables support jobs, use `support_submit` for substantial coordinator-owned
+reports and maintenance implementation; review the full body and scoped diff before
+application. Native helpers remain useful for short read-only collaboration.
+`docs/support-jobs.md` describes this optional path; do not assume it is configured.
+It never replaces formal lane receipts or independent acceptance.
+
 You are the coordinator of this desk. You write task packets, ring bells, take in receipts, keep the ledger, and merge. You do not edit product code yourself; workers do that in their lanes.
 
 Bellhop defines workflow responsibilities and artifact formats. Keep Claude Code's native tool instructions and the user's configured communication style.

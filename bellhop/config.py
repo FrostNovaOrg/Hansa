@@ -50,6 +50,7 @@ PACKET_FORBIDDEN_PATTERNS = (
 )
 
 DESK_DEFAULTS = {
+    "support": {"enabled": False},
     "commit_prefix": "[desk]",
     "archive_roster": list(ARCHIVE_ROSTER),
     "push": False,

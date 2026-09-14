@@ -653,6 +653,39 @@ def add_state_parser(sub):
     return st
 
 
+def cmd_support(args):
+    from . import support
+    desk = _desk(args)
+    op = args.support_cmd
+    if op == 'submit':
+        spec = json.loads(Path(args.request).read_text())
+        result = support.submit(desk, spec)
+    elif op == 'run':
+        result = support.run_job(desk, args.id)
+    elif op == 'status':
+        result = support.get(desk, args.id) if args.id else support.summary(desk)
+    elif op == 'doctor':
+        result = support.doctor(desk)
+    elif op == 'reconcile':
+        result = {'interrupted': support.reconcile(desk)}
+    elif op == 'cancel':
+        result = support.cancel(desk, args.id, args.note)
+    elif op == 'result':
+        job = support.get(desk, args.id)
+        print(json.dumps({k: job.get(k) for k in ('id', 'status', 'provider', 'model', 'error')}, ensure_ascii=False))
+        print(support.result_text(desk, args.id))
+        return
+    elif op == 'diff':
+        print(support.diff(desk, args.id), end=''); return
+    elif op == 'review':
+        result = support.review(desk, args.id, args.note)
+    elif op == 'apply':
+        result = support.apply(desk, args.id, args.note)
+    elif op == 'listen':
+        support.listen(desk, args.id); return
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bellhop", description="File-based operations for a team of Claude Code agents.")
     p.add_argument("--version", action="version", version=f"bellhop {__version__}")
@@ -780,6 +813,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lane", required=True)
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- followed by the command to check")
     s.set_defaults(fn=cmd_provider_guard)
+
+    s = sub.add_parser('support', help='isolated coordinator collaboration jobs; separate from formal acceptance')
+    ss = s.add_subparsers(dest='support_cmd', required=True)
+    q = ss.add_parser('submit'); q.add_argument('--request', required=True); q.set_defaults(fn=cmd_support)
+    q = ss.add_parser('status'); q.add_argument('id', nargs='?'); q.set_defaults(fn=cmd_support)
+    ss.add_parser('doctor').set_defaults(fn=cmd_support)
+    ss.add_parser('reconcile').set_defaults(fn=cmd_support)
+    for operation in ('run', 'result', 'diff', 'review', 'apply', 'listen', 'cancel'):
+        q = ss.add_parser(operation); q.add_argument('id'); q.set_defaults(fn=cmd_support)
+        if operation in ('review', 'apply', 'cancel'): q.add_argument('--note', required=True)
 
     s = sub.add_parser("daemon", help="resident watchdog and sentinel service"); ss = s.add_subparsers(dest="daemon_cmd", required=True)
     i = ss.add_parser("install", help="vendor Bellhop into the desk and write service files"); i.add_argument("--load", action="store_true", help="also load the services now")

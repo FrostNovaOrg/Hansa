@@ -30,6 +30,20 @@ from .util import BellhopError, append, read, ts
 PROTOCOL_VERSION = "2025-06-18"
 
 TOOLS = [
+    {'name': 'support_submit', 'description': 'Delegate coordinator-owned research or implementation preparation to an isolated GLM worker with Astra fallback. Not a formal product task. Commands must come from support doctor configuration.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'title': {'type': 'string'}, 'prompt': {'type': 'string'}, 'mode': {'enum': ['report', 'code']},
+         'provider': {'enum': ['glm', 'astra']}, 'source_root': {'type': 'string'},
+         'input_set': {'type': 'string'},
+         'files': {'type': 'array', 'items': {'type': 'string'}},
+         'writable_files': {'type': 'array', 'items': {'type': 'string'}},
+         'commands': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['title', 'prompt']}},
+    {'name': 'support_status', 'description': 'Read a support job or compact queue; completed results remain until reviewed.',
+     'inputSchema': {'type': 'object', 'properties': {'id': {'type': 'string'}}}},
+    {'name': 'support_result', 'description': 'Read the complete support worker report body and actual status. Does not acknowledge it.',
+     'inputSchema': {'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id']}},
+    {'name': 'support_review', 'description': 'Record coordinator review/disposition of a completed support job. Does not accept formal product work.',
+     'inputSchema': {'type': 'object', 'properties': {'id': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['id', 'note']}},
     {"name": "desk_status", "description": "Sentinel status, dispatch card, pending bells, watchdog heartbeat.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "ring", "description": "Ring a bell for a task packet (path relative to the desk).",
@@ -158,6 +172,24 @@ class Server:
         return f"{out.relative_to(desk.root)} archived at {sha}\n\n{read(out)}"
 
     # -- protocol ----------------------------------------------------------
+    def tool_support_submit(self, args):
+        from .support import submit
+        job = submit(self._need_desk(), args)
+        return json.dumps({k: job.get(k) for k in ('id', 'title', 'status', 'unit')}, ensure_ascii=False) + '\nUse Monitor with bellhop support listen JOB_ID for completion; the board also retains unread results.'
+
+    def tool_support_status(self, args):
+        from .support import get, summary
+        return json.dumps(get(self._need_desk(), args['id']) if args.get('id') else summary(self._need_desk()), ensure_ascii=False)
+
+    def tool_support_result(self, args):
+        from .support import get, result_text
+        desk = self._need_desk(); job = get(desk, args['id'])
+        return json.dumps({k: job.get(k) for k in ('id', 'status', 'model', 'effort', 'error')}, ensure_ascii=False) + '\n' + result_text(desk, args['id'])
+
+    def tool_support_review(self, args):
+        from .support import review
+        return json.dumps(review(self._need_desk(), args['id'], args['note']), ensure_ascii=False)
+
     def handle(self, msg: dict):
         method = msg.get("method")
         mid = msg.get("id")

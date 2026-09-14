@@ -205,10 +205,22 @@ def _bells_and_watchdog(desk: Desk, out: List[Row]) -> None:
         out.append(("S", "NOTE: bells are waiting and nothing is answering them; start /bellhop:daemon"))
 
 
+def _support(desk: Desk, out: List[Row]) -> None:
+    if not (desk.cfg.get('support') or {}).get('enabled'):
+        return
+    from .support import summary
+    data = summary(desk)
+    out.append(('H', '== coordinator support jobs =='))
+    out.append(('S', f"{data['running']} running; {len(data['unread'])} results awaiting coordinator review"))
+    for job in data['recent']:
+        if job['id'] in data['unread'] or job['status'] not in ('completed', 'failed', 'blocked', 'cancelled', 'interrupted'):
+            out.append(('S', f"{job['id']} {job['status']} {job['title']}"))
+
+
 def rows(desk: Desk) -> List[Row]:
     """The whole page as tagged rows, each already cut to its row length."""
     out: List[Row] = []
-    for section in (_card, _inflight, _own, _debts, _closings, _intake, _hot, _sentinel, _bells_and_watchdog):
+    for section in (_card, _inflight, _support, _own, _debts, _closings, _intake, _hot, _sentinel, _bells_and_watchdog):
         section(desk, out)
     return [(tag, _cut(text, ROW_CHARS[tag]) if tag in ROW_CHARS else text) for tag, text in out]
 
