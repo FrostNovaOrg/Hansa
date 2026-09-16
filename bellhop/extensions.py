@@ -12,9 +12,13 @@ An extension is a directory named in `bellhop.json`:
 Relative names are resolved against the desk root. The directory holds a
 `bellhop_ext.py` with any of three functions, all optional:
 
-    checks(desk)            -> [(name, ok, detail), ...]   extra sentinel checks
+    checks(desk, persist)   -> [(name, ok, detail), ...]   extra sentinel checks
     board_rows(desk)        -> [("H"|"S", text), ...]      extra board rows
     fingerprint_parts(desk) -> [str, ...]                  extra board fingerprint
+
+`persist` is false when the sentinel is rehearsing (`--dry-run`), and a check must
+then write nothing at all. The flag is explicit rather than inferred because a
+rehearsal that quietly changed state would be worse than no rehearsal.
 
 The direction is one way. The core imports no extension by name and knows nothing
 about what any of them do; an extension imports the core as a library.
@@ -90,7 +94,7 @@ def _load(desk: Desk, name: str):
     return module
 
 
-def _call(desk: Desk, name: str, fn_name: str):
+def _call(desk: Desk, name: str, fn_name: str, *args):
     """(value, error). Never raises, whatever the extension does."""
     module = _load(desk, name)
     if isinstance(module, str):
@@ -99,16 +103,16 @@ def _call(desk: Desk, name: str, fn_name: str):
     if fn is None:
         return None, None  # this extension does not use this hook
     try:
-        return list(fn(desk)), None
+        return list(fn(desk, *args)), None
     except (Exception, SystemExit) as exc:  # noqa: BLE001
         return None, _short(exc)
 
 
-def checks(desk: Desk) -> List[Check]:
+def checks(desk: Desk, persist: bool = True) -> List[Check]:
     out: List[Check] = []
     for name in names(desk):
         label = _label(name)
-        value, error = _call(desk, name, "checks")
+        value, error = _call(desk, name, "checks", persist)
         if error:
             out.append((f"ext:{label}", False, f"extension failed: {error}"))
             continue

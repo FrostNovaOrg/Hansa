@@ -25,7 +25,7 @@ from bellhop import sentinel as sentinel_mod  # noqa: E402
 from bellhop.config import DESK_DEFAULTS, Desk  # noqa: E402
 
 WORKING = '''
-def checks(desk):
+def checks(desk, persist=True):
     return [("queue", False, "2 jobs waiting")]
 
 
@@ -40,7 +40,7 @@ def fingerprint_parts(desk):
 RAISES_ON_IMPORT = 'raise RuntimeError("the add-on could not start")\n'
 
 RAISES_WHEN_CALLED = '''
-def checks(desk):
+def checks(desk, persist=True):
     raise ValueError("no queue file")
 
 
@@ -56,7 +56,7 @@ EXITS = '''
 import sys
 
 
-def checks(desk):
+def checks(desk, persist=True):
     sys.exit(3)
 
 
@@ -64,8 +64,18 @@ def board_rows(desk):
     sys.exit(3)
 '''
 
+WRITES_WHEN_ALLOWED = '''
+from pathlib import Path
+
+
+def checks(desk, persist=True):
+    if persist:
+        (Path(desk.root) / "extension-wrote-here").write_text("x")
+    return [("wrote", True, "persist=%s" % persist)]
+'''
+
 BAD_SHAPES = '''
-def checks(desk):
+def checks(desk, persist=True):
     return ["not a triple"]
 
 
@@ -144,6 +154,17 @@ class ExtensionCase(unittest.TestCase):
         desk = self.desk("angry")
         self.assertEqual(extensions_mod.fingerprint_parts(desk), [])
         self.assertEqual(sentinel_mod.board_fingerprint(desk), sentinel_mod.board_fingerprint(Desk(self.root, {})))
+
+    def test_a_rehearsing_sentinel_tells_the_extension_not_to_write(self):
+        """`--dry-run` writes nothing at all, and that promise has to reach an add-on."""
+        self.write_ext("writer", WRITES_WHEN_ALLOWED)
+        desk = self.desk("writer")
+        marker = self.root / "extension-wrote-here"
+        found = extensions_mod.checks(desk, persist=False)
+        self.assertEqual(found, [("ext:writer:wrote", True, "persist=False")])
+        self.assertFalse(marker.exists())
+        extensions_mod.checks(desk, persist=True)
+        self.assertTrue(marker.exists())
 
     # -- the sentinel and the board survive it -----------------------------
     def test_the_sentinel_keeps_its_own_checks_beside_a_broken_extension(self):

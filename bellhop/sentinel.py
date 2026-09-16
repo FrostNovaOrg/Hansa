@@ -222,7 +222,7 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
     checks.extend(check_stop_dispatch(desk))
     # Desk-local extensions run last and cannot raise out of here; a broken add-on
     # becomes one red line, never a sentinel that stopped running.
-    checks.extend(extensions_mod.checks(desk))
+    checks.extend(extensions_mod.checks(desk, persist))
     if persist:
         write_json(snap_path, snapshot)
     return checks
