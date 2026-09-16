@@ -239,15 +239,16 @@ The implementation is in [`bellhop/`](bellhop/); reusable desk files are in
 | Dispatch, acceptance and closing contracts | [Dispatch](docs/dispatch.md) · [Acceptance](docs/acceptance.md) · [Close-task](docs/close-task.md) |
 | State, parallelism and recovery | [State writer](docs/state.md) · [Concurrency](docs/concurrency.md) · [Sentinel](docs/sentinel.md) |
 | Installation and execution settings | [Plugin](docs/plugin.md) · [Claude Code](docs/claude-code.md) · [Provider seam](docs/providers.md) |
-| Costs and historical evidence | [Metrics](docs/metrics.md) · [Model provenance](docs/measurement-provenance.md) |
+| Costs and historical evidence | [Metrics](docs/metrics.md) |
 | Permissions and boundaries | [Security model](docs/security.md) |
 
 ## Origin and current limits
 
 Bellhop was distilled from a working desk with a coordinator and several worker
-lanes. Its observations are not a benchmark of any model.
-The template's `opus` alias is a configuration default, not historical attribution.
-See [measurement provenance](docs/measurement-provenance.md).
+lanes. Per-run model assignments from that desk are
+incomplete, including the unnamed comparison groups, so its figures are observations
+about a process and not a benchmark of any model. The template's `opus` alias is a
+configuration default, not a historical attribution.
 
 The project is **early, before 1.0**, and breaking changes are possible. Tests and
 the demo exercise real local Git operations with stub agents; they do not prove
