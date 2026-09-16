@@ -268,6 +268,7 @@ is the specification.
 | Installation and execution settings | [Plugin](docs/plugin.md) · [Claude Code](docs/claude-code.md) · [Provider seam](docs/providers.md) |
 | Costs and historical evidence | [Metrics](docs/metrics.md) |
 | Permissions and boundaries | [Security model](docs/security.md) |
+| Upgrading a desk that is already running | [Upgrading](docs/upgrading.md) |
 
 ## Origin and current limits
 
