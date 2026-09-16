@@ -34,6 +34,7 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from . import extensions as extensions_mod
 from . import ledger as ledger_mod
 from . import seal as seal_mod
 from . import stopdispatch as stop_mod
@@ -219,6 +220,9 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
         check_seals(desk),
     ]
     checks.extend(check_stop_dispatch(desk))
+    # Desk-local extensions run last and cannot raise out of here; a broken add-on
+    # becomes one red line, never a sentinel that stopped running.
+    checks.extend(extensions_mod.checks(desk))
     if persist:
         write_json(snap_path, snapshot)
     return checks
@@ -275,6 +279,7 @@ def board_fingerprint(desk: Desk) -> str:
     parts = [read(card_path) if card_path.exists() else ""]
     parts.extend(inflight_lines(desk))
     parts.extend(b.name for b in pending_bells(desk))
+    parts.extend(extensions_mod.fingerprint_parts(desk))
     return sha256_bytes("\n".join(parts).encode("utf-8"))[:16]
 
 
