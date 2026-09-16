@@ -50,7 +50,8 @@ READINGS_FILE = "state/readings.md"
 INTAKE_FILE = "state/intake.md"
 
 COLUMNS = ("date", "turns", "context median", "tail share (turns)", "tail share (cost)",
-           "coordinator cost", "compactions", "tasks closed", "full-chain cost per task",
+           "coordinator cost", "compactions", "thinking tokens", "thinking share",
+           "tasks closed", "full-chain cost per task",
            "repair share", "verifier sessions per task", "intake duplicates",
            "status-question share")
 
@@ -468,6 +469,10 @@ def day_line(day: str, reading: Optional[tr.Reading], closed: int, chain_reading
         share(reading.tail_cost_share if reading else None),
         money(reading.cost if reading else None),
         number(reading.compactions if reading else None),
+        # Plain, not grouped: these lines are read by a script. `n/a` is a day whose
+        # provider never itemised its reasoning, which is not a day with none.
+        number(reading.thinking_tokens if reading else None),
+        share(reading.thinking_share if reading else None),
         str(closed),
         money(chain_reading.median),
         share(rep_share) if packets else NOT_AVAILABLE,
@@ -622,6 +627,9 @@ def report(desk: Desk, week: Optional[str] = None, transcripts: Optional[list] =
               f"| Coordinator cost | {money(whole.cost if whole else None)}"
               + (f" ({whole.priced_turns}/{whole.turns} turns priced)" if whole and whole.turns else "") + " |",
               f"| Compactions | {number(whole.compactions if whole else None)} |",
+              f"| Thinking tokens | {grouped(whole.thinking_tokens if whole else None)}"
+              + (f" ({share(whole.thinking_share)} of {grouped(whole.billed_tokens)} billed tokens)"
+                 if whole and whole.thinking_tokens is not None else "") + " |",
               f"| Full-chain cost per task | {chain_week.line()} |",
               f"| Repair share | {share(rep_share_value) if packets else NOT_AVAILABLE}"
               + (f" ({repairs}/{packets} packets, {unknown} could not be listed)" if packets else "") + " |",

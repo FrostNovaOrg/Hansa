@@ -19,6 +19,7 @@ from . import intake as intake_mod
 from . import decisions as decisions_mod
 from . import dispatch as dispatch_mod
 from . import desk_ops
+from . import exits
 from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import exceptions as exceptions_mod
@@ -33,7 +34,7 @@ from . import sentinel as sentinel_mod
 from . import state as state_mod
 from . import stopdispatch as stop_mod
 from . import watch as watch_mod
-from .config import find_desk
+from .config import find_desk, framework_root
 from . import packet as packet_mod
 from .packet import next_packet_id, parse_packet, render_packet
 from .util import BellhopError, read, slugify, ts, write
@@ -95,7 +96,10 @@ def cmd_packet_rebind(args):
     done = [r for r in rows if r["status"].endswith("rebind") or r["status"] == "rebound"]
     print(f"{len(done)} rebound, {len(rows) - len(done) - len(bad)} already bound, {len(bad)} refused")
     if bad:
-        sys.exit(2)
+        # Not a usage error: the command line was fine and the migration ran. A task a
+        # gate would not rebind and a task nothing on disk can identify are two
+        # different jobs for the person reading this. See docs/exit-codes.md.
+        sys.exit(exits.GATE if any(r["status"] == "refused" for r in bad) else exits.NOT_FOUND)
 
 
 def cmd_dispatch(args):
@@ -132,7 +136,7 @@ def cmd_lane(args):
             report = lanes_mod.lane_align(desk, args.lane)
     except lanes_mod.LaneBlocked as exc:
         print(f"🛑 {exc}")
-        sys.exit(2)
+        sys.exit(exits.GATE)
     for line in report["steps"]:
         print(f"  {line}")
     print(report["last"])
@@ -148,9 +152,14 @@ def cmd_watch(args):
     if result is None:
         print("no bell to answer")
     else:
+        if result.get("quota"):
+            print(f"QUOTA: {result['id']} on {result['lane']} left pending; "
+                  f"dispatch stopped ({result.get('quota_signal') or 'provider refused'}); "
+                  f"lift with `bellhop stop-dispatch lift` when the provider answers again")
+            sys.exit(exits.EXTERNAL)
         print(f"{'DEAD' if result['dead'] else 'done'}: {result['id']} on {result['lane']} in {result['duration_s']}s cost={result.get('cost_usd')}")
         if result["dead"]:
-            sys.exit(2)
+            sys.exit(exits.EXTERNAL)
 
 
 def cmd_archive(args):
@@ -163,7 +172,7 @@ def cmd_sentinel(args):
     desk = _desk(args)
     green, text = sentinel_mod.sentinel(desk, wake=not args.no_wake, dry_run=args.dry_run)
     print(text, end="")
-    sys.exit(0 if green else 1)
+    sys.exit(exits.OK if green else exits.RED)
 
 
 def cmd_stop_dispatch(args):
@@ -189,7 +198,7 @@ def cmd_stop_dispatch(args):
     else:
         print(stop_mod.status_text(desk), end="")
         allowed, _reason = stop_mod.dispatch_allowed(desk)
-        sys.exit(0 if allowed else 1)
+        sys.exit(exits.OK if allowed else exits.RED)
 
 
 def cmd_ledger(args):
@@ -226,7 +235,7 @@ def cmd_sample(args):
     desk = _desk(args)
     hit, seed, digest = sampling.sampled(desk, args.id)
     print(f"{'sampled' if hit else 'not sampled'} id={args.id} seed={seed} digest={digest} rate=1/{desk.cfg['sample_rate']}")
-    sys.exit(0 if hit else 3)
+    sys.exit(exits.OK if hit else exits.NOT_FOUND)
 
 
 def _desk_or_none(args):
@@ -269,10 +278,12 @@ def cmd_acceptance_header(args):
     path = Path(args.file)
     try:
         if args.dry_run:
-            values = headers_mod.compute_acceptance_values(path, desk=desk, lane=args.lane, task=args.task)
+            values = headers_mod.compute_acceptance_values(path, desk=desk, lane=args.lane,
+                                                           task=args.task, result=args.result_json)
             print(headers_mod.render_header("acceptance", values), end="")
             return
-        values, action = headers_mod.write_acceptance_header(path, desk=desk, lane=args.lane, task=args.task)
+        values, action = headers_mod.write_acceptance_header(path, desk=desk, lane=args.lane,
+                                                             task=args.task, result=args.result_json)
     except BellhopError as exc:
         print(f"bellhop: {exc}", file=sys.stderr)
         sys.exit(headers_mod.EXIT_MALFORMED)
@@ -313,7 +324,7 @@ def cmd_accept(args):
     if args.target == "shadow-report":
         text, ready = accept_mod.shadow_report(desk)
         print(text, end="")
-        sys.exit(0 if ready else 1)
+        sys.exit(exits.OK if ready else exits.RED)
     if args.target == "status":
         if not args.id:
             raise BellhopError("usage: bellhop accept status <id>")
@@ -398,14 +409,15 @@ def cmd_readings(args):
 def cmd_seal(args):
     desk = _desk(args)
     if args.verify:
-        changed = seal_mod.verify(desk)
-        if changed:
-            print("changed since seal:\n  " + "\n  ".join(changed))
-            sys.exit(1)
+        report = seal_mod.verify_report(desk)
+        print(report.line())
+        if report.changed:
+            print("changed since seal:\n  " + "\n  ".join(report.changed))
+            sys.exit(exits.RED)
         print("seals hold")
         return
     p = seal_mod.seal(desk)
-    print(f"sealed: {p.relative_to(desk.root)}")
+    print(f"sealed: {p.relative_to(desk.root)} ({framework_root().line()})")
     _commit(desk, args, [p, "rules", "frozen", ".claude", "templates"], "reseal")
 
 
@@ -447,7 +459,7 @@ def cmd_daemon(args):
             print(f"  error: {e}")
         _commit(desk, args, ["state/.daemon.json"], "resident service installed")
         if report["errors"]:
-            sys.exit(1)
+            sys.exit(exits.EXTERNAL)
     elif args.daemon_cmd in ("load", "unload"):
         report = daemon_mod.load(desk) if args.daemon_cmd == "load" else daemon_mod.unload(desk)
         for c in report["commands"]:
@@ -456,7 +468,7 @@ def cmd_daemon(args):
         for e in report["errors"]:
             print(f"  error: {e}")
         if report["errors"]:
-            sys.exit(1)
+            sys.exit(exits.EXTERNAL)
     elif args.daemon_cmd == "uninstall":
         report = daemon_mod.uninstall(desk)
         print("removed:\n  " + "\n  ".join(report["removed"]) if report["removed"] else "no service files to remove")
@@ -465,7 +477,7 @@ def cmd_daemon(args):
     elif args.daemon_cmd == "status":
         print(daemon_mod.status_text(desk), end="")
         s = daemon_mod.status(desk)
-        sys.exit(0 if (s["heartbeat_fresh"] or not s["installed"]) else 1)
+        sys.exit(exits.OK if (s["heartbeat_fresh"] or not s["installed"]) else exits.RED)
     elif args.daemon_cmd == "files":
         for path, content in daemon_mod.service_files(desk, daemon_mod.platform_name(), args.python).items():
             print(f"===== {path}\n{content}")
@@ -479,7 +491,7 @@ def cmd_provider(args):
     print(providers_mod.check_text(report), end="")
     if args.heavy and report.get("heavy") is not None:
         print(f"heavy: {report['heavy'].summary()}")
-    sys.exit(2 if report["problems"] else 0)
+    sys.exit(exits.CONFIG if report["problems"] else exits.OK)
 
 
 def cmd_provider_guard(args):
@@ -493,21 +505,23 @@ def cmd_provider_guard(args):
     argv = list(args.command or [])
     while argv and argv[0] == "--":
         argv.pop(0)
+    # Every exit here is the Claude Code hook protocol's, not the desk's table: 2 is
+    # "block this call and hand the model the reason". See docs/exit-codes.md.
     if not argv:
         print("refused: no command given (bellhop provider-guard --lane <lane> -- <command...>)")
-        sys.exit(2)
+        sys.exit(exits.HOOK_BLOCK)
     command = argv[0] if len(argv) == 1 else " ".join(argv)
     try:
         lane = desk.lane(args.lane)
     except BellhopError as exc:
         print(f"refused: {exc}")
-        sys.exit(2)
+        sys.exit(exits.HOOK_BLOCK)
     ok, reason = providers_mod.guard(desk, lane, command)
     if ok:
         print(f"allowed: {reason}")
-        sys.exit(0)
+        sys.exit(exits.OK)
     print(f"refused: {reason}")
-    sys.exit(2)
+    sys.exit(exits.HOOK_BLOCK)
 
 
 def cmd_mcp(args):
@@ -529,13 +543,13 @@ def cmd_brief(args):
         sent, why = brief_mod.send(desk, text)
         print("send: " + why)
         if not sent and (desk.cfg.get("alert_cmd") or "").strip():
-            sys.exit(1)
+            sys.exit(exits.EXTERNAL)
 
 
 def cmd_release(args):
     code = release_mod.release(_desk(args), args.version, from_step=args.from_step, dry_run=args.dry_run)
     if code:
-        sys.exit(code)
+        sys.exit(code)  # release_mod already speaks the table
 
 
 def cmd_intake(args):
@@ -544,7 +558,8 @@ def cmd_intake(args):
         try:
             print(intake_mod.show_text(desk, args.number), end="")
         except KeyError as exc:
-            raise BellhopError(str(exc).strip("'"))
+            # The book was read and that number is not in it: not a typo in the flag.
+            raise BellhopError(str(exc).strip("'"), code=exits.NOT_FOUND)
         return
     print(intake_mod.list_text(desk, last=args.last), end="")
 
@@ -821,6 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("acceptance-header", help="read an acceptance verdict's body and write its machine header at the top")
     s.add_argument("--file", required=True); s.add_argument("--lane", help="lane, so paths outside its worktree can be counted"); s.add_argument("--task")
+    s.add_argument("--result-json", help="the verifier's run meta (<id>.acceptance.meta.json), for model_asked and model")
     s.add_argument("--dry-run", action="store_true", help="print the header, write nothing"); s.set_defaults(fn=cmd_acceptance_header)
 
     s = sub.add_parser("check-receipt", help="check a receipt's header (exit 1 on a red finding)")
@@ -921,14 +937,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    """Parse, run, and return one of the numbers in `bellhop/exits.py`.
+
+    Argument parsing is wrapped because argparse raises `SystemExit` with whatever it
+    likes -- 0 for `--help`, 2 for a bad flag, and on one desk a wrapper turned the
+    whole thing into 128. A coordinator branching on `$?` cannot tell a typo from a
+    hard failure unless one place decides, and this is that place.
+    """
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exits.normalise_usage_exit(exc)
     try:
         args.fn(args)
     except BellhopError as exc:
         print(f"bellhop: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        return getattr(exc, "code", exits.USAGE)
+    return exits.OK
 
 
 if __name__ == "__main__":

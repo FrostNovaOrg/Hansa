@@ -4,15 +4,18 @@ import json
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
 from . import archive as archive_mod
+from . import card as card_mod
 from . import closetask as closetask_mod
 from . import headers as headers_mod
 from . import health as health_mod
 from . import providers as providers_mod
-from .config import Desk
+from . import stopdispatch as stop_mod
+from .config import CONFIG_NAME, Desk
 from .locking import desk_lock, serialized, worker_limit, worker_slot
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
 from .packet import Packet, parse_packet
@@ -120,6 +123,15 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
     write(log_path, f"# bellhop worker log {packet.stem}\n\n## stdout\n{stdout}\n\n## stderr\n{stderr}\n")
     parsed = providers_mod.parse_result(stdout, resolved.provider)
     raw = parsed.get("raw") or {}
+    # Classified here, where the provider's own words are still in scope: the footer
+    # keeps numbers, and "429, Retry-After 900s" is not a number. `None` when the
+    # breaker is off and when the provider answered normally -- so a footer carrying a
+    # quota reading is, by itself, the fact that the desk was refused.
+    quota = providers_mod.classify(
+        {"exit_code": code, "is_error": bool(raw.get("is_error")) if raw else code != 0,
+         "raw": raw, "stop_reason": parsed["stop_reason"],
+         "result_text": parsed["result_text"], "stderr": stderr},
+        text=stdout) if breaker_on(desk) else providers_mod.Quota()
     # `n/a` is what a person reads; `null` is what the readings parse. `na_none` is the
     # one place the two meet, and neither of them is `0`.
     return {
@@ -133,6 +145,14 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         "effort": resolved.effort or None,
         "heavy": resolved.heavy,
         "schedule_override": resolved.schedule_label or None,
+        "fallback_from": resolved.fallback_from or None,
+        # Three readings, not two: the thinking was readable, it was there and sealed, or
+        # there was none. One desk's model billed thinking tokens against empty
+        # blocks, and nothing on the desk could tell that from a model that never thought.
+        "provider_reasoning": parsed.get("provider_reasoning", providers_mod.NA),
+        "thinking_tokens": providers_mod.na_none(parsed.get("thinking_tokens", providers_mod.NA)),
+        "quota": {"hit": True, "signal": quota.signal, "status": quota.status,
+                  "retry_after_s": quota.retry_after_s} if quota else None,
         "turns": providers_mod.na_none(parsed["turns"]),
         # The wall clock, not the CLI's own number: it covers the launch and the exit too.
         "duration_s": round(duration, 1),
@@ -239,6 +259,94 @@ def dead_bells(desk: Desk) -> list:
     return sorted(d.glob("*.bell")) if d.exists() else []
 
 
+# --------------------------------------------------------------------------
+# the provider circuit breaker
+# --------------------------------------------------------------------------
+# A provider answering 402, 429, "usage limit" or `Retry-After` is not this task's
+# problem: it is the desk's. On one desk all four lanes were on one vendor, and an
+# exhausted balance stopped everything while each lane met the wall on
+# its own and wrote its own dead task; nobody's state ever said "the desk is out of
+# credit". On another, repeated rate limits -- one of them asking for six
+# days -- were answered by trying again, and again, until a person intervened.
+#
+# So the first quota answer becomes four things at once: a stop-dispatch order, a bell
+# left pending rather than dead, a line on the card, and one line in the sentinel log.
+# The order is the switch every dispatch path already asks about, and only a person
+# lifts it.
+def breaker_on(desk: Desk) -> bool:
+    return bool(desk.cfg.get("quota_breaker", True))
+
+
+def _quota_of(footer: dict) -> "providers_mod.Quota":
+    """The reading `launch_worker` took, back as an object. Absent means not refused."""
+    data = footer.get("quota") or {}
+    return providers_mod.Quota(**data) if data else providers_mod.Quota()
+
+
+def quota_cooldown_s(desk: Desk, quota: "providers_mod.Quota") -> int:
+    """How long it is worth waiting: the provider's number when it gave a usable one."""
+    default = int(desk.cfg.get("quota_cooldown_s", 1800) or 1800)
+    if quota.retry_after_s is None or quota.long_wait:
+        return default
+    return quota.retry_after_s
+
+
+def quota_hold(desk: Desk) -> str:
+    """Why the watchdog must not start another worker right now, or ''.
+
+    Only a *quota* order holds the watchdog. A stop order a person wrote is about
+    dispatching new work, and a bell already rung is work that was already dispatched --
+    but a bell answered under an exhausted balance is one more refusal from the vendor
+    and one more dead task, every tick, for as long as the tick runs.
+    """
+    if not breaker_on(desk):
+        return ""
+    order = stop_mod.read_stop(desk)
+    if not stop_mod.is_quota_stop(order):
+        return ""
+    tail = f"; not worth lifting before {order['retry_after']}" if order.get("retry_after") else ""
+    return (f"{order['reason']} (stopped {order['stopped_at']}{tail}) — "
+            f"bells stay pending; `bellhop stop-dispatch lift` when the provider is answering again")
+
+
+def _quota_release(desk: Desk, bell: Path, packet: Packet, resolved, footer: dict,
+                   quota, started_marker: Path) -> dict:
+    """Undo the launch, stop dispatch, say so in four places, leave the bell pending.
+
+    The bell is not renamed and no receipt is written: nothing about this task was
+    decided. A dead task would have to be acknowledged in the ledger by a person, and
+    the task did not die -- the desk did.
+    """
+    lane_name = packet.lane
+    provider = resolved.provider
+    cooldown = quota_cooldown_s(desk, quota)
+    retry_at = ts(now() + timedelta(seconds=cooldown))
+    with desk_lock(desk):
+        _remove_inflight(desk, packet.stem)
+        if started_marker.exists():
+            started_marker.unlink()
+    order, written = stop_mod.quota_stop(desk, provider, lane_name, retry_after=retry_at)
+    wait = ("the provider asked for longer than a day — waiting it out is not a plan; your call"
+            if quota.long_wait else f"not worth lifting before {retry_at}")
+    line = (f"provider quota: {provider}/{lane_name} ({quota.signal or 'refused'}); "
+            f"{packet.id} left pending; {wait}")
+    try:
+        card_mod.refresh_card(
+            desk, ready="no", reason=f"{provider} refused: {quota.signal or 'quota'}"[:160],
+            next=f"lift the stop order when {provider} answers again ({wait})"[:160])
+    except BellhopError as exc:      # a card that cannot be written must not eat the order
+        _log(desk, f"RED\tcard not refreshed after the quota stop: {exc}")
+    from . import sentinel as sentinel_mod
+    sentinel_mod.log_event(desk, "RED", line)
+    _log(desk, f"QUOTA\t{packet.id}\t{lane_name}\t{line}"
+               + ("" if written else "  (a stop order already stood; left as it was)"))
+    footer.update({"bell": bell.name, "id": packet.id, "lane": packet.lane, "base": packet.base,
+                   "quota": True, "quota_signal": quota.signal, "dead": False, "pending": True,
+                   "stop_order": order["stopped_at"], "retry_after": retry_at,
+                   "finished_at": ts()})
+    return footer
+
+
 def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
     if not bell.exists():
         raise BellhopError(f"bell already claimed or completed: {bell.name}")
@@ -283,6 +391,28 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
             write_json(started_marker, {"bell": bell.name, "lane": packet.lane, "started_at": ts()})
         prompt = build_worker_prompt(desk, packet, lane, worktree)
         footer = launch_worker(desk, lane, packet, worktree, prompt, log_path, resolved=resolved)
+        # The provider's willingness to answer at all, read before anything is judged
+        # about the work: a 402 produces a receipt-less session that otherwise looks
+        # exactly like a worker that crashed, and gets written down as a dead task.
+        quota = _quota_of(footer)
+        extra_logs = []
+        if quota:
+            try:
+                switched = providers_mod.fallback_for(lane, resolved)
+            except providers_mod.ProviderRefusal as exc:
+                switched = None                       # a bad fallback is not a reason to lose the stop
+                _log(desk, f"RED\t{bell.name}: {exc}")
+            if switched is not None:
+                # Logged, on the card, and in the header as `model_asked` beside `model`:
+                # the fallback rule is "never silently", not "never".
+                _log(desk, switched.fallback_line(bell.name, quota.signal))
+                resolved = switched
+                fallback_log = log_path.with_name(log_path.stem + ".fallback.log")
+                footer = launch_worker(desk, lane, packet, worktree, prompt, fallback_log, resolved=resolved)
+                extra_logs = [fallback_log, fallback_log.with_suffix(".prompt.md")]
+                quota = _quota_of(footer)
+        if quota:
+            return _quota_release(desk, bell, packet, resolved, footer, quota, started_marker)
         head_after = git(worktree, "rev-parse", "HEAD")
         receipt = desk.receipts / f"{packet.stem}.md"
         wrote_receipt = receipt.exists()
@@ -329,7 +459,8 @@ def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
             if archive:
                 archive_mod.archive(
                     desk,
-                    [receipt, meta, rung, bell, desk.state / "in-flight.md", desk.state / "closings.md", log_path, log_path.with_suffix(".prompt.md")],
+                    [receipt, meta, rung, bell, desk.state / "in-flight.md", desk.state / "closings.md",
+                     log_path, log_path.with_suffix(".prompt.md"), *extra_logs],
                     f"receipt {packet.stem}" + (" (dead)" if dead else ""),
                 )
     return footer
@@ -354,6 +485,10 @@ def pending_bells(desk: Desk) -> list:
 
 
 def watch_once(desk: Desk, archive: bool = True) -> Optional[dict]:
+    held = quota_hold(desk)
+    if held:
+        _log(desk, f"HOLD\t{held}")
+        return None
     for bell in pending_bells(desk):
         data = json.loads(read(bell))
         if lane_is_busy(desk, data.get("lane", "")):
@@ -385,6 +520,7 @@ class WatchPool:
         self.limit = worker_limit(desk)
         self.executor = ThreadPoolExecutor(max_workers=self.limit, thread_name_prefix="bellhop-worker")
         self.active = {}  # Future -> (bell, lane)
+        self.held = ""    # the quota hold, logged on the tick it starts and not again
 
     def tick(self, dispatch: bool = True):
         for future, (bell, lane) in list(self.active.items()):
@@ -394,7 +530,8 @@ class WatchPool:
             try:
                 result = future.result()
                 clear_bell_failures(self.desk, bell)
-                _log(self.desk, f"{'DEAD' if result['dead'] else 'OK'}\t{result['id']}\t"
+                verdict = "QUOTA" if result.get("quota") else ("DEAD" if result["dead"] else "OK")
+                _log(self.desk, f"{verdict}\t{result['id']}\t"
                      f"{lane}\t{result['duration_s']}s\tcost={result.get('cost_usd')}")
             except Exception as exc:
                 count, parked = record_bell_failure(self.desk, bell, exc)
@@ -403,6 +540,17 @@ class WatchPool:
                 if parked:
                     _log(self.desk, f"RED\t{bell.name}: not answered again; see bells/dead/")
         if not dispatch:
+            return
+        # The breaker's hold, asked once per tick and logged once per order: a desk whose
+        # provider is refusing must not spend the next tick discovering that again.
+        held = quota_hold(self.desk)
+        if held != self.held:
+            self.held = held
+            if held:
+                _log(self.desk, f"HOLD\t{held}")
+            else:
+                _log(self.desk, "HOLD lifted; answering bells again")
+        if held:
             return
         lanes = {lane for _, lane in self.active.values()}
         for bell in pending_bells(self.desk):
@@ -425,6 +573,69 @@ class WatchPool:
         self.tick(dispatch=False)
 
 
+def _names(names) -> str:
+    return ",".join(sorted(names)) if names else "none"
+
+
+class LaneReload:
+    """Re-read the desk's lanes between ticks, so a new lane does not need a restart.
+
+    A lane added to `bellhop.json` while the resident watchdog was up was invisible until
+    somebody restarted the service. On one desk two packets sat pending for hours
+    for that reason, and the board showed them as waiting for a worker -- which they were,
+    for a worker in a lane the running process did not know existed.
+
+    The check is a `stat` per tick, not a parse: the file is read only when its mtime or
+    its size has moved. Only the lanes are taken from the new file. Everything else --
+    the worker limit, the thread pool, the intervals -- was fixed when the pool was built
+    and a mid-flight change to it would mean two answers inside one tick, so the log says
+    plainly that those still need a restart.
+    """
+
+    def __init__(self, desk: Desk):
+        self.desk = desk
+        self.path = desk.path(CONFIG_NAME)
+        self.stamp = self._stamp()
+
+    def _stamp(self):
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def tick(self) -> str:
+        """The line to log, or "" when nothing moved. Never raises: this runs in the loop."""
+        stamp = self._stamp()
+        if stamp is None or stamp == self.stamp:
+            return ""
+        self.stamp = stamp                      # a half-written file is not read twice
+        try:
+            cfg = read_json(self.path, None)
+        except (OSError, ValueError) as exc:
+            return f"lanes not reloaded: {CONFIG_NAME} unreadable ({exc}); keeping the lanes already loaded"
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("lanes"), dict):
+            return f"lanes not reloaded: {CONFIG_NAME} has no lanes table; keeping the lanes already loaded"
+        before = dict(self.desk.cfg.get("lanes") or {})
+        after = cfg["lanes"]
+        added = set(after) - set(before)
+        removed = set(before) - set(after)
+        changed = {n for n in set(before) & set(after) if before[n] != after[n]}
+        rest = {k: v for k, v in cfg.items() if k != "lanes"}
+        others = {k for k, v in rest.items() if self.desk.cfg.get(k) != v}
+        if not (added or removed or changed or others):
+            return ""
+        merged = dict(self.desk.cfg)
+        merged["lanes"] = after
+        self.desk.cfg = merged                  # one assignment; a tick sees one table
+        line = f"lanes reloaded: +{_names(added)} -{_names(removed)}"
+        if changed:
+            line += f" ~{_names(changed)}"
+        if others:
+            line += f" (unchanged here, restart to pick up: {_names(others)})"
+        return line
+
+
 def watch_loop(desk: Desk, interval: int = 5, archive: bool = True) -> None:
     global _stop
     _stop = False
@@ -432,9 +643,13 @@ def watch_loop(desk: Desk, interval: int = 5, archive: bool = True) -> None:
     signal.signal(signal.SIGINT, _handle_term)
     from . import daemon as daemon_mod
     pool = WatchPool(desk, archive)
+    reload = LaneReload(desk)
     try:
         while not _stop or pool.active:
             daemon_mod.touch_heartbeat(desk, "resident")
+            line = reload.tick()
+            if line:
+                _log(desk, f"RELOAD\t{line}")
             pool.tick(dispatch=not _stop)
             if not _stop or pool.active:
                 time.sleep(max(0.05, interval))

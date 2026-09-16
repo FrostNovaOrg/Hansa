@@ -15,7 +15,18 @@ NEW_FILE_MODE = 0o644
 
 
 class BellhopError(Exception):
-    """A user-facing error. The CLI prints the message and exits 1."""
+    """A user-facing error. The CLI prints the message and exits with `code`.
+
+    The default is `exits.USAGE`, because most of these say something is wrong with what
+    was asked for. A raiser that knows better says so -- `code=exits.NOT_FOUND` for a
+    task nobody dispatched, `code=exits.CONFIG` for a desk that is not configured -- and
+    the CLI carries that out. The table is `bellhop/exits.py` and nowhere else.
+    """
+
+    def __init__(self, *args, code: Optional[int] = None):
+        super().__init__(*args)
+        from .exits import USAGE
+        self.code = USAGE if code is None else int(code)
 
 
 def now() -> datetime:

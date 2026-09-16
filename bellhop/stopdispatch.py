@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from . import exits
 from . import state as state_mod
 from .config import Desk
 from .util import BellhopError, append, now, read, ts, write
@@ -31,6 +32,11 @@ from .util import BellhopError, append, now, read, ts, write
 STOP_FILE = "state/stop-dispatch.md"
 EXCEPTIONS_HEADING = "## Exceptions"
 PIERCED_AT = 2
+
+# The reason a provider circuit breaker writes. The prefix is load-bearing: the watchdog
+# reads it to tell "the desk is out of credit" from "a person stopped the desk", and only
+# the first of the two makes it hold before launching the next worker.
+QUOTA_PREFIX = "provider quota: "
 
 
 def stop_path(desk: Desk) -> Path:
@@ -69,6 +75,9 @@ def read_stop(desk: Desk) -> Optional[Dict[str, object]]:
         "stopped_at": keys.get("stopped_at", ""),
         "reason": keys.get("reason", ""),
         "by": keys.get("by", ""),
+        # Written by the circuit breaker: the earliest time it is worth lifting this
+        # order. Nothing acts on it. It is what the principal reads before deciding.
+        "retry_after": keys.get("retry_after", ""),
         "exceptions": exceptions,
         "path": p,
     }
@@ -98,7 +107,7 @@ def dispatch_allowed(desk: Desk) -> Tuple[bool, str]:
     )
 
 
-def _render(stopped_at: str, reason: str, by: str) -> str:
+def _render(stopped_at: str, reason: str, by: str, retry_after: str = "") -> str:
     return (
         "# Dispatch stopped\n"
         "(the presence of this file is the switch; `bellhop stop-dispatch` is its only writer."
@@ -107,7 +116,8 @@ def _render(stopped_at: str, reason: str, by: str) -> str:
         f"stopped_at: {stopped_at}\n"
         f"reason: {reason}\n"
         f"by: {by}\n"
-        "\n"
+        + (f"retry_after: {retry_after}\n" if retry_after else "")
+        + "\n"
         f"{EXCEPTIONS_HEADING}\n"
         "(one line per dispatch that went out anyway: `- <time> <reason>`."
         " Two of them mean the order is not being kept, and the sentinel says so on every run.)\n"
@@ -116,7 +126,7 @@ def _render(stopped_at: str, reason: str, by: str) -> str:
     )
 
 
-def set_stop(desk: Desk, reason: str, by: str = "coordinator") -> Dict[str, object]:
+def set_stop(desk: Desk, reason: str, by: str = "coordinator", retry_after: str = "") -> Dict[str, object]:
     reason = (reason or "").strip().replace("\n", " ")
     if not reason:
         raise BellhopError("--reason is empty; a stop order without a reason cannot be lifted by anyone else")
@@ -124,11 +134,34 @@ def set_stop(desk: Desk, reason: str, by: str = "coordinator") -> Dict[str, obje
     if existing is not None:
         raise BellhopError(
             f"dispatch is already stopped since {existing['stopped_at']} ({existing['reason']}); "
-            "lift it first, or record an exception"
+            "lift it first, or record an exception",
+            code=exits.GATE,
         )
     stamp = ts()
-    write(stop_path(desk), _render(stamp, reason, by))
-    return {"stopped_at": stamp, "reason": reason, "by": by, "exceptions": []}
+    write(stop_path(desk), _render(stamp, reason, by, retry_after))
+    return {"stopped_at": stamp, "reason": reason, "by": by, "retry_after": retry_after, "exceptions": []}
+
+
+def quota_stop(desk: Desk, provider: str, lane: str, retry_after: str = "",
+               by: str = "watchdog") -> Tuple[Dict[str, object], bool]:
+    """The circuit breaker's writer: stop dispatch because a provider said no. -> (order, written).
+
+    Not `set_stop` directly, for one reason: this is called from the closing path of a
+    worker that has already failed, and a second lane meeting the same wall a second
+    later must not turn a stop order into an exception in the watchdog log. An order
+    that already stands is left exactly as it is and reported as such -- the first
+    answer is the one that describes the desk, and re-dating it would lose when the
+    money actually ran out.
+    """
+    reason = f"{QUOTA_PREFIX}{provider}/{lane}"
+    existing = read_stop(desk)
+    if existing is not None:
+        return existing, False
+    return set_stop(desk, reason, by=by, retry_after=retry_after), True
+
+
+def is_quota_stop(order: Optional[Dict[str, object]]) -> bool:
+    return bool(order) and str(order.get("reason", "")).startswith(QUOTA_PREFIX)
 
 
 def add_exception(desk: Desk, reason: str) -> Dict[str, object]:
@@ -137,7 +170,8 @@ def add_exception(desk: Desk, reason: str) -> Dict[str, object]:
         raise BellhopError("--reason is empty; an exception without a reason is not an exception")
     order = read_stop(desk)
     if order is None:
-        raise BellhopError("dispatch is not stopped; there is nothing to make an exception to")
+        raise BellhopError("dispatch is not stopped; there is nothing to make an exception to",
+                           code=exits.NOT_FOUND)
     p = stop_path(desk)
     text = read(p)
     if "\n- none\n" in text:
@@ -151,7 +185,7 @@ def add_exception(desk: Desk, reason: str) -> Dict[str, object]:
 def lift(desk: Desk, note: str = "") -> Dict[str, object]:
     order = read_stop(desk)
     if order is None:
-        raise BellhopError("dispatch is not stopped; there is nothing to lift")
+        raise BellhopError("dispatch is not stopped; there is nothing to lift", code=exits.NOT_FOUND)
     started = _parse_ts(str(order["stopped_at"]))
     held = ""
     if started:
@@ -179,6 +213,10 @@ def status_text(desk: Desk) -> str:
     lines = [
         f"dispatch: STOPPED since {order['stopped_at']} (by {order['by'] or 'unknown'})",
         f"  reason: {order['reason']}",
+    ]
+    if order.get("retry_after"):
+        lines.append(f"  not worth lifting before: {order['retry_after']}")
+    lines += [
         f"  exceptions: {n}" + ("  <- the order is not being kept; ask the principal to lift it" if n >= PIERCED_AT else ""),
     ]
     lines.extend(f"    - {e}" for e in order["exceptions"])

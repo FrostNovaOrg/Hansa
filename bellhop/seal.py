@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .locking import serialized
-from .config import FRAMEWORK_ROOT, Desk
+from .config import COVERS_ALL, COVERS_PACKAGE, Desk, framework_root
 from .state import HOT_END, HOT_START
 from .util import BellhopError, sha256_bytes, sha256_file, ts, write
 
@@ -66,10 +67,11 @@ def manifest_path(desk: Desk) -> Path:
 
 
 def compute(desk: Desk) -> Dict[str, str]:
+    root = framework_root().path
     out: Dict[str, str] = {}
     for rel in SEALED_FRAMEWORK:
-        for p in _files(FRAMEWORK_ROOT, rel):
-            out["framework:" + str(p.relative_to(FRAMEWORK_ROOT))] = _digest(p)
+        for p in _files(root, rel):
+            out["framework:" + str(p.relative_to(root))] = _digest(p)
     for rel in SEALED_DESK:
         for p in _files(desk.root, rel):
             out["desk:" + str(p.relative_to(desk.root))] = _digest(p)
@@ -78,8 +80,13 @@ def compute(desk: Desk) -> Dict[str, str]:
 
 @serialized
 def seal(desk: Desk) -> Path:
+    root = framework_root()
     entries = compute(desk)
-    lines = [f"# sealed {ts()} framework={FRAMEWORK_ROOT}"] + [f"{h}  {name}" for name, h in sorted(entries.items())]
+    lines = [
+        f"# sealed {ts()} framework={root.path}",
+        f"# root: {root.kind} via {root.source}",
+        f"# covers: {root.covers}",
+    ] + [f"{h}  {name}" for name, h in sorted(entries.items())]
     p = manifest_path(desk)
     write(p, "\n".join(lines) + "\n")
     return p
@@ -90,24 +97,90 @@ VENDORED_PREFIXES = ("framework:bellhop/", "framework:bellhop_main.py", "framewo
 
 def running_from_vendored_copy() -> bool:
     """True when this code runs from a desk's `.bellhop/` copy rather than a full checkout."""
-    return (FRAMEWORK_ROOT / "VERSION").exists() and not (FRAMEWORK_ROOT / ".claude-plugin").exists()
+    return framework_root().covers == COVERS_PACKAGE
 
 
-def verify(desk: Desk) -> List[str]:
-    p = manifest_path(desk)
-    if not p.exists():
-        raise BellhopError("no seals manifest; run `bellhop seal`")
+def _in_scope(name: str, scope: str) -> bool:
+    if scope == COVERS_ALL or not name.startswith("framework:"):
+        return True
+    return name.startswith(VENDORED_PREFIXES)
+
+
+def _read_manifest(p: Path) -> Tuple[Dict[str, str], str, str]:
+    """(entries, covers, sealed_from). `covers` comes from the header, or from the names.
+
+    Manifests written before the header carried `covers` are read by looking at what is
+    in them, so an upgrade does not turn every desk red for one run.
+    """
     recorded: Dict[str, str] = {}
+    covers, sealed_from = "", ""
     for line in p.read_text(encoding="utf-8").splitlines():
-        if line.startswith("#") or not line.strip():
+        if line.startswith("#"):
+            m = re.match(r"#\s*covers:\s*(\S+)", line)
+            if m:
+                covers = m.group(1)
+            m = re.search(r"framework=(.+)$", line)
+            if m:
+                sealed_from = m.group(1).strip()
+            continue
+        if not line.strip():
             continue
         h, name = line.split("  ", 1)
         recorded[name] = h
+    if covers not in (COVERS_ALL, COVERS_PACKAGE):
+        framework = [n for n in recorded if n.startswith("framework:")]
+        covers = COVERS_PACKAGE if framework and all(n.startswith(VENDORED_PREFIXES) for n in framework) else COVERS_ALL
+    return recorded, covers, sealed_from
+
+
+class Report:
+    """What `verify` found, and what it was able to look at.
+
+    The scope is reported rather than assumed because it is the difference between
+    "nothing changed" and "nothing I could see changed", and a desk is checked from
+    more than one copy of the framework.
+    """
+
+    __slots__ = ("changed", "scope", "root", "sealed_from")
+
+    def __init__(self, changed: List[str], scope: str, root, sealed_from: str):
+        self.changed = changed
+        self.scope = scope
+        self.root = root
+        self.sealed_from = sealed_from
+
+    @property
+    def partial(self) -> bool:
+        return self.scope == COVERS_PACKAGE
+
+    def line(self) -> str:
+        where = f"framework: {self.root.line()}"
+        if self.partial:
+            where += "; the skills, hooks and plugin files are not in this copy and were not checked"
+        return where
+
+
+def verify_report(desk: Desk) -> Report:
+    """The seal check, with the scope it ran at.
+
+    Both sides are cut to the *narrower* of what the manifest covers and what this copy
+    of the framework has on disk. Without that, the same desk reads green from a full
+    checkout and red from the daemon's vendored copy -- every skill and hook file
+    "missing" -- which is how a real desk ended up with two answers and no explanation.
+    """
+    p = manifest_path(desk)
+    if not p.exists():
+        raise BellhopError("no seals manifest; run `bellhop seal`")
+    root = framework_root()
+    recorded, covers, sealed_from = _read_manifest(p)
     current = compute(desk)
-    if running_from_vendored_copy():
-        # The vendored copy carries only the package, the entry point, and the templates.
-        recorded = {n: h for n, h in recorded.items() if not n.startswith("framework:") or n.startswith(VENDORED_PREFIXES)}
-        current = {n: h for n, h in current.items() if not n.startswith("framework:") or n.startswith(VENDORED_PREFIXES)}
+    scope = COVERS_PACKAGE if COVERS_PACKAGE in (covers, root.covers) else COVERS_ALL
+    recorded = {n: h for n, h in recorded.items() if _in_scope(n, scope)}
+    current = {n: h for n, h in current.items() if _in_scope(n, scope)}
     changed = [n for n, h in current.items() if recorded.get(n) != h]
     changed += [n for n in recorded if n not in current]
-    return sorted(changed)
+    return Report(sorted(changed), scope, root, sealed_from)
+
+
+def verify(desk: Desk) -> List[str]:
+    return verify_report(desk).changed

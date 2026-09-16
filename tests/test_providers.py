@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bellhop import daemon as daemon_mod  # noqa: E402
+from bellhop import exits  # noqa: E402
 from bellhop import providers  # noqa: E402
 from bellhop import desk_ops, ring, watch  # noqa: E402
 from bellhop.config import LANE_DEFAULTS, Desk  # noqa: E402
@@ -423,6 +424,80 @@ class ProviderUnitTest(unittest.TestCase):
         finally:
             os.environ.pop("BELLHOP_TEST_SECRET")
 
+    # -- quota: classification ----------------------------------------------
+    def test_a_quota_answer_is_recognised_in_every_shape_a_vendor_uses(self):
+        cases = {
+            '{"error": {"status": 402, "message": "insufficient_balance"}}': "HTTP 402",
+            '{"error": {"type": "rate_limit_error"}, "http_status": 429}': "HTTP 429",
+            "the request failed: usage limit reached for this key": "usage limit",
+            '{"headers": {"retry-after": "900"}}': "Retry-After",
+        }
+        for body, expected in cases.items():
+            quota = providers.classify(body)
+            self.assertTrue(quota.hit, body)
+            self.assertIn(expected, quota.signal, body)
+
+    def test_an_ordinary_answer_is_not_a_quota_answer(self):
+        """The negative control: the breaker stops the whole desk, so it must be sure."""
+        for body in ('{"subtype": "success", "num_turns": 429, "total_cost_usd": 0.42}',
+                     "done: the retry logic now backs off", "", "{}"):
+            self.assertFalse(providers.classify(body).hit, body)
+
+    def test_a_session_that_finished_is_never_read_as_refused(self):
+        """A task *about* rate limits quotes 429 in its result. It still finished."""
+        footer = {"exit_code": 0, "is_error": False,
+                  "result_text": "handled the http 429 error path", "raw": {}}
+        self.assertFalse(providers.classify(footer).hit)
+        footer["exit_code"] = 1
+        self.assertTrue(providers.classify(footer).hit)
+
+    def test_retry_after_reads_seconds_and_dates_and_says_when_it_is_too_long(self):
+        self.assertEqual(providers.classify('{"retry-after": "120"}').retry_after_s, 120)
+        self.assertFalse(providers.classify('{"retry-after": "120"}').long_wait)
+        self.assertTrue(providers.classify('{"retry-after": "%d"}' % (6 * 24 * 3600)).long_wait)
+        dated = providers.classify('{"retry-after": "Wed, 21 Oct 2099 07:28:00 GMT"}')
+        self.assertTrue(dated.hit)
+        self.assertTrue(dated.long_wait)
+        # a value nobody can read is still a refusal, just without a number
+        unreadable = providers.classify('{"retry-after": "soon"}')
+        self.assertTrue(unreadable.hit)
+        self.assertIsNone(unreadable.retry_after_s)
+
+    def test_the_fallback_is_one_step_sideways_and_refuses_a_circle(self):
+        resolved = providers.Resolved("claude", "opus")
+        self.assertIsNone(providers.fallback_for(self.lane(), resolved))
+        switched = providers.fallback_for(self.lane(fallback_model="sonnet"), resolved)
+        self.assertEqual((switched.provider, switched.model), ("claude", "sonnet"))
+        self.assertEqual(switched.fallback_from, "claude/opus")
+        self.assertIn("switched once", switched.fallback_line("001.bell", "HTTP 429"))
+        # a fallback onto what just refused is not a fallback
+        self.assertIsNone(providers.fallback_for(self.lane(fallback_model="opus"), resolved))
+        with self.assertRaises(providers.ProviderRefusal):
+            providers.fallback_for(self.lane(fallback_provider="nobody", fallback_model=""), resolved)
+
+    # -- reasoning ----------------------------------------------------------
+    def test_hidden_thinking_is_a_third_reading_and_not_the_same_as_none(self):
+        empty = {"content": [{"type": "thinking", "thinking": "", "signature": "x"}],
+                 "usage": {"thinking_tokens": 1100}}
+        self.assertEqual(providers.reasoning_state(empty), providers.REASONING_HIDDEN)
+        self.assertEqual(providers.thinking_tokens(empty), 1100)
+        visible = {"content": [{"type": "thinking", "thinking": "let me check the base"}]}
+        self.assertEqual(providers.reasoning_state(visible), providers.REASONING_VISIBLE)
+        self.assertEqual(providers.reasoning_state({"content": [{"type": "text", "text": "hi"}]}),
+                         providers.NA)
+        self.assertIsNone(providers.thinking_tokens({"usage": {"output_tokens": 4}}))
+
+    def test_parse_result_carries_the_reasoning_reading(self):
+        line = json.dumps({"subtype": "success", "result": "done",
+                           "content": [{"type": "thinking", "thinking": ""}],
+                           "usage": {"reasoning_tokens": 77}})
+        parsed = providers.parse_result(line)
+        self.assertEqual(parsed["provider_reasoning"], providers.REASONING_HIDDEN)
+        self.assertEqual(parsed["thinking_tokens"], 77)
+        plain = providers.parse_result('{"subtype": "success", "result": "done"}')
+        self.assertEqual(plain["provider_reasoning"], providers.NA)
+        self.assertEqual(plain["thinking_tokens"], providers.NA)
+
     # -- provider check -----------------------------------------------------
     def test_check_reports_clean_and_flags_what_is_missing(self):
         write(self.tmp / "providers" / "lane.sb", "(version 1)\n")
@@ -494,7 +569,9 @@ class ProviderCliTest(unittest.TestCase):
         cfg["lanes"]["api"]["sandbox_profile"] = "providers/gone.sb"
         write_json(self.tmp / "bellhop.json", cfg)
         red = self.bellhop("provider", "check", "api")
-        self.assertEqual(red.returncode, 2)
+        # A lane naming a profile that is not on disk is a misconfigured desk, not a
+        # mistyped command line: 78 is EX_CONFIG. See docs/exit-codes.md.
+        self.assertEqual(red.returncode, exits.CONFIG)
         self.assertIn("🛑", red.stdout)
 
     def test_provider_check_heavy_line(self):
@@ -660,6 +737,121 @@ class ProviderWatchTest(unittest.TestCase):
         result = watch.watch_once(self.desk)
         self.assertFalse(result["heavy"])
         self.assertEqual(result["model_asked"], "opus")
+
+    # -- the circuit breaker ------------------------------------------------
+    def quota_mode(self, retry_after="120"):
+        """Make the stub worker answer the way a provider out of credit answers."""
+        os.environ["BELLHOP_STUB_MODE"] = "quota"
+        os.environ["BELLHOP_STUB_RETRY_AFTER"] = retry_after
+        self.desk.cfg["lanes"]["api"]["env_allow"] = ["BELLHOP_STUB_MODE", "BELLHOP_STUB_RETRY_AFTER"]
+        self.addCleanup(lambda: [os.environ.pop(k, None)
+                                 for k in ("BELLHOP_STUB_MODE", "BELLHOP_STUB_RETRY_AFTER")])
+
+    def test_a_quota_answer_stops_dispatch_and_leaves_the_bell_pending(self):
+        from bellhop import stopdispatch as stop_mod
+        self.quota_mode()
+        ring.ring(self.desk, self.packet("101"))
+        result = watch.watch_once(self.desk)
+        self.assertTrue(result["quota"], result)
+        # not dead: the task did not fail, the desk did
+        self.assertFalse(result["dead"])
+        self.assertEqual(len(list(self.desk.bells_pending.glob("*.bell"))), 1)
+        self.assertFalse((self.desk.receipts / "101.meta.json").exists())
+        self.assertFalse((self.desk.receipts / "101-note.md").exists())
+        self.assertNotIn("[worker] 101", read(self.desk.state / "in-flight.md"))
+        # the order, with the provider and lane in its reason
+        order = stop_mod.read_stop(self.desk)
+        self.assertIsNotNone(order)
+        self.assertEqual(order["reason"], "provider quota: claude/api")
+        self.assertTrue(order["retry_after"])
+        # the card says what happened and what to do about it
+        card = read(self.desk.state / "next.md")
+        self.assertIn("refused", card)
+        self.assertIn("lift the stop order", card)
+        # one line in the sentinel log, and one in the watchdog log
+        self.assertIn("provider quota", read(self.desk.path("state", "sentinel.log")))
+        self.assertIn("QUOTA", self.watchdog_log())
+        # and the watchdog holds instead of walking into the wall again
+        self.assertIsNone(watch.watch_once(self.desk))
+        self.assertIn("HOLD", self.watchdog_log())
+        self.assertEqual(len(list(self.desk.bells_pending.glob("*.bell"))), 1)
+
+    def test_lifting_the_order_lets_the_same_bell_run(self):
+        from bellhop import stopdispatch as stop_mod
+        self.quota_mode()
+        ring.ring(self.desk, self.packet("102"))
+        watch.watch_once(self.desk)
+        os.environ.pop("BELLHOP_STUB_MODE")          # the provider is answering again
+        stop_mod.lift(self.desk, note="test")
+        result = watch.watch_once(self.desk)
+        self.assertFalse(result["dead"], result)
+        self.assertFalse(result.get("quota"))
+        self.assertTrue((self.desk.receipts / "102.meta.json").exists())
+
+    def test_the_breaker_can_be_turned_off_and_then_a_quota_is_a_dead_task(self):
+        """The negative control: without the breaker every lane meets the wall alone."""
+        from bellhop import stopdispatch as stop_mod
+        self.quota_mode()
+        self.desk.cfg["quota_breaker"] = False
+        ring.ring(self.desk, self.packet("103"))
+        result = watch.watch_once(self.desk)
+        self.assertFalse(result.get("quota"))
+        self.assertTrue(result["dead"])
+        self.assertIsNone(stop_mod.read_stop(self.desk))
+        self.assertEqual(len(list(self.desk.bells_pending.glob("*.bell"))), 0)
+
+    def test_a_declared_fallback_is_taken_once_and_written_down_three_times(self):
+        self.quota_mode()
+        # the fallback lane runs the ordinary stub, so the switch succeeds
+        self.desk.cfg["lanes"]["api"]["fallback_model"] = "sonnet"
+        self.desk.cfg["lanes"]["api"]["worker_cmd"] = (
+            f"sh -c 'BELLHOP_STUB_MODE=$([ \"$BELLHOP_MODEL\" = sonnet ] && echo ok || echo quota) "
+            f"python3 {ROOT}/bellhop/stubworker.py'")
+        ring.ring(self.desk, self.packet("104"))
+        result = watch.watch_once(self.desk)
+        self.assertFalse(result["dead"], result)
+        self.assertFalse(result.get("quota"))
+        self.assertEqual(result["model_asked"], "sonnet")
+        self.assertEqual(result["fallback_from"], "claude/opus")
+        self.assertIn("switched once to claude/sonnet", self.watchdog_log())
+        meta = read_json(self.desk.receipts / "104.meta.json")
+        self.assertEqual(meta["fallback_from"], "claude/opus")
+        header = read(self.desk.receipts / "104-note.md")
+        self.assertIn("model_asked: sonnet", header)
+
+    def test_a_fallback_that_is_refused_too_stops_dispatch(self):
+        from bellhop import stopdispatch as stop_mod
+        self.quota_mode()
+        self.desk.cfg["lanes"]["api"]["fallback_model"] = "sonnet"
+        ring.ring(self.desk, self.packet("105"))
+        result = watch.watch_once(self.desk)
+        self.assertTrue(result["quota"])
+        self.assertEqual(result["model_asked"], "sonnet")
+        self.assertEqual(stop_mod.read_stop(self.desk)["reason"], "provider quota: claude/api")
+        self.assertIn("switched once", self.watchdog_log())
+
+    def test_a_long_retry_after_is_the_principals_call_not_a_wait(self):
+        from bellhop import stopdispatch as stop_mod
+        self.quota_mode(retry_after=str(6 * 24 * 3600))
+        ring.ring(self.desk, self.packet("106"))
+        watch.watch_once(self.desk)
+        self.assertIn("your call", read(self.desk.state / "next.md"))
+        # the cooldown falls back to the desk's own, and the order still stands
+        self.assertTrue(stop_mod.read_stop(self.desk)["retry_after"])
+        self.assertIn("longer than a day", read(self.desk.path("state", "sentinel.log")))
+
+    def test_hidden_reasoning_reaches_the_footer_and_the_header(self):
+        os.environ["BELLHOP_STUB_MODE"] = "thinking"
+        self.desk.cfg["lanes"]["api"]["env_allow"] = ["BELLHOP_STUB_MODE"]
+        self.addCleanup(lambda: os.environ.pop("BELLHOP_STUB_MODE", None))
+        ring.ring(self.desk, self.packet("107"))
+        result = watch.watch_once(self.desk)
+        self.assertFalse(result["dead"], result)
+        self.assertEqual(result["provider_reasoning"], "hidden")
+        self.assertEqual(result["thinking_tokens"], 4321)
+        header = read(self.desk.receipts / "107-note.md")
+        self.assertIn("provider_reasoning: hidden", header)
+        self.assertIn("thinking_tokens: 4321", header)
 
     def test_the_footer_keeps_null_apart_from_zero(self):
         """`readings` parses these as numbers; a `n/a` string there would break it."""

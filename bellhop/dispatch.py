@@ -48,15 +48,17 @@ from typing import List, Optional, Sequence, Tuple
 from . import criteria as criteria_mod
 from . import packet as packet_mod
 from . import ring as ring_mod
+from . import exits
 from . import state as state_mod
 from .locking import serialized
 from .config import Desk
 from .util import BellhopError, append, git, now, read, run, slugify, ts, write
 
-OK = 0
-REFUSED = 2
-BELL_TAKEN = 3
-PART_WAY = 4
+# The one table is bellhop/exits.py; these are its numbers under this command's names.
+OK = exits.OK
+REFUSED = exits.GATE          # a gate said no: the stop order, or a lane that is not clean
+BELL_TAKEN = exits.NOT_FOUND  # nothing to do: this packet has already been rung
+PART_WAY = exits.EXTERNAL     # some of the four steps ran and one of them failed
 
 # TODO: the `stopdispatch` module (its own branch) will own this file and expose
 # `dispatch_allowed(desk)`. Until it lands, the switch is checked here directly --
@@ -382,14 +384,18 @@ def dispatch(
 def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, continue_id,
               return_id, heavy, allow, exception, demo, commit, allow_unbreakable=False,
               kind="") -> None:
+    # Two flags that contradict each other are a typo, not a gate: argparse answers 2
+    # for the same pair at the command line, and one mistake must not have two codes.
     if continue_id and return_id:
         raise Stopped(STEP_PACKET,
                       "--continue and --return are opposites: continue picks up a packet that "
-                      "stopped without a receipt, return re-sends one whose receipt was refused")
+                      "stopped without a receipt, return re-sends one whose receipt was refused",
+                      code=exits.USAGE)
     if demo and exception:
         raise Stopped(STEP_STOP,
                       "--demo with --exception: a demo writes nothing, so there is nothing to "
-                      "except. Drop --exception to look, or drop --demo to dispatch")
+                      "except. Drop --exception to look, or drop --demo to dispatch",
+                      code=exits.USAGE)
 
     # -- the switch, before anything else -----------------------------------
     stop_file = stop_order(desk)

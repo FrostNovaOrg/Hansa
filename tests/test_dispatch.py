@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bellhop import cli  # noqa: E402
+from bellhop import cli, exits  # noqa: E402
 from bellhop import dispatch as dispatch_mod  # noqa: E402
 from bellhop import sentinel as sentinel_mod  # noqa: E402
 from bellhop import desk_ops, lanes, packet as packet_mod, state as state_mod  # noqa: E402
@@ -209,7 +209,7 @@ class DispatchTest(unittest.TestCase):
     def test_refuses_while_a_bell_is_pending_for_the_lane(self):
         self.dispatch()
         code, out = self.dispatch("Second thing")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("a bell is still pending for packet 001", out)
         self.assertFalse((self.desk.inbox / "api" / "002-second-thing.md").exists())
         # control: once it is answered, the same command goes through
@@ -221,7 +221,7 @@ class DispatchTest(unittest.TestCase):
         wt = self.lane_worktree()
         write(wt / "half-finished.txt", "someone was in the middle of this\n")
         code, out = self.dispatch()
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("uncommitted path(s)", out)
         self.assertFalse(any(self.desk.inbox.rglob("*.md")))
         # control: a clean worktree is not a blocker
@@ -235,7 +235,7 @@ class DispatchTest(unittest.TestCase):
         git(wt, "add", "-A")
         git(wt, "commit", "-q", "-m", "lane work")
         code, out = self.dispatch()
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("commit(s) not on main", out)
         # control: merge it and the lane is free again
         git(self.repo, "merge", "-q", "--no-edit", "lane/api")
@@ -245,7 +245,7 @@ class DispatchTest(unittest.TestCase):
     def test_unknown_lane_is_refused_before_anything_is_written(self):
         code, out = self.run_cli("dispatch", "--lane", "nope", "--title", "x",
                                  "--body", str(self.body))
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("unknown lane", out)
         self.assertFalse(any(self.desk.inbox.rglob("*.md")))
 
@@ -271,14 +271,14 @@ class DispatchTest(unittest.TestCase):
         self.dispatch()
         write(self.desk.receipts / "001-add-health-check-note.md", "# receipt\n")
         code, out = self.dispatch("Continue 001", self.body, "--continue", "001")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("it did not die", out)
         self.assertIn("--return 001", out)
 
     def test_return_refuses_a_task_that_never_reported(self):
         self.dispatch()
         code, out = self.dispatch("Return 001", self.body, "--return", "001")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("no receipt", out)
         # control: with a receipt on the desk the same command goes through
         write(self.desk.receipts / "001-add-health-check-note.md", "# receipt\n")
@@ -295,10 +295,10 @@ class DispatchTest(unittest.TestCase):
         # argparse refuses the pair at the CLI; the module refuses it too, because a
         # caller that reached past the parser would otherwise get one of them silently.
         code, out = self.dispatch("x", self.body, "--continue", "001", "--return", "001")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, exits.USAGE)          # argparse: the pair is mutually exclusive
         report = dispatch_mod.dispatch(self.desk, "api", "x", self.body,
                                        continue_id="001", return_id="001")
-        self.assertEqual(report.code, 2)
+        self.assertEqual(report.code, exits.USAGE)   # the module: same answer past the parser
         self.assertIn("opposites", report.last)
 
     def test_only_the_named_headings_are_carried(self):
@@ -358,16 +358,16 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(read(original), before)
         changed = self.body_file(BODY.replace("note.md", "different.md"), "changed.md")
         code, out = self.dispatch("Changed criteria", changed, "--return", "001")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("keep the original acceptance", out)
         write(original, before + "\nAnother requirement.\n")
         code, out = self.dispatch("Changed packet", returned, "--return", "001")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("return packet provenance", out)
 
     def test_continue_needs_a_packet_that_exists(self):
         code, out = self.dispatch("x", self.body, "--continue", "042")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("0 packet(s) match id 042", out)
 
     # -- the forbidden-command gate ----------------------------------------
@@ -375,7 +375,7 @@ class DispatchTest(unittest.TestCase):
     def test_forbidden_command_in_the_body_is_refused(self):
         bad = self.body_file(BODY.replace("Keep the checks green.", "Then run build.sh to publish."))
         code, out = self.dispatch("Bad thing", bad)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("build.sh", out)
         self.assertFalse(any(self.desk.inbox.rglob("*.md")))
         # control: the same body without that line dispatches
@@ -393,11 +393,11 @@ class DispatchTest(unittest.TestCase):
         # control: the next packet is gated again
         self.clear_bells()
         code, out = self.dispatch("Second bad thing", bad)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
 
     def test_allow_refuses_a_pattern_nobody_configured(self):
         code, out = self.dispatch("x", self.body, "--allow", "rm -rf")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("names no configured pattern", out)
 
     def test_forbidden_patterns_are_configurable(self):
@@ -410,7 +410,7 @@ class DispatchTest(unittest.TestCase):
         self.clear_bells()
         code, out = self.dispatch("Uses ship it",
                                   self.body_file(BODY + "\nRun ship-it.sh at the end.\n", "s.md"))
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("ship-it.sh", out)
 
     # -- the body's own shape ---------------------------------------------
@@ -418,7 +418,7 @@ class DispatchTest(unittest.TestCase):
     def test_body_may_not_carry_its_own_front_matter(self):
         bad = self.body_file("---\nid: 999\nlane: api\n---\n" + BODY)
         code, out = self.dispatch("Pasted packet", bad)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("front matter", out)
         self.assertFalse(any(self.desk.inbox.rglob("*.md")))
         code, out = self.dispatch("Plain body")     # control
@@ -427,7 +427,7 @@ class DispatchTest(unittest.TestCase):
     def test_body_without_acceptance_items_is_refused(self):
         bad = self.body_file("## What to do\n\nSomething, somehow.\n")
         code, out = self.dispatch("No checks", bad)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("Acceptance", out)
         # control: an Acceptance heading with bullets lifts them into the front matter
         good = self.body_file("## What to do\n\nSomething.\n\n## Acceptance\n\n"
@@ -439,7 +439,7 @@ class DispatchTest(unittest.TestCase):
 
     def test_empty_body_is_refused(self):
         code, out = self.dispatch("Nothing", self.body_file("   \n"))
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("empty", out)
 
     def test_oversized_body_warns_but_still_dispatches(self):
@@ -462,7 +462,7 @@ class DispatchTest(unittest.TestCase):
     def test_stop_order_refuses_dispatch(self):
         stop = self.stop_order()
         code, out = self.dispatch()
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertIn("dispatch is stopped", out)
         self.assertIn("--exception", out)
         self.assertFalse(any(self.desk.inbox.rglob("*.md")))
@@ -492,7 +492,7 @@ class DispatchTest(unittest.TestCase):
         stop = self.stop_order()
         code, out = self.dispatch("Blocked", self.body_file("## What to do\n\nno checks here\n"),
                                   "--exception", "urgent")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, dispatch_mod.REFUSED)
         self.assertEqual(dispatch_mod.exception_count(stop), 0)
 
     def test_demo_under_a_stop_order_looks_but_excepts_nothing(self):
@@ -502,7 +502,7 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("stop-dispatch order in force", out)
         self.assertEqual(dispatch_mod.exception_count(stop), 0)
         code, out = self.dispatch("Contradiction", self.body, "--demo", "--exception", "why")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, exits.USAGE)          # two flags that contradict: a typo, not a gate
         self.assertIn("nothing to except", out)
 
     # -- demo ---------------------------------------------------------------

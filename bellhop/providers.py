@@ -198,6 +198,8 @@ class Resolved:
     heavy: bool = False
     schedule_label: str = ""
     notes: List[str] = field(default_factory=list)
+    #: `<provider>/<model>` this launch was switched away from, after a quota answer.
+    fallback_from: str = ""
 
     @property
     def overridden(self) -> bool:
@@ -205,6 +207,10 @@ class Resolved:
 
     def override_line(self, bell: str) -> str:
         return f"⏰ {bell}: schedule override → {self.provider}/{self.model}"
+
+    def fallback_line(self, bell: str, signal: str = "") -> str:
+        return (f"↩ {bell}: {self.fallback_from} answered with {signal or 'a quota refusal'}; "
+                f"switched once to {self.provider}/{self.model}")
 
     def summary(self) -> str:
         return f"{self.provider}/{self.model}" + (f" (effort {self.effort})" if self.effort else "")
@@ -485,7 +491,8 @@ def parse_result(text: str, provider: Optional[str] = None) -> dict:
     that ran fine into a stack trace in the watchdog log and a receipt with no footer.
     """
     out = {"model": NA, "turns": NA, "cost_usd": NA, "duration_s": NA,
-           "stop_reason": NA, "result_text": "", "raw": {}}
+           "stop_reason": NA, "result_text": "", "raw": {},
+           "provider_reasoning": NA, "thinking_tokens": NA}
     try:
         text = text if isinstance(text, str) else ""
         obj = _last_json_object(text)
@@ -493,6 +500,9 @@ def parse_result(text: str, provider: Optional[str] = None) -> dict:
             out["result_text"] = text.strip()
             return out
         out["raw"] = obj
+        out["provider_reasoning"] = reasoning_state(obj)
+        tokens = thinking_tokens(obj)
+        out["thinking_tokens"] = NA if tokens is None else tokens
         usage = obj.get("modelUsage") if isinstance(obj.get("modelUsage"), dict) else {}
         model = obj.get("model") or (",".join(str(k) for k in usage) if usage else "")
         out["model"] = str(model) if model else NA
@@ -524,6 +534,235 @@ def parse_result(text: str, provider: Optional[str] = None) -> dict:
 def na_none(value):
     """`n/a` -> None, for the JSON files the readings parse as numbers."""
     return None if value == NA else value
+
+
+# ---------------------------------------------------------------------------
+# Reasoning: was there thinking, and could anyone read it?
+# ---------------------------------------------------------------------------
+REASONING_VISIBLE = "visible"
+REASONING_HIDDEN = "hidden"
+
+#: Keys a vendor has used for the count of tokens billed as reasoning.
+THINKING_TOKEN_KEYS = ("thinking_tokens", "reasoning_tokens", "reasoning_output_tokens",
+                       "thinking_output_tokens")
+
+_THINKING_TYPES = ("thinking", "redacted_thinking", "reasoning")
+
+
+def _walk(obj, depth: int = 0):
+    """Every dict inside a result object, down to a bounded depth."""
+    if depth > 6:
+        return
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk(v, depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _walk(v, depth + 1)
+
+
+def thinking_blocks(obj) -> List[dict]:
+    return [d for d in _walk(obj) if str(d.get("type") or "") in _THINKING_TYPES]
+
+
+def reasoning_state(obj) -> str:
+    """`visible`, `hidden`, or `n/a` — three readings, and `hidden` is not `n/a`.
+
+    One desk's model returned thinking blocks with an empty `thinking` field and an
+    encrypted signature, and billed thinking tokens against them. Nothing on the
+    desk could tell that run from one that did no thinking at all: both left a result
+    with no reasoning text in it. `hidden` says the blocks were there and unreadable,
+    which is the reading that explains the bill.
+    """
+    blocks = thinking_blocks(obj)
+    if not blocks:
+        return NA
+    for b in blocks:
+        for key in ("thinking", "text", "reasoning", "content"):
+            value = b.get(key)
+            if isinstance(value, str) and value.strip():
+                return REASONING_VISIBLE
+    return REASONING_HIDDEN
+
+
+def thinking_tokens(obj) -> Optional[int]:
+    """Tokens billed as reasoning, from wherever the vendor put the number."""
+    for d in _walk(obj):
+        for key in THINKING_TOKEN_KEYS:
+            value = d.get(key)
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                return int(value)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Quota: the one failure that used to be nobody's state
+# ---------------------------------------------------------------------------
+# Desk A ran four lanes on one vendor. A balance-exhausted 402 stopped the whole desk
+# for 55 minutes and left two dead tasks, and no stop-dispatch order was ever written:
+# a provider saying "not you, not now" was a per-task error, so every lane met it
+# separately and nobody's state said the desk was out of credit. Desk B, reaching a
+# second vendor through a relay, took repeated `429`s with `Retry-After`
+# values up to six days, and the coordinator kept walking into the wall until a person
+# stopped it.
+#
+# A quota answer is a *desk* fact, not a task fact. It is classified here, in the one
+# module that reads what a worker printed, and acted on in `watch.py`.
+QUOTA_STATUSES = (402, 429)
+
+#: Words a vendor uses for the same thing, matched case-insensitively.
+QUOTA_WORDS = (
+    "usage_limit", "usage limit", "insufficient_balance", "insufficient balance",
+    "quota_exceeded", "quota exceeded", "out of credit", "credit balance",
+    "rate_limit_error", "rate limit exceeded", "too many requests", "payment required",
+    "billing_hard_limit", "over capacity",
+)
+
+_STATUS_RE = re.compile(
+    r"(?:status(?:_code)?|http|code|error)\D{0,16}(402|429)\b|\b(402|429)\b\s*(?:error|status)", re.I)
+# The value runs to the closing quote or brace, commas included: `Retry-After` may be a
+# number of seconds or an HTTP date, and an HTTP date has a comma in it.
+_RETRY_AFTER_RE = re.compile(r"retry[-_ ]?after[\"']?\s*[:=]\s*[\"']?\s*([^\"'}\n]+)", re.I)
+
+# A retry window longer than this is not something a desk waits out; the order stands
+# and the principal decides. Desk B was handed six days.
+LONG_RETRY_S = 24 * 3600
+
+
+@dataclass
+class Quota:
+    """What a worker's answer said about the provider's willingness to answer at all."""
+
+    hit: bool = False
+    signal: str = ""                      # what was seen, in words, for the log line
+    status: Optional[int] = None
+    retry_after_s: Optional[int] = None
+
+    def __bool__(self) -> bool:
+        return self.hit
+
+    @property
+    def long_wait(self) -> bool:
+        return self.retry_after_s is not None and self.retry_after_s > LONG_RETRY_S
+
+
+def _retry_seconds(raw: str) -> Optional[int]:
+    """`Retry-After` as seconds: a number of seconds, or an HTTP/ISO date."""
+    text = str(raw or "").strip().strip('"\'').rstrip(",").strip()
+    if not text:
+        return None
+    try:
+        return max(0, int(float(text)))
+    except ValueError:
+        pass
+    when = None
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        when = None
+    if when is None:
+        try:
+            when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    try:
+        base = now().astimezone(when.tzinfo) if when.tzinfo else now().replace(tzinfo=None)
+        return max(0, int((when - base).total_seconds()))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def searchable(result) -> str:
+    """Everything a worker's answer said, as one bounded string."""
+    parts: List[str] = []
+    if isinstance(result, dict):
+        for key in ("stop_reason", "result_text", "stderr", "error", "message"):
+            value = result.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        raw = result.get("raw") if isinstance(result.get("raw"), dict) else None
+        for obj in (raw, result):
+            if obj is None:
+                continue
+            try:
+                parts.append(json.dumps(obj, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                pass
+    elif isinstance(result, str):
+        parts.append(result)
+    return "\n".join(parts)[:40000]
+
+
+def classify(result, text: str = "") -> Quota:
+    """Is this answer the provider refusing to answer? -> `Quota`. **Never raises.**
+
+    Runs on the closing path beside `parse_result`, and for the same reason: a traceback
+    here would turn a provider refusal into a stack trace in the watchdog log, which is
+    exactly the silence the breaker exists to end.
+    """
+    q = Quota()
+    try:
+        if isinstance(result, dict) and "exit_code" in result:
+            # A session that ran to the end was not refused, whatever its transcript
+            # happens to quote. Without this, a task *about* rate limiting, whose result
+            # text says "429", would stop the desk -- and a breaker that fires on the
+            # word rather than on the refusal is worse than no breaker.
+            if not result.get("is_error") and result.get("exit_code") in (0, None):
+                return q
+        body = "\n".join(p for p in (searchable(result), text or "") if p)
+        if not body:
+            return q
+        signals: List[str] = []
+        m = _STATUS_RE.search(body)
+        if m:
+            q.status = int(m.group(1) or m.group(2))
+            signals.append(f"HTTP {q.status}")
+        for word in QUOTA_WORDS:
+            if word in body.lower():
+                signals.append(word)
+                break
+        m = _RETRY_AFTER_RE.search(body)
+        if m:
+            q.retry_after_s = _retry_seconds(m.group(1))
+            signals.append("Retry-After" + (f" {q.retry_after_s}s" if q.retry_after_s is not None else ""))
+        q.hit = bool(signals)
+        q.signal = ", ".join(signals)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return Quota()
+    return q
+
+
+def fallback_for(lane: dict, resolved: Resolved) -> Optional[Resolved]:
+    """The lane's one declared step sideways, or None.
+
+    The rule "never silently fall back" is kept because this switch is never silent: it
+    is logged, it reaches the card, and the receipt header carries `model_asked` beside
+    the model that actually answered. A fallback nobody can see afterwards is the thing
+    that rule forbids; this one is written down three times.
+    """
+    provider = str(lane.get("fallback_provider") or "").strip()
+    model = str(lane.get("fallback_model") or "").strip()
+    if not provider and not model:
+        return None
+    switched = Resolved(
+        provider=provider or resolved.provider,
+        model=model or resolved.model,
+        effort=resolved.effort,
+        heavy=resolved.heavy,
+        schedule_label=resolved.schedule_label,
+        fallback_from=f"{resolved.provider}/{resolved.model}",
+    )
+    if (switched.provider, switched.model) == (resolved.provider, resolved.model):
+        return None  # a fallback onto the thing that just refused is not a fallback
+    if switched.provider not in REGISTRY:
+        raise ProviderRefusal(
+            f"lane {lane.get('name')}: fallback_provider {switched.provider!r} is not registered "
+            f"(registered: {', '.join(sorted(REGISTRY))})")
+    return switched
 
 
 # ---------------------------------------------------------------------------

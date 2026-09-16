@@ -27,6 +27,7 @@ from bellhop import board as board_mod  # noqa: E402
 from bellhop import hand as hand_mod  # noqa: E402
 from bellhop import intake as intake_mod  # noqa: E402
 from bellhop import state as state_mod  # noqa: E402
+from bellhop import exits  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import BellhopError, read, write  # noqa: E402
 
@@ -261,7 +262,7 @@ class IntakeTest(DeskCase):
         shown = self.cli("intake", "show", "1")
         self.assertIn("first message", shown.stdout)
         missing = self.cli("intake", "show", "9")
-        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.returncode, exits.NOT_FOUND)
         self.assertIn("no intake 9", missing.stderr)
 
 

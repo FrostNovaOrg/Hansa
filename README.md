@@ -266,6 +266,7 @@ is the specification.
 | Dispatch, acceptance and closing contracts | [Dispatch](docs/dispatch.md) · [Acceptance](docs/acceptance.md) · [Close-task](docs/close-task.md) |
 | State, parallelism and recovery | [State writer](docs/state.md) · [Concurrency](docs/concurrency.md) · [Sentinel](docs/sentinel.md) |
 | Installation and execution settings | [Plugin](docs/plugin.md) · [Claude Code](docs/claude-code.md) · [Provider seam](docs/providers.md) |
+| What a command's exit code means | [Exit codes](docs/exit-codes.md) |
 | Costs and historical evidence | [Metrics](docs/metrics.md) |
 | Permissions and boundaries | [Security model](docs/security.md) |
 | Upgrading a desk that is already running | [Upgrading](docs/upgrading.md) |

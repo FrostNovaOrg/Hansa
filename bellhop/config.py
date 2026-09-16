@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .transcripts import PRICE_DEFAULTS
+from . import exits
 from .util import BellhopError, read_json
 
 CONFIG_NAME = "bellhop.json"
@@ -141,6 +142,17 @@ DESK_DEFAULTS = {
     # a profile anyway is a refusal, not a launch: a worker that ran unsandboxed because
     # the wrapper was blank leaves the same receipt as one that ran sandboxed.
     "sandbox_wrapper": "",
+    # -- the provider circuit breaker (see docs/providers.md) --------------
+    # A provider that answers "not you, not now" -- HTTP 402 or 429, a usage limit, an
+    # exhausted balance, a `Retry-After` -- is a fact about the desk, not about the task.
+    # With the breaker on, the first such answer writes a stop-dispatch order, leaves the
+    # bell pending rather than dead, and says so on the card. Off, every lane meets that
+    # wall separately and nobody's state says the desk is out of credit.
+    "quota_breaker": True,
+    # The earliest time it is worth lifting that order, in seconds. A `Retry-After`
+    # shorter than 24h replaces it; one longer than that is not a wait anyone sits
+    # through, so the card asks the principal. Nothing lifts the order but a person.
+    "quota_cooldown_s": 1800,
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,
     "session_watchdog_interval": 5,
@@ -294,6 +306,13 @@ LANE_DEFAULTS = {
     "allowlist_file": "",
     # A sandbox profile for this lane, applied through the desk's `sandbox_wrapper`.
     "sandbox_profile": "",
+    # Where this lane goes, once, when its provider answers with a quota refusal. Either
+    # key may stand alone: `fallback_model` on its own keeps the provider. The switch is
+    # never silent -- it is logged, it reaches the card, and the receipt header carries
+    # `model_asked` beside the model that answered. Declare neither and a quota answer
+    # stops dispatch instead.
+    "fallback_provider": "",
+    "fallback_model": "",
     # Time windows that move this lane to another provider or model, judged against the
     # time the worker starts -- not the time the packet was dispatched. Each entry:
     # {"name": "...", "days": "mon-fri", "from": "14:00", "to": "18:00",
@@ -302,7 +321,111 @@ LANE_DEFAULTS = {
     "schedule": [],
 }
 
-FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent
+# -- where the framework lives -------------------------------------------------
+#
+# Three entry points reach this package: `bin/bellhop` in a checkout, the plugin's
+# `${CLAUDE_PLUGIN_ROOT}/bellhop_main.py` for MCP and hooks, and the copy the daemon
+# vendors into `<desk>/.bellhop/`. Each one used to work the root out for itself from
+# `__file__`, and nothing wrote down which one it had picked. On a production desk that
+# meant `bellhop seal --verify` answered "seals hold" from the hook and named four
+# changed files from the shell, against the same desk in the same minute, and the only
+# way to see why was to read the code. One resolver now answers the question, every
+# caller asks it, and the answer says out loud where it came from.
+
+ENV_FRAMEWORK = "BELLHOP_FRAMEWORK"
+PLUGIN_ENV = "CLAUDE_PLUGIN_ROOT"
+
+CHECKOUT, VENDORED = "checkout", "vendored"
+COVERS_ALL, COVERS_PACKAGE = "all", "package"
+
+
+class FrameworkRoot:
+    """Which copy of the framework is running, and how that was decided.
+
+    `kind` is the fact that matters to the seal: a checkout carries the skills, the
+    hooks and the plugin manifest; a vendored copy carries the package, the entry
+    point and the templates and nothing else. `covers` is that fact said in the seal's
+    own words, so a manifest can record what it was able to see.
+    """
+
+    __slots__ = ("path", "kind", "source", "note")
+
+    def __init__(self, path: Path, kind: str, source: str, note: str = ""):
+        self.path = path
+        self.kind = kind
+        self.source = source
+        self.note = note
+
+    @property
+    def covers(self) -> str:
+        return COVERS_PACKAGE if self.kind == VENDORED else COVERS_ALL
+
+    def __fspath__(self) -> str:                      # usable wherever a path is
+        return str(self.path)
+
+    def __str__(self) -> str:
+        return str(self.path)
+
+    def line(self) -> str:
+        """One line for `bellhop sentinel` and the seal manifest."""
+        text = f"{self.kind} at {self.path} (via {self.source}, covers {self.covers})"
+        return text + f" — {self.note}" if self.note else text
+
+
+def _kind_of(p: Path) -> str:
+    """A checkout has the plugin manifest; a vendored copy has a VERSION and no manifest."""
+    if (p / ".claude-plugin").exists():
+        return CHECKOUT
+    return VENDORED if (p / "VERSION").exists() else CHECKOUT
+
+
+def resolve_framework_root(env: Optional[dict] = None) -> FrameworkRoot:
+    """The one resolver. Order: an explicit override, then the code that is running.
+
+    `CLAUDE_PLUGIN_ROOT` deliberately does not win: hashing a directory other than the
+    one whose code is executing would make the seal a claim about files nobody ran. When
+    the two disagree the disagreement is carried as a note rather than resolved quietly,
+    because a plugin pointing at one checkout while `bellhop` on PATH is another is worth
+    a person's attention and is invisible otherwise.
+    """
+    env = os.environ if env is None else env
+    running = Path(__file__).resolve().parent.parent
+    chosen, source = running, "package"
+    override = (env.get(ENV_FRAMEWORK) or "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if (p / "bellhop" / "cli.py").exists():
+            chosen, source = p.resolve(), ENV_FRAMEWORK
+        else:
+            raise BellhopError(
+                f"{ENV_FRAMEWORK}={override} does not hold a bellhop package "
+                "(no bellhop/cli.py under it)",
+                code=exits.CONFIG,
+            )
+    note = ""
+    plugin = (env.get(PLUGIN_ENV) or "").strip()
+    if plugin:
+        try:
+            same = Path(plugin).expanduser().resolve() == chosen
+        except OSError:
+            same = False
+        if not same:
+            note = f"{PLUGIN_ENV} names {plugin}, which is not the code that is running"
+    return FrameworkRoot(chosen, _kind_of(chosen), source, note)
+
+
+_ROOT: Optional[FrameworkRoot] = None
+
+
+def framework_root() -> FrameworkRoot:
+    """Resolved once per process: two callers in one run must not get two answers."""
+    global _ROOT
+    if _ROOT is None:
+        _ROOT = resolve_framework_root()
+    return _ROOT
+
+
+FRAMEWORK_ROOT = framework_root().path
 
 
 class Desk:
@@ -403,5 +526,6 @@ def find_desk(start: Optional[Path] = None) -> Desk:
         if cfg.exists():
             return Desk(c, read_json(cfg, {}))
     raise BellhopError(
-        f"no {CONFIG_NAME} found here or above; run `bellhop init <dir>` or set BELLHOP_DESK"
+        f"no {CONFIG_NAME} found here or above; run `bellhop init <dir>` or set BELLHOP_DESK",
+        code=exits.CONFIG,
     )

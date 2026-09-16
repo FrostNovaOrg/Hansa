@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 from bellhop import daemon as daemon_mod  # noqa: E402
 from bellhop import sentinel as sentinel_mod  # noqa: E402
 from bellhop import stopdispatch as stop_mod  # noqa: E402
+from bellhop import exits  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import BellhopError, now, read, read_json, ts, write  # noqa: E402
 
@@ -415,9 +416,10 @@ class StopDispatchCliTest(SentinelCase):
         self.assertEqual(lift.returncode, 0, lift.stderr)
         self.assertEqual(self.cli("stop-dispatch", "status").returncode, 0)
 
-    def test_a_bad_lift_exits_non_zero_with_a_message(self):
+    def test_a_bad_lift_says_there_is_nothing_to_lift(self):
+        """No order standing is `not found` (3), not a red finding: see docs/exit-codes.md."""
         out = self.cli("stop-dispatch", "lift")
-        self.assertEqual(out.returncode, 1)
+        self.assertEqual(out.returncode, exits.NOT_FOUND)
         self.assertIn("not stopped", out.stderr)
 
 

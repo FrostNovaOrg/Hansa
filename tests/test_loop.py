@@ -298,24 +298,24 @@ class LoopTest(unittest.TestCase):
     def test_daily_close_scans_seals_once_and_reports_changes(self):
         card.refresh_card(self.desk, ready="no", reason="queue empty")
         seal.seal(self.desk)
-        with patch.object(seal, "verify", wraps=seal.verify) as verify:
+        with patch.object(seal, "verify_report", wraps=seal.verify_report) as scan:
             report = desk_ops.close(self.desk)
-        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(scan.call_count, 1)
         self.assertIn("Seals: all seals hold", report)
 
         rules = self.desk.path("rules", "core.md")
         write(rules, read(rules) + "\nUnexpected edit.\n")
-        with patch.object(seal, "verify", wraps=seal.verify) as verify:
+        with patch.object(seal, "verify_report", wraps=seal.verify_report) as scan:
             report = desk_ops.close(self.desk)
-        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(scan.call_count, 1)
         self.assertIn("Sentinel: RED", report)
         self.assertIn("Seals: 1 sealed file(s) changed: desk:rules/core.md", report)
         self.assertTrue(any("desk:rules/core.md" in read(p) for p in self.desk.ledger.rglob("*.md")))
 
         seal.manifest_path(self.desk).unlink()
-        with patch.object(seal, "verify", wraps=seal.verify) as verify:
+        with patch.object(seal, "verify_report", wraps=seal.verify_report) as scan:
             report = desk_ops.close(self.desk)
-        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(scan.call_count, 1)
         self.assertIn("no seals yet", report)
         self.assertIn("bellhop seal", report)
         self.assertNotIn("all seals hold", report)
