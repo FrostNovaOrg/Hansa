@@ -50,7 +50,10 @@ PACKET_FORBIDDEN_PATTERNS = (
 )
 
 DESK_DEFAULTS = {
-    "support": {"enabled": False},
+    # Optional desk-local add-ons, each a directory holding a `bellhop_ext.py`; see
+    # `bellhop/extensions.py`. Relative names resolve against the desk root. The core
+    # never names one: an extension imports Bellhop, never the other way round.
+    "extensions": [],
     "commit_prefix": "[desk]",
     "archive_roster": list(ARCHIVE_ROSTER),
     "push": False,

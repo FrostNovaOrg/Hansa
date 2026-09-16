@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import daemon as daemon_mod
+from . import extensions as extensions_mod
 from . import intake as intake_mod
 from . import state as state_mod
 from .config import Desk
@@ -205,22 +206,21 @@ def _bells_and_watchdog(desk: Desk, out: List[Row]) -> None:
         out.append(("S", "NOTE: bells are waiting and nothing is answering them; start /bellhop:daemon"))
 
 
-def _support(desk: Desk, out: List[Row]) -> None:
-    if not (desk.cfg.get('support') or {}).get('enabled'):
-        return
-    from .support import summary
-    data = summary(desk)
-    out.append(('H', '== coordinator support jobs =='))
-    out.append(('S', f"{data['running']} running; {len(data['unread'])} results awaiting coordinator review"))
-    for job in data['recent']:
-        if job['id'] in data['unread'] or job['status'] not in ('completed', 'failed', 'blocked', 'cancelled', 'interrupted'):
-            out.append(('S', f"{job['id']} {job['status']} {job['title']}"))
+def _extensions(desk: Desk, out: List[Row]) -> None:
+    """Rows from the desk's own extensions, if it has any (see `extensions.py`).
+
+    A desk-local queue nobody else runs still has to reach the page: work that is
+    only visible in its own tool is work the coordinator forgets it owns.
+    """
+    extra = extensions_mod.board_rows(desk)
+    if extra:
+        out.extend(extra)
 
 
 def rows(desk: Desk) -> List[Row]:
     """The whole page as tagged rows, each already cut to its row length."""
     out: List[Row] = []
-    for section in (_card, _inflight, _support, _own, _debts, _closings, _intake, _hot, _sentinel, _bells_and_watchdog):
+    for section in (_card, _inflight, _extensions, _own, _debts, _closings, _intake, _hot, _sentinel, _bells_and_watchdog):
         section(desk, out)
     return [(tag, _cut(text, ROW_CHARS[tag]) if tag in ROW_CHARS else text) for tag, text in out]
 

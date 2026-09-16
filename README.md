@@ -23,8 +23,6 @@ flowchart TB
     principal(["Principal<br/>Direction + decisions"])
     coordinator["Coordinator<br/>Claude Code · one per desk"]
     watchdog["Watchdog · script<br/>Bounded worker launches"]
-    support["Optional support worker · Claude Code<br/>Research · reports · maintenance copy"]
-    review["Coordinator review<br/>Full body · diff · scoped apply"]
 
     subgraph lanes["Parallel workers"]
         workerA["Worker A · Claude Code<br/>Fresh session · lane A"]
@@ -38,9 +36,6 @@ flowchart TB
     records[("Files + Git history<br/>Result recorded · board refreshed")]
 
     principal --> coordinator
-    coordinator -->|own-work request| support
-    support -->|complete result| review
-    review --> records
     coordinator -->|dispatch| watchdog
     watchdog --> workerA & workerB
     workerA & workerB -->|check · commit · receipt| settled
@@ -55,7 +50,7 @@ flowchart TB
     classDef record fill:#ecfdf5,stroke:#059669,color:#064e3b
     classDef held fill:#fffbeb,stroke:#d97706,color:#78350f
     class principal human
-    class coordinator,workerA,workerB,verifier,support,review agent
+    class coordinator,workerA,workerB,verifier agent
     class watchdog,settled,close script
     class records record
     class held held
@@ -85,12 +80,6 @@ flowchart LR
 the coordinator reads the board again when it resumes. Helpers (Claude Code
 subagents) support the coordinator's research, walkthroughs and drafts; they do not
 own worker tasks or replace their receipts.
-
-For substantial coordinator-owned reports and maintenance, optional
-[durable support jobs](docs/support-jobs.md) provide a separate worker, selected
-input snapshot, provider fallback and explicit review. Results stay on the board
-until reviewed. The coordinator approves maintenance changes through a fixed apply
-command; formal product tasks retain independent acceptance.
 
 - **Parallel work, serialized records.** The default is two concurrent workers,
   configurable with `max_parallel_workers`. Lane claims prevent overlap on one
@@ -215,6 +204,17 @@ handled while no Claude Code session is open. Keep these two jobs distinct:
 Installing a watchdog alone does not configure wake delivery. On upgrades, refresh
 any vendored resident copy as well as the plugin, at an idle boundary. See
 [concurrency and recovery](docs/concurrency.md) and [sentinel setup](docs/sentinel.md).
+
+### Optional: codex bridge
+
+Most desks should skip this. If your coordinator has to run through a proxy that
+routes Claude Code onto another vendor's subscription, the optional
+[codex bridge](contrib/codex-bridge/README.md) plugin covers that detour: durable
+helper jobs through the same proxy, a launcher for the coordinator's own session,
+and a check that asks the endpoint which model actually answers. It is a separate
+plugin (`claude --plugin-dir contrib/codex-bridge`) with its own configuration, and
+the core neither imports it nor knows it exists. Its results are helper output for
+the coordinator to read, never a task result.
 
 ## Operate the desk
 
