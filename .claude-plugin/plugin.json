@@ -1,7 +1,7 @@
 {
   "name": "bellhop",
   "description": "File-based, auditable operations for a team of Claude Code agents: task packets, bells, one fresh worker session per task, receipts with machine headers, acceptance on a disposable copy, a one-command close, an append-only ledger, a sentinel, and a resident watchdog.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "FrostNova"
   },
