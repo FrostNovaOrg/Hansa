@@ -148,6 +148,16 @@ class DispatchTest(unittest.TestCase):
         row = self.four_lines(out)[3]
         self.assertIn(row.lstrip("- "), self.inflight())
 
+    def test_the_tail_names_the_receipt_variable_and_refuses_an_empty_commit(self):
+        """The packet's receipt path is desk-relative; a worker reads it in its worktree."""
+        self.dispatch()
+        text = read(self.desk.inbox / "api" / "001-add-health-check-note.md")
+        self.assertIn("$BELLHOP_RECEIPT", text)
+        self.assertIn("relative to the desk", text)
+        self.assertIn("an empty commit is not a record of work", text)
+        self.assertIn("an empty commit is not a record of work",
+                      self.desk.template("worker-prompt.md"))
+
     def test_body_and_head_and_tail_are_three_parts(self):
         self.dispatch()
         text = read(self.desk.inbox / "api" / "001-add-health-check-note.md")

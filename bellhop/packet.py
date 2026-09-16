@@ -377,12 +377,18 @@ def build_packet_text(
                  "section, is what the coordinator wrote.")
 
     tail = ["## How to report (fixed)", "",
-            f"- Write the receipt to `{receipt}`, from `templates/receipt.md`.",
+            # `receipt` is desk-relative, and a worker reads it inside its own worktree,
+            # where that path is a different file -- or no file. The variable is the
+            # same receipt as an absolute path, and the launcher exports it.
+            f"- Write the receipt to `$BELLHOP_RECEIPT`: `{receipt}` **relative to the desk**, "
+            "not to your working tree. Use the shape in `$BELLHOP_DESK/templates/receipt.md`.",
             "- For each acceptance item above: the command you ran and the output it printed. "
             "A sentence with no command behind it is not a check.",
             "- Do not write the receipt's machine header yourself. `bellhop receipt-header` "
             "computes it by running the commands; a header that was typed is a header nobody ran.",
-            "- Commit on the lane branch in your own worktree. Do not push: the lane repository's "
+            "- Commit the task's changes on the lane branch in your own worktree. A task that "
+            "changed no product files makes no commit: an empty commit is not a record of work. "
+            "Do not push: the lane repository's "
             "`pre-push` hook refuses it, and the coordinator's merge is where a push belongs.",
             "- Stop and say so rather than working around a packet that contradicts itself, names "
             "a file that is not there, or asks for something you cannot check.",
