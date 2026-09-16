@@ -9,7 +9,9 @@ description: Write a packet body and dispatch it to a lane in one command. Use w
 
 1. **Write the body** to a scratch file: `## What to do`, `## Do not touch`, `## Acceptance`
    (one `- ` bullet per check a command can run). No front matter — the command writes it.
-   Use an existing relevant reading; ask `scout` for a brief when investigation is needed.
+   Use an existing relevant reading; if the change touches code you have not read this
+   session, ask the `scout` subagent for a brief. Do not read the repository yourself —
+   the packet carries what the worker needs.
    Keep criteria self-contained. An optional `## Required context` section carries necessary
    original source text and its provenance; it survives acceptance trimming. A link alone
    does not copy an external document. Do not create a context section when criteria suffice.

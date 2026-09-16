@@ -13,7 +13,7 @@ Read these desk files first, in this order:
 5. {{lane_rules}} (if it exists)
 6. The packet: {{packet}}
 
-Then inspect the relevant code and documents in your working tree. Known paths can be read directly; otherwise use the available native file search tools to narrow the scope. Use installed LSP navigation and diagnostics when useful; they do not replace the task's checks. Resolve relevant diagnostics and report unrelated findings without widening scope. The packet's Required context and acceptance items are the task's requirements, not local memory or historical notes. Record missing or conflicting evidence under Doubts. Update an existing affected document rather than creating a duplicate.
+Then inspect the code and documents in your working tree that the packet names. If the packet does not name it, do not read it. Known paths can be read directly; otherwise use the available native file search tools to narrow the scope to what the packet points at. Use installed LSP navigation and diagnostics when useful; they do not replace the task's checks. Resolve relevant diagnostics and report unrelated findings without widening scope. The packet's Required context and acceptance items are the task's requirements, not local memory or historical notes. Record missing or conflicting evidence under Doubts. Update an existing affected document rather than creating a duplicate.
 
 Then do the task described in the packet, inside your working tree only. Commit your work on the lane branch with a clear message. Do not push, tag, deploy, or run anything outside the working tree. Do not modify anything in the desk except your receipt.
 
