@@ -74,6 +74,15 @@ DESK_DEFAULTS = {
     "acceptance_bytes": 3000,
     "packet_bytes": 3000,
     "packet_budget_minutes": 45,
+    # Opt-in observation of a running worker's output; see docs/concurrency.md. Off
+    # leaves the worker path exactly as it was, timeout included.
+    "worker_health": {"enabled": False},
+    # Sections a `--return` packet inherits from the original, by exact `## ` title, on
+    # the same fixed path as the forbids and Required context. Empty by default: the
+    # framework has no such section of its own, and a desk whose packet adapter requires
+    # one ("Execution scope", "Rollout") says so once here rather than retyping it into
+    # every return -- or, as happened, shipping a return with a hole where it should be.
+    "return_inherit_sections": [],
     "packet_forbidden_patterns": list(PACKET_FORBIDDEN_PATTERNS),
     "ledger_entry_bytes": 800,
     "inflight_line_chars": 160,

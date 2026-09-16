@@ -42,6 +42,8 @@
   "max_parallel_workers": 1,
   "lock_timeout_seconds": 30,
   "bell_max_failures": 3,
+  "worker_health": {"enabled": false},
+  "return_inherit_sections": [],
   "brief_bytes": 1500,
   "brief_times": ["09:00", "17:00"],
   "alert_cmd": "",

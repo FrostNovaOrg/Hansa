@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -137,7 +138,42 @@ class PluginTest(unittest.TestCase):
         return reply
 
     # -- 2. resident-service installer -------------------------------------
+    def service_manager_fixture(self):
+        """Nothing here may reach the host's real service manager.
+
+        The fixture installs files and never loads them, so every probe and unload
+        below is about a unit this machine has never heard of. Asking `launchctl` or
+        `systemctl` about it works by accident — the return codes for "not loaded"
+        differ by host, and a developer running the suite should not have their own
+        services spoken to at all. The double replaces the manager and the boundary
+        patch makes any escape to a real command fail loudly rather than quietly work.
+        """
+        lab = daemon.label(self.desk)
+        if sys.platform == "darwin":
+            target = f"gui/{os.getuid()}/{lab}"
+            probe = ["launchctl", "print", target]
+            unload = [["launchctl", "bootout", target], ["launchctl", "bootout", target + ".sentinel"],
+                      ["launchctl", "disable", target], ["launchctl", "disable", target + ".sentinel"]]
+        elif sys.platform.startswith("linux"):
+            probe = ["systemctl", "--user", "is-active", f"{lab}.service"]
+            unload = [["systemctl", "--user", "stop", f"{lab}.service", f"{lab}-sentinel.timer"]]
+        else:  # pragma: no cover - the installer refuses other platforms
+            self.skipTest("the service installer supports macOS and Linux")
+        allowed = [probe] + unload
+
+        def double(argv):
+            self.assertIn(argv, allowed, "unexpected service-manager command")
+            return subprocess.CompletedProcess(
+                argv, 3 if argv == probe else 1, "inactive\n", "test double: unit not loaded")
+
+        manager = patch.object(daemon, "_run_quiet", side_effect=double).start()
+        escape = patch.object(daemon, "run", side_effect=AssertionError(
+            "a real service-manager command escaped the fixture")).start()
+        self.addCleanup(patch.stopall)
+        return manager, escape, probe, unload
+
     def test_daemon_install_status_and_uninstall(self):
+        manager, escape, probe, unload = self.service_manager_fixture()
         report = daemon.install(self.desk, load=False)
         self.assertFalse(report["loaded"])
         self.assertEqual(report["errors"], [])
@@ -196,6 +232,12 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(list(self.services.iterdir()), [])
         self.assertFalse((self.desk_dir / "state" / ".daemon.json").exists())
         self.assertFalse(daemon.status(self.desk)["installed"])
+        # the only commands that were run are the probe (once per status read) and the
+        # platform's unload list, and none of them reached a real service manager
+        argv = [c.args[0] for c in manager.call_args_list]
+        self.assertEqual([a for a in argv if a == probe], [probe] * 3)
+        self.assertEqual([a for a in argv if a != probe], unload)
+        escape.assert_not_called()
 
     # -- 3. hooks ----------------------------------------------------------
     def hook(self, event, stdin="", cwd=None):

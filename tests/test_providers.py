@@ -83,6 +83,15 @@ class ProviderUnitTest(unittest.TestCase):
         out = providers.parse_result(json.dumps({"subtype": "error_max_turns", "is_error": True}))
         self.assertEqual(out["stop_reason"], "error_max_turns (error)")
 
+    def test_parser_keeps_the_native_stop_reason_beside_the_error_subtype(self):
+        out = providers.parse_result(json.dumps({
+            "type": "result", "subtype": "error_during_execution", "is_error": True,
+            "stop_reason": "cancelled",
+        }))
+        self.assertEqual(out["stop_reason"], "error_during_execution (error)")
+        self.assertEqual(out["raw"]["stop_reason"], "cancelled")
+        self.assertTrue(out["raw"]["is_error"])
+
     def test_parser_reads_a_generic_result_json(self):
         out = providers.parse_result(json.dumps(
             {"result": "finished", "cost_usd": 1.25, "num_turns": 3, "model": "other-model"}))

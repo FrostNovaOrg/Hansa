@@ -112,6 +112,85 @@ class LoopTest(unittest.TestCase):
         self.assertTrue(report.merged_sha)
         self.assertIn("merge lane/api", git(self.repo, "log", "-1", "--format=%s"))
 
+    def test_the_providers_own_stop_fields_survive_into_the_worker_meta(self):
+        """`stop_reason` collapses two provider fields into one reading; meta keeps both."""
+        packet = parse_packet(self.packet("011", "Native stop fields"))
+        cases = [
+            ({"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "stop_reason": "cancelled"},
+             "error_during_execution (error)", "error_during_execution", "cancelled", True),
+            ({"type": "result", "subtype": "success", "is_error": False},
+             "success", "success", None, False),
+            ({"result": "generic result", "num_turns": 1}, None, None, None, False),
+            ({"text": "done", "stopReason": "end_turn"}, "end_turn", None, None, False),
+        ]
+        for raw, collapsed, subtype, native, is_error in cases:
+            with self.subTest(raw=raw):
+                session = {"stdout": json.dumps(raw), "stderr": "", "exit_code": 0}
+                with patch("bellhop.accept.run_session", return_value=session):
+                    meta = watch.launch_worker(self.desk, self.desk.lane("api"), packet,
+                                               self.repo, "fixture", self.desk.bells_logs / "native.log")
+                self.assertEqual(meta["stop_reason"], collapsed)
+                self.assertEqual(meta["native_subtype"], subtype)
+                self.assertEqual(meta["native_stop_reason"], native)
+                self.assertEqual(meta["is_error"], is_error)
+        # control: stdout that is not a result object invents neither field
+        for stdout in ("", "{", "plain output"):
+            with self.subTest(stdout=stdout):
+                with patch("bellhop.accept.run_session",
+                           return_value={"stdout": stdout, "stderr": "", "exit_code": 0}):
+                    meta = watch.launch_worker(self.desk, self.desk.lane("api"), packet,
+                                               self.repo, "fixture", self.desk.bells_logs / "native.log")
+                self.assertIsNone(meta["native_subtype"])
+                self.assertIsNone(meta["native_stop_reason"])
+
+    def test_a_cancelled_worker_that_exited_zero_without_a_receipt_is_dead(self):
+        """The bridge cancelled the run; the exit code says nothing happened wrong."""
+        ring.ring(self.desk, self.packet("012", "Cancelled without receipt"))
+        session = {"stdout": json.dumps({"type": "result", "subtype": "error_during_execution",
+                                         "stop_reason": "cancelled", "is_error": True}),
+                   "stderr": "", "exit_code": 0}
+        with patch("bellhop.accept.run_session", return_value=session):
+            result = watch.watch_once(self.desk)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(result["dead"])
+        self.assertTrue(result["is_error"])
+        self.assertEqual(result["native_stop_reason"], "cancelled")
+        meta = read_json(self.desk.receipts / "012.meta.json")
+        self.assertTrue(meta["dead"])
+        self.assertEqual(meta["native_subtype"], "error_during_execution")
+
+    def test_a_worker_that_goes_quiet_is_recorded_and_turns_the_board_red(self):
+        """Opt-in observation: silence is an alert, and the alert waits to be read."""
+        from bellhop import health
+        self.desk.cfg["worker_health"] = {"enabled": True, "interval_s": 0.05,
+                                          "idle_s": 0.3, "soft_runtime_s": 3600}
+        self.desk.cfg["lanes"]["api"]["worker_cmd"] = (
+            "python3 -c \"import time; print('starting', flush=True); time.sleep(1.5)\"")
+        packet = parse_packet(self.packet("014", "Quiet worker"))
+        meta = watch.launch_worker(self.desk, self.desk.lane("api"), packet, self.repo,
+                                   "fixture", self.desk.bells_logs / "quiet.log")
+        self.assertGreater(meta["health"]["bytes"], 0)
+        self.assertGreaterEqual(meta["health"]["idle_episodes"], 1)
+        self.assertEqual(meta["exit_code"], 0, "a quiet worker is not a killed worker")
+        open_alerts = health.alerts(self.desk)
+        self.assertTrue(open_alerts, "silence past the limit is an alert")
+        self.assertEqual(open_alerts[0]["task"], "014")
+        self.assertEqual(open_alerts[0]["kind"], "idle_warning")
+        self.assertFalse(sentinel.check_worker_health(self.desk)[1])
+        for row in open_alerts:
+            health.ack(self.desk, row["event_id"])
+        self.assertTrue(sentinel.check_worker_health(self.desk)[1])
+
+    def test_a_desk_that_did_not_ask_for_observation_records_nothing(self):
+        from bellhop import health
+        self.desk.cfg["lanes"]["api"]["worker_cmd"] = "python3 -c \"print('done')\""
+        packet = parse_packet(self.packet("015", "Unwatched worker"))
+        meta = watch.launch_worker(self.desk, self.desk.lane("api"), packet, self.repo,
+                                   "fixture", self.desk.bells_logs / "unwatched.log")
+        self.assertIsNone(meta["health"])
+        self.assertFalse(health.events_path(self.desk).exists())
+
     def test_dead_task_is_counted_until_acknowledged(self):
         p = self.packet("003", "Crash on purpose")
         ring.ring(self.desk, p)

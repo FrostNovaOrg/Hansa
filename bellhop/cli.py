@@ -695,6 +695,33 @@ def add_state_parser(sub):
     return st
 
 
+def cmd_health(args):
+    """Worker health: what the observation saw, and one acknowledgment at a time."""
+    from . import health as health_mod
+    desk = _desk(args)
+    if args.health_cmd == "ack":
+        event = health_mod.ack(desk, args.event_id)
+        left = len(health_mod.alerts(desk))
+        print(f"acknowledged {args.event_id} ({event['task']}); {left} alert(s) left")
+        return
+    report = health_mod.status(desk, limit=args.limit, task=args.task)
+    if not report["enabled"]:
+        print("worker health: off (set worker_health.enabled to turn it on)")
+    else:
+        cfg = report["settings"]
+        print(f"worker health: on (idle {cfg['idle_s']:g}s, soft runtime {cfg['soft_runtime_s']:g}s, "
+              f"measured every {cfg['interval_s']:g}s)")
+    for row in report["alerts"]:
+        print(f"  ALERT {row['event_id']} {row['at']} {row['task']} {row['kind']}: {row.get('detail', '')}")
+    if report["enabled"] and not report["alerts"]:
+        print("  no unacknowledged alerts")
+    print(f"last {len(report['recent'])} of {report['total']} event(s):" if report["recent"]
+          else "no events recorded yet")
+    for row in report["recent"]:
+        print(f"  {row['at']} {row.get('task', '-')} {row['kind']}"
+              + (f": {row['detail']}" if row.get("detail") else ""))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bellhop", description="File-based operations for a team of Claude Code agents.")
     p.add_argument("--version", action="version", version=f"bellhop {__version__}")
@@ -749,7 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("archive", help="commit desk files"); s.add_argument("-m", "--message", required=True); s.add_argument("paths", nargs="+"); s.set_defaults(fn=cmd_archive)
 
-    s = sub.add_parser("sentinel", help="run the checks; every run logs one line to state/sentinel.log")
+    s = sub.add_parser("sentinel", help="run the checks; every run logs its decision to state/sentinel.log, and an attempted wake logs what the command did")
     s.add_argument("--no-wake", action="store_true", help="run the checks but never run wake_cmd")
     s.add_argument("--dry-run", action="store_true", help="say what would happen (wake, clear, compact) and write nothing")
     s.set_defaults(fn=cmd_sentinel)
@@ -829,6 +856,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("seal", help="record or verify seals"); s.add_argument("--verify", action="store_true"); s.set_defaults(fn=cmd_seal)
     sub.add_parser("close", help="daily close").set_defaults(fn=cmd_close)
     sub.add_parser("coldstart", help="print the reading list and check state files").set_defaults(fn=cmd_coldstart)
+
+    s = sub.add_parser("health", help="what the optional worker observation saw, and the alerts nobody has read")
+    hs = s.add_subparsers(dest="health_cmd", required=True)
+    h = hs.add_parser("status", help="settings, unacknowledged alerts, and the last events")
+    h.add_argument("--limit", type=int, default=20)
+    h.add_argument("--task", help="one task's events only")
+    h.set_defaults(fn=cmd_health)
+    h = hs.add_parser("ack", help="acknowledge one alert by id: looked at, not fixed")
+    h.add_argument("event_id")
+    h.set_defaults(fn=cmd_health, limit=20, task=None)
 
     s = sub.add_parser("provider", help="worker providers: who answers a bell, and with what")
     ss = s.add_subparsers(dest="provider_cmd", required=True)

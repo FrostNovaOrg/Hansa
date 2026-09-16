@@ -177,6 +177,48 @@ def packet_section(body: str, starts: tuple) -> tuple:
     return "\n".join(section).strip(), "\n".join(rest).strip()
 
 
+def standalone_sections(body: str, title: str) -> list:
+    """Every `## <title>` section of the body, verbatim, in source order.
+
+    `packet_section` takes its headings at any level and lifts them out of the prose,
+    which is what carrying a "do not touch" paragraph into a pack needs. It is the
+    wrong collector for a section a return inherits: a `### Rollout` written inside
+    `## Required context` is part of that context, and lifting it out as a section of
+    its own produces a packet nobody wrote. This one takes a level-2 heading whose
+    title is exactly `title`, leaves the body alone, and runs the section to the next
+    heading at the same level or above — so a `###` inside it is content, not a
+    second section.
+
+    Fences are respected: a heading inside a code block is a line of code.
+    """
+    wanted = title.strip().lower()
+    sections: List[str] = []
+    current: List[str] = []
+    inside = False
+    fence = None
+    for line in body.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        in_code = fence is not None
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1] and not marker[2].strip():
+                fence = None
+        elif marker:
+            fence = (marker[1][0], len(marker[1]))
+        heading = None if in_code or marker else re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", line)
+        if heading:
+            depth, name = len(heading.group(1)), heading.group(2).strip().lower()
+            if inside and depth <= 2:
+                sections.append("\n".join(current).strip())
+                current, inside = [], False
+            if depth == 2 and name == wanted:
+                inside = True
+        if inside:
+            current.append(line)
+    if inside:
+        sections.append("\n".join(current).strip())
+    return sections
+
+
 def next_packet_id(inbox: Path) -> str:
     ids = []
     for p in inbox.rglob("*.md"):
@@ -336,12 +378,18 @@ def build_packet_text(
                  "section, is what the coordinator wrote.")
 
     tail = ["## How to report (fixed)", "",
-            f"- Write the receipt to `{receipt}`, from `templates/receipt.md`.",
+            # `receipt` is desk-relative, and a worker reads it inside its own worktree,
+            # where that path is a different file -- or no file. The variable is the
+            # same receipt as an absolute path, and the launcher exports it.
+            f"- Write the receipt to `$BELLHOP_RECEIPT`: `{receipt}` **relative to the desk**, "
+            "not to your working tree. Use the shape in `$BELLHOP_DESK/templates/receipt.md`.",
             "- For each acceptance item above: the command you ran and the output it printed. "
             "A sentence with no command behind it is not a check.",
             "- Do not write the receipt's machine header yourself. `bellhop receipt-header` "
             "computes it by running the commands; a header that was typed is a header nobody ran.",
-            "- Commit on the lane branch in your own worktree. Do not push: the lane repository's "
+            "- Commit the task's changes on the lane branch in your own worktree. A task that "
+            "changed no product files makes no commit: an empty commit is not a record of work. "
+            "Do not push: the lane repository's "
             "`pre-push` hook refuses it, and the coordinator's merge is where a push belongs.",
             "- Stop and say so rather than working around a packet that contradicts itself, names "
             "a file that is not there, or asks for something you cannot check.",

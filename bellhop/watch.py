@@ -10,6 +10,7 @@ from typing import Optional
 from . import archive as archive_mod
 from . import closetask as closetask_mod
 from . import headers as headers_mod
+from . import health as health_mod
 from . import providers as providers_mod
 from .config import Desk
 from .locking import desk_lock, serialized, worker_limit, worker_slot
@@ -89,14 +90,33 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
     cmd = providers_mod.build_command(desk, lane, packet, prompt, resolved, worktree=worktree,
                                       prompt_file=prompt_file, log_path=log_path)
     started = now()
+    # The wall clock for the record, a monotonic one for the arithmetic: a machine whose
+    # clock steps while a worker runs would otherwise report a negative duration or an
+    # extra hour, and the duration is one of the numbers the readings add up.
+    elapsed = time.monotonic()
     timeout = max(60, packet.budget_minutes * 60 * 2)
+    # -- opt-in worker observation (health.py); off by default ---------------
+    watched = health_mod.observation(
+        desk, packet.id,
+        on_error=lambda exc: _log(desk, f"RED\t{packet.id}: worker health could not be recorded: {exc}"))
     try:
         from .accept import run_session
-        session = run_session(cmd, worktree, env, timeout)
+        if watched is None:
+            session = run_session(cmd, worktree, env, timeout)
+        else:
+            from .worker_session import run_worker
+            session = run_worker(
+                cmd, worktree, env, timeout, watched,
+                on_error=lambda exc: _log(desk, f"RED\t{packet.id}: worker health observation stopped: {exc}"))
         stdout, stderr, code = session["stdout"], session["stderr"], session["exit_code"]
     except Exception as exc:  # timeout or launch failure
+        session = {}
         stdout, stderr, code = "", f"worker launch failed: {exc}", 124
-    duration = (now() - started).total_seconds()
+    health = watched.finish(code) if watched is not None else None
+    if watched is not None and not session.get("observed", True):
+        health["observed"] = False
+    # -- end worker observation ---------------------------------------------
+    duration = time.monotonic() - elapsed
     write(log_path, f"# bellhop worker log {packet.stem}\n\n## stdout\n{stdout}\n\n## stderr\n{stderr}\n")
     parsed = providers_mod.parse_result(stdout, resolved.provider)
     raw = parsed.get("raw") or {}
@@ -118,11 +138,21 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         "duration_s": round(duration, 1),
         "cost_usd": providers_mod.na_none(parsed["cost_usd"]),
         "stop_reason": providers_mod.na_none(parsed["stop_reason"]),
+        # The provider's own two fields, kept unmerged beside the reading above. A run
+        # that the transport cancelled prints `error_during_execution` with a native stop
+        # reason of `cancelled`; `stop_reason` collapses those into one string, and
+        # afterwards nothing in the meta can say whether the model stopped or the
+        # channel did. `None` where the provider said nothing, never invented.
+        "native_subtype": raw.get("subtype"),
+        "native_stop_reason": raw.get("stop_reason"),
         "session_id": raw.get("session_id"),
         "exit_code": code,
         "started_at": ts(started),
         "is_error": bool(raw.get("is_error")) if raw else code != 0,
         "usage": raw.get("usage"),
+        # What the observation saw, or `None` on a desk that did not ask for one. Bytes
+        # are a proxy for a live session, never for progress; see health.py.
+        "health": health,
     }
 
 
