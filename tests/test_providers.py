@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bellhop import daemon as daemon_mod  # noqa: E402
+from bellhop import exits  # noqa: E402
 from bellhop import providers  # noqa: E402
 from bellhop import desk_ops, ring, watch  # noqa: E402
 from bellhop.config import LANE_DEFAULTS, Desk  # noqa: E402
@@ -568,7 +569,9 @@ class ProviderCliTest(unittest.TestCase):
         cfg["lanes"]["api"]["sandbox_profile"] = "providers/gone.sb"
         write_json(self.tmp / "bellhop.json", cfg)
         red = self.bellhop("provider", "check", "api")
-        self.assertEqual(red.returncode, 2)
+        # A lane naming a profile that is not on disk is a misconfigured desk, not a
+        # mistyped command line: 78 is EX_CONFIG. See docs/exit-codes.md.
+        self.assertEqual(red.returncode, exits.CONFIG)
         self.assertIn("🛑", red.stdout)
 
     def test_provider_check_heavy_line(self):

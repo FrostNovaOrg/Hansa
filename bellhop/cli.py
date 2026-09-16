@@ -96,7 +96,10 @@ def cmd_packet_rebind(args):
     done = [r for r in rows if r["status"].endswith("rebind") or r["status"] == "rebound"]
     print(f"{len(done)} rebound, {len(rows) - len(done) - len(bad)} already bound, {len(bad)} refused")
     if bad:
-        sys.exit(2)
+        # Not a usage error: the command line was fine and the migration ran. A task a
+        # gate would not rebind and a task nothing on disk can identify are two
+        # different jobs for the person reading this. See docs/exit-codes.md.
+        sys.exit(exits.GATE if any(r["status"] == "refused" for r in bad) else exits.NOT_FOUND)
 
 
 def cmd_dispatch(args):
