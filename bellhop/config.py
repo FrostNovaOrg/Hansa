@@ -141,6 +141,17 @@ DESK_DEFAULTS = {
     # a profile anyway is a refusal, not a launch: a worker that ran unsandboxed because
     # the wrapper was blank leaves the same receipt as one that ran sandboxed.
     "sandbox_wrapper": "",
+    # -- the provider circuit breaker (see docs/providers.md) --------------
+    # A provider that answers "not you, not now" -- HTTP 402 or 429, a usage limit, an
+    # exhausted balance, a `Retry-After` -- is a fact about the desk, not about the task.
+    # With the breaker on, the first such answer writes a stop-dispatch order, leaves the
+    # bell pending rather than dead, and says so on the card. Off, every lane meets that
+    # wall separately and nobody's state says the desk is out of credit.
+    "quota_breaker": True,
+    # The earliest time it is worth lifting that order, in seconds. A `Retry-After`
+    # shorter than 24h replaces it; one longer than that is not a wait anyone sits
+    # through, so the card asks the principal. Nothing lifts the order but a person.
+    "quota_cooldown_s": 1800,
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,
     "session_watchdog_interval": 5,
@@ -294,6 +305,13 @@ LANE_DEFAULTS = {
     "allowlist_file": "",
     # A sandbox profile for this lane, applied through the desk's `sandbox_wrapper`.
     "sandbox_profile": "",
+    # Where this lane goes, once, when its provider answers with a quota refusal. Either
+    # key may stand alone: `fallback_model` on its own keeps the provider. The switch is
+    # never silent -- it is logged, it reaches the card, and the receipt header carries
+    # `model_asked` beside the model that answered. Declare neither and a quota answer
+    # stops dispatch instead.
+    "fallback_provider": "",
+    "fallback_model": "",
     # Time windows that move this lane to another provider or model, judged against the
     # time the worker starts -- not the time the packet was dispatched. Each entry:
     # {"name": "...", "days": "mon-fri", "from": "14:00", "to": "18:00",

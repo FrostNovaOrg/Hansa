@@ -65,6 +65,22 @@ def _parse_ts(s: str):
         return None
 
 
+def log_event(desk: Desk, verdict: str, text: str, at: Optional[datetime] = None) -> str:
+    """Append one line to `state/sentinel.log` from outside a sentinel run.
+
+    That log is the desk's one timeline of "something was noticed". A fact the machinery
+    finds between two runs -- a provider refusing to answer at all, say -- belongs on
+    that timeline as well as in the log of whatever found it, or reading the desk back
+    means knowing which file to open before knowing what happened.
+    """
+    line = f"{ts(at)} {verdict} {text}"
+    path = desk.path(SENTINEL_LOG)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    return line
+
+
 def _last_receipt_time(desk: Desk):
     latest = None
     for p in desk.receipts.glob("*.meta.json"):
