@@ -147,7 +147,7 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         "schedule_override": resolved.schedule_label or None,
         "fallback_from": resolved.fallback_from or None,
         # Three readings, not two: the thinking was readable, it was there and sealed, or
-        # there was none. A bridged model billed 1.1M thinking tokens against 2,553 empty
+        # there was none. One desk's model billed thinking tokens against empty
         # blocks, and nothing on the desk could tell that from a model that never thought.
         "provider_reasoning": parsed.get("provider_reasoning", providers_mod.NA),
         "thinking_tokens": providers_mod.na_none(parsed.get("thinking_tokens", providers_mod.NA)),

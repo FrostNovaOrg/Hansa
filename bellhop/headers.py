@@ -241,8 +241,8 @@ def _result_fields(result) -> dict:
     return {
         "provider": result.get("provider"),
         # Both of them, always: on one desk the coordinator, the native helpers, the
-        # verifier and the permission classifier were all quietly the same bridged model,
-        # under two different model names, and the only place that was visible was a key
+        # verifier and the permission classifier were all quietly one model answering to
+        # two different model names, and the only place that was visible was a key
         # in the worker's meta file that nothing printed.
         "model_asked": result.get("model_asked"),
         "model": result.get("model"),

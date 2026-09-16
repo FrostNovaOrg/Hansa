@@ -52,7 +52,7 @@ def main() -> int:
     result = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
               "duration_ms": 1200, "total_cost_usd": 0.0, "session_id": "stub", "model": "stub"}
     if mode == "thinking":
-        # The bridged model's shape: thinking blocks with nothing readable in them, and
+        # The shape that started this: thinking blocks with nothing readable in them, and
         # tokens billed against them anyway.
         result["content"] = [{"type": "thinking", "thinking": "", "signature": "encrypted"}]
         result["usage"] = {"output_tokens": 10, "thinking_tokens": 4321}

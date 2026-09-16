@@ -569,7 +569,7 @@ def thinking_blocks(obj) -> List[dict]:
 def reasoning_state(obj) -> str:
     """`visible`, `hidden`, or `n/a` — three readings, and `hidden` is not `n/a`.
 
-    A bridged model returned 2,553 thinking blocks with an empty `thinking` field and an
+    One desk's model returned thinking blocks with an empty `thinking` field and an
     encrypted signature, and billed thinking tokens against them. Nothing on the
     desk could tell that run from one that did no thinking at all: both left a result
     with no reasoning text in it. `hidden` says the blocks were there and unreadable,
@@ -604,9 +604,10 @@ def thinking_tokens(obj) -> Optional[int]:
 # Desk A ran four lanes on one vendor. A balance-exhausted 402 stopped the whole desk
 # for 55 minutes and left two dead tasks, and no stop-dispatch order was ever written:
 # a provider saying "not you, not now" was a per-task error, so every lane met it
-# separately and nobody's state said the desk was out of credit. Desk B, bridged to
-# another vendor, took repeated `429`s with `Retry-After` values up to six
-# days, and the coordinator kept walking into the wall until a person stopped it.
+# separately and nobody's state said the desk was out of credit. Desk B, reaching a
+# second vendor through a relay, took repeated `429`s with `Retry-After`
+# values up to six days, and the coordinator kept walking into the wall until a person
+# stopped it.
 #
 # A quota answer is a *desk* fact, not a task fact. It is classified here, in the one
 # module that reads what a worker printed, and acted on in `watch.py`.
