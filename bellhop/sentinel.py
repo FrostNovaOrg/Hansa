@@ -634,7 +634,9 @@ def run_sentinel(desk: Desk, wake: bool = True, dry_run: bool = False,
         code = _run_cmd(desk.cfg["wake_cmd"], text)
         outcome = wake_outcome(code)
         with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"{ts(at)} WAKE-RESULT outcome={outcome} exit_code={code} handled=unknown\n")
+            # This one is stamped when the command returned, not when the run began:
+            # it is a later event, and a wake command can take a while to answer.
+            fh.write(f"{ts()} WAKE-RESULT outcome={outcome} exit_code={code} handled=unknown\n")
         text += f"  wake result: {outcome} (exit {code}); handling not acknowledged\n"
         write(desk.state / ".sentinel" / "status.txt", text)
         if wake_state is not None:
