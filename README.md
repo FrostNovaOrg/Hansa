@@ -261,7 +261,7 @@ is the specification.
 | To understand or change… | Read |
 |---|---|
 | The workflow on a new project | [Claude Code replication guide](docs/replicate-claude-workflow.md) |
-| Documents, task inputs and native Claude Code prompts | [Prompt and document contract](docs/prompt-contract.md) |
+| Documents, task inputs and native Claude Code prompts | [Claude Code integration, appendix](docs/claude-code.md#appendix-prompts-documents-and-task-inputs) |
 | The decisions behind the architecture | [Rationale](docs/rationale.md) · [Design](docs/design.md) |
 | Dispatch, acceptance and closing contracts | [Dispatch](docs/dispatch.md) · [Acceptance](docs/acceptance.md) · [Close-task](docs/close-task.md) |
 | State, parallelism and recovery | [State writer](docs/state.md) · [Concurrency](docs/concurrency.md) · [Sentinel](docs/sentinel.md) |
