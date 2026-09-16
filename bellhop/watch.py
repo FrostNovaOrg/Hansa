@@ -15,7 +15,7 @@ from .config import Desk
 from .locking import desk_lock, serialized, worker_limit, worker_slot
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
 from .packet import Packet, parse_packet
-from .util import BellhopError, append, git, now, read, run, sha256_file, ts, write, write_json
+from .util import BellhopError, append, git, now, read, read_json, run, sha256_file, ts, write, write_json
 
 _stop = False
 
@@ -129,6 +129,84 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
 def _log(desk: Desk, line: str) -> None:
     """One line in the watchdog log. Every provider decision leaves one."""
     append(desk.bells_logs / "watchdog.log", f"{ts()}\t{line}\n")
+
+
+# --------------------------------------------------------------------------
+# bells that keep failing
+# --------------------------------------------------------------------------
+def dead_bells_dir(desk: Desk) -> Path:
+    return desk.path("bells", "dead")
+
+
+def _failure_file(desk: Desk, bell: Path) -> Path:
+    return desk.path("bells", ".locks", "failures", bell.name + ".json")
+
+
+def bell_failures(desk: Desk, bell: Path) -> int:
+    return int((read_json(_failure_file(desk, bell), {}) or {}).get("count", 0))
+
+
+def clear_bell_failures(desk: Desk, bell: Path) -> None:
+    """A bell that was answered starts again from zero; the count is consecutive."""
+    path = _failure_file(desk, bell)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def bell_failure_limit(desk: Desk) -> int:
+    try:
+        limit = int(desk.cfg.get("bell_max_failures", 3))
+    except (TypeError, ValueError):
+        limit = 3
+    return max(1, limit)
+
+
+def record_bell_failure(desk: Desk, bell: Path, exc: BaseException) -> tuple:
+    """Count one failed attempt on this bell; park it when it has had enough.
+
+    A bell that fails for a reason that is not going to change - a packet whose file
+    is gone, a lane whose repository was moved, a marker from an interrupted launch -
+    is picked up again on the next tick, and the next, forever. Every pass writes the
+    same red line, so the log grows and nothing in it says that this is the hundredth
+    time. After `bell_max_failures` consecutive failures the bell moves to
+    `bells/dead/` and the sentinel says so: a bell being retried and a bell nobody can
+    answer must not look the same on the board.
+
+    Returns (count, parked_path_or_None).
+    """
+    path = _failure_file(desk, bell)
+    data = read_json(path, {}) or {}
+    count = int(data.get("count", 0)) + 1
+    limit = bell_failure_limit(desk)
+    reason = f"{type(exc).__name__}: {exc}"
+    write_json(path, {"bell": bell.name, "count": count, "last_error": reason[:500], "last_at": ts()})
+    if count < limit or not bell.exists():
+        return count, None
+    parked = dead_bells_dir(desk) / bell.name
+    parked.parent.mkdir(parents=True, exist_ok=True)
+    bell.rename(parked)
+    _log(desk, f"PARKED\t{bell.name}: {count} consecutive failures; moved to bells/dead/")
+    _sentinel_line(desk, f"RED bell {bell.name} parked in bells/dead/ after {count} consecutive "
+                         f"failures: {reason[:160]}")
+    return count, parked
+
+
+def _sentinel_line(desk: Desk, text: str) -> None:
+    """One line where the operator already looks. The watchdog log is for the machine."""
+    try:
+        path = desk.path("state", "sentinel.log")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        append(path, f"{ts()} {text}\n")
+    except OSError:
+        pass
+
+
+def dead_bells(desk: Desk) -> list:
+    d = dead_bells_dir(desk)
+    return sorted(d.glob("*.bell")) if d.exists() else []
 
 
 def process_bell(desk: Desk, bell: Path, archive: bool = True) -> dict:
@@ -250,7 +328,18 @@ def watch_once(desk: Desk, archive: bool = True) -> Optional[dict]:
         data = json.loads(read(bell))
         if lane_is_busy(desk, data.get("lane", "")):
             continue
-        return process_bell(desk, bell, archive=archive)
+        try:
+            result = process_bell(desk, bell, archive=archive)
+        except Exception as exc:
+            # The count is kept here too, so a bell answered by hand one attempt at a
+            # time reaches the same limit as one the pool is retrying.
+            count, parked = record_bell_failure(desk, bell, exc)
+            if parked:
+                raise BellhopError(f"{exc}\nbell {bell.name} failed {count} time(s) and is parked in "
+                                   f"bells/dead/; it will not be answered again")
+            raise
+        clear_bell_failures(desk, bell)
+        return result
     return None
 
 
@@ -274,10 +363,15 @@ class WatchPool:
             del self.active[future]
             try:
                 result = future.result()
+                clear_bell_failures(self.desk, bell)
                 _log(self.desk, f"{'DEAD' if result['dead'] else 'OK'}\t{result['id']}\t"
                      f"{lane}\t{result['duration_s']}s\tcost={result.get('cost_usd')}")
             except Exception as exc:
-                _log(self.desk, f"RED\t{bell.name}: {exc}")
+                count, parked = record_bell_failure(self.desk, bell, exc)
+                _log(self.desk, f"RED\t{bell.name}: {exc} (attempt {count}"
+                                f"/{bell_failure_limit(self.desk)})")
+                if parked:
+                    _log(self.desk, f"RED\t{bell.name}: not answered again; see bells/dead/")
         if not dispatch:
             return
         lanes = {lane for _, lane in self.active.values()}
