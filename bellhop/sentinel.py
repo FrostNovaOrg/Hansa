@@ -123,6 +123,23 @@ def check_dead_tasks(desk: Desk) -> Check:
     return ("dead-tasks", True, "none unacknowledged")
 
 
+def check_worker_health(desk: Desk) -> Check:
+    """Red while a worker alert is unacknowledged. Only on a desk that asked for one.
+
+    This is how an alert about a quiet worker reaches the coordinator: through the wake
+    that already exists, with its busy gate and its brake, rather than through a second
+    notifier that would have to be kept alive itself.
+    """
+    from . import health as health_mod
+    open_alerts = health_mod.alerts(desk)
+    if not open_alerts:
+        return ("worker-health", True, "no unacknowledged worker alerts")
+    first = open_alerts[0]
+    return ("worker-health", False,
+            f"{len(open_alerts)} unacknowledged worker alert(s); oldest: {first.get('task')} "
+            f"{first.get('kind')} {first.get('detail', '')} ({first.get('event_id')})".strip())
+
+
 def check_ledger(desk: Desk, snapshot: dict) -> Check:
     count, size = ledger_mod.stats(desk)
     prev = snapshot.get("ledger", {})
@@ -242,6 +259,11 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
         check_seals(desk),
     ]
     checks.extend(check_stop_dispatch(desk))
+    # -- opt-in worker observation (health.py); off by default ---------------
+    from . import health as health_mod
+    if health_mod.options(desk)["enabled"]:
+        checks.append(check_worker_health(desk))
+    # ------------------------------------------------------------------------
     # A merge taken on the coordinator's judgement is allowed; two of them in a week
     # means the acceptance gate is not the gate any more, and that is the principal's
     # call rather than something the desk keeps absorbing one reasonable case at a time.

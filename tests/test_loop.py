@@ -160,6 +160,37 @@ class LoopTest(unittest.TestCase):
         self.assertTrue(meta["dead"])
         self.assertEqual(meta["native_subtype"], "error_during_execution")
 
+    def test_a_worker_that_goes_quiet_is_recorded_and_turns_the_board_red(self):
+        """Opt-in observation: silence is an alert, and the alert waits to be read."""
+        from bellhop import health
+        self.desk.cfg["worker_health"] = {"enabled": True, "interval_s": 0.05,
+                                          "idle_s": 0.3, "soft_runtime_s": 3600}
+        self.desk.cfg["lanes"]["api"]["worker_cmd"] = (
+            "python3 -c \"import time; print('starting', flush=True); time.sleep(1.5)\"")
+        packet = parse_packet(self.packet("014", "Quiet worker"))
+        meta = watch.launch_worker(self.desk, self.desk.lane("api"), packet, self.repo,
+                                   "fixture", self.desk.bells_logs / "quiet.log")
+        self.assertGreater(meta["health"]["bytes"], 0)
+        self.assertGreaterEqual(meta["health"]["idle_episodes"], 1)
+        self.assertEqual(meta["exit_code"], 0, "a quiet worker is not a killed worker")
+        open_alerts = health.alerts(self.desk)
+        self.assertTrue(open_alerts, "silence past the limit is an alert")
+        self.assertEqual(open_alerts[0]["task"], "014")
+        self.assertEqual(open_alerts[0]["kind"], "idle_warning")
+        self.assertFalse(sentinel.check_worker_health(self.desk)[1])
+        for row in open_alerts:
+            health.ack(self.desk, row["event_id"])
+        self.assertTrue(sentinel.check_worker_health(self.desk)[1])
+
+    def test_a_desk_that_did_not_ask_for_observation_records_nothing(self):
+        from bellhop import health
+        self.desk.cfg["lanes"]["api"]["worker_cmd"] = "python3 -c \"print('done')\""
+        packet = parse_packet(self.packet("015", "Unwatched worker"))
+        meta = watch.launch_worker(self.desk, self.desk.lane("api"), packet, self.repo,
+                                   "fixture", self.desk.bells_logs / "unwatched.log")
+        self.assertIsNone(meta["health"])
+        self.assertFalse(health.events_path(self.desk).exists())
+
     def test_dead_task_is_counted_until_acknowledged(self):
         p = self.packet("003", "Crash on purpose")
         ring.ring(self.desk, p)

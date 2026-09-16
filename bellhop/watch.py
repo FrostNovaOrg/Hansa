@@ -10,6 +10,7 @@ from typing import Optional
 from . import archive as archive_mod
 from . import closetask as closetask_mod
 from . import headers as headers_mod
+from . import health as health_mod
 from . import providers as providers_mod
 from .config import Desk
 from .locking import desk_lock, serialized, worker_limit, worker_slot
@@ -94,12 +95,27 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
     # extra hour, and the duration is one of the numbers the readings add up.
     elapsed = time.monotonic()
     timeout = max(60, packet.budget_minutes * 60 * 2)
+    # -- opt-in worker observation (health.py); off by default ---------------
+    watched = health_mod.observation(
+        desk, packet.id,
+        on_error=lambda exc: _log(desk, f"RED\t{packet.id}: worker health could not be recorded: {exc}"))
     try:
         from .accept import run_session
-        session = run_session(cmd, worktree, env, timeout)
+        if watched is None:
+            session = run_session(cmd, worktree, env, timeout)
+        else:
+            from .worker_session import run_worker
+            session = run_worker(
+                cmd, worktree, env, timeout, watched,
+                on_error=lambda exc: _log(desk, f"RED\t{packet.id}: worker health observation stopped: {exc}"))
         stdout, stderr, code = session["stdout"], session["stderr"], session["exit_code"]
     except Exception as exc:  # timeout or launch failure
+        session = {}
         stdout, stderr, code = "", f"worker launch failed: {exc}", 124
+    health = watched.finish(code) if watched is not None else None
+    if watched is not None and not session.get("observed", True):
+        health["observed"] = False
+    # -- end worker observation ---------------------------------------------
     duration = time.monotonic() - elapsed
     write(log_path, f"# bellhop worker log {packet.stem}\n\n## stdout\n{stdout}\n\n## stderr\n{stderr}\n")
     parsed = providers_mod.parse_result(stdout, resolved.provider)
@@ -134,6 +150,9 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         "started_at": ts(started),
         "is_error": bool(raw.get("is_error")) if raw else code != 0,
         "usage": raw.get("usage"),
+        # What the observation saw, or `None` on a desk that did not ask for one. Bytes
+        # are a proxy for a live session, never for progress; see health.py.
+        "health": health,
     }
 
 

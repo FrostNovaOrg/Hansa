@@ -74,6 +74,9 @@ DESK_DEFAULTS = {
     "acceptance_bytes": 3000,
     "packet_bytes": 3000,
     "packet_budget_minutes": 45,
+    # Opt-in observation of a running worker's output; see docs/concurrency.md. Off
+    # leaves the worker path exactly as it was, timeout included.
+    "worker_health": {"enabled": False},
     "packet_forbidden_patterns": list(PACKET_FORBIDDEN_PATTERNS),
     "ledger_entry_bytes": 800,
     "inflight_line_chars": 160,
