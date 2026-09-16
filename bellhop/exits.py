@@ -6,7 +6,7 @@ with a bad argument printed usage and exited **128**, while other verbs used 2, 
 for different things, so three failures recorded as hard errors turned out to be three
 typos. Guessing which kind of failure a number meant cost more than the failures did.
 
-Six numbers, and nothing else may be returned by a command:
+Seven numbers, and nothing else may be returned by a command:
 
 * **0 ok** - it did what it was asked.
 * **1 red** - it ran to the end and the answer is no. A red sentinel, a receipt that
