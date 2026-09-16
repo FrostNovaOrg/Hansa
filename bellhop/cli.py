@@ -269,10 +269,12 @@ def cmd_acceptance_header(args):
     path = Path(args.file)
     try:
         if args.dry_run:
-            values = headers_mod.compute_acceptance_values(path, desk=desk, lane=args.lane, task=args.task)
+            values = headers_mod.compute_acceptance_values(path, desk=desk, lane=args.lane,
+                                                           task=args.task, result=args.result_json)
             print(headers_mod.render_header("acceptance", values), end="")
             return
-        values, action = headers_mod.write_acceptance_header(path, desk=desk, lane=args.lane, task=args.task)
+        values, action = headers_mod.write_acceptance_header(path, desk=desk, lane=args.lane,
+                                                             task=args.task, result=args.result_json)
     except BellhopError as exc:
         print(f"bellhop: {exc}", file=sys.stderr)
         sys.exit(headers_mod.EXIT_MALFORMED)
@@ -821,6 +823,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("acceptance-header", help="read an acceptance verdict's body and write its machine header at the top")
     s.add_argument("--file", required=True); s.add_argument("--lane", help="lane, so paths outside its worktree can be counted"); s.add_argument("--task")
+    s.add_argument("--result-json", help="the verifier's run meta (<id>.acceptance.meta.json), for model_asked and model")
     s.add_argument("--dry-run", action="store_true", help="print the header, write nothing"); s.set_defaults(fn=cmd_acceptance_header)
 
     s = sub.add_parser("check-receipt", help="check a receipt's header (exit 1 on a red finding)")

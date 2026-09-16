@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 from . import headers as headers_mod
+from . import providers as providers_mod
 from .locking import acceptance_session, serialized
 from .config import FRAMEWORK_ROOT, Desk
 from .packet import (CONTEXT_WORDS, FORBID_WORDS, Packet, packet_section,
@@ -699,7 +700,12 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
             if result:
                 meta.update({"model": result.get("model"),
                              "turns": result.get("num_turns"), "cost_usd": result.get("total_cost_usd"),
-                             "session_id": result.get("session_id")})
+                             "session_id": result.get("session_id"),
+                             # Was there thinking, and could anyone read it? A verifier
+                             # whose reasoning came back sealed is still a verifier whose
+                             # work nobody can audit, and the verdict header says so.
+                             "provider_reasoning": providers_mod.reasoning_state(result),
+                             "thinking_tokens": providers_mod.thinking_tokens(result)})
             if session["timed_out"]:
                 return finish("timeout", STALL_TIMEOUT,
                               f"the verifier passed {timeout_s}s; its process group was killed")
@@ -739,7 +745,7 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
             write(out, heading + body + "\n")
             try:
                 header_values, _action = headers_mod.write_acceptance_header(
-                    out, desk=desk, lane=packet.lane, task=packet.id)
+                    out, desk=desk, lane=packet.lane, task=packet.id, result=meta)
                 report = headers_mod.check_acceptance(out, max_bytes=acceptance_cap(desk, packet))
             except BellhopError as exc:
                 write(check_path(desk, packet.id, shadow),

@@ -43,6 +43,10 @@ FENCE_RECEIPT = "receipt-header"
 FENCE_ACCEPTANCE = "acceptance-header"
 
 NOT_AVAILABLE = "-"        # the generator could not compute this one
+# Different reading, different word: `-` is "this desk could not work it out", `n/a` is
+# "the thing that answered did not say". A model that reported no model id and a header
+# whose generator crashed before it got there are not the same finding.
+NOT_REPORTED = "n/a"
 CHECK_NOT_RUN = "not-run"  # the lane declares no check command
 SUMMARY_MAX = 120
 DEFAULT_ACCEPTANCE_BYTES = 3000
@@ -70,7 +74,10 @@ RECEIPT_SPEC: Sequence[Field] = (
     Field("doubts", "int", True, "body lines that start with `DOUBT:`"),
     Field("extras", "int", True, "body lines that start with `EXTRA:`"),
     Field("provider", "str", False, "worker provider, from the result JSON"),
-    Field("model", "str", False, "model, from the result JSON"),
+    Field("model_asked", "str", False, "the model the lane asked for, before anyone answered; `n/a` when nothing said"),
+    Field("model", "str", False, "the model that answered, from the result JSON; `n/a` when it named none"),
+    Field("provider_reasoning", "str", False, "`visible`, `hidden` when the thinking blocks came back empty, `n/a` when there were none"),
+    Field("thinking_tokens", "int", False, "tokens billed as reasoning, from the result JSON"),
     Field("turns", "int", False, "turns, from the result JSON"),
     Field("cost_usd", "float", False, "cost in USD, from the result JSON"),
     Field("duration_s", "float", False, "wall-clock seconds, from the result JSON"),
@@ -92,6 +99,9 @@ ACCEPTANCE_SPEC: Sequence[Field] = (
     Field("extra_findings", "int", True, "list items under `## Extra findings`"),
     Field("sections_missing", "str", True, "which of the eight sections the body does not have, `none` when all eight are there"),
     Field("paths_outside", "int", False, "absolute paths named in the body that are under neither the lane worktree nor the desk"),
+    Field("model_asked", "str", False, "the model the verifier was asked for; `n/a` when the lane runs its own accept_cmd"),
+    Field("model", "str", False, "the model that answered, from the verifier's result JSON; `n/a` when it named none"),
+    Field("provider_reasoning", "str", False, "`visible`, `hidden` when the thinking blocks came back empty, `n/a` when there were none"),
     Field("bytes", "int", True, "size of the body in bytes, header excluded, so writing the header does not change it"),
     Field("generated", "str", True, "when this header was written; the only line that moves between two runs"),
 )
@@ -228,7 +238,14 @@ def _result_fields(result) -> dict:
         duration = round(float(result["duration_ms"]) / 1000.0, 1)
     return {
         "provider": result.get("provider"),
+        # Both of them, always: on one desk the coordinator, the native helpers, the
+        # verifier and the permission classifier were all quietly the same bridged model,
+        # under two different model names, and the only place that was visible was a key
+        # in the worker's meta file that nothing printed.
+        "model_asked": result.get("model_asked"),
         "model": result.get("model"),
+        "provider_reasoning": result.get("provider_reasoning"),
+        "thinking_tokens": result.get("thinking_tokens"),
         "turns": result.get("turns", result.get("num_turns")),
         "cost_usd": result.get("cost_usd", result.get("total_cost_usd")),
         "duration_s": duration,
@@ -315,6 +332,11 @@ def compute_receipt_values(desk: Desk, receipt: Path, lane_name: str, packet=Non
         "check_summary": check_summary,
         "doubts": len(_DOUBT_RE.findall(body)),
         "extras": len(_EXTRA_RE.findall(body)),
+        # No result JSON at all is still an answer to "which model wrote this": nobody
+        # said. `-` would claim the generator failed at it.
+        "model_asked": NOT_REPORTED,
+        "model": NOT_REPORTED,
+        "provider_reasoning": NOT_REPORTED,
         "generated": ts(),
     }
     values.update({k: v for k, v in _result_fields(result).items() if v is not None})
@@ -369,7 +391,7 @@ def split_sections(body: str) -> dict:
 
 
 def compute_acceptance_values(path: Path, desk: Optional[Desk] = None, lane: Optional[str] = None,
-                              task: Optional[str] = None) -> dict:
+                              task: Optional[str] = None, result=None) -> dict:
     path = Path(path)
     if not path.exists():
         raise BellhopError(f"acceptance verdict not found: {path}")
@@ -399,6 +421,14 @@ def compute_acceptance_values(path: Path, desk: Optional[Desk] = None, lane: Opt
         outside = len(hits)
 
     missing = [n for n in SECTIONS if n not in sections]
+    # Who actually judged this. The verdict is the desk's most expensive reading, and a
+    # verdict from the model the work was meant to be checked against is not one.
+    asked = answered = reasoning = NOT_REPORTED
+    if isinstance(result, dict):
+        fields = _result_fields(result)
+        asked = fields.get("model_asked") or NOT_REPORTED
+        answered = fields.get("model") or NOT_REPORTED
+        reasoning = fields.get("provider_reasoning") or NOT_REPORTED
     return {
         "task": task,
         "verdict": verdict,
@@ -412,14 +442,17 @@ def compute_acceptance_values(path: Path, desk: Optional[Desk] = None, lane: Opt
         "extra_findings": sum(1 for l in sections.get("Extra findings", []) if _ITEM_RE.match(l)),
         "sections_missing": ", ".join(n.lower() for n in missing) if missing else "none",
         "paths_outside": outside,
+        "model_asked": asked,
+        "model": answered,
+        "provider_reasoning": reasoning,
         "bytes": len(body.encode("utf-8")),
         "generated": ts(),
     }
 
 
 def write_acceptance_header(path: Path, desk: Optional[Desk] = None, lane: Optional[str] = None,
-                            task: Optional[str] = None) -> Tuple[dict, str]:
-    values = compute_acceptance_values(path, desk=desk, lane=lane, task=task)
+                            task: Optional[str] = None, result=None) -> Tuple[dict, str]:
+    values = compute_acceptance_values(path, desk=desk, lane=lane, task=task, result=result)
     return values, write_header(path, "acceptance", values)
 
 
