@@ -81,9 +81,9 @@ the coordinator reads the board again when it resumes. Helpers (Claude Code
 subagents) support the coordinator's research, walkthroughs and drafts; they do not
 own worker tasks or replace their receipts.
 
-- **Parallel work, serialized records.** The default is two concurrent workers,
-  configurable with `max_parallel_workers`. Lane claims prevent overlap on one
-  lane; shared state and Git updates use the desk lock. Heartbeats continue while
+- **Parallel work, serialized records.** The default is one worker at a time,
+  raised with `max_parallel_workers` once a lane has gone end to end. Lane claims
+  prevent overlap on one lane; shared state and Git updates use the desk lock. Heartbeats continue while
   workers run. See [concurrency and recovery](docs/concurrency.md).
 - **Independent acceptance before every merge.** The verifier has its own model
   settings and may make reversible mutations in its disposable copy. Sampling
@@ -226,8 +226,52 @@ the coordinator to read, never a task result.
 | Pause and resume | `/bellhop:shutdown`, `/bellhop:resume` |
 | Release through the configured steps | `/bellhop:release` |
 
+Every top-level CLI command, as `./bin/bellhop --help` prints them; each has its own
+`--help`, and [exit codes](docs/exit-codes.md) says what its exit status means.
+
+| Command | What it does |
+|---|---|
+| `bellhop init` | Create a desk from the template |
+| `bellhop packet` | Packet tools, including `rebind` for an upgraded desk |
+| `bellhop dispatch` | Write the packet, ring, start the in-flight row, refresh the card |
+| `bellhop ring` | Ring a bell for a packet |
+| `bellhop lane` | Lane worktree maintenance: `reset`, `align`, `recover` |
+| `bellhop watch` | Answer bells (watchdog) |
+| `bellhop archive` | Commit desk files |
+| `bellhop sentinel` | Run the checks; every run logs its decision and any attempted wake |
+| `bellhop stop-dispatch` | The stop-dispatch switch: a file whose presence stops dispatch |
+| `bellhop ledger` | Ledger entries |
+| `bellhop decide` | Append a decision, verbatim |
+| `bellhop card` | Refresh or show the dispatch card |
+| `bellhop sample` | Is this id sampled for acceptance? |
+| `bellhop accept` | Run acceptance in a fresh read-only session, on a copy of the tree |
+| `bellhop receipt-header` | Compute a receipt's machine header from real commands |
+| `bellhop acceptance-header` | Write a verdict's machine header from its body |
+| `bellhop check-receipt` | Check a receipt's header |
+| `bellhop check-acceptance` | Check an acceptance verdict's header |
+| `bellhop header-spec` | Print the header spec straight from the code |
+| `bellhop merge` | Merge on the coordinator's judgement; needs `--reason`, counted as an exception |
+| `bellhop exceptions` | The recorded exceptions and how many are inside the window |
+| `bellhop readings` | Weekly readings |
+| `bellhop close-task` | Close one task: evidence, fileset, merge, ledger, state, archive |
+| `bellhop settle-bell` | The three things done the moment a worker exits |
+| `bellhop seal` | Record or verify seals |
+| `bellhop close` | Daily close |
+| `bellhop coldstart` | Print the reading list and check state files |
+| `bellhop health` | What the optional worker observation saw, and unread alerts |
+| `bellhop provider` | Worker providers: who answers a bell, and with what |
+| `bellhop provider-guard` | Does a command match the lane's allowlist? |
+| `bellhop daemon` | Resident watchdog and sentinel service |
+| `bellhop state` | The single write entry for the desk's state files |
+| `bellhop mcp` | Run the MCP server on stdio (used by the Claude Code plugin) |
+| `bellhop board` | The one page: everything a turn starts from, quoted and byte-capped |
+| `bellhop brief` | The principal's page: what is waiting, the queue, today, money, decisions |
+| `bellhop release` | Run the desk's `release_steps` in order |
+| `bellhop intake` | The principal's words, as the `UserPromptSubmit` hook logged them |
+| `bellhop hand` | The hand-edit window: lane repositories are gated until one is open |
+| `bellhop hook` | Claude Code hook entry point |
+
 The [plugin reference](docs/plugin.md) lists every skill, helper, hook and MCP tool.
-`./bin/bellhop --help` lists CLI commands; each subcommand has its own `--help`.
 
 The implementation is in [`bellhop/`](bellhop/); reusable desk files are in
 [`template/`](template/). Claude Code assets live in [`skills/`](skills/),
