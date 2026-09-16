@@ -39,7 +39,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
 
-from .locking import serialized
+from .locking import soft_serialized
 from .config import Desk
 from .util import append, read, write
 
@@ -165,7 +165,10 @@ def duplicate_of(desk: Desk, text: str, when: Optional[datetime] = None) -> Opti
     return None
 
 
-@serialized
+# The `UserPromptSubmit` hook calls this inside the coordinator's turn. It waits two
+# seconds for the desk lock and then writes anyway, leaving a line in the sentinel log:
+# a duplicated intake number is a recoverable mess, a turn that never starts is not.
+@soft_serialized("intake.log")
 def log(desk: Desk, text: str, when: Optional[datetime] = None) -> Tuple[str, object]:
     """Append the principal's words. Returns (LOGGED, n) / (DUPLICATE, n) / (SKIPPED, why)."""
     reason = skip_reason(desk, text)

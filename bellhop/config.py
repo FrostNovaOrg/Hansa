@@ -121,7 +121,16 @@ DESK_DEFAULTS = {
     "worktrees_dir": ".worktrees",
     "session_watchdog": True,
     "session_watchdog_interval": 5,
-    "max_parallel_workers": 2,
+    # Start at one. The lanes can run in parallel and all the machinery for it is
+    # here; raise this once two workers landing at the same time is something this
+    # desk has watched happen, not something it meets on its first day.
+    "max_parallel_workers": 1,
+    # How long a writer waits for the desk lock before it gives up and names the
+    # holder. Raise it on a desk whose full board runs for minutes inside the lock.
+    "lock_timeout_seconds": 30,
+    # Consecutive failed attempts on one bell before the watchdog stops answering it
+    # and parks it under `bells/dead/`. A bell retried forever is a loop, not a retry.
+    "bell_max_failures": 3,
     # Readings. `context_tail_tokens` is the line above which a turn is a long-context
     # turn: such turns cost more than the rest, because each one re-sends the context.
     # `prices` is merged over PRICE_DEFAULTS, key by key, so a
