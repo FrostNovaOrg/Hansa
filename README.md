@@ -8,7 +8,8 @@ queue, records, merge gates and supervision. Decisions, task packets, receipts
 and the next action survive in files and Git history when a session ends.
 
 [Try the demo](#try-the-demo) · [Set up a desk](#set-up-a-desk) ·
-[How it works](#how-the-desk-works) · [Documentation](#documentation)
+[How it works](#how-the-desk-works) · [Design principles](#design-principles) ·
+[Documentation](#documentation)
 
 ## How the desk works
 
@@ -197,10 +198,14 @@ whose session or resident watchdog is already handling the queue.
 
 ### Add continuous supervision
 
-After the first real task passes end to end, exercise two independent lanes and
-verify the host's wake path after the coordinator ends its turn. Use
-`/bellhop:daemon` when you need the queue handled while no Claude Code session is
-open. Keep these two jobs distinct:
+**Install the daemon last, after one real task has gone end to end while you were
+watching it.** A watchdog answering bells you have not yet seen answered is how a desk
+runs away from you, and one task run by hand teaches you more about your allowlist and
+your check command than any amount of configuration.
+
+After that task passes, exercise two independent lanes and verify the host's wake path
+once the coordinator ends its turn. Use `/bellhop:daemon` when you need the queue
+handled while no Claude Code session is open. Keep these two jobs distinct:
 
 | Component | Responsibility |
 |---|---|
@@ -228,6 +233,28 @@ The implementation is in [`bellhop/`](bellhop/); reusable desk files are in
 [`template/`](template/). Claude Code assets live in [`skills/`](skills/),
 [`agents/`](agents/) and [`hooks/`](hooks/). [`examples/`](examples/) and
 [`tests/`](tests/) exercise the file and Git workflow.
+
+## Design principles
+
+1. **Files, not chat.** Every instruction, result, and approval is a file in a Git
+   repository. If it is not in a file, it did not happen.
+2. **One task, one fresh session.** Workers start cold, read a short list, do one
+   thing, write one receipt, and exit. No long-lived worker state.
+3. **Append, never rewrite.** The ledger and the decisions log only grow. Rewriting
+   state is done by scripts that keep the previous version.
+4. **Guardrails at the repository layer.** Workers get a worktree, no push rights, and
+   a scrubbed environment. The model's own tool gate is the second line of defence,
+   not the first.
+5. **Machines check what machines can check.** The sentinel, the seals and the machine
+   headers catch drift; a rule a script can enforce is not written as a rule.
+6. **Gates block once; they never remind.** A hook that only warns changes nothing -
+   one that fired on every edit moved no habit. One
+   hook can refuse a call; nothing else nags.
+7. **Measure outcomes; use process numbers only to diagnose.** Time from bug report to
+   release, and defects found after release, are the score. Commit counts are a symptom.
+
+[Rationale](docs/rationale.md) has the reading behind each one; [design](docs/design.md)
+is the specification.
 
 ## Documentation
 
