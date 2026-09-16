@@ -247,7 +247,7 @@ The implementation is in [`bellhop/`](bellhop/); reusable desk files are in
    not the first.
 5. **Machines check what machines can check.** The sentinel, the seals and the machine
    headers catch drift; a rule a script can enforce is not written as a rule.
-6. **Gates block once; they never remind.** A hook that only warns changes nothing -
+6. **Gates block once; they never remind.** A hook that only warns changes nothing —
    one that fired on every edit moved no habit. One
    hook can refuse a call; nothing else nags.
 7. **Measure outcomes; use process numbers only to diagnose.** Time from bug report to
