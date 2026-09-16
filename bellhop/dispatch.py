@@ -18,6 +18,11 @@ Three lessons are built into the gates here, each of them paid for:
   never started, a task that is really running and a task nobody knows was sent look
   identical on the board. So the echo is four lines read back from the files, and the
   last line is either `✅ dispatched` or `🛑 stopped at: <step>` -- never silence.
+* **A criterion that cannot go red has passed before the worker starts.** Every
+  acceptance item carries a `breaks when:` clause naming what makes it fail; on one
+  desk, criteria without one were most of the self-caught mistakes and several
+  returned tasks. `bellhop/criteria.py` holds the check and `--allow-unbreakable`
+  waives it into the ledger.
 * **A stop-dispatch order needs a command path.** An order that lives only in prose
   gets pierced by exceptions, one reasonable-sounding exception at a time. Here the
   switch is a file this command reads before it does anything, and every exception is
@@ -40,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+from . import criteria as criteria_mod
 from . import packet as packet_mod
 from . import ring as ring_mod
 from . import state as state_mod
@@ -322,15 +328,17 @@ def dispatch(
     continue_id: Optional[str] = None,
     return_id: Optional[str] = None,
     heavy: bool = False,
+    kind: str = "",
     allow: Sequence[str] = (),
     exception: Optional[str] = None,
     demo: bool = False,
     commit: bool = True,
+    allow_unbreakable: bool = False,
 ) -> Report:
     report = Report()
     try:
         _dispatch(report, desk, lane, title, body_file, inflight, next_, continue_id,
-                  return_id, heavy, allow, exception, demo, commit)
+                  return_id, heavy, allow, exception, demo, commit, allow_unbreakable, kind)
     except Stopped as exc:
         report.code = exc.code
         report.last = f"🛑 stopped at: {exc.step} — {exc.reason}"
@@ -338,7 +346,8 @@ def dispatch(
 
 
 def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, continue_id,
-              return_id, heavy, allow, exception, demo, commit) -> None:
+              return_id, heavy, allow, exception, demo, commit, allow_unbreakable=False,
+              kind="") -> None:
     if continue_id and return_id:
         raise Stopped(STEP_PACKET,
                       "--continue and --return are opposites: continue picks up a packet that "
@@ -402,6 +411,10 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
     # -- the lane: where this starts -----------------------------------------
     state = lane_state(desk, lane)
     links: List[Tuple[str, str]] = []
+    # `kind` rides in the front matter beside the links. Acceptance reads it back for
+    # the verdict's byte cap: a report is long because it is a report.
+    if kind:
+        links.append(("kind", " ".join(str(kind).split())))
     resume_id = continue_id or return_id
     if resume_id:
         prior = find_packet(desk, lane_name, resume_id)
@@ -459,6 +472,14 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
     slug = slugify(title)
     receipt_rel = f"receipts/{task_id}-{slug}.md"
     created = ts()
+    refusal = criteria_mod.check(desk, acceptance, allow=allow_unbreakable, record=not demo,
+                                 task_id=task_id, lane=lane_name, title=title,
+                                 source=resume_id if return_id else "")
+    if refusal:
+        raise Stopped(STEP_PACKET, refusal)
+    if allow_unbreakable and criteria_mod.unbreakable(acceptance):
+        report.notes.append("\u26a0 --allow-unbreakable: %d criterion/criteria cannot go red; "
+                            "recorded in the ledger" % len(criteria_mod.unbreakable(acceptance)))
     try:
         text = packet_mod.build_packet_text(
             id=task_id, lane=lane_name, title=title, base=base, created=created, body=body,

@@ -21,6 +21,9 @@ if the task needs source excerpts quoted into it.
 ## Acceptance
 
 - one line per check a command can run; `bellhop dispatch` lifts these into the front matter
+- every line says how it goes red: `- <criterion> — breaks when: <what makes it red>`
+- a criterion with no `breaks when:` clause is refused at dispatch — it has passed before
+  the worker starts, and acceptance cannot tell it from work nobody did
 
 ## How to report
 
