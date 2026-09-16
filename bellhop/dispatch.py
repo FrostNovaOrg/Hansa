@@ -264,13 +264,18 @@ def record_exception(desk: Desk, path: Path, reason: str, what: str) -> Tuple[in
 # --------------------------------------------------------------------------
 def inflight_text(task_id: str, lane: str, title: str, base: str, bell: str,
                   sentence: str = "", cap: int = 160) -> str:
-    """`<id> <lane> <title> | dispatched <time> | base <sha7> | bell <name>[ | <sentence>]`.
+    """`[worker] <id> <lane> <title> | dispatched <time> | base <sha7> | bell <name>[ | <sentence>]`.
 
     The sentence goes last on purpose. The line has a cap, and whatever falls off the end
     when it is reached should be the prose, not the base and the bell: those two are how a
     row on the board is traced back to a commit and a log weeks later.
+
+    The `[worker]` label is what `sentinel.check_inflight` reads: a row has to say whose
+    work it is. Dispatch wrote its rows without one while `watch.py` wrote its own rows
+    with one, so one file had two writers who disagreed, and every dispatched row made
+    the sentinel red for a reason nobody had chosen.
     """
-    fixed = (f"{task_id} {lane} {title} | dispatched {now().strftime('%Y-%m-%d %H:%M')} "
+    fixed = (f"[worker] {task_id} {lane} {title} | dispatched {now().strftime('%Y-%m-%d %H:%M')} "
              f"| base {base} | bell {bell}")
     sentence = " ".join((sentence or "").split())
     if not sentence:

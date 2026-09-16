@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from bellhop import cli  # noqa: E402
 from bellhop import dispatch as dispatch_mod  # noqa: E402
+from bellhop import sentinel as sentinel_mod  # noqa: E402
 from bellhop import desk_ops, lanes, packet as packet_mod, state as state_mod  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import read, read_json, write, write_json  # noqa: E402
@@ -137,7 +138,7 @@ class DispatchTest(unittest.TestCase):
                           "a file named note.md exists in the working tree — breaks when: "
                           "note.md is deleted"])
         self.assertTrue((self.desk.bells_pending / lines[2]).exists())
-        self.assertIn("- 001 api Add health check note |", self.inflight())
+        self.assertIn("- [worker] 001 api Add health check note |", self.inflight())
         self.assertEqual(self.card()["next"], "002 wire the metrics reader")
 
     def test_four_lines_are_read_back_from_the_files(self):
@@ -569,18 +570,28 @@ class DispatchTest(unittest.TestCase):
 
     # -- in flight ----------------------------------------------------------
 
+    def test_a_dispatched_row_passes_the_sentinel_role_check(self):
+        """The writer of the row and the reader of the row have to agree about its shape."""
+        code, out = self.dispatch()
+        self.assertEqual(code, 0, out)
+        name, ok, detail = sentinel_mod.check_inflight(self.desk)
+        self.assertTrue(ok, detail)
+        # control: a row without a role label is what the check is there to catch
+        state_mod.inflight_start(self.desk, "002 api unlabelled row")
+        self.assertFalse(sentinel_mod.check_inflight(self.desk)[1])
+
     def test_in_flight_start_is_idempotent(self):
         self.dispatch()
-        rows = self.inflight().count("- 001 api")
+        rows = self.inflight().count("- [worker] 001 api")
         line = dispatch_mod.inflight_text("001", "api", "Add health check note", self.base, "bell-1")
         row, skipped = dispatch_mod.start_inflight(self.desk, "001", line)
         self.assertTrue(skipped)
-        self.assertEqual(self.inflight().count("- 001 api"), rows)
+        self.assertEqual(self.inflight().count("- [worker] 001 api"), rows)
         # control: a different id is a different row
         row, skipped = dispatch_mod.start_inflight(
             self.desk, "002", dispatch_mod.inflight_text("002", "api", "Other", self.base, "bell-2"))
         self.assertFalse(skipped)
-        self.assertIn("- 002 api Other", self.inflight())
+        self.assertIn("- [worker] 002 api Other", self.inflight())
 
     def test_a_long_sentence_is_trimmed_and_the_base_and_bell_survive(self):
         line = dispatch_mod.inflight_text("001", "api", "Add health check note", self.base,
