@@ -146,7 +146,7 @@ Start with one small task on one lane.
 | `lanes.<lane>.check_cmd` / `allowed_tools` | A meaningful full check and the tool permissions needed to run it and commit |
 | `lanes.<lane>.model` | The worker model available through your Claude Code installation |
 | `accept_model` / `accept_effort` | Independent verifier settings; non-empty lane overrides take precedence |
-| `max_parallel_workers` | Start at `1`; the shipped default is `2` |
+| `max_parallel_workers` | Ships as `1`; raise it only after one real task has closed cleanly |
 | `wake_cmd` / `busy_probe_cmd` | The host's actual wake and busy-state adapters, before relying on automatic resumption |
 
 Record standing decisions, seal the desk, then use `/bellhop:dispatch` for a task
