@@ -89,6 +89,10 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
     cmd = providers_mod.build_command(desk, lane, packet, prompt, resolved, worktree=worktree,
                                       prompt_file=prompt_file, log_path=log_path)
     started = now()
+    # The wall clock for the record, a monotonic one for the arithmetic: a machine whose
+    # clock steps while a worker runs would otherwise report a negative duration or an
+    # extra hour, and the duration is one of the numbers the readings add up.
+    elapsed = time.monotonic()
     timeout = max(60, packet.budget_minutes * 60 * 2)
     try:
         from .accept import run_session
@@ -96,7 +100,7 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         stdout, stderr, code = session["stdout"], session["stderr"], session["exit_code"]
     except Exception as exc:  # timeout or launch failure
         stdout, stderr, code = "", f"worker launch failed: {exc}", 124
-    duration = (now() - started).total_seconds()
+    duration = time.monotonic() - elapsed
     write(log_path, f"# bellhop worker log {packet.stem}\n\n## stdout\n{stdout}\n\n## stderr\n{stderr}\n")
     parsed = providers_mod.parse_result(stdout, resolved.provider)
     raw = parsed.get("raw") or {}
@@ -118,6 +122,13 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         "duration_s": round(duration, 1),
         "cost_usd": providers_mod.na_none(parsed["cost_usd"]),
         "stop_reason": providers_mod.na_none(parsed["stop_reason"]),
+        # The provider's own two fields, kept unmerged beside the reading above. A run
+        # that the bridge cancelled prints `error_during_execution` with a native stop
+        # reason of `cancelled`; `stop_reason` collapses those into one string, and
+        # afterwards nothing in the meta can say whether the model stopped or the
+        # channel did. `None` where the provider said nothing, never invented.
+        "native_subtype": raw.get("subtype"),
+        "native_stop_reason": raw.get("stop_reason"),
         "session_id": raw.get("session_id"),
         "exit_code": code,
         "started_at": ts(started),
