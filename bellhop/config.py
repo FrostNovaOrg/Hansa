@@ -49,6 +49,17 @@ PACKET_FORBIDDEN_PATTERNS = (
     r"docker push",
 )
 
+# The role gate's two lists. They live here because `bellhop.json` overrides them and a
+# desk reading its own config should find them beside everything else it can set.
+ROLE_GATE_CODE_GLOBS = (
+    "*.py", "*.pyi", "*.js", "*.jsx", "*.ts", "*.tsx", "*.mjs", "*.cjs", "*.go",
+    "*.rs", "*.rb", "*.java", "*.kt", "*.kts", "*.swift", "*.c", "*.h", "*.cc",
+    "*.cpp", "*.hpp", "*.cs", "*.m", "*.mm", "*.php", "*.scala", "*.lua", "*.pl",
+    "*.sh", "*.bash", "*.zsh", "*.fish", "*.sql", "*.tf", "*.gradle", "*.ipynb",
+    "Makefile", "*.mk", "Dockerfile", "*.podspec", "*.gemspec",
+)
+ROLE_GATE_WRITE_DIRS = ("state", "rules", "inbox", "ledger", "reports", "receipts", "bells")
+
 DESK_DEFAULTS = {
     # Optional desk-local add-ons, each a directory holding a `bellhop_ext.py`; see
     # `bellhop/extensions.py`. Relative names resolve against the desk root. The core
@@ -185,8 +196,43 @@ DESK_DEFAULTS = {
     # Commands that already have their own record. Matched on the first word's
     # basename, so `bellhop merge` and `./bin/bellhop merge` both count.
     "hand_allow_commands": ["bellhop"],
+    # Every gate decision lands in the hand ledger, reads included, so a desk can count
+    # the gate's own false positives rather than take its word for them. Turn it off and
+    # a read that was let through and a read nobody made look the same.
+    "hand_log_reads": True,
+    # -- the role gate ------------------------------------------------------
+    # The coordinator dispatches; it does not implement. On one desk the coordinator
+    # wrote code often before a guard was installed, and not at all the day
+    # after. `"role_gate": "off"` (or false) turns it off.
+    "role_gate": True,
+    "role_gate_code_globs": list(ROLE_GATE_CODE_GLOBS),
+    "role_gate_write_dirs": list(ROLE_GATE_WRITE_DIRS),
+    # -- helpers ------------------------------------------------------------
+    # A helper is read-only and uncapped, which is how read-only scouts came to cost
+    # more than the verifiers on one desk, with nothing to compare
+    # against. These are declared here, printed into the helper's prompt, and read
+    # back by `bellhop readings` as "helpers over budget".
+    "helper_max_turns": 40,
+    "helper_max_cost_usd": 2.0,
+    # -- acceptance pre-flight and the verdict cap by kind -------------------
+    "accept_preflight": True,
+    "accept_recovery_commands": ["git checkout --", "git checkout", "git restore"],
+    "acceptance_bytes_report": 6000,
     "lanes": {},
 }
+
+def helper_budget(desk: "Desk"):
+    """(turns, dollars) a helper session may spend. Printed into the helper's prompt."""
+    try:
+        turns = int(desk.cfg.get("helper_max_turns", 40) or 0)
+    except (TypeError, ValueError):
+        turns = 40
+    try:
+        cost = float(desk.cfg.get("helper_max_cost_usd", 2.0) or 0.0)
+    except (TypeError, ValueError):
+        cost = 2.0
+    return turns, cost
+
 
 LANE_DEFAULTS = {
     "repo": "",
@@ -211,6 +257,12 @@ LANE_DEFAULTS = {
     "env_allow": [],
     "worker_cmd": "",
     "accept_cmd": "",
+    # The verifier's allowlist for this lane. Empty means the one `bellhop accept`
+    # builds: readers, the four git readers, the mutation pair and the lane's check.
+    # A lane that names its own is pre-flighted against the criteria before a session
+    # starts -- a policy with no recovery command voided a task on one desk after two
+    # attempts, and the mismatch was on the page the whole time.
+    "accept_allowed_tools": [],
     "accept_model": "",
     "accept_effort": "",
     "check_cmd": "",
