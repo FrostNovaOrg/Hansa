@@ -15,7 +15,7 @@ from . import headers as headers_mod
 from . import health as health_mod
 from . import providers as providers_mod
 from . import stopdispatch as stop_mod
-from .config import Desk
+from .config import CONFIG_NAME, Desk
 from .locking import desk_lock, serialized, worker_limit, worker_slot
 from .lanes import lane_is_busy, lane_lock, prepare_worktree
 from .packet import Packet, parse_packet
@@ -573,6 +573,69 @@ class WatchPool:
         self.tick(dispatch=False)
 
 
+def _names(names) -> str:
+    return ",".join(sorted(names)) if names else "none"
+
+
+class LaneReload:
+    """Re-read the desk's lanes between ticks, so a new lane does not need a restart.
+
+    A lane added to `bellhop.json` while the resident watchdog was up was invisible until
+    somebody restarted the service. On one desk two packets sat pending for hours
+    for that reason, and the board showed them as waiting for a worker -- which they were,
+    for a worker in a lane the running process did not know existed.
+
+    The check is a `stat` per tick, not a parse: the file is read only when its mtime or
+    its size has moved. Only the lanes are taken from the new file. Everything else --
+    the worker limit, the thread pool, the intervals -- was fixed when the pool was built
+    and a mid-flight change to it would mean two answers inside one tick, so the log says
+    plainly that those still need a restart.
+    """
+
+    def __init__(self, desk: Desk):
+        self.desk = desk
+        self.path = desk.path(CONFIG_NAME)
+        self.stamp = self._stamp()
+
+    def _stamp(self):
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def tick(self) -> str:
+        """The line to log, or "" when nothing moved. Never raises: this runs in the loop."""
+        stamp = self._stamp()
+        if stamp is None or stamp == self.stamp:
+            return ""
+        self.stamp = stamp                      # a half-written file is not read twice
+        try:
+            cfg = read_json(self.path, None)
+        except (OSError, ValueError) as exc:
+            return f"lanes not reloaded: {CONFIG_NAME} unreadable ({exc}); keeping the lanes already loaded"
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("lanes"), dict):
+            return f"lanes not reloaded: {CONFIG_NAME} has no lanes table; keeping the lanes already loaded"
+        before = dict(self.desk.cfg.get("lanes") or {})
+        after = cfg["lanes"]
+        added = set(after) - set(before)
+        removed = set(before) - set(after)
+        changed = {n for n in set(before) & set(after) if before[n] != after[n]}
+        rest = {k: v for k, v in cfg.items() if k != "lanes"}
+        others = {k for k, v in rest.items() if self.desk.cfg.get(k) != v}
+        if not (added or removed or changed or others):
+            return ""
+        merged = dict(self.desk.cfg)
+        merged["lanes"] = after
+        self.desk.cfg = merged                  # one assignment; a tick sees one table
+        line = f"lanes reloaded: +{_names(added)} -{_names(removed)}"
+        if changed:
+            line += f" ~{_names(changed)}"
+        if others:
+            line += f" (unchanged here, restart to pick up: {_names(others)})"
+        return line
+
+
 def watch_loop(desk: Desk, interval: int = 5, archive: bool = True) -> None:
     global _stop
     _stop = False
@@ -580,9 +643,13 @@ def watch_loop(desk: Desk, interval: int = 5, archive: bool = True) -> None:
     signal.signal(signal.SIGINT, _handle_term)
     from . import daemon as daemon_mod
     pool = WatchPool(desk, archive)
+    reload = LaneReload(desk)
     try:
         while not _stop or pool.active:
             daemon_mod.touch_heartbeat(desk, "resident")
+            line = reload.tick()
+            if line:
+                _log(desk, f"RELOAD\t{line}")
             pool.tick(dispatch=not _stop)
             if not _stop or pool.active:
                 time.sleep(max(0.05, interval))
