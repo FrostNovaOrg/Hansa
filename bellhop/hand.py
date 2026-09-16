@@ -300,9 +300,9 @@ def _allowed_command(desk: Desk, command: str) -> bool:
 
 # -- write intent ----------------------------------------------------------
 # A gate that fires on the name of a lane is not a gate on writing into it. On one
-# desk this hook blocked eleven times in a fortnight and **all eleven were reads**
-# -- `rg`, `ls`, `find`, `cat`, `git status`, `bash -n` -- that happened to carry a
-# lane path as an argument. Not one hand-write was caught, and the coordinator lost
+# desk this hook blocked **11 times and all 11 were reads** -- `rg`, `ls`, `find`,
+# `cat`, `git status`, `bash -n` -- that happened to carry a lane path as an
+# argument. Not one hand-write was caught, and the coordinator lost
 # the evidence it was reading for. So the question here is not "does this command
 # name a lane" but "does this command write", and the answer is only yes when
 # something in it actually writes: a redirection onto a file, a command whose job is
@@ -590,8 +590,11 @@ def _git_verb(args: List[str]) -> Optional[str]:
             return None
         if any(word in GIT_MIXED[sub] for word in tail):
             return "git " + sub
-        if sub in ("branch", "tag") and [w for w in tail if not w.startswith("-")]:
-            return "git " + sub
+        positional = [w for w in tail if not w.startswith("-")]
+        if sub in ("branch", "tag") and positional:
+            return "git " + sub  # naming one creates it; `--list` was handled above
+        if sub == "config" and len(positional) >= 2:
+            return "git config"  # a key and a value is a write; a key alone is a read
         return None
     return "git " + sub  # an unknown git verb is not the place to guess
 
