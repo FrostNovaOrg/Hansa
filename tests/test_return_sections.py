@@ -54,8 +54,8 @@ SCOPE_SECTION = f"""## Execution scope
 
 CRITERIA = """## Acceptance
 
-- C1: ./check.sh prints 'check.sh: all green'
-- C2: a file named note.md exists in the working tree
+- C1: ./check.sh prints 'check.sh: all green' — breaks when: the greeting line is removed from check.sh
+- C2: a file named note.md exists in the working tree — breaks when: note.md is deleted
 """
 
 FORMAL_BODY = WHAT + "\n" + SCOPE_SECTION + "\n" + CRITERIA
