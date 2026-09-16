@@ -22,7 +22,9 @@ The shape:
   three edits are not the same claim, and only the second one is evidence.
 * **An expired window counts as closed.** A window closed on time and a window
   left open and forgotten look alike in the sentence "there was a window".
-* **Reads are never gated.** `Read`, `Grep` and `Glob` cannot change a repository.
+* **Reads are never gated.** `Read`, `Grep` and `Glob` cannot change a repository, and
+  a `Bash` call is judged by what it would *write*, not by the paths it names: the
+  first version blocked eleven reads on one desk and caught no write at all.
 * **A broken gate never blocks.** If this module raises, the caller logs the
   failure and lets the tool through: a command stopped by a bug in the gate and a
   command stopped by a real breach look the same from the coordinator's seat, and
@@ -49,8 +51,13 @@ LEDGER_HEADER = (
     "(one line per event, all starting `- `:\n"
     "  `- opened: <time> | <N> min | <reason>`\n"
     "  `- closed: <time> | <N> min used | <M> written[ | expired]`\n"
-    "  `- written: <time> | <tool> | <path> | <command head>`\n"
-    "  `- blocked: <time> | <tool> | <path> | <command head>`\n"
+    "  `- written: <time> | <tool> | <path> | <command head> | open-window <verb>`\n"
+    "  `- blocked: <time> | <tool> | <path> | <command head> | block-write <verb>`\n"
+    "  `- allow-read: <time> | <tool> | <path> | <command head>`\n"
+    "  `- role-refused: <time> | <tool> | <path> | <command head> | <why>`\n"
+    "  `- role-open: <time> | <tool> | <path> | <command head> | <why>`\n"
+    "The three gate decisions are `allow-read`, `block-write` (`blocked`) and\n"
+    "`open-window` (`written`); the `role-` rows are the coordinator role gate.\n"
     "A window is the declaration; this file is the record. They are separate on purpose.)\n"
 )
 
@@ -248,8 +255,20 @@ def _resolve(candidate: str, cwd: str) -> str:
     return os.path.realpath(candidate)
 
 
+def mentions(tool: str, tool_input: dict, cwd: str) -> List[str]:
+    """Every path this call names, resolved. A mention is not an intention to write."""
+    return targets(tool, tool_input, cwd)
+
+
 def targets(tool: str, tool_input: dict, cwd: str) -> List[str]:
-    """Every path this call might write to, resolved to a real absolute path."""
+    """Every path this call names, resolved to a real absolute path.
+
+    This is the conservative scanner: it says a lane was *mentioned*, which is what
+    the log needs to show that a read was seen and let through. What a call would
+    *write* is `write_targets` below, and the two are deliberately different
+    questions -- a gate that could not tell them apart blocked eleven reads in a row
+    on one desk and caught no write at all.
+    """
     tool_input = tool_input or {}
     cwd = _expand(cwd or "")
     if tool != "Bash":
@@ -279,14 +298,450 @@ def _allowed_command(desk: Desk, command: str) -> bool:
     return first in tuple(desk.cfg.get("hand_allow_commands") or ())
 
 
+# -- write intent ----------------------------------------------------------
+# A gate that fires on the name of a lane is not a gate on writing into it. On one
+# desk this hook blocked eleven times in a fortnight and **all eleven were reads**
+# -- `rg`, `ls`, `find`, `cat`, `git status`, `bash -n` -- that happened to carry a
+# lane path as an argument. Not one hand-write was caught, and the coordinator lost
+# the evidence it was reading for. So the question here is not "does this command
+# name a lane" but "does this command write", and the answer is only yes when
+# something in it actually writes: a redirection onto a file, a command whose job is
+# to change a file, or a git subcommand that moves the tree or the branch.
+#
+# The default for everything else is **pass**. That is a deliberate hole -- a script
+# or an interpreter running a file it was handed can write anywhere and this
+# classifier will not see it -- and it is the right side to err on: a false block
+# costs the desk a turn and teaches everyone to keep a window open, which is the
+# habit that made the first version of this hook useless.
+
+# Commands whose purpose is to change a file. Matched on the basename, so
+# `/usr/bin/rm` and `rm` are the same word.
+WRITE_COMMANDS = frozenset({
+    "tee", "mv", "cp", "rm", "rmdir", "unlink", "shred", "patch", "chmod", "chown",
+    "chgrp", "touch", "mkdir", "install", "ln", "truncate", "dd", "rsync", "tar",
+    "unzip", "zip", "gzip", "gunzip", "mktemp", "chflags", "xattr",
+    # Editors. An editor opened on a lane file is a hand edit by definition.
+    "vi", "vim", "nvim", "nano", "pico", "emacs", "ed", "ex", "micro", "joe", "kak",
+    "hx", "helix", "code", "subl", "mate", "open",
+})
+
+# Readers. Anything unrecognised passes anyway, so this list changes nothing on its
+# own; it is consulted first so that a name can never sit in both lists and have the
+# write side win quietly. These are the commands the eleven false blocks were made of.
+READ_COMMANDS = frozenset({
+    "cat", "ls", "rg", "grep", "egrep", "fgrep", "find", "head", "tail", "wc", "diff",
+    "less", "more", "file", "stat", "du", "df", "pwd", "which", "type", "echo",
+    "printf", "sort", "uniq", "cut", "tr", "awk", "jq", "sed", "column", "basename",
+    "dirname", "realpath", "readlink", "test", "true", "false", "date", "env",
+})
+
+# git subcommands that move the tree, the index, the branches or the config.
+GIT_WRITE = frozenset({
+    "add", "commit", "push", "checkout", "reset", "rebase", "merge", "stash", "clean",
+    "apply", "restore", "rm", "mv", "switch", "cherry-pick", "revert", "am", "pull",
+    "fetch", "init", "clone", "gc", "prune", "update-ref", "update-index", "mergetool",
+    "filter-branch", "bisect", "rerere", "replace", "sparse-checkout", "maintenance",
+})
+# git subcommands that only read. Anything in neither list counts as a write: git is
+# how a tree changes, and an unknown git verb is not the place to guess.
+GIT_READ = frozenset({
+    "status", "log", "diff", "show", "blame", "rev-parse", "rev-list", "ls-files",
+    "ls-tree", "ls-remote", "cat-file", "describe", "shortlog", "grep", "reflog",
+    "count-objects", "symbolic-ref", "for-each-ref", "name-rev", "merge-base",
+    "diff-tree", "diff-index", "whatchanged", "check-ignore", "check-attr", "var",
+    "help", "version", "fsck", "verify-commit", "verify-tag", "annotate", "cherry",
+})
+# git subcommands that read or write depending on their arguments, and the words
+# that make each one a write.
+GIT_MIXED = {
+    "branch": ("-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy",
+               "--set-upstream-to", "--unset-upstream", "--edit-description"),
+    "tag": ("-d", "-D", "--delete", "-a", "-s", "-f", "--force", "-m"),
+    "remote": ("add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune"),
+    "worktree": ("add", "remove", "move", "prune", "repair", "lock", "unlock"),
+    "stash": ("push", "pop", "apply", "drop", "save", "clear", "store", "create", "branch"),
+    "notes": ("add", "append", "copy", "edit", "remove", "prune"),
+    "submodule": ("add", "update", "init", "deinit", "sync", "absorbgitdirs", "set-url"),
+    "config": ("--add", "--unset", "--unset-all", "--replace-all", "--edit", "-e", "--rename-section", "--remove-section"),
+}
+GIT_READ_FLAGS = {
+    "branch": ("--list", "-l", "-a", "-r", "-v", "-vv", "--all", "--show-current", "--contains", "--merged", "--no-merged"),
+    "tag": ("-l", "--list", "-n", "--contains", "--points-at"),
+    "config": ("--get", "--get-all", "--get-regexp", "--list", "-l", "--get-urlmatch"),
+}
+
+# Wrappers that stand in front of the command that matters.
+WRAPPERS = frozenset({"env", "sudo", "doas", "nohup", "time", "command", "builtin",
+                      "exec", "nice", "ionice", "stdbuf", "timeout", "xargs"})
+
+INTERPRETERS = frozenset({"python", "python2", "python3", "perl", "ruby", "node", "php"})
+SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
+
+# What makes a `-c` one-liner a writer rather than a printer.
+_INLINE_WRITE = re.compile(
+    r"""\.write(_text|_bytes)?\s*\(|open\s*\([^)]*['"][rbt+]*[wax]|>>?\s*['"]?/|"""
+    r"""os\.(remove|unlink|rename|replace|mkdir|makedirs|rmdir|chmod|symlink|link|truncate)|"""
+    r"""shutil\.(copy\w*|move|rmtree)|Path\([^)]*\)\.(write\w*|unlink|mkdir|rename|touch|replace)|"""
+    r"""print\s*\([^)]*file\s*=\s*open|subprocess|os\.system|json\.dump\s*\(""",
+    re.X,
+)
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def split_heredocs(command: str) -> Tuple[List[str], Dict[int, str]]:
+    """(the command's lines with heredoc bodies removed, body by header-line index).
+
+    A heredoc body is data the command is fed, not a chain of commands. Left in, a
+    packet body being written to a scratch file that *mentions* `rm -rf <lane>` reads
+    exactly like a command that runs it. The header line stays, so `cat > file
+    <<'EOF'` is still the redirection it is, and the body is handed back separately
+    for the one reader that should see it: an interpreter told to run it.
+    """
+    lines = command.split("\n")
+    out: List[str] = []
+    bodies: Dict[int, str] = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        here = len(out) - 1
+        marks = [m.group(2) for m in _HEREDOC.finditer(line)]
+        i += 1
+        for mark in marks:
+            body: List[str] = []
+            while i < len(lines) and lines[i].strip() != mark:
+                body.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # the terminator itself
+            if body:
+                bodies[here] = (bodies.get(here, "") + "\n" + "\n".join(body)).strip()
+    return out, bodies
+
+
+def strip_heredocs(command: str) -> str:
+    """The command with its heredoc bodies removed."""
+    lines, _bodies = split_heredocs(command)
+    return "\n".join(lines)
+
+
+def split_segments(command: str) -> List[str]:
+    """Split a command line into the simple commands it runs, quotes respected.
+
+    `&&`, `||`, `;`, `|`, `&`, a newline, a subshell and a command substitution all
+    start a new segment. A classifier that read only the first word of the whole line
+    would pass `rg foo /lane && rm -rf /lane`.
+    """
+    out: List[str] = []
+    buf: List[str] = []
+    quote: Optional[str] = None
+    depth = 0  # open command substitutions, so `open(...)` in code stays one word
+    i, n = 0, len(command or "")
+    while i < n:
+        c = command[i]
+        if quote:
+            buf.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(c)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "(":
+            out.append("".join(buf))
+            buf = []
+            depth += 1
+            i += 2
+            continue
+        if c == ")" and depth:
+            out.append("".join(buf))
+            buf = []
+            depth -= 1
+            i += 1
+            continue
+        if c in "`\n;":
+            out.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        if c in "&|":
+            out.append("".join(buf))
+            buf = []
+            i += 2 if i + 1 < n and command[i + 1] == c else 1
+            continue
+        buf.append(c)
+        i += 1
+    out.append("".join(buf))
+    return [s.strip() for s in out if s.strip()]
+
+
+def lex(segment: str) -> Tuple[List[str], List[str]]:
+    """(words, files written by a redirection) for one simple command.
+
+    `2>&1` and `>&2` duplicate a descriptor and write no file; `> out` and `>> out`
+    do. Telling those apart is what keeps `rg pattern /lane 2>/dev/null` a read.
+    """
+    words: List[str] = []
+    redirects: List[str] = []
+    buf: List[str] = []
+    has = False
+    pending = False
+    quote: Optional[str] = None
+    i, n = 0, len(segment or "")
+
+    def flush() -> None:
+        nonlocal buf, has, pending
+        if has:
+            word = "".join(buf)
+            (redirects if pending else words).append(word)
+            pending = False
+        buf, has = [], False
+
+    while i < n:
+        c = segment[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                buf.append(segment[i + 1])
+                has = True
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+                has = True
+                i += 1
+                continue
+            buf.append(c)
+            has = True
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            has = True
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(segment[i + 1])
+            has = True
+            i += 2
+            continue
+        if c.isspace():
+            flush()
+            i += 1
+            continue
+        if c == ">":
+            if has and "".join(buf).isdigit():
+                buf, has = [], False  # the file descriptor, not a word
+            flush()
+            i += 1
+            if i < n and segment[i] == ">":
+                i += 1
+            while i < n and segment[i] in " \t":
+                i += 1
+            if i < n and segment[i] == "&":
+                i += 1
+                while i < n and not segment[i].isspace():
+                    i += 1
+                continue
+            pending = True
+            continue
+        if c == "<":
+            flush()
+            i += 1
+            if i < n and segment[i] == "<":
+                i += 1
+            continue
+        buf.append(c)
+        has = True
+        i += 1
+    flush()
+    return words, redirects
+
+
+def _git_verb(args: List[str]) -> Optional[str]:
+    """The git subcommand's verdict, or None when it only reads."""
+    rest = list(args)
+    while rest and rest[0].startswith("-"):
+        opt = rest.pop(0)
+        if opt in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path") and rest:
+            rest.pop(0)
+    if not rest:
+        return None
+    sub = rest[0]
+    tail = rest[1:]
+    if sub in GIT_READ:
+        return None
+    if sub in GIT_WRITE:
+        return "git " + sub
+    if sub in GIT_MIXED:
+        if any(flag in tail for flag in GIT_READ_FLAGS.get(sub, ())):
+            return None
+        if any(word in GIT_MIXED[sub] for word in tail):
+            return "git " + sub
+        if sub in ("branch", "tag") and [w for w in tail if not w.startswith("-")]:
+            return "git " + sub
+        return None
+    return "git " + sub  # an unknown git verb is not the place to guess
+
+
+def _sed_in_place(args: List[str]) -> bool:
+    for a in args:
+        if a == "--in-place" or a.startswith("--in-place="):
+            return True
+        if a.startswith("-") and not a.startswith("--") and "i" in a.split("=")[0]:
+            return True
+    return False
+
+
+INLINE = " inline"
+
+
+def write_verb(words: List[str], raw: str = "") -> Optional[str]:
+    """What makes this simple command a write, or None if it only reads.
+
+    None is the default: this returns a verb only when it recognises one. `raw` is
+    the segment as typed, plus any heredoc body fed to it, and is read for one thing
+    only -- whether code handed to an interpreter writes. `python3 -c` that prints is
+    a read; the same command opening a file for writing is not.
+    """
+    rest = list(words)
+    while rest:
+        first = rest[0]
+        if _ENV_ASSIGN.match(first):
+            rest.pop(0)
+            continue
+        if os.path.basename(first) in WRAPPERS:
+            rest.pop(0)
+            while rest and rest[0].startswith("-"):
+                rest.pop(0)
+            continue
+        break
+    if not rest:
+        return None
+    name = os.path.basename(rest[0])
+    args = rest[1:]
+    if name == "git":
+        return _git_verb(args)
+    if name in ("sed", "perl", "ruby", "gsed") and _sed_in_place(args):
+        return name + " -i"
+    if name in READ_COMMANDS:
+        return None  # named first, so a reader can never be added to both lists
+    if name in WRITE_COMMANDS:
+        return name
+    if name in INTERPRETERS or name in SHELLS:
+        # `bash -n <file>` and a script file this gate cannot read stay reads; code
+        # that is here on the line, in a `-c` or in a heredoc, is read for intent.
+        return name + INLINE if _INLINE_WRITE.search(raw or " ".join(args)) else None
+    return None
+
+
+REDIRECT = "redirect"
+
+
+_QUOTED = re.compile(r"""['"]([^'"\n]{1,200})['"]""")
+
+
+def _candidate_paths(verb: str, words: List[str], redirects: List[str], raw: str) -> List[str]:
+    """The words of a write command that could be the thing it writes.
+
+    A bare redirection writes exactly one thing -- the file after the `>`. Counting
+    the rest of the line too is how `rg pattern <lane> 2>/dev/null` became a block.
+    Code handed to an interpreter names its paths inside itself, quoted, so those are
+    read out of the text rather than out of the argument list.
+    """
+    out = list(redirects)
+    if verb == REDIRECT:
+        return out
+    if verb.endswith(INLINE):
+        out.extend(m.group(1) for m in _ABS.finditer(raw))
+        out.extend(m.group(1) for m in _QUOTED.finditer(raw))
+        return out
+    for word in words[1:]:
+        if word.startswith("-"):
+            continue
+        out.append(word)
+    return out
+
+
+def bash_writes(command: str, cwd: str) -> List[Tuple[str, str]]:
+    """(verb, resolved path) for everything this command line would write.
+
+    `cd` is followed between segments, so `cd <lane> && sed -i ... file.py` resolves
+    `file.py` inside the lane the way the shell would.
+    """
+    here = _expand(cwd or "")
+    found: List[Tuple[str, str]] = []
+    lines, bodies = split_heredocs(_expand(command or ""))
+    for n, line in enumerate(lines):
+        body = bodies.get(n, "")
+        for segment in split_segments(line):
+            words, redirects = lex(segment)
+            if not words and not redirects:
+                continue
+            if words and os.path.basename(words[0]) == "cd":
+                if len(words) > 1:
+                    here = _resolve(words[1], here)
+                continue
+            raw = segment + ("\n" + body if body else "")
+            verb = write_verb(words, raw) if words else REDIRECT
+            if not verb and redirects:
+                verb = REDIRECT
+            if not verb:
+                continue
+            for candidate in _candidate_paths(verb, words, redirects, raw):
+                resolved = _resolve(candidate, here)
+                if resolved:
+                    found.append((verb, resolved))
+    return found
+
+
+def write_targets(tool: str, tool_input: dict, cwd: str) -> List[Tuple[str, str]]:
+    """(verb, resolved path) for every path this tool call would write to."""
+    tool_input = tool_input or {}
+    if tool != "Bash":
+        raw = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        resolved = _resolve(raw, _expand(cwd or "")) if raw else ""
+        return [(tool, resolved)] if resolved else []
+    return bash_writes(tool_input.get("command") or "", cwd)
+
+
 def _short(desk: Desk, path: str) -> str:
     root = os.path.realpath(str(desk.root))
     return path[len(root) + 1:] if _inside(path, root) and path != root else path
 
 
 # -- the gate --------------------------------------------------------------
+def _first_hit(paths, roots):
+    for item in paths:
+        verb, path = item if isinstance(item, tuple) else ("", item)
+        for lane, root in roots:
+            if _inside(path, root):
+                return lane, path, verb
+    return None
+
+
 def gate(desk: Desk, data: dict) -> Tuple[int, str]:
-    """PreToolUse. Returns (exit code, message): 2 blocks the call, 0 lets it through."""
+    """PreToolUse. Returns (exit code, message): 2 blocks the call, 0 lets it through.
+
+    Three decisions, all of them written to the ledger so a desk can count the gate's
+    own false positives instead of taking its word for them:
+
+    * `allow-read` -- the call named a lane and would not write into it;
+    * `open-window` -- it would write, and a window is open (the row reads `written`);
+    * `block-write` -- it would write, and no window is open (the row reads `blocked`).
+    """
     tool = (data or {}).get("tool_name") or ""
     if tool in READ_ONLY or tool not in WRITE_TOOLS:
         return 0, ""
@@ -300,27 +755,25 @@ def gate(desk: Desk, data: dict) -> Tuple[int, str]:
     roots = lane_roots(desk)
     if not roots:
         return 0, ""
-    hit = None
-    for path in targets(tool, tool_input, cwd):
-        for lane, root in roots:
-            if _inside(path, root):
-                hit = (lane, path)
-                break
-        if hit:
-            break
-    if not hit:
-        return 0, ""
-    lane, path = hit
     head = command[:COMMAND_HEAD_CHARS] + "…" if len(command) > COMMAND_HEAD_CHARS else (command or "-")
+    hit = _first_hit(write_targets(tool, tool_input, cwd), roots)
+    if hit is None:
+        read_hit = _first_hit(mentions(tool, tool_input, cwd), roots)
+        if read_hit is not None and desk.cfg.get("hand_log_reads", True):
+            lane, path, _verb = read_hit
+            note(desk, "allow-read: %s | %s | %s | %s" % (_now(), tool, _short(desk, path), head))
+        return 0, ""
+    lane, path, verb = hit
     current = window(desk)
     if current["state"] == "open":
-        note(desk, "written: %s | %s | %s | %s" % (_now(), tool, _short(desk, path), head))
+        note(desk, "written: %s | %s | %s | %s | open-window %s" % (_now(), tool, _short(desk, path), head, verb))
         return 0, ""
     expired = current["state"] == "expired"
-    note(desk, "blocked: %s | %s | %s | %s%s" % (_now(), tool, _short(desk, path), head, " | expired" if expired else ""))
+    note(desk, "blocked: %s | %s | %s | %s | block-write %s%s"
+         % (_now(), tool, _short(desk, path), head, verb, " | expired" if expired else ""))
     return 2, (
-        "bellhop hand gate: %s would write into lane '%s' (%s)%s.\n"
+        "bellhop hand gate: %s would write into lane '%s' (%s, via `%s`)%s.\n"
         'Open a window first, then repeat the call: bellhop hand open --minutes 30 --reason "why this cannot go to a worker"\n'
-        "Recorded as `blocked` in %s. Dispatching a packet instead needs no window."
-        % (tool, lane, path, " and the window has expired" if expired else " with no hand window open", LEDGER)
+        "Recorded as `blocked` in %s. Reading the lane is not gated, and dispatching a packet needs no window."
+        % (tool, lane, path, verb, " and the window has expired" if expired else " with no hand window open", LEDGER)
     )
