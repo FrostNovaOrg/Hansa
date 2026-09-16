@@ -13,7 +13,10 @@ Say it in plain words. One task. Name the files or areas if you know them.
 
 ## Do not touch
 
-List anything out of bounds (other modules, config, CI).
+List anything out of bounds (other modules, config, CI). This heading and `## Forbids`
+are the two spellings that are carried verbatim into the acceptance pack and into a
+`--return` packet; any other wording is ordinary prose. Same for `## Required context`,
+if the task needs source excerpts quoted into it.
 
 ## Acceptance
 

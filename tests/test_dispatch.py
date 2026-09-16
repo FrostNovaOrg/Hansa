@@ -288,6 +288,39 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(report.code, 2)
         self.assertIn("opposites", report.last)
 
+    def test_only_the_named_headings_are_carried(self):
+        """A heading is carried because it is one of the two names, not because a word
+        in it sounds like a prohibition."""
+        body = ("## Forbidden paths\n\nkeyword match, not a name\n\n"
+                "## Forbids\n\nthe named one\n\n"
+                "## Do not touch\n\nthe template's name for it\n")
+        section, rest = packet_mod.packet_section(body, packet_mod.FORBID_HEADINGS)
+        self.assertIn("the named one", section)
+        self.assertIn("the template's name for it", section)
+        self.assertNotIn("keyword match", section)
+        self.assertIn("Forbidden paths", rest)
+        carried, _ = packet_mod.packet_section("## Required context\n\nexcerpt\n",
+                                               packet_mod.CONTEXT_HEADINGS)
+        self.assertIn("excerpt", carried)
+
+    def test_the_return_note_names_only_what_was_inherited(self):
+        """The first version said "acceptance, forbids and required context inherited"
+        on every return, so a packet that had neither section and one that had both
+        left the same line behind."""
+        plain = self.body_file("## What to do\n\nAdd a note.\n\n## Acceptance\n\n"
+                               "- ./check.sh prints 'check.sh: all green'\n", "plain.md")
+        code, out = self.dispatch("Original plain", plain)
+        self.assertEqual(code, 0, out)
+        prior = packet_mod.parse_packet(self.desk.inbox / "api" / "001-original-plain.md")
+        write(self.desk.receipts / "001-original-plain.md", "# receipt\n")
+        write_json(self.desk.receipts / "001.meta.json", {"packet_sha256": prior.sha256})
+        again = self.body_file("## Why returned\n\nThe note is missing.\n", "again.md")
+        code, out = self.dispatch("Return plain", again, "--return", "001")
+        self.assertEqual(code, 0, out)
+        self.assertIn("↩ inherited from the original packet: acceptance", out)
+        self.assertNotIn("forbids", out)
+        self.assertNotIn("required context", out)
+
     def test_return_inherits_required_material_without_retyping_criteria(self):
         body = self.body_file(BODY + "\n## Required context\n\n### Approved source\nRetry limit: 3.\n")
         code, out = self.dispatch("Original", body)
