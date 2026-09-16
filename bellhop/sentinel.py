@@ -1,9 +1,10 @@
 """The sentinel: red/green checks on a timer, and the three things it may do about them.
 
-Every run writes **one line** to `state/sentinel.log`, green included. On a production
-desk only the red runs were logged, and "the sentinel did not run" and "the sentinel ran
-and found nothing" then look the same in the file - which is the worse of the two to
-mistake for the other, because one of them is a dead sentinel.
+Every run writes its **decision line** to `state/sentinel.log`, green included. On a
+production desk only the red runs were logged, and "the sentinel did not run" and "the
+sentinel ran and found nothing" then look the same in the file - which is the worse of
+the two to mistake for the other, because one of them is a dead sentinel. A run that
+attempted a wake appends a second line saying what the wake command actually did.
 
 The three actions the sentinel may take are all guarded, and each guard exists because
 its absence cost something:
@@ -352,8 +353,11 @@ def decide_wake(desk: Desk, checks: List[Check], busy: str, why: str, wake: bool
             {"fingerprint": fp, "count": count, "braked_at": ts()},
         )
     return (
-        Action("wake", True, f"sent ({len(reds)} red, board {fp}, wake {count + 1}/{limit})"),
-        {"fingerprint": fp, "count": count + 1, "last_wake": ts()},
+        # "attempting", not "sent": the decision is taken before the command runs, and the
+        # wake command is the one part of a sentinel run that talks to something outside
+        # the desk. What it actually did is appended afterwards, by `run_sentinel`.
+        Action("wake", True, f"attempting ({len(reds)} red, board {fp}, wake {count + 1}/{limit})"),
+        {"fingerprint": fp, "count": count + 1, "attempted_at": ts(), "outcome": "attempting"},
     )
 
 
@@ -503,7 +507,10 @@ def status_line(checks: List[Check]) -> str:
 
 
 def log_line(checks: List[Check], actions: List[Action], at: Optional[datetime] = None) -> str:
-    """`<time> GREEN|RED <n checks> <summary>` - written on every run, green included."""
+    """`<time> GREEN|RED <n checks> <summary>` - written on every run, green included.
+
+    An attempted wake appends a second `WAKE-RESULT` line after the command returns.
+    """
     reds = [name for name, ok, _ in checks if not ok]
     verdict = "GREEN" if not reds else "RED"
     summary = "all green" if not reds else f"{len(reds)} red ({', '.join(reds)})"
@@ -511,8 +518,22 @@ def log_line(checks: List[Check], actions: List[Action], at: Optional[datetime] 
     return f"{ts(at)} {verdict} {len(checks)} checks {summary}" + (f"; {tail}" if tail else "")
 
 
-def _run_cmd(cmd: str, text: Optional[str] = None) -> None:
-    subprocess.run(cmd, shell=True, input=text, text=True)
+def _run_cmd(cmd: str, text: Optional[str] = None) -> Optional[int]:
+    """Run one of the three commands. Returns its exit code, `None` if it never ran."""
+    try:
+        return subprocess.run(cmd, shell=True, input=text, text=True).returncode
+    except OSError:
+        return None
+
+
+# What the wake command's exit code is allowed to mean. Zero is the most anyone can
+# honestly claim: the report was handed over. Whether a coordinator read it, or was
+# even there, is not visible from here, so the recorded line says `handled=unknown`.
+WAKE_OUTCOMES = {0: "submitted", 75: "deferred"}  # 75 is the shell's EX_TEMPFAIL
+
+
+def wake_outcome(code: Optional[int]) -> str:
+    return WAKE_OUTCOMES.get(code, "failed")
 
 
 def sentinel(desk: Desk, wake: bool = True, dry_run: bool = False, at: Optional[datetime] = None) -> Tuple[bool, str]:
@@ -522,7 +543,7 @@ def sentinel(desk: Desk, wake: bool = True, dry_run: bool = False, at: Optional[
 
 def run_sentinel(desk: Desk, wake: bool = True, dry_run: bool = False,
                  at: Optional[datetime] = None) -> Tuple[bool, str, List[Check]]:
-    """Run the checks, decide the three actions, log exactly one line.
+    """Run the checks, decide the three actions, log the decision.
 
     Returns (green, report, checks) so callers can reuse findings without rescanning.
     With `dry_run` nothing is written and no command is run; the
@@ -576,7 +597,19 @@ def run_sentinel(desk: Desk, wake: bool = True, dry_run: bool = False,
             for path, content in action.writes:
                 write(path, content)
     if wake_action.done:
-        _run_cmd(desk.cfg["wake_cmd"], text)
+        # The decision line is already on disk and is not rewritten; what the command
+        # did is a second, later fact and gets its own append-only line. A wake that
+        # reached the coordinator and a wake whose command was not there look the same
+        # in the word "sent", and this line is what tells them apart next week.
+        code = _run_cmd(desk.cfg["wake_cmd"], text)
+        outcome = wake_outcome(code)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts(at)} WAKE-RESULT outcome={outcome} exit_code={code} handled=unknown\n")
+        text += f"  wake result: {outcome} (exit {code}); handling not acknowledged\n"
+        write(desk.state / ".sentinel" / "status.txt", text)
+        if wake_state is not None:
+            wake_state.update({"outcome": outcome, "exit_code": code, "result_at": ts()})
+            write_json(desk.path(WAKE_STATE), wake_state)
     if clear_action.done:
         _run_cmd(desk.cfg["clear_cmd"])
     if compact_action.done:

@@ -27,7 +27,7 @@ from bellhop import daemon as daemon_mod  # noqa: E402
 from bellhop import sentinel as sentinel_mod  # noqa: E402
 from bellhop import stopdispatch as stop_mod  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
-from bellhop.util import BellhopError, now, read, ts, write  # noqa: E402
+from bellhop.util import BellhopError, now, read, read_json, ts, write  # noqa: E402
 
 
 class SentinelCase(unittest.TestCase):
@@ -132,8 +132,21 @@ class LogLineTest(SentinelCase):
         self.set_cfg(wake_cmd=cmd)
         self.make_red()
         self.run_sentinel()
-        self.assertIn("wake: sent", self.log_lines()[0])
+        self.assertIn("wake: attempting", self.log_lines()[0])
+        self.assertIn("WAKE-RESULT outcome=submitted exit_code=0 handled=unknown", self.log_lines()[1])
         self.assertEqual(len(self.calls(log)), 1)
+
+    def test_a_wake_command_that_failed_is_not_recorded_as_a_wake(self):
+        """A wake that landed and a wake whose command was missing are different facts."""
+        self.make_red()
+        for code, outcome in ((75, "deferred"), (2, "failed")):
+            with self.subTest(exit_code=code):
+                self.set_cfg(wake_cmd=f"exit {code}")
+                _green, text = self.run_sentinel()
+                self.assertIn(f"wake result: {outcome}", text)
+                self.assertNotIn("wake: sent", text)
+                self.assertIn(f"WAKE-RESULT outcome={outcome} exit_code={code}", self.log_lines()[-1])
+                self.assertEqual(read_json(self.root / "state" / ".sentinel" / "wake.json")["outcome"], outcome)
 
 
 class DryRunTest(SentinelCase):
@@ -176,7 +189,7 @@ class DryRunTest(SentinelCase):
         self.assertEqual(len(self.calls(wake_log)), 1)
         self.assertEqual(len(self.calls(clear_log)), 1)
         self.assertEqual(len(self.calls(compact_log)), 1)
-        self.assertEqual(len(self.log_lines()), 1)
+        self.assertEqual(len(self.log_lines()), 2)  # the decision, then the wake result
 
 
 class WakeBrakeTest(SentinelCase):

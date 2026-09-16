@@ -749,7 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("archive", help="commit desk files"); s.add_argument("-m", "--message", required=True); s.add_argument("paths", nargs="+"); s.set_defaults(fn=cmd_archive)
 
-    s = sub.add_parser("sentinel", help="run the checks; every run logs one line to state/sentinel.log")
+    s = sub.add_parser("sentinel", help="run the checks; every run logs its decision to state/sentinel.log, and an attempted wake logs what the command did")
     s.add_argument("--no-wake", action="store_true", help="run the checks but never run wake_cmd")
     s.add_argument("--dry-run", action="store_true", help="say what would happen (wake, clear, compact) and write nothing")
     s.set_defaults(fn=cmd_sentinel)
