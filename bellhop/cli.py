@@ -34,7 +34,7 @@ from . import sentinel as sentinel_mod
 from . import state as state_mod
 from . import stopdispatch as stop_mod
 from . import watch as watch_mod
-from .config import find_desk
+from .config import find_desk, framework_root
 from . import packet as packet_mod
 from .packet import next_packet_id, parse_packet, render_packet
 from .util import BellhopError, read, slugify, ts, write
@@ -406,14 +406,15 @@ def cmd_readings(args):
 def cmd_seal(args):
     desk = _desk(args)
     if args.verify:
-        changed = seal_mod.verify(desk)
-        if changed:
-            print("changed since seal:\n  " + "\n  ".join(changed))
+        report = seal_mod.verify_report(desk)
+        print(report.line())
+        if report.changed:
+            print("changed since seal:\n  " + "\n  ".join(report.changed))
             sys.exit(exits.RED)
         print("seals hold")
         return
     p = seal_mod.seal(desk)
-    print(f"sealed: {p.relative_to(desk.root)}")
+    print(f"sealed: {p.relative_to(desk.root)} ({framework_root().line()})")
     _commit(desk, args, [p, "rules", "frozen", ".claude", "templates"], "reseal")
 
 

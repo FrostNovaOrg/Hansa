@@ -321,7 +321,111 @@ LANE_DEFAULTS = {
     "schedule": [],
 }
 
-FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent
+# -- where the framework lives -------------------------------------------------
+#
+# Three entry points reach this package: `bin/bellhop` in a checkout, the plugin's
+# `${CLAUDE_PLUGIN_ROOT}/bellhop_main.py` for MCP and hooks, and the copy the daemon
+# vendors into `<desk>/.bellhop/`. Each one used to work the root out for itself from
+# `__file__`, and nothing wrote down which one it had picked. On a production desk that
+# meant `bellhop seal --verify` answered "seals hold" from the hook and named four
+# changed files from the shell, against the same desk in the same minute, and the only
+# way to see why was to read the code. One resolver now answers the question, every
+# caller asks it, and the answer says out loud where it came from.
+
+ENV_FRAMEWORK = "BELLHOP_FRAMEWORK"
+PLUGIN_ENV = "CLAUDE_PLUGIN_ROOT"
+
+CHECKOUT, VENDORED = "checkout", "vendored"
+COVERS_ALL, COVERS_PACKAGE = "all", "package"
+
+
+class FrameworkRoot:
+    """Which copy of the framework is running, and how that was decided.
+
+    `kind` is the fact that matters to the seal: a checkout carries the skills, the
+    hooks and the plugin manifest; a vendored copy carries the package, the entry
+    point and the templates and nothing else. `covers` is that fact said in the seal's
+    own words, so a manifest can record what it was able to see.
+    """
+
+    __slots__ = ("path", "kind", "source", "note")
+
+    def __init__(self, path: Path, kind: str, source: str, note: str = ""):
+        self.path = path
+        self.kind = kind
+        self.source = source
+        self.note = note
+
+    @property
+    def covers(self) -> str:
+        return COVERS_PACKAGE if self.kind == VENDORED else COVERS_ALL
+
+    def __fspath__(self) -> str:                      # usable wherever a path is
+        return str(self.path)
+
+    def __str__(self) -> str:
+        return str(self.path)
+
+    def line(self) -> str:
+        """One line for `bellhop sentinel` and the seal manifest."""
+        text = f"{self.kind} at {self.path} (via {self.source}, covers {self.covers})"
+        return text + f" — {self.note}" if self.note else text
+
+
+def _kind_of(p: Path) -> str:
+    """A checkout has the plugin manifest; a vendored copy has a VERSION and no manifest."""
+    if (p / ".claude-plugin").exists():
+        return CHECKOUT
+    return VENDORED if (p / "VERSION").exists() else CHECKOUT
+
+
+def resolve_framework_root(env: Optional[dict] = None) -> FrameworkRoot:
+    """The one resolver. Order: an explicit override, then the code that is running.
+
+    `CLAUDE_PLUGIN_ROOT` deliberately does not win: hashing a directory other than the
+    one whose code is executing would make the seal a claim about files nobody ran. When
+    the two disagree the disagreement is carried as a note rather than resolved quietly,
+    because a plugin pointing at one checkout while `bellhop` on PATH is another is worth
+    a person's attention and is invisible otherwise.
+    """
+    env = os.environ if env is None else env
+    running = Path(__file__).resolve().parent.parent
+    chosen, source = running, "package"
+    override = (env.get(ENV_FRAMEWORK) or "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if (p / "bellhop" / "cli.py").exists():
+            chosen, source = p.resolve(), ENV_FRAMEWORK
+        else:
+            raise BellhopError(
+                f"{ENV_FRAMEWORK}={override} does not hold a bellhop package "
+                "(no bellhop/cli.py under it)",
+                code=exits.CONFIG,
+            )
+    note = ""
+    plugin = (env.get(PLUGIN_ENV) or "").strip()
+    if plugin:
+        try:
+            same = Path(plugin).expanduser().resolve() == chosen
+        except OSError:
+            same = False
+        if not same:
+            note = f"{PLUGIN_ENV} names {plugin}, which is not the code that is running"
+    return FrameworkRoot(chosen, _kind_of(chosen), source, note)
+
+
+_ROOT: Optional[FrameworkRoot] = None
+
+
+def framework_root() -> FrameworkRoot:
+    """Resolved once per process: two callers in one run must not get two answers."""
+    global _ROOT
+    if _ROOT is None:
+        _ROOT = resolve_framework_root()
+    return _ROOT
+
+
+FRAMEWORK_ROOT = framework_root().path
 
 
 class Desk:

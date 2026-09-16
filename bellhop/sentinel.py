@@ -42,7 +42,7 @@ from . import seal as seal_mod
 from . import stopdispatch as stop_mod
 from .archive import unpushed_count
 from .card import read_card
-from .config import Desk
+from .config import Desk, framework_root
 from .decisions import decisions_path
 from .util import BellhopError, now, read, read_json, sha256_bytes, today, ts, write, write_json
 
@@ -191,14 +191,27 @@ def check_push(desk: Desk) -> Check:
     return ("push", n == 0, f"{n} unpushed commit(s)")
 
 
+def check_framework(desk: Desk) -> Check:
+    """Which copy of the framework answered this run.
+
+    Normally a green line nobody reads, and that is the point: when the hook and the
+    shell disagree about where the framework lives, every other check on this page was
+    computed against a directory the reader is not looking at. The line says which one.
+    """
+    root = framework_root()
+    return ("framework", not root.note, root.line())
+
+
 def check_seals(desk: Desk) -> Check:
     try:
-        changed = seal_mod.verify(desk)
+        report = seal_mod.verify_report(desk)
     except BellhopError as exc:
         return ("seals", True, f"no seals yet ({exc})")
-    if changed:
-        return ("seals", False, f"{len(changed)} sealed file(s) changed: {', '.join(changed[:3])}{'…' if len(changed) > 3 else ''}")
-    return ("seals", True, "all seals hold")
+    scope = "" if not report.partial else " (package only; this copy has no skills or hooks)"
+    if report.changed:
+        changed = report.changed
+        return ("seals", False, f"{len(changed)} sealed file(s) changed{scope}: {', '.join(changed[:3])}{'…' if len(changed) > 3 else ''}")
+    return ("seals", True, "all seals hold" + scope)
 
 
 def pending_bells(desk: Desk) -> List[Path]:
@@ -275,6 +288,7 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
         check_ledger(desk, snapshot),
         check_decisions(desk, snapshot),
         check_push(desk),
+        check_framework(desk),
         check_seals(desk),
     ]
     checks.extend(check_stop_dispatch(desk))
