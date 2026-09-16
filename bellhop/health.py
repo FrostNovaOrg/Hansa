@@ -31,6 +31,7 @@ import time
 import uuid
 from typing import List, Optional
 
+from . import exits
 from .config import Desk
 from .util import BellhopError, human_bytes, read, ts
 
@@ -149,7 +150,8 @@ def ack(desk: Desk, event_id: str) -> dict:
     for row in alerts(desk):
         if row.get("event_id") == event_id:
             return record(desk, row.get("task", ""), "ack", event=event_id)
-    raise BellhopError(f"no unacknowledged worker health alert with id {event_id}")
+    raise BellhopError(f"no unacknowledged worker health alert with id {event_id}",
+                       code=exits.NOT_FOUND)
 
 
 def status(desk: Desk, limit: int = 20, task: Optional[str] = None) -> dict:

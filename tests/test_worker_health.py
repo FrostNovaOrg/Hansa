@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bellhop import cli, health, sentinel  # noqa: E402
+from bellhop import cli, exits, health, sentinel  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import BellhopError, read, write  # noqa: E402
 from bellhop.worker_session import run_worker  # noqa: E402
@@ -283,7 +283,8 @@ class CommandTest(HealthDeskCase):
         self.assertIn("0 alert(s) left", out)
         self.assertEqual(health.alerts(self.desk), [])
         code, out = self.run_cli("health", "ack", event["event_id"])
-        self.assertEqual(code, 1, out)
+        # An id nobody has open is `not found`, not a red finding: docs/exit-codes.md.
+        self.assertEqual(code, exits.NOT_FOUND, out)
         self.assertIn("no unacknowledged worker health alert", out)
 
 
