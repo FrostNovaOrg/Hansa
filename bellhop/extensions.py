@@ -7,7 +7,7 @@ every other desk carry it.
 
 An extension is a directory named in `bellhop.json`:
 
-    {"extensions": ["contrib/some-extension", "/srv/desk/another"]}
+    {"extensions": ["contrib/some-extension", "/absolute/path/to/another"]}
 
 Relative names are resolved against the desk root. The directory holds a
 `bellhop_ext.py` with any of three functions, all optional:
