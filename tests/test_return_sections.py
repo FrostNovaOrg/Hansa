@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bellhop import cli, desk_ops, packet as packet_mod  # noqa: E402
+from bellhop import cli, desk_ops, dispatch as dispatch_mod, packet as packet_mod  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import read, read_json, write, write_json  # noqa: E402
 
@@ -240,7 +240,7 @@ class ReturnSectionTest(unittest.TestCase):
         path, _prior = self.original(WHAT + "\n" + SCOPE_SECTION + "\n" + SCOPE_SECTION + "\n" + CRITERIA)
         before = read(path)
         code, out = self.dispatch("Return original", RETURN_BODY, "return.md", "--return", "001")
-        self.assertEqual(code, 2, out)
+        self.assertEqual(code, dispatch_mod.REFUSED, out)
         self.assertIn("carries 2 '## Execution scope' sections", out)
         self.assertFalse((self.desk.inbox / "api" / "002-return-original.md").exists())
         self.assertEqual(read(path), before)
@@ -274,7 +274,7 @@ class ReturnSectionTest(unittest.TestCase):
         self.configure("Execution scope")
         self.original()
         code, out = self.dispatch("Return original", RETURN_BODY, "return.md", "--return", "001")
-        self.assertEqual(code, 2, out)
+        self.assertEqual(code, dispatch_mod.REFUSED, out)
         self.assertIn("return_inherit_sections", out)
 
 
