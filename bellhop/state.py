@@ -39,15 +39,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from . import exits
 from . import ledger as ledger_mod
 from .locking import serialized
 from .config import Desk
 from .util import append, read, slugify, today, ts, write
 
-OK = 0
-REFUSED = 2
-MALFORMED = 3
-ENVIRONMENT = 4
+# The one table is bellhop/exits.py; these are its numbers under this module's names.
+OK = exits.OK
+REFUSED = exits.GATE          # a precondition on the file said no
+MALFORMED = exits.USAGE       # the argument itself is the wrong shape
+ENVIRONMENT = exits.NOT_FOUND  # a file that has to be there is not there
 
 ECHO_MAX_BYTES = 300
 PLACEHOLDER = "- none"

@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from . import exits
 from . import state as state_mod
 from .config import Desk
 from .util import BellhopError, append, now, read, ts, write
@@ -133,7 +134,8 @@ def set_stop(desk: Desk, reason: str, by: str = "coordinator", retry_after: str 
     if existing is not None:
         raise BellhopError(
             f"dispatch is already stopped since {existing['stopped_at']} ({existing['reason']}); "
-            "lift it first, or record an exception"
+            "lift it first, or record an exception",
+            code=exits.GATE,
         )
     stamp = ts()
     write(stop_path(desk), _render(stamp, reason, by, retry_after))
@@ -168,7 +170,8 @@ def add_exception(desk: Desk, reason: str) -> Dict[str, object]:
         raise BellhopError("--reason is empty; an exception without a reason is not an exception")
     order = read_stop(desk)
     if order is None:
-        raise BellhopError("dispatch is not stopped; there is nothing to make an exception to")
+        raise BellhopError("dispatch is not stopped; there is nothing to make an exception to",
+                           code=exits.NOT_FOUND)
     p = stop_path(desk)
     text = read(p)
     if "\n- none\n" in text:
@@ -182,7 +185,7 @@ def add_exception(desk: Desk, reason: str) -> Dict[str, object]:
 def lift(desk: Desk, note: str = "") -> Dict[str, object]:
     order = read_stop(desk)
     if order is None:
-        raise BellhopError("dispatch is not stopped; there is nothing to lift")
+        raise BellhopError("dispatch is not stopped; there is nothing to lift", code=exits.NOT_FOUND)
     started = _parse_ts(str(order["stopped_at"]))
     held = ""
     if started:

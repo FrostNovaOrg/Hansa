@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .transcripts import PRICE_DEFAULTS
+from . import exits
 from .util import BellhopError, read_json
 
 CONFIG_NAME = "bellhop.json"
@@ -421,5 +422,6 @@ def find_desk(start: Optional[Path] = None) -> Desk:
         if cfg.exists():
             return Desk(c, read_json(cfg, {}))
     raise BellhopError(
-        f"no {CONFIG_NAME} found here or above; run `bellhop init <dir>` or set BELLHOP_DESK"
+        f"no {CONFIG_NAME} found here or above; run `bellhop init <dir>` or set BELLHOP_DESK",
+        code=exits.CONFIG,
     )

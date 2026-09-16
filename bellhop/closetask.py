@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import archive as archive_mod
+from . import exits
 from . import headers as headers_mod
 from . import ledger as ledger_mod
 from . import merge as merge_mod
@@ -59,11 +60,12 @@ from .util import BellhopError, git, read, ts, write_json
 STEPS = ("evidence", "fileset", "merge", "ledger", "state", "archive")
 GATES = ("evidence", "fileset")  # read-only; they run again on every rerun
 
-EXIT_OK = 0
-EXIT_STOPPED = 1      # ran to the end of a step and the finding is red
-EXIT_REFUSED = 2      # refused by design: the verdict says this one does not close
-EXIT_MALFORMED = 3    # the argument itself is the wrong shape
-EXIT_ENVIRONMENT = 4  # a file that has to exist is not there
+# The one table is bellhop/exits.py; these are its numbers under this command's names.
+EXIT_OK = exits.OK
+EXIT_STOPPED = exits.RED            # ran to the end of a step and the finding is red
+EXIT_REFUSED = exits.GATE           # a gate refused: the verdict says this one does not close
+EXIT_MALFORMED = exits.USAGE        # the argument itself is the wrong shape
+EXIT_ENVIRONMENT = exits.NOT_FOUND  # a file that has to be there is not there yet
 
 SETTLED_TAG = "settled-awaiting-close"
 AWAITING_LINE = "settled, awaiting close"

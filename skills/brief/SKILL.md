@@ -14,7 +14,7 @@ description: The principal's page - what is waiting for them, the queue, today's
    page comes from, the principal asked that question again and again.
 2. Send it unasked at the times in the config key `brief_times`: `$BH brief --send`.
    With `alert_cmd` empty the page is printed and nothing is recorded; with one set,
-   only a zero exit records `state/.brief-sent`. A send that did not send exits 1.
+   only a zero exit records `state/.brief-sent`. A send that did not send exits 5.
 3. `--bytes N` overrides `brief_bytes` for one run. Over the cap whole sections are
    dropped in a fixed order - decisions, money, counts, returns, queue - and the last
    line says which went. "Waiting for you" is never dropped.

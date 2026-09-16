@@ -26,16 +26,18 @@ from collections import namedtuple
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+from . import exits
 from .config import Desk
 from .util import BellhopError, read, run, scrubbed_env, ts, write
 
 # -- exit codes ------------------------------------------------------------
-# Same five states the desk used, so a caller can branch on the number alone.
-EXIT_OK = 0          # green
-EXIT_RED = 1         # ran to the end, the finding is red
-EXIT_REFUSED = 2     # refused by design: a precondition was not met
-EXIT_MALFORMED = 3   # the input is malformed; running it again changes nothing
-EXIT_EXTERNAL = 4    # something outside failed; running it again may differ
+# The one table is bellhop/exits.py and docs/exit-codes.md; these are its numbers under
+# the names the checkers use, so a caller can branch on the number alone.
+EXIT_OK = exits.OK              # green
+EXIT_RED = exits.RED            # ran to the end, the finding is red
+EXIT_REFUSED = exits.GATE       # a gate refused; answering it is the only way on
+EXIT_MALFORMED = exits.NOT_FOUND  # the file is missing or unreadable; a rerun changes nothing
+EXIT_EXTERNAL = exits.EXTERNAL  # something outside failed; running it again may differ
 
 Field = namedtuple("Field", "key type required how")
 

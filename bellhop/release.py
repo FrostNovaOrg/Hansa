@@ -37,6 +37,7 @@ from typing import Dict, List, Optional
 
 from . import stopdispatch as stop_mod
 from .config import Desk
+from . import exits
 from .util import BellhopError, read_json, ts, write_json
 
 # The version becomes part of a file name and is substituted into a shell command.
@@ -62,21 +63,24 @@ def steps(desk: Desk) -> List[Dict[str, str]]:
     if not isinstance(raw, list) or not raw:
         raise BellhopError(
             "no release_steps in bellhop.json; a release with no steps would exit 0 "
-            "having released nothing"
+            "having released nothing",
+            code=exits.CONFIG,
         )
     out: List[Dict[str, str]] = []
     seen = set()
     for i, item in enumerate(raw, 1):
         if not isinstance(item, dict):
-            raise BellhopError("release_steps[%d] is not an object with `name` and `cmd`" % i)
+            raise BellhopError("release_steps[%d] is not an object with `name` and `cmd`" % i,
+                               code=exits.CONFIG)
         name = str(item.get("name") or "").strip()
         cmd = str(item.get("cmd") or "").strip()
         if not name or not cmd:
-            raise BellhopError("release_steps[%d] needs both `name` and `cmd`" % i)
+            raise BellhopError("release_steps[%d] needs both `name` and `cmd`" % i, code=exits.CONFIG)
         if name in seen:
             raise BellhopError(
                 "release_steps has two steps named %r; `--from %s` could not say which one"
-                % (name, name)
+                % (name, name),
+                code=exits.CONFIG,
             )
         seen.add(name)
         out.append({"name": name, "cmd": cmd})
@@ -101,7 +105,8 @@ def check_stop(desk: Desk) -> None:
     if not allowed:
         raise BellhopError(
             reason + " A release is refused while the order stands; set "
-            "`release_ignores_stop` to true if this desk's stop order is narrower than that."
+            "`release_ignores_stop` to true if this desk's stop order is narrower than that.",
+            code=exits.GATE,
         )
 
 
@@ -199,7 +204,7 @@ def release(desk: Desk, version: str, from_step: Optional[str] = None,
             print("exit %d; after fixing it, resume with `bellhop release %s --from %s`"
                   % (proc.returncode, version, step["name"]))
             print("progress: %s" % progress_path(desk, version))
-            return 1
+            return exits.EXTERNAL   # a step failed: outside this process, and worth retrying
 
     print("released %s (%d step(s) run, %d skipped)" % (version, len(plan) - start, start))
     print("progress: %s" % progress_path(desk, version))

@@ -93,12 +93,12 @@ class GeneralRulesTest(DeskCase):
     def test_anchored_replacement_needs_exactly_one_match(self):
         state.debts_add(self.desk, "one debt about widgets")
         state.debts_add(self.desk, "another debt about widgets")
-        exc = self.refuses(2, state.debts_set, self.desk, "widgets", "- replaced")
+        exc = self.refuses(state.REFUSED, state.debts_set, self.desk, "widgets", "- replaced")
         self.assertIn("2 line(s) matched", str(exc))
         self.assertEqual(len(exc.extra), 2)
 
     def test_zero_matches_is_also_a_refusal(self):
-        exc = self.refuses(2, state.debts_set, self.desk, "nothing here", "- replaced")
+        exc = self.refuses(state.REFUSED, state.debts_set, self.desk, "nothing here", "- replaced")
         self.assertIn("0 line(s) matched", str(exc))
 
     def test_every_write_echoes_what_it_wrote(self):
@@ -113,7 +113,7 @@ class GeneralRulesTest(DeskCase):
 
     def test_missing_state_file_is_an_environment_error(self):
         (self.root / state.CARD).unlink()
-        self.refuses(4, state.card_set, self.desk, lane="api")
+        self.refuses(state.ENVIRONMENT, state.card_set, self.desk, lane="api")
 
 
 # --------------------------------------------------------------------------
@@ -132,10 +132,10 @@ class LedgerTest(DeskCase):
         self.assertIn("bytes", first.echo[0])
 
     def test_add_refuses_a_missing_file(self):
-        self.refuses(4, state.ledger_add, self.desk, self.tmp / "not-there.md")
+        self.refuses(state.ENVIRONMENT, state.ledger_add, self.desk, self.tmp / "not-there.md")
 
     def test_add_refuses_an_empty_entry(self):
-        self.refuses(3, state.ledger_add, self.desk, self.entry("\n \n"))
+        self.refuses(state.MALFORMED, state.ledger_add, self.desk, self.entry("\n \n"))
 
     def test_over_the_cap_it_compresses_rather_than_refusing(self):
         raw = "".join(f"note   {i} with trailing   \n\n\n" for i in range(12))
@@ -202,28 +202,28 @@ class CardTest(DeskCase):
         self.assertIn("rules/card.md", self.body(state.CARD), "a refresh ate the pointer to the rules")
 
     def test_pool_must_start_with_a_digit(self):
-        self.refuses(3, state.card_set, self.desk, pool="lots of things")
+        self.refuses(state.MALFORMED, state.card_set, self.desk, pool="lots of things")
 
     def test_pool_word_none_becomes_a_machine_readable_zero(self):
         state.card_set(self.desk, pool="none")
         self.assertEqual(state.read_card_keys(self.desk)["queue"], "0 (none)")
 
     def test_dispatchable_yes_without_next_is_refused(self):
-        self.refuses(2, state.card_set, self.desk, dispatchable="yes")
+        self.refuses(state.REFUSED, state.card_set, self.desk, dispatchable="yes")
 
     def test_dispatchable_no_without_reason_is_refused(self):
-        self.refuses(2, state.card_set, self.desk, dispatchable="no", reason="")
+        self.refuses(state.REFUSED, state.card_set, self.desk, dispatchable="no", reason="")
 
     def test_dispatchable_takes_yes_or_no_only(self):
-        self.refuses(3, state.card_set, self.desk, dispatchable="maybe")
+        self.refuses(state.MALFORMED, state.card_set, self.desk, dispatchable="maybe")
 
     def test_unknown_key_is_refused(self):
-        self.refuses(3, state.card_set, self.desk, colour="blue")
+        self.refuses(state.MALFORMED, state.card_set, self.desk, colour="blue")
 
     def test_a_duplicated_key_line_is_refused_not_guessed(self):
         text = self.body(state.CARD).replace("lane: \n", "lane: \nlane: api\n")
         write(self.root / state.CARD, text)
-        exc = self.refuses(2, state.card_set, self.desk, lane="web")
+        exc = self.refuses(state.REFUSED, state.card_set, self.desk, lane="web")
         self.assertIn("2 `lane: ` line(s)", str(exc))
 
 
@@ -234,7 +234,7 @@ class InflightTest(DeskCase):
         self.assertEqual(self.rows(state.INFLIGHT), ["- worker on 017 health endpoint"])
 
     def test_start_refuses_empty_text(self):
-        self.refuses(3, state.inflight_start, self.desk, "   ")
+        self.refuses(state.MALFORMED, state.inflight_start, self.desk, "   ")
 
     def test_a_long_line_is_truncated_not_refused(self):
         self.desk.cfg["inflight_line_chars"] = 40
@@ -257,12 +257,12 @@ class InflightTest(DeskCase):
 
     def test_finish_refuses_an_id_that_matches_no_line(self):
         state.inflight_start(self.desk, "worker on 017")
-        self.refuses(2, state.inflight_finish, self.desk, "999")
+        self.refuses(state.REFUSED, state.inflight_finish, self.desk, "999")
 
     def test_finish_refuses_an_id_that_matches_two_lines(self):
         state.inflight_start(self.desk, "worker on 017 first half")
         state.inflight_start(self.desk, "helper waiting on 017 to land")
-        exc = self.refuses(2, state.inflight_finish, self.desk, "017")
+        exc = self.refuses(state.REFUSED, state.inflight_finish, self.desk, "017")
         self.assertIn("2 line(s) matched", str(exc))
 
     def test_an_id_matches_as_a_whole_token_only(self):
@@ -280,7 +280,7 @@ class InflightTest(DeskCase):
     def test_tag_refuses_a_line_that_already_carries_it(self):
         state.inflight_start(self.desk, "worker on 017")
         state.inflight_tag(self.desk, "017", "settled-awaiting-close")
-        self.refuses(2, state.inflight_tag, self.desk, "017", "settled-awaiting-close")
+        self.refuses(state.REFUSED, state.inflight_tag, self.desk, "017", "settled-awaiting-close")
 
 
 # --------------------------------------------------------------------------
@@ -291,7 +291,7 @@ class DebtsTest(DeskCase):
 
     def test_add_refuses_the_same_line_twice(self):
         state.debts_add(self.desk, "owe the principal a release note")
-        self.refuses(2, state.debts_add, self.desk, "owe the principal a release note")
+        self.refuses(state.REFUSED, state.debts_add, self.desk, "owe the principal a release note")
 
     def test_settle_moves_the_line_to_the_settled_file(self):
         state.debts_add(self.desk, "owe the principal a release note")
@@ -308,7 +308,7 @@ class DebtsTest(DeskCase):
         self.assertIn("release note", self.body(state.DEBTS_SETTLED))
 
     def test_settle_refuses_when_nothing_matches(self):
-        self.refuses(2, state.debts_settle, self.desk, "no such debt")
+        self.refuses(state.REFUSED, state.debts_settle, self.desk, "no such debt")
 
     def test_set_replaces_in_place_and_keeps_the_position(self):
         state.debts_add(self.desk, "BASELINE sha abc1234 suite 2410")
@@ -321,7 +321,7 @@ class DebtsTest(DeskCase):
 
     def test_set_refuses_an_empty_replacement(self):
         state.debts_add(self.desk, "BASELINE sha abc1234")
-        self.refuses(3, state.debts_set, self.desk, "BASELINE", "  ")
+        self.refuses(state.MALFORMED, state.debts_set, self.desk, "BASELINE", "  ")
 
     def test_settled_file_is_only_appended_to(self):
         state.debts_add(self.desk, "first debt")
@@ -341,7 +341,7 @@ class TodoTest(DeskCase):
         self.assertIn(self.LINE, self.body(state.TODO))
 
     def test_add_refuses_a_line_without_the_clause(self):
-        self.refuses(3, state.todo_add, self.desk, "sign the vendor contract")
+        self.refuses(state.MALFORMED, state.todo_add, self.desk, "sign the vendor contract")
 
     def test_settle_moves_the_line_to_done(self):
         state.todo_add(self.desk, self.LINE)
@@ -353,7 +353,7 @@ class TodoTest(DeskCase):
 
     def test_settle_refuses_when_nothing_matches(self):
         state.todo_add(self.desk, self.LINE)
-        self.refuses(2, state.todo_settle, self.desk, "no such thing")
+        self.refuses(state.REFUSED, state.todo_settle, self.desk, "no such thing")
 
 
 # --------------------------------------------------------------------------
@@ -364,7 +364,7 @@ class OwnListTest(DeskCase):
         self.assertEqual(result.echo, ["- [doing] write the weekly -> next: send it"])
 
     def test_add_refuses_empty_text(self):
-        self.refuses(3, state.own_add, self.desk, "")
+        self.refuses(state.MALFORMED, state.own_add, self.desk, "")
 
     def test_settle_removes_the_line(self):
         state.own_add(self.desk, "[doing] write the weekly -> next: send it")
@@ -374,7 +374,7 @@ class OwnListTest(DeskCase):
         self.assertEqual(len(state.own_list(self.desk).echo), 1)
 
     def test_settle_refuses_when_nothing_matches(self):
-        self.refuses(2, state.own_settle, self.desk, "no such item")
+        self.refuses(state.REFUSED, state.own_settle, self.desk, "no such item")
 
     def test_more_than_seven_open_lines_warns_but_does_not_refuse(self):
         for i in range(7):
@@ -396,17 +396,17 @@ class SelfCatchTest(DeskCase):
         self.assertIn("dispatched before reading the lane rules", self.body(state.SELFCATCH))
 
     def test_add_refuses_an_empty_cause(self):
-        self.refuses(3, state.selfcatch_add, self.desk, "R1", "judgement", "   ")
+        self.refuses(state.MALFORMED, state.selfcatch_add, self.desk, "R1", "judgement", "   ")
 
     def test_add_refuses_a_cause_shorter_than_twelve_characters(self):
-        self.refuses(3, state.selfcatch_add, self.desk, "R1", "judgement", "too short")
+        self.refuses(state.MALFORMED, state.selfcatch_add, self.desk, "R1", "judgement", "too short")
 
     def test_add_refuses_a_cause_that_is_the_root_id(self):
-        exc = self.refuses(3, state.selfcatch_add, self.desk, "R1", "judgement", "R1")
+        exc = self.refuses(state.MALFORMED, state.selfcatch_add, self.desk, "R1", "judgement", "R1")
         self.assertIn("placeholder", str(exc))
 
     def test_add_refuses_an_unknown_kind(self):
-        self.refuses(3, state.selfcatch_add, self.desk, "R1", "vibes", "a perfectly good sentence here")
+        self.refuses(state.MALFORMED, state.selfcatch_add, self.desk, "R1", "vibes", "a perfectly good sentence here")
 
     def test_hook_hits_never_touch_the_human_count(self):
         self.catch()
@@ -418,7 +418,7 @@ class SelfCatchTest(DeskCase):
         self.assertEqual(len(self.rows(state.SELFCATCH)), 1, "a hook hit landed in the human book")
 
     def test_hook_hit_refuses_an_empty_root(self):
-        self.refuses(3, state.selfcatch_hook_hit, self.desk, " ")
+        self.refuses(state.MALFORMED, state.selfcatch_hook_hit, self.desk, " ")
 
     def test_table_prints_the_recomputed_counts(self):
         self.catch()
@@ -454,13 +454,13 @@ class HotRulesTest(DeskCase):
 
     def test_promote_refuses_under_the_threshold(self):
         self.qualify(times=2)
-        exc = self.refuses(2, state.hotrules_promote, self.desk, "R1", self.RULE)
+        exc = self.refuses(state.REFUSED, state.hotrules_promote, self.desk, "R1", self.RULE)
         self.assertIn("under the promotion threshold", str(exc))
 
     def test_hook_hits_do_not_earn_a_slot(self):
         for _ in range(9):
             state.selfcatch_hook_hit(self.desk, "R1")
-        self.refuses(2, state.hotrules_promote, self.desk, "R1", self.RULE)
+        self.refuses(state.REFUSED, state.hotrules_promote, self.desk, "R1", self.RULE)
 
     def test_promote_refuses_a_case_record_instead_of_a_rule(self):
         self.qualify()
@@ -470,20 +470,20 @@ class HotRulesTest(DeskCase):
             "the incident proves the lane file matters",
             "a failure to read the lane file again",
         ):
-            self.refuses(3, state.hotrules_promote, self.desk, "R1", bad)
+            self.refuses(state.MALFORMED, state.hotrules_promote, self.desk, "R1", bad)
 
     def test_promote_refuses_when_every_slot_is_taken(self):
         self.desk.cfg["hot_rule_max_lines"] = 1
         self.qualify("R1")
         self.qualify("R2")
         state.hotrules_promote(self.desk, "R1", self.RULE)
-        exc = self.refuses(2, state.hotrules_promote, self.desk, "R2", "ring only after the packet validates")
+        exc = self.refuses(state.REFUSED, state.hotrules_promote, self.desk, "R2", "ring only after the packet validates")
         self.assertIn("maximum is 1", str(exc))
 
     def test_promote_refuses_a_second_slot_for_the_same_root(self):
         self.qualify()
         state.hotrules_promote(self.desk, "R1", self.RULE)
-        self.refuses(2, state.hotrules_promote, self.desk, "R1", "read the lane file, really")
+        self.refuses(state.REFUSED, state.hotrules_promote, self.desk, "R1", "read the lane file, really")
 
     def test_retire_removes_the_line_and_records_it_with_the_reason(self):
         self.qualify()
@@ -496,12 +496,12 @@ class HotRulesTest(DeskCase):
         self.assertIn("the packet template now carries the lane file", register)
 
     def test_retire_refuses_a_root_that_holds_no_slot(self):
-        self.refuses(2, state.hotrules_retire, self.desk, "R1", "never held a slot")
+        self.refuses(state.REFUSED, state.hotrules_retire, self.desk, "R1", "never held a slot")
 
     def test_retire_refuses_an_empty_reason(self):
         self.qualify()
         state.hotrules_promote(self.desk, "R1", self.RULE)
-        self.refuses(3, state.hotrules_retire, self.desk, "R1", "  ")
+        self.refuses(state.MALFORMED, state.hotrules_retire, self.desk, "R1", "  ")
 
     def test_list_reports_the_slots(self):
         self.assertIn("0/10", state.hotrules_list(self.desk).note)
@@ -513,7 +513,7 @@ class HotRulesTest(DeskCase):
         text = self.body(state.CLAUDE_MD).replace(state.HOT_END, "")
         write(self.root / state.CLAUDE_MD, text)
         self.qualify()
-        self.refuses(4, state.hotrules_promote, self.desk, "R1", self.RULE)
+        self.refuses(state.ENVIRONMENT, state.hotrules_promote, self.desk, "R1", self.RULE)
 
 
 # --------------------------------------------------------------------------
@@ -523,10 +523,10 @@ class ClosingsTest(DeskCase):
         self.assertIn("[017]", self.body(state.CLOSINGS))
 
     def test_add_refuses_a_line_over_the_cap(self):
-        self.refuses(3, state.closings_add, self.desk, "017", "x" * 201)
+        self.refuses(state.MALFORMED, state.closings_add, self.desk, "017", "x" * 201)
 
     def test_add_refuses_an_empty_task(self):
-        self.refuses(3, state.closings_add, self.desk, " ", "merged")
+        self.refuses(state.MALFORMED, state.closings_add, self.desk, " ", "merged")
 
     def test_unread_prints_the_new_lines_and_advances_the_pointer(self):
         state.closings_add(self.desk, "017", "merged at abc1234")
@@ -579,13 +579,13 @@ class WrapupTest(DeskCase):
             )
         exc = caught.exception
         self.assertEqual(exc.step, "in-flight")
-        self.assertEqual(exc.code, 2)
+        self.assertEqual(exc.code, state.REFUSED)
         self.assertEqual(len(exc.done), 1, "a step after the refusal ran anyway")
         self.assertEqual(self.body(state.DEBTS), debts_before)
         self.assertEqual(self.body(state.CARD), card_before)
 
     def test_it_refuses_when_given_nothing_to_do(self):
-        self.refuses(3, state.wrapup, self.desk)
+        self.refuses(state.MALFORMED, state.wrapup, self.desk)
 
 
 # --------------------------------------------------------------------------
@@ -600,19 +600,20 @@ class CliTest(DeskCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("- worker on 017", out.stdout)
 
-    def test_a_precondition_refusal_exits_two_and_says_refused(self):
+    def test_a_precondition_refusal_is_a_gate_refusal(self):
+        """The numbers are docs/exit-codes.md's; the names are what this module means."""
         out = self.cli("inflight", "finish", "--task", "999")
-        self.assertEqual(out.returncode, 2)
+        self.assertEqual(out.returncode, state.REFUSED)
         self.assertTrue(out.stderr.startswith("refused:"), out.stderr)
 
-    def test_malformed_input_exits_three(self):
+    def test_malformed_input_is_a_usage_error(self):
         out = self.cli("selfcatch", "add", "--root", "R1", "--kind", "judgement", "--cause", "R1")
-        self.assertEqual(out.returncode, 3)
+        self.assertEqual(out.returncode, state.MALFORMED)
         self.assertTrue(out.stderr.startswith("refused:"), out.stderr)
 
-    def test_a_missing_file_exits_four_and_says_error(self):
+    def test_a_missing_file_is_a_not_found_and_says_error(self):
         out = self.cli("ledger", "add", "--file", str(self.tmp / "nope.md"))
-        self.assertEqual(out.returncode, 4)
+        self.assertEqual(out.returncode, state.ENVIRONMENT)
         self.assertTrue(out.stderr.startswith("error:"), out.stderr)
 
 

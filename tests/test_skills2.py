@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bellhop import brief as brief_mod  # noqa: E402
+from bellhop import exits  # noqa: E402
+from bellhop import readings as readings_mod  # noqa: E402
 from bellhop import decisions as decisions_mod  # noqa: E402
 from bellhop import intake as intake_mod  # noqa: E402
 from bellhop import release as release_mod  # noqa: E402
@@ -148,10 +150,17 @@ class BriefPage(DeskCase):
         self.assertIn("cost today n/a, full chain per task n/a", text)
         self.assertIn("no line for today in state/readings.md", text)
 
-        # a real day line, columns taken from the file's own header row
+        # a real day line, columns taken from the file's own header row. The row is
+        # built from `readings.COLUMNS` so that adding a column moves the cell that
+        # goes with it, rather than silently shifting every value one to the left.
         day = self.today()
-        cells = [day, "40", "120000", "10%", "20%", "$3.40", "1", "2", "$9.10",
-                 "5%", "1/2", "0", "8%"]
+        values = {"date": day, "turns": "40", "context median": "120000",
+                  "tail share (turns)": "10%", "tail share (cost)": "20%",
+                  "coordinator cost": "$3.40", "compactions": "1", "tasks closed": "2",
+                  "full-chain cost per task": "$9.10", "repair share": "5%",
+                  "verifier sessions per task": "1/2", "intake duplicates": "0",
+                  "status-question share": "8%"}
+        cells = [values.get(name, "n/a") for name in readings_mod.COLUMNS]
         with (self.root / "state" / "readings.md").open("a", encoding="utf-8") as fh:
             fh.write("| " + " | ".join(cells) + " |\n")
         text = brief_mod.brief_text(self.desk, cap=100000)
@@ -226,11 +235,12 @@ class BriefSend(DeskCase):
         self.assertTrue(marker.exists())
         self.assertRegex(read(marker), r"^\d{4}-\d{2}-\d{2}T\S+ \d+ bytes\n$")
 
-    def test_negative_control_a_failed_send_records_nothing_and_exits_1(self):
+    def test_negative_control_a_failed_send_records_nothing_and_exits_external(self):
+        """The alert command failed, which is exit 5 in docs/exit-codes.md."""
         self.cfg["alert_cmd"] = "exit 7"
         self.save_cfg()
         proc = self.cli("brief", "--send")
-        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.returncode, exits.EXTERNAL)
         self.assertIn("alert_cmd exited 7", proc.stdout)
         self.assertFalse((self.root / brief_mod.SENT_MARKER).exists())
 
@@ -279,7 +289,7 @@ class ReleaseRun(DeskCase):
         self.steps(("preflight", self.marker("preflight")), ("check", "exit 3"),
                    ("tag", self.marker("tag")))
         out = self.run_release("1.2.3")
-        self.assertEqual(out.code, 1)
+        self.assertEqual(out.code, exits.EXTERNAL)
         self.assertIn("\N{OCTAGONAL SIGN} stopped at: check", out.text)
         self.assertIn("--from check", out.text)
         self.assertTrue(self.done("preflight"))
@@ -311,7 +321,7 @@ class ReleaseRun(DeskCase):
         `skipped`: only one of them has evidence behind it."""
         self.steps(("preflight", self.marker("preflight")), ("check", "exit 4"),
                    ("tag", self.marker("tag")))
-        self.assertEqual(self.run_release("1.2.3").code, 1)
+        self.assertEqual(self.run_release("1.2.3").code, exits.EXTERNAL)
         self.steps(("preflight", self.marker("preflight")), ("check", "true"),
                    ("tag", self.marker("tag")))
         self.assertEqual(self.run_release("1.2.3", from_step="check").code, 0)
@@ -409,14 +419,14 @@ class ReleaseRun(DeskCase):
         example = json.loads(read(ROOT / "template" / "bellhop.example.json"))
         self.assertTrue(example["release_steps"])
         out = self.run_release("1.2.3")
-        self.assertEqual(out.code, 1)
+        self.assertEqual(out.code, exits.EXTERNAL)
         self.assertIn("\N{OCTAGONAL SIGN} stopped at: preflight", out.text)
 
     # -- the CLI carries the exit code -------------------------------------
     def test_cli_exit_codes(self):
         self.steps(("preflight", "exit 5"))
         proc = self.cli("release", "1.2.3")
-        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.returncode, exits.EXTERNAL)
         self.assertIn("stopped at: preflight", proc.stdout)
         self.steps(("preflight", "true"))
         self.assertEqual(self.cli("release", "1.2.3").returncode, 0)

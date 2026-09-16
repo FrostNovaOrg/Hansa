@@ -48,15 +48,17 @@ from typing import List, Optional, Sequence, Tuple
 from . import criteria as criteria_mod
 from . import packet as packet_mod
 from . import ring as ring_mod
+from . import exits
 from . import state as state_mod
 from .locking import serialized
 from .config import Desk
 from .util import BellhopError, append, git, now, read, run, slugify, ts, write
 
-OK = 0
-REFUSED = 2
-BELL_TAKEN = 3
-PART_WAY = 4
+# The one table is bellhop/exits.py; these are its numbers under this command's names.
+OK = exits.OK
+REFUSED = exits.GATE          # a gate said no: the stop order, or a lane that is not clean
+BELL_TAKEN = exits.NOT_FOUND  # nothing to do: this packet has already been rung
+PART_WAY = exits.EXTERNAL     # some of the four steps ran and one of them failed
 
 # TODO: the `stopdispatch` module (its own branch) will own this file and expose
 # `dispatch_allowed(desk)`. Until it lands, the switch is checked here directly --

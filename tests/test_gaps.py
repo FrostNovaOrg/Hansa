@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bellhop import archive as archive_mod  # noqa: E402
-from bellhop import desk_ops, lanes, ring, watch  # noqa: E402
+from bellhop import desk_ops, exits, lanes, ring, watch  # noqa: E402
 from bellhop.config import LANE_DEFAULTS, Desk  # noqa: E402
 from bellhop.util import BellhopError, read, read_json, write, write_json  # noqa: E402
 
@@ -243,12 +243,13 @@ class GapTest(unittest.TestCase):
         self.assertTrue(report["moved"])
         self.assertTrue(report["last"].startswith("✅"))
 
-    def test_lane_commands_exit_two_when_they_refuse(self):
+    def test_lane_commands_refuse_with_the_gate_code(self):
+        """A lane holding work is a gate, not a typo: docs/exit-codes.md says 4."""
         self.lane_worktree()
         env = dict(os.environ, BELLHOP_DESK=str(self.desk_dir))
         for cmd in (["lane", "reset", "api"], ["lane", "align", "api"]):
             out = subprocess.run([str(ROOT / "bin" / "bellhop"), *cmd], env=env, capture_output=True, text=True)
-            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+            self.assertEqual(out.returncode, exits.GATE, out.stdout + out.stderr)
             self.assertTrue(out.stdout.strip().splitlines()[-1].startswith("🛑"), out.stdout)
         # positive control: the same command succeeds and ends in a tick once forced
         out = subprocess.run([str(ROOT / "bin" / "bellhop"), "lane", "reset", "api", "--force"],
