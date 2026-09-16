@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from .util import BellhopError, read, sha256_file, slugify
+from .util import BellhopError, read, sha256_file, slugify, ts, write
 
 REQUIRED = ("id", "lane", "title", "base")
 
@@ -136,12 +136,27 @@ def verify_worker_packet(desk, packet: Packet) -> str:
     return expected
 
 
-FORBID_WORDS = ("do not touch", "do not change", "don't touch", "forbid", "out of bounds", "not to touch")
-CONTEXT_WORDS = ("required context",)
+# Which body sections are carried -- into an acceptance pack, and into a `--return`
+# packet -- is a convention, not a guess. A heading is carried when it reads exactly
+# like one of these and never because it happens to start with a word that sounds
+# like a prohibition. The first version matched any heading beginning "forbid", "out
+# of bounds", "do not change"...; that is a script deciding what the coordinator
+# meant, and a section that was carried and one that was overlooked looked the same
+# in the packet. Two spellings are listed for the forbids because `## Do not touch`
+# is what the packet template has always called that section.
+FORBID_HEADINGS = ("forbids", "do not touch")
+CONTEXT_HEADINGS = ("required context",)
+# The names the acceptance pack builder imports. Same tuples, older spelling.
+FORBID_WORDS = FORBID_HEADINGS
+CONTEXT_WORDS = CONTEXT_HEADINGS
 
 
 def packet_section(body: str, starts: tuple) -> tuple:
-    """Extract named sections, including their nested headings, in source order."""
+    """Extract named sections, including their nested headings, in source order.
+
+    `starts` is a tuple of exact heading texts, compared case-insensitively. A heading
+    that is not one of them stays in the prose, whatever it is about.
+    """
     section, rest = [], []
     level = None
     fence = None
@@ -157,7 +172,7 @@ def packet_section(body: str, starts: tuple) -> tuple:
         if heading:
             depth, title = len(heading.group(1)), heading.group(2).lower()
             if level is None or depth <= level:
-                level = depth if any(title.startswith(s) for s in starts) else None
+                level = depth if title in starts else None
         (section if level is not None else rest).append(line)
     return "\n".join(section).strip(), "\n".join(rest).strip()
 
@@ -337,3 +352,123 @@ def build_packet_text(
                     "Releasing and deploying are the coordinator's, with gates this packet does not carry.")
 
     return "\n".join(head) + "\n\n" + "\n".join(intro) + "\n\n" + body.strip("\n") + "\n\n" + "\n".join(tail) + "\n"
+
+
+# --------------------------------------------------------------------------
+# rebinding a packet to the bytes its worker was dispatched
+# --------------------------------------------------------------------------
+BELL_EVIDENCE = "bell"
+META_RE = re.compile(r"^(?P<id>[A-Za-z0-9_.-]+)\.meta\.json$")
+
+
+def _bell_sha(desk, task_id: str):
+    """The packet digest recorded when the bell was rung, and where it was found.
+
+    This is evidence, and it is the only evidence there is: the bell was written at
+    dispatch, before any worker ran, and it has been in git since. Hashing today's
+    packet file instead would produce a binding that always verifies and never means
+    anything — a packet edited after the fact and one nobody touched would agree.
+    """
+    for bell in sorted(desk.bells_pending.glob("*.bell")) if desk.bells_pending.exists() else []:
+        try:
+            data = json.loads(bell.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(data.get("id")) == str(task_id) and data.get("sha256"):
+            return str(data["sha256"]), f"pending bell {bell.name}"
+    for bell in sorted(desk.bells_rung.glob(f"*-{task_id}.bell")) if desk.bells_rung.exists() else []:
+        try:
+            data = json.loads(bell.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("sha256"):
+            return str(data["sha256"]), f"rung bell {bell.name}"
+    return None, ""
+
+
+def worker_meta_paths(desk) -> List[Path]:
+    """`receipts/<id>.meta.json`, and not the acceptance metadata beside it."""
+    if not desk.receipts.exists():
+        return []
+    return [p for p in sorted(desk.receipts.glob("*.meta.json")) if META_RE.match(p.name)]
+
+
+def rebind(desk, task_id: str = "", every: bool = False, dry_run: bool = False) -> List[dict]:
+    """Write the dispatched packet's digest into a worker's metadata, once, from the bell.
+
+    A desk that upgrades into the binding check (acceptance and closing both verify
+    that the packet is the one the worker was given) finds that none of its in-flight
+    tasks carry that digest, because nothing wrote it when they went out. Every one of
+    them is refused, and the only ways forward were re-dispatching finished work or
+    editing hashes by hand — which is the thing the check exists to prevent.
+
+    So: one command, run once, that takes the digest from the bell and nowhere else,
+    refuses where the bell and the packet on disk disagree, and leaves a line per task
+    in `state/sentinel.log`. A rebind and a hand-edited hash must not look the same
+    afterwards, and a task that was quietly skipped must not look like one that was
+    rebound, so every task examined comes back with a row.
+    """
+    if bool(task_id) == bool(every):
+        raise BellhopError("bellhop packet rebind takes one task id, or --all; not both and not neither")
+    paths = worker_meta_paths(desk)
+    if task_id:
+        paths = [p for p in paths if META_RE.match(p.name).group("id") == str(task_id)]
+        if not paths:
+            raise BellhopError(f"no worker metadata at receipts/{task_id}.meta.json; "
+                               f"there is nothing to rebind for {task_id}")
+    rows: List[dict] = []
+    for path in paths:
+        tid = META_RE.match(path.name).group("id")
+        row = {"task": tid, "status": "", "note": ""}
+        rows.append(row)
+        try:
+            meta = json.loads(read(path))
+            if not isinstance(meta, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as exc:
+            row.update(status="refused", note=f"{path.name} is unreadable ({exc})")
+            continue
+        current = meta.get("packet_sha256")
+        if isinstance(current, str) and re.fullmatch(r"[0-9a-f]{64}", current):
+            row.update(status="already", note=f"bound to {current[:12]}; left alone")
+            continue
+        recorded, where = _bell_sha(desk, tid)
+        if not recorded:
+            row.update(status="no-evidence",
+                       note="no bell records this packet's digest; recover it from git history "
+                            "or dispatch the work again, and do not write a hash by hand")
+            continue
+        hits = sorted(desk.inbox.rglob(f"{tid}-*.md")) if desk.inbox.exists() else []
+        if len(hits) != 1:
+            row.update(status="refused", note=f"{len(hits)} packet(s) match id {tid} in the inbox; exactly 1 is required")
+            continue
+        try:
+            on_disk = sha256_file(hits[0])
+        except OSError as exc:
+            row.update(status="refused", note=f"cannot read {hits[0].name}: {exc}")
+            continue
+        if on_disk != recorded:
+            row.update(status="refused",
+                       note=f"the packet on disk ({on_disk[:12]}) is not the one the {where} recorded "
+                            f"({recorded[:12]}); that is a changed packet, not a missing binding")
+            continue
+        row.update(status="would rebind" if dry_run else "rebound",
+                   note=f"{recorded[:12]} from the {where}")
+        if dry_run:
+            continue
+        meta["packet_sha256"] = recorded
+        meta["packet_sha256_source"] = where
+        meta["packet_rebound_at"] = ts()
+        write(path, json.dumps(meta, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+        _rebind_line(desk, f"REBIND {tid} packet_sha256 {recorded[:12]} from the {where}")
+    return rows
+
+
+def _rebind_line(desk, text: str) -> None:
+    try:
+        p = desk.path("state", "sentinel.log")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts()} {text}\n")
+    except OSError:
+        pass

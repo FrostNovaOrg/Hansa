@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import extensions as extensions_mod
+from . import exceptions as exceptions_mod
 from . import ledger as ledger_mod
 from . import seal as seal_mod
 from . import stopdispatch as stop_mod
@@ -183,6 +184,25 @@ def check_bells(desk: Desk) -> Check:
     return ("bells", True, f"{len(pending)} pending")
 
 
+def check_dead_bells(desk: Desk) -> Check:
+    """A bell the watchdog gave up on. It stops being red once the ledger names it.
+
+    The watchdog parks a bell in `bells/dead/` after `bell_max_failures` consecutive
+    failures rather than answering it forever. That is the right thing to do and it is
+    also invisible: the bell leaves `pending/`, the board's pending count falls, and
+    the desk reads as if the work went out. So it is red here until somebody writes
+    down what happened to it, the same way an unacknowledged dead task is.
+    """
+    d = desk.path("bells", "dead")
+    parked = sorted(d.glob("*.bell")) if d.exists() else []
+    unacknowledged = [p.name for p in parked if not ledger_mod.entries_mentioning(desk, p.name)]
+    if unacknowledged:
+        return ("dead-bells", False,
+                f"{len(unacknowledged)} bell(s) parked in bells/dead/ after repeated failures: "
+                + ", ".join(unacknowledged[:3]) + ("…" if len(unacknowledged) > 3 else ""))
+    return ("dead-bells", True, f"{len(parked)} parked, all acknowledged" if parked else "none parked")
+
+
 def _times(n: int) -> str:
     return {1: "once", 2: "twice"}.get(n, f"{n} times")
 
@@ -214,12 +234,17 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
         check_inflight(desk),
         check_dead_tasks(desk),
         check_bells(desk),
+        check_dead_bells(desk),
         check_ledger(desk, snapshot),
         check_decisions(desk, snapshot),
         check_push(desk),
         check_seals(desk),
     ]
     checks.extend(check_stop_dispatch(desk))
+    # A merge taken on the coordinator's judgement is allowed; two of them in a week
+    # means the acceptance gate is not the gate any more, and that is the principal's
+    # call rather than something the desk keeps absorbing one reasonable case at a time.
+    checks.append(exceptions_mod.check(desk, "merge"))
     # Desk-local extensions run last and cannot raise out of here; a broken add-on
     # becomes one red line, never a sentinel that stopped running.
     checks.extend(extensions_mod.checks(desk, persist))

@@ -37,7 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .locking import serialized
+from .locking import serialized, soft_serialized
 from .config import Desk
 from .util import BellhopError, append, read, write
 
@@ -85,7 +85,9 @@ def _ensure_ledger(desk: Desk) -> Path:
     return p
 
 
-@serialized
+# The `PreToolUse` gate writes through here, inside the coordinator's turn, so this
+# one waits two seconds and then appends anyway rather than holding the turn open.
+@soft_serialized("hand.note")
 def note(desk: Desk, line: str) -> None:
     """Append one row. Append-only: this file is never rewritten."""
     append(_ensure_ledger(desk), "- " + line + "\n")

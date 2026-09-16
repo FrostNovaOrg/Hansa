@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
+NEW_FILE_MODE = 0o644
+
+
 class BellhopError(Exception):
     """A user-facing error. The CLI prints the message and exits 1."""
 
@@ -53,13 +56,16 @@ def write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Readers (board, sentinel, watchdog) must not observe half a JSON/card rewrite.
     # Writers still need a lock around read/modify/write and a backup where required.
-    previous_mode = path.stat().st_mode & 0o777 if path.exists() else None
+    # `mkstemp` makes the file 0600. An existing file keeps the mode it had; a new one
+    # gets 0644, because every one of these is a desk record something else reads --
+    # the board, the sentinel, a person with a pager -- and a state file nobody but
+    # this user can open is a record that is not there.
+    previous_mode = path.stat().st_mode & 0o777 if path.exists() else NEW_FILE_MODE
     fd, temporary = tempfile.mkstemp(prefix=".bellhop-write-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-        if previous_mode is not None:
-            os.chmod(temporary, previous_mode)
+        os.chmod(temporary, previous_mode)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):

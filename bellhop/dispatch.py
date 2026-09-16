@@ -425,11 +425,19 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
                 raise Stopped(STEP_PACKET, "a return must keep the original acceptance items; "
                               "omit the Acceptance section to inherit them, or scope a new task")
             acceptance = prior_packet.acceptance
-            for names in (packet_mod.FORBID_WORDS, packet_mod.CONTEXT_WORDS):
+            # The note names what was carried, not what the code went looking for. The
+            # first version said "acceptance, forbids and required context inherited"
+            # on every return, so a packet that had neither section and one that had
+            # both left the same line behind.
+            carried = ["acceptance"] if acceptance else []
+            for label, names in (("forbids", packet_mod.FORBID_HEADINGS),
+                                 ("required context", packet_mod.CONTEXT_HEADINGS)):
                 inherited, _ = packet_mod.packet_section(prior_packet.body, names)
                 if inherited:
                     body = body.rstrip() + "\n\n" + inherited + "\n"
-            report.notes.append("↩ acceptance, forbids and required context inherited from the original packet")
+                    carried.append(label)
+            if carried:
+                report.notes.append("↩ inherited from the original packet: " + ", ".join(carried))
         key = "continues" if continue_id else "returns"
         links.append((key, resume_id))
         links.append((f"{key}_receipt", str(receipt.relative_to(desk.root)) if receipt else "none"))
@@ -442,7 +450,7 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
         if blockers:
             raise Stopped(STEP_PACKET,
                           "the lane cannot take a packet: " + "; ".join(blockers) +
-                          ". Merge or accept the task in flight (`bellhop merge <id>`), clear the "
+                          ". Close the task in flight (`bellhop close-task <id>`), clear the "
                           "worktree (`bellhop lane reset <lane>`), or name it with --continue/--return")
         base = state.head
 
