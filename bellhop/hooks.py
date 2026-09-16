@@ -10,7 +10,7 @@ single turn. Only `pre-tool` blocks; the other three carry facts, not advice.
 |---|---|---|
 | `SessionStart` (startup, clear, compact) | `session-start` | Prints the reading list, then the board. After `/clear` the terminal's own reading list goes with the context; this one is injected into the new one. |
 | `UserPromptSubmit` | `intake` | Appends the principal's words to `state/intake.md`, numbered and de-duplicated. |
-| `PreToolUse` (Edit, Write, Bash) | `pre-tool` | Refuses the first write into a lane repository when no hand window is open. |
+| `PreToolUse` (Edit, Write, Bash) | `pre-tool` | Refuses the first write into a lane repository when no hand window is open, and the coordinator's own source-file writes. |
 | `Stop` | `stop` | Warns about bells nobody is answering. |
 
 `session-start`, `intake` and `stop` never exit non-zero. A hook that fails a
@@ -27,6 +27,7 @@ from . import board as board_mod
 from . import daemon as daemon_mod
 from . import hand as hand_mod
 from . import intake as intake_mod
+from . import rolegate as rolegate_mod
 from .config import Desk, find_desk
 from .util import BellhopError
 
@@ -108,22 +109,33 @@ def intake() -> int:
 
 
 def pre_tool() -> int:
-    """PreToolUse: the hand-window gate. Exit 2 refuses the call."""
+    """PreToolUse: the hand-window gate, then the role gate. Exit 2 refuses the call.
+
+    Two checks, one hook. The framework has exactly one hook that can refuse a call
+    (rationale, principle 3), and a second registration would double every message on
+    a desk that already runs the plugin and its own settings block. So the role gate
+    is a second question asked inside this one: first "would this write into a lane",
+    then "is this the coordinator writing code". The first refusal wins, and a check
+    that raises is skipped rather than allowed to stop a session.
+    """
     data = _hook_input()
     desk = _desk_from(data)
     if not desk:
         return 0
-    try:
-        code, message = hand_mod.gate(desk, data)
-    except Exception as exc:
+    for gate in (hand_mod.gate, rolegate_mod.check):
         try:
-            hand_mod.note_failure(desk, exc)
-        except Exception:
-            pass
-        return 0  # a broken gate never blocks
-    if message:
-        print(message, file=sys.stderr)
-    return code
+            code, message = gate(desk, data)
+        except Exception as exc:
+            try:
+                hand_mod.note_failure(desk, exc)
+            except Exception:
+                pass
+            continue  # a broken gate never blocks
+        if message:
+            print(message, file=sys.stderr)
+        if code:
+            return code
+    return 0
 
 
 def stop() -> int:
