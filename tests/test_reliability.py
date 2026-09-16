@@ -11,14 +11,15 @@ import sys
 import threading
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import test_gaps as fixtures
-from bellhop import archive, daemon, ledger, mcp_server, merge, ring, sentinel, watch
+from bellhop import archive, daemon, exceptions, ledger, mcp_server, merge, ring, sentinel, watch
 from bellhop.config import Desk
 from bellhop.locking import desk_lock, worker_slot
-from bellhop.util import BellhopError, read, write
+from bellhop.util import BellhopError, now, read, write
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -179,13 +180,52 @@ for n in range(8):
         self.desk.cfg["busy_probe_cmd"] = "exit 1"
         self.assertEqual(sentinel.probe_busy(self.desk)[0], sentinel.IDLE)
 
-    def test_legacy_merge_cannot_bypass_acceptance_with_prose(self):
+    def test_merge_on_judgement_refuses_without_a_reason(self):
+        """The judgement is allowed; taking it silently is not."""
         ring.ring(self.desk, self.packet())
         watch.watch_once(self.desk)
         before = fixtures.git(self.repo, "rev-parse", "main")
-        with self.assertRaisesRegex(BellhopError, "acceptance"):
-            merge.merge(self.desk, "001", verdict="PASS, trust me")
+        for reason in ("", "   "):
+            with self.assertRaisesRegex(BellhopError, "--reason"):
+                merge.merge(self.desk, "001", reason)
         self.assertEqual(fixtures.git(self.repo, "rev-parse", "main"), before)
+        self.assertFalse(exceptions.path(self.desk).exists(), "a refusal wrote an exception line")
+
+    def test_merge_on_judgement_merges_and_records_the_exception(self):
+        """No acceptance file anywhere, and the merge still happens - with its reason on
+        the ledger, in state/exceptions.md and in the close-out register."""
+        ring.ring(self.desk, self.packet())
+        watch.watch_once(self.desk)
+        result = merge.merge(self.desk, "001", "verifier is down and the release is waiting")
+        self.assertIn("merge lane/api", fixtures.git(self.repo, "log", "-1", "--format=%s", "main"))
+        self.assertEqual(result.count, 1)
+        self.assertFalse(result.red)
+        line = read(exceptions.path(self.desk)).strip().splitlines()[-1]
+        self.assertIn("| merge |", line)
+        self.assertIn("verifier is down", line)
+        entries = ledger.entries_mentioning(self.desk, "merge exception: 001")
+        self.assertEqual(len(entries), 1, entries)
+        self.assertIn("coordinator's judgement", read(entries[0]))
+        self.assertIn("exception: verifier is down", read(self.desk.state / "closings.md"))
+
+    def test_merge_exceptions_turn_the_sentinel_red_at_two_in_seven_days(self):
+        name, ok, detail = exceptions.check(self.desk, "merge")
+        self.assertTrue(ok, detail)
+        exceptions.record(self.desk, "merge", "001 api one", "first")
+        self.assertTrue(exceptions.check(self.desk, "merge")[1])
+        exceptions.record(self.desk, "merge", "002 api two", "second")
+        name, ok, detail = exceptions.check(self.desk, "merge")
+        self.assertFalse(ok, detail)
+        self.assertIn("2 merge exception(s)", detail)
+        self.assertIn(("merge-exceptions", False), [(c[0], c[1]) for c in sentinel.run_checks(self.desk)])
+
+    def test_merge_exceptions_older_than_the_window_do_not_count(self):
+        """A rolling seven days, not a running total: two last month is not two this week."""
+        exceptions.record(self.desk, "merge", "001 api one", "long ago")
+        exceptions.record(self.desk, "merge", "002 api two", "also long ago")
+        self.assertFalse(exceptions.check(self.desk, "merge")[1])
+        later = now() + timedelta(days=30)
+        self.assertTrue(exceptions.check(self.desk, "merge", at=later)[1])
 
     def test_settlement_failure_never_automatically_relaunches_worker(self):
         bell = ring.ring(self.desk, self.packet())

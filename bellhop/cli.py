@@ -21,6 +21,7 @@ from . import dispatch as dispatch_mod
 from . import desk_ops
 from . import lanes as lanes_mod
 from . import ledger as ledger_mod
+from . import exceptions as exceptions_mod
 from . import merge as merge_mod
 from . import readings as readings_mod
 from . import release as release_mod
@@ -33,6 +34,7 @@ from . import state as state_mod
 from . import stopdispatch as stop_mod
 from . import watch as watch_mod
 from .config import find_desk
+from . import packet as packet_mod
 from .packet import next_packet_id, parse_packet, render_packet
 from .util import BellhopError, read, slugify, ts, write
 
@@ -76,6 +78,22 @@ def cmd_packet_new(args):
     print(path)
 
 
+def cmd_packet_rebind(args):
+    """One-time migration: bind a worker's metadata to the packet its bell recorded."""
+    desk = _desk(args)
+    rows = packet_mod.rebind(desk, task_id=args.id or "", every=args.all, dry_run=args.dry_run)
+    if not rows:
+        print("no worker metadata on this desk; nothing to rebind")
+        return
+    for row in rows:
+        print(f"{row['task']}: {row['status']} — {row['note']}")
+    bad = [r for r in rows if r["status"] in ("refused", "no-evidence")]
+    done = [r for r in rows if r["status"].endswith("rebind") or r["status"] == "rebound"]
+    print(f"{len(done)} rebound, {len(rows) - len(done) - len(bad)} already bound, {len(bad)} refused")
+    if bad:
+        sys.exit(2)
+
+
 def cmd_dispatch(args):
     """Write the packet, ring, start the in-flight row, refresh the card -- and echo four lines."""
     desk = _desk(args)
@@ -102,6 +120,8 @@ def cmd_lane(args):
     try:
         if args.lane_cmd == "reset":
             report = lanes_mod.lane_reset(desk, args.lane, dry_run=args.dry_run, force=args.force)
+        elif args.lane_cmd == "recover":
+            report = lanes_mod.lane_recover(desk, args.lane, dry_run=args.dry_run, force=args.force)
         else:
             report = lanes_mod.lane_align(desk, args.lane)
     except lanes_mod.LaneBlocked as exc:
@@ -316,10 +336,26 @@ def cmd_accept(args):
 
 
 def cmd_merge(args):
+    """The coordinator's judgement merge. It is allowed, and it is counted."""
     desk = _desk(args)
-    sha = merge_mod.merge(desk, args.id, push=args.push, verdict=args.verdict or "",
-                          commit=not getattr(args, "no_commit", False))
-    print(f"merged at {sha}")
+    result = merge_mod.merge(desk, args.id, reason=args.reason, push=args.push,
+                             commit=not getattr(args, "no_commit", False))
+    how = "already in" if result.already else "merged into"
+    print(f"{result.branch} {how} {result.target} at {result.sha}; full board exit "
+          f"{result.check_exit} — {result.check_summary}" + ("; pushed" if result.pushed else ""))
+    print(f"exception recorded: {result.exception}")
+    for note in result.notes:
+        print(f"   {note}")
+    print(f"ledger: {result.ledger_path.relative_to(desk.root)}")
+    if result.red:
+        print(f"⚠ {result.count} merge exceptions in the last {exceptions_mod.WINDOW_DAYS} days; "
+              f"the sentinel is red until the acceptance gate is being kept again")
+        sys.exit(headers_mod.EXIT_RED)
+
+
+def cmd_exceptions(args):
+    desk = _desk(args)
+    print(exceptions_mod.status_text(desk, kind=args.kind), end="")
 
 
 def cmd_close_task(args):
@@ -698,6 +734,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("packet", help="packet tools"); ss = s.add_subparsers(dest="packet_cmd", required=True)
     n = ss.add_parser("new", help="write a packet skeleton in the inbox"); n.add_argument("--lane", required=True); n.add_argument("--title", required=True)
     n.add_argument("--base", help="base commit (default HEAD)"); n.add_argument("--id"); n.add_argument("--budget", type=int, default=45); n.set_defaults(fn=cmd_packet_new)
+    b = ss.add_parser("rebind", help="one-time: write the dispatched packet's digest into a worker's metadata, from its bell")
+    b.add_argument("id", nargs="?", help="the task id; leave it out and pass --all")
+    b.add_argument("--all", action="store_true", help="every worker metadata file on the desk")
+    b.add_argument("--dry-run", action="store_true", help="print what it would do, change nothing")
+    b.set_defaults(fn=cmd_packet_rebind)
 
     s = sub.add_parser("dispatch", help="write the packet, ring, start the in-flight row, refresh the card")
     s.add_argument("--lane", required=True)
@@ -722,6 +763,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--force", action="store_true", help="proceed even if the lane is busy or holds unmerged commits")
     a = ss.add_parser("align", help="fast-forward a clean, fully merged lane branch onto its base branch")
     a.add_argument("lane")
+    v = ss.add_parser("recover", help="clear a stale launch marker left by an interrupted worker, and log it")
+    v.add_argument("lane"); v.add_argument("--dry-run", action="store_true", help="print what it would do, change nothing")
+    v.add_argument("--force", action="store_true", help="clear it even though the lane claim is still held")
     s.set_defaults(fn=cmd_lane)
 
     s = sub.add_parser("watch", help="answer bells (watchdog)"); s.add_argument("--loop", action="store_true"); s.add_argument("--once", action="store_true")
@@ -785,7 +829,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("header-spec", help="print the header spec straight from the code")
     s.add_argument("kind", nargs="?", default="both", choices=["receipt", "acceptance", "both"]); s.set_defaults(fn=cmd_header_spec)
 
-    s = sub.add_parser("merge", help="compatibility alias for close-task (requires a passing acceptance file)"); s.add_argument("id"); s.add_argument("--push", action="store_true"); s.add_argument("--verdict"); s.set_defaults(fn=cmd_merge)
+    s = sub.add_parser("merge", help="merge on the coordinator's judgement; needs --reason and is counted as an exception")
+    s.add_argument("id")
+    s.add_argument("--reason", required=True, help="why the acceptance gate is being gone round; it is recorded and counted")
+    s.add_argument("--push", action="store_true")
+    s.add_argument("--no-commit", action="store_true", help="do not commit the ledger entry and the state files")
+    s.set_defaults(fn=cmd_merge)
+
+    s = sub.add_parser("exceptions", help="the recorded exceptions and how many are inside the window")
+    s.add_argument("--kind", help="only this kind (e.g. merge)")
+    s.set_defaults(fn=cmd_exceptions)
     s = sub.add_parser("readings", help="weekly readings"); s.add_argument("--week"); s.add_argument("--transcripts", action="append", metavar="PATH", help="a Claude Code transcript, or a directory of them; repeatable"); s.set_defaults(fn=cmd_readings)
 
     s = sub.add_parser("close-task", help="close one task in one command: evidence, fileset, merge, ledger, state, archive")

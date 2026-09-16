@@ -106,10 +106,10 @@ class LoopTest(unittest.TestCase):
         from bellhop import accept as accept_mod
         out = accept_mod.accept(self.desk, "001")
         self.assertIn("VERDICT: pass", read(out))
-        # merge
-        from bellhop import merge as merge_mod
-        sha = merge_mod.merge(self.desk, "001", verdict="PASS")
-        self.assertTrue(sha)
+        # merge: the acceptance-gated path closes it, and the branch is on main
+        from bellhop import closetask as closetask_mod
+        report = closetask_mod.close_task(self.desk, "001", say=lambda line: None)
+        self.assertTrue(report.merged_sha)
         self.assertIn("merge lane/api", git(self.repo, "log", "-1", "--format=%s"))
 
     def test_dead_task_is_counted_until_acknowledged(self):

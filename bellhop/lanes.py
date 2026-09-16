@@ -8,7 +8,7 @@ from pathlib import Path
 from .locking import serialized
 from .config import Desk
 from .packet import parse_packet
-from .util import BellhopError, git, read, read_json, run
+from .util import BellhopError, append, git, read, read_json, run, ts
 
 PRE_PUSH_HOOK = """#!/bin/sh
 # Installed by Bellhop. Workers must not push; the coordinator's merge sets BELLHOP_MERGE=1.
@@ -158,7 +158,7 @@ def lane_reset(desk: Desk, lane_name: str, dry_run: bool = False, force: bool = 
     if ahead and not force:
         raise LaneBlocked(
             f"lane '{lane_name}' has {ahead} commit(s) not on {lane['branch']}: reset would drop them. "
-            f"Merge them (`bellhop merge <id>`) or re-run with --force"
+            f"Close the task (`bellhop close-task <id>`) or re-run with --force"
         )
     dirty = [l for l in git(wt, "status", "--porcelain").splitlines() if l.strip()]
     head = git(wt, "rev-parse", "--short", "HEAD")
@@ -184,6 +184,85 @@ def lane_reset(desk: Desk, lane_name: str, dry_run: bool = False, force: bool = 
             "base": base, "base_ref": base_ref, "source": source, "head_before": head, "head_after": after,
             "last": f"✅ lane {lane_name} reset to {after} ({base_ref}, from {source}); "
                     f"{len(dirty)} uncommitted path(s) discarded"}
+
+
+# -- stale started markers -------------------------------------------------
+
+
+def started_dir(desk: Desk) -> Path:
+    return desk.path("bells", ".locks", "started")
+
+
+def started_markers(desk: Desk, lane_name: str = "") -> list:
+    """The launch markers on this lane (all of them when no lane is named).
+
+    `process_bell` writes one before it starts a worker and removes it after the
+    receipt is archived. One left behind means a launch that never finished, and it
+    deliberately blocks a replay: a worker that died before it wrote anything and a
+    worker that finished and then lost its settlement look the same from the bell.
+    """
+    out = []
+    d = started_dir(desk)
+    if not d.exists():
+        return out
+    for marker in sorted(d.glob("*.json")):
+        data = read_json(marker, {}) or {}
+        if lane_name and data.get("lane") != lane_name:
+            continue
+        out.append((marker, data))
+    return out
+
+
+def _bell_state(desk: Desk, bell_name: str) -> str:
+    if (desk.bells_pending / bell_name).exists():
+        return "its bell is still pending"
+    if (desk.bells_rung / bell_name).exists():
+        return "its bell has been rung and archived"
+    return "its bell is in neither pending/ nor rung/"
+
+
+@serialized
+def lane_recover(desk: Desk, lane_name: str, dry_run: bool = False, force: bool = False) -> dict:
+    """Clear a stale launch marker on a lane, and leave a line saying so.
+
+    The marker is the desk being careful: it refuses to answer the same bell twice
+    after an interrupted launch, because Bellhop cannot tell from a missing process
+    whether the worker's external effects happened. That care turns into a stuck lane
+    the moment nobody has a command to end it — the only way forward was deleting a
+    file under `bells/.locks/`, by hand, with nothing written down. This is that
+    command, and the line it writes is the record the hand deletion never left.
+
+    It refuses while the lane claim is held: a claim plus a marker is a launch that may
+    still be running, and that is not stale, it is live. `--force` says you have looked.
+    """
+    desk.lane(lane_name)  # validates the lane exists
+    markers = started_markers(desk, lane_name)
+    busy = lane_is_busy(desk, lane_name)
+    if busy and not force:
+        raise LaneBlocked(
+            f"lane '{lane_name}' still holds its claim: a worker may be running. Establish that its "
+            f"process is gone and preserve its receipt and log first, then re-run with --force"
+        )
+    steps = []
+    for marker, data in markers:
+        steps.append(f"clear {marker.name} (bell {data.get('bell', '?')}, started {data.get('started_at', '?')}; "
+                     f"{_bell_state(desk, str(data.get('bell', '')))})")
+    if not markers:
+        return {"lane": lane_name, "dry_run": dry_run, "cleared": 0, "steps": steps,
+                "last": f"✅ lane {lane_name}: no launch marker to clear"}
+    if dry_run:
+        return {"lane": lane_name, "dry_run": True, "cleared": 0, "steps": steps,
+                "last": f"✅ lane {lane_name} recover (dry run): {len(markers)} marker(s), nothing was changed"}
+    log = desk.bells_logs / "watchdog.log"
+    for marker, data in markers:
+        bell_name = str(data.get("bell", marker.stem))
+        append(log, f"{ts()}\tRECOVER\t{lane_name}\tcleared started marker {marker.name} "
+                    f"(started {data.get('started_at', '?')}; {_bell_state(desk, bell_name)})"
+                    + ("\t(--force: the lane claim was still held)" if busy else "") + "\n")
+        marker.unlink()
+    return {"lane": lane_name, "dry_run": False, "cleared": len(markers), "steps": steps,
+            "last": f"✅ lane {lane_name}: {len(markers)} stale launch marker(s) cleared, "
+                    f"one line each in bells/logs/watchdog.log"}
 
 
 @serialized
@@ -212,7 +291,7 @@ def lane_align(desk: Desk, lane_name: str) -> dict:
     ahead = _ahead(wt, target)
     if ahead:
         raise LaneBlocked(
-            f"lane '{lane_name}' has {ahead} commit(s) not on {target}; merge them first (`bellhop merge <id>`)"
+            f"lane '{lane_name}' has {ahead} commit(s) not on {target}; close the task first (`bellhop close-task <id>`)"
         )
     before = git(wt, "rev-parse", "--short", "HEAD")
     proc = run(["git", "-C", str(wt), "merge", "--ff-only", "-q", target], check=False)

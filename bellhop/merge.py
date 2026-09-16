@@ -5,24 +5,100 @@ import shutil
 from collections import namedtuple
 from pathlib import Path
 
+from . import archive as archive_mod
+from . import exceptions as exceptions_mod
 from . import headers as headers_mod
+from . import ledger as ledger_mod
+from . import state as state_mod
 from .accept import find_packet
 from .locking import serialized
 from .config import Desk
 from .packet import parse_packet
-from .util import BellhopError, git, run
+from .util import BellhopError, git, read, run
+
+JudgementMerge = namedtuple(
+    "JudgementMerge",
+    "sha target branch already check_exit check_summary pushed reason exception count red "
+    "ledger_path archive_sha notes")
 
 
-def merge(desk: Desk, task_id: str, push: bool = False, verdict: str = "", commit: bool = True) -> str:
-    """Compatibility entry point; a prose verdict never substitutes for acceptance.
+def merge(desk: Desk, task_id: str, reason: str, push: bool = False, commit: bool = True) -> JudgementMerge:
+    """Merge on the coordinator's judgement, and write down that that is what happened.
 
-    All public merging goes through close-task's evidence/fileset/full-check gates
-    and resumable bookkeeping. Kept for scripts that used `bellhop merge` before.
+    `close-task` is the ordinary way a task reaches the product: it wants a passing
+    acceptance verdict and refuses without one. This command is the other way, and it
+    exists because the verdict is **not binding** — the coordinator keeps the final
+    say, and a desk with no command for that gets the same thing done by hand, with no
+    record at all. A gate with no exception channel is not obeyed more often; it is
+    gone round more quietly.
+
+    So the judgement is allowed and it is counted. `--reason` is required, the reason
+    goes on the ledger and into `state/exceptions.md`, and two of these inside seven
+    days turn the sentinel red until the principal says which way it should be.
+
+    What is *not* waived: the merge still happens in a throwaway worktree and the
+    lane's full board still has to pass on the merged result. That is mechanics, not
+    judgement — a merge that breaks the base branch is not a decision anybody made.
     """
-    from .closetask import close_task
-    configured = Desk(desk.root, dict(desk.cfg, close_push_lane=push or desk.cfg["close_push_lane"]))
-    report = close_task(configured, task_id, note=verdict or None, commit=commit, say=lambda line: None)
-    return report.merged_sha
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise BellhopError(
+            'bellhop merge needs --reason "<why the acceptance gate is being gone round>": '
+            "an exception nobody wrote down cannot be counted. `bellhop close-task <id>` "
+            "is the path that needs no reason, because the verdict carries it")
+    packet = parse_packet(find_packet(desk, task_id))
+    result = merge_checked(desk, task_id, push=push)
+
+    entry = exceptions_mod.record(desk, "merge", f"{task_id} {packet.lane} {packet.title}", reason)
+    hits = exceptions_mod.recent(desk, "merge")
+    red = len(hits) >= exceptions_mod.RED_AT
+
+    title = f"merge exception: {task_id} — {reason}"
+    body = "\n".join([
+        f"- lane: {packet.lane} (base {packet.base})",
+        f"- merged: {result.sha} into {result.target}"
+        + (" (already there)" if result.already else ""),
+        f"- full board: exit {result.check_exit} — {result.check_summary}",
+        "- acceptance: not required here; this merge went on the coordinator's judgement",
+        f"- reason: {reason}",
+        f"- recorded in: {exceptions_mod.EXCEPTIONS} ({len(hits)} merge exception(s) in the "
+        f"last {exceptions_mod.WINDOW_DAYS} days)",
+    ])
+    ledger_path = ledger_mod.add(desk, title, body, refs=[task_id, result.sha])
+
+    notes = []
+    rows = _inflight_rows(desk, task_id)
+    if len(rows) > 1:
+        notes.append(f"{len(rows)} in-flight rows carry {task_id}; left alone, finish one by hand")
+    elif rows:
+        notes.append(state_mod.inflight_finish(desk, task_id).note)
+    else:
+        notes.append("in flight: no row")
+    line = f"{packet.title} | merged {result.sha} | exception: {reason}"
+    cap = state_mod.cfg_int(desk, "closings_line_chars", 200)
+    if len(line) > cap:
+        line = line[: cap - 4].rstrip() + " ..."
+    notes.append(state_mod.closings_add(desk, task_id, line).note)
+
+    archive_sha = ""
+    if commit:
+        paths = [ledger_path, desk.path(state_mod.INFLIGHT), desk.path(state_mod.CLOSINGS),
+                 exceptions_mod.path(desk)]
+        archive_sha = archive_mod.archive(desk, paths, f"merge exception {task_id} at {result.sha}")
+    return JudgementMerge(sha=result.sha, target=result.target, branch=result.branch,
+                          already=result.already, check_exit=result.check_exit,
+                          check_summary=result.check_summary, pushed=result.pushed,
+                          reason=reason, exception=entry.line, count=len(hits), red=red,
+                          ledger_path=ledger_path, archive_sha=archive_sha, notes=notes)
+
+
+def _inflight_rows(desk: Desk, task_id: str):
+    path = desk.path(state_mod.INFLIGHT)
+    if not path.exists():
+        return []
+    carries = state_mod.token(task_id)
+    return [l for l in read(path).splitlines()
+            if l.startswith("- ") and l.strip() != "- none" and carries(l)]
 
 
 # --------------------------------------------------------------------------
