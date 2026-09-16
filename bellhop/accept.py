@@ -28,7 +28,7 @@ import statistics
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from . import headers as headers_mod
 from .locking import acceptance_session, serialized
@@ -40,10 +40,11 @@ from .util import BellhopError, append, git, now, read, run, scrubbed_env, ts, w
 # -- names -----------------------------------------------------------------
 # The steps a run walks, in order. A stall is recorded as the step it stalled at, so
 # "where did the 82 runs die" is a question the closings file can answer by itself.
-STEPS = ("prepare", "snapshot", "verifier", "recheck", "verdict format", "timeout")
+STEPS = ("preflight", "prepare", "snapshot", "verifier", "recheck", "verdict format", "timeout")
 STALL_TOUCHED = "verifier touched the tree"
 STALL_TIMEOUT = "timeout"
 STALL_FORMAT = "verdict format"
+STALL_PREFLIGHT = "preflight"
 
 CLOSING_MAX = 200
 TRIM_MARK = "[trimmed by bellhop accept to fit the case-pack cap]"
@@ -281,6 +282,144 @@ def allowed_tools(lane: dict) -> str:
     return ",".join(tools)
 
 
+# -- pre-flight: the policy against the criteria, before anything costs money ---
+# One task on a production desk was voided after **two attempts of
+# verifier time** because the policy allowed no way to undo the mutation the criteria
+# asked for: the verifier broke what the criterion claimed, could not put it back, and
+# the run died at `verdict format` -- the last step, with the bill already run up. The
+# mismatch was visible before the session started, in two lists sitting next to each
+# other. So they are compared here, and a run that cannot succeed stalls at `preflight`
+# with the missing command named, having launched nothing.
+
+# What the verifier needs to undo its own mutation. A desk whose policy names a
+# different restore command puts it in `accept_recovery_commands`.
+RECOVERY_COMMANDS = ("git checkout --", "git checkout", "git restore")
+
+# A backticked string in a criterion counts as a command to run when it starts with
+# one of these, or with a path. Everything else -- a config key, a field name, a
+# quoted value -- is prose, and a pre-flight that read prose as a command would stall
+# runs over punctuation.
+KNOWN_RUNNERS = frozenset({
+    "git", "make", "npm", "npx", "pnpm", "yarn", "node", "python", "python3", "pytest",
+    "tox", "cargo", "go", "ruby", "rake", "bundle", "mvn", "gradle", "dotnet", "swift",
+    "bash", "sh", "rg", "grep", "flake8", "mypy", "ruff", "black", "eslint", "tsc",
+    "jest", "vitest", "phpunit", "bellhop",
+})
+_BACKTICKED = re.compile(r"`([^`\n]{1,200})`")
+_MUTATION_WORDS = ("breaks when:", "break it", "mutation", "goes red", "go red")
+
+
+def _policy_tools(desk: Desk, lane: dict) -> List[str]:
+    """The verifier's allowlist as this run will use it, or [] when it has none."""
+    if lane.get("accept_cmd"):
+        return []  # a custom command carries its own policy; this module cannot read it
+    raw = lane.get("accept_allowed_tools") or desk.cfg.get("accept_allowed_tools")
+    if isinstance(raw, (list, tuple)) and raw:
+        return [str(t).strip() for t in raw if str(t).strip()]
+    if isinstance(raw, str) and raw.strip():
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return [t.strip() for t in allowed_tools(lane).split(",") if t.strip()]
+
+
+def allowlisted(command: str, tools: Sequence[str]) -> bool:
+    """Does the policy allow this command? Prefix-matched, the way Claude Code matches.
+
+    `Bash(git status:*)` does not cover `git -C <path> status`, which is a trap the
+    providers layer already paid for; this function does not pretend otherwise.
+    """
+    first = " ".join(str(command or "").split())
+    if not first:
+        return False
+    for entry in tools:
+        entry = str(entry).strip()
+        if entry == "Bash":
+            return True
+        m = re.match(r"^Bash\((.*?)\)$", entry)
+        if not m:
+            continue
+        prefix = m.group(1).strip()
+        if prefix.endswith(":*"):
+            prefix = prefix[:-2].strip()
+        if prefix in ("*", ""):
+            return True
+        if first == prefix or first.startswith(prefix):
+            return True
+    return False
+
+
+def needs_mutation(packet: Packet) -> bool:
+    """Do the criteria ask for something to be broken and put back?
+
+    Every criterion written to the `breaks when:` convention does, and so does one
+    that says it in words. This is a question about the criteria, not about the
+    pipeline: the checker's mutation gate applies either way.
+    """
+    text = "\n".join(packet.acceptance).lower()
+    return any(word in text for word in _MUTATION_WORDS)
+
+
+def criteria_commands(packet: Packet) -> List[str]:
+    """Commands the criteria name in backticks, in order, de-duplicated."""
+    out: List[str] = []
+    for item in packet.acceptance:
+        for m in _BACKTICKED.finditer(str(item)):
+            candidate = " ".join(m.group(1).split())
+            if not candidate:
+                continue
+            head = candidate.split()[0]
+            runner = os.path.basename(head)
+            if runner in KNOWN_RUNNERS or head.startswith(("./", "/")) or runner.endswith(".sh"):
+                if candidate not in out:
+                    out.append(candidate)
+    return out
+
+
+def preflight(desk: Desk, packet: Packet, lane: dict) -> Optional[str]:
+    """The reason this run cannot succeed, or None. Read before a session is launched."""
+    if not desk.cfg.get("accept_preflight", True):
+        return None
+    tools = _policy_tools(desk, lane)
+    if not tools:
+        return None  # lane `accept_cmd`: the policy is the lane's own business
+    recovery = desk.cfg.get("accept_recovery_commands") or RECOVERY_COMMANDS
+    if needs_mutation(packet) and not any(allowlisted(c, tools) for c in recovery):
+        return ("the criteria ask for a mutation and the verifier's policy allows no way to undo "
+                "one: none of %s is in the allowlist (%s). Add the recovery command to the lane's "
+                "`accept_allowed_tools`, or name the one this desk uses in `accept_recovery_commands`."
+                % (", ".join("`%s`" % c for c in recovery), ", ".join(tools)))
+    check = " ".join((lane.get("check_cmd") or "").split())
+    if check and not allowlisted(check, tools):
+        return ("lane '%s' declares check_cmd `%s` and the verifier's policy does not allow it (%s); "
+                "a criterion of the form \"the check passes\" could only be believed, not run."
+                % (lane.get("name", "?"), check, ", ".join(tools)))
+    for command in criteria_commands(packet):
+        if allowlisted(command, tools):
+            continue
+        missing = "" if check else " The lane declares no check command, so nothing else covers it."
+        return ("a criterion runs `%s` and the verifier's policy does not allow it (%s).%s "
+                "Add it to the lane's `check_cmd` or `accept_allowed_tools`, or write a criterion "
+                "the allowed commands can check." % (command, ", ".join(tools), missing))
+    return None
+
+
+# -- the verdict body cap, by what the task was ------------------------------
+# A report is long because it is a report. Report-type tasks hit the 3,000-byte
+# verdict cap over and over on one desk, and every time the coordinator opened the
+# full verdict to find out what it said -- the reading the machine header exists to
+# save. The cap is a warning either way: over it the pack is trimmed, never refused.
+KIND_REPORT = "report"
+DEFAULT_ACCEPTANCE_BYTES_REPORT = 6000
+
+
+def acceptance_cap(desk: Desk, packet: Optional[Packet] = None) -> int:
+    """The verdict body cap for this packet's kind."""
+    default = int(desk.cfg.get("acceptance_bytes", headers_mod.DEFAULT_ACCEPTANCE_BYTES))
+    kind = str(((packet.extra if packet else None) or {}).get("kind") or "").strip().lower()
+    if kind == KIND_REPORT:
+        return int(desk.cfg.get("acceptance_bytes_report", DEFAULT_ACCEPTANCE_BYTES_REPORT))
+    return default
+
+
 def _result_object(stdout: str) -> Optional[dict]:
     """The last JSON object on stdout, the way the watchdog reads a worker's result."""
     result = None
@@ -463,9 +602,14 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
             append_closing(desk, _stall_closing(packet.id, packet.lane, step, log), shadow)
         return meta
 
-    # -- prepare: the copy, then the case pack -----------------------------
+    # -- preflight: can this run succeed at all ----------------------------
     if binding_error:
         return finish("prepare", "packet provenance", binding_error)
+    stopper = preflight(desk, packet, lane)
+    if stopper:
+        return finish("preflight", STALL_PREFLIGHT, stopper)
+
+    # -- prepare: the copy, then the case pack -----------------------------
     values = _receipt_header(receipt)
     head = values.get("head") or ""
     base = values.get("base") or packet.base
@@ -585,8 +729,7 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
             try:
                 header_values, _action = headers_mod.write_acceptance_header(
                     out, desk=desk, lane=packet.lane, task=packet.id)
-                report = headers_mod.check_acceptance(out, max_bytes=int(
-                    desk.cfg.get("acceptance_bytes", headers_mod.DEFAULT_ACCEPTANCE_BYTES)))
+                report = headers_mod.check_acceptance(out, max_bytes=acceptance_cap(desk, packet))
             except BellhopError as exc:
                 write(check_path(desk, packet.id, shadow),
                       f"red: header could not be written: {exc}\nred 1 warn 0\n")

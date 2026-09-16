@@ -49,7 +49,7 @@ from . import headers as headers_mod
 from . import ledger as ledger_mod
 from . import merge as merge_mod
 from . import state as state_mod
-from .accept import find_packet
+from .accept import acceptance_cap, find_packet
 from .locking import acceptance_lock, desk_lock, serialized
 from .lanes import lane_lock
 from .config import Desk
@@ -535,8 +535,9 @@ class Closing:
             raise
         except BellhopError as exc:
             self.stop("evidence", f"cannot resolve acceptance base/head: {exc}")
-        cap = int(desk.cfg.get("acceptance_bytes", headers_mod.DEFAULT_ACCEPTANCE_BYTES))
-        report = headers_mod.check_acceptance(path, max_bytes=cap)
+        # The cap follows the task's kind: a `kind: report` packet is judged against
+        # `acceptance_bytes_report`, so a long report does not warn on every close.
+        report = headers_mod.check_acceptance(path, max_bytes=acceptance_cap(desk, self.packet))
         if report.reds:
             self.stop("evidence", f"check-acceptance is red: {report.reds[0]}", EXIT_STOPPED,
                       report.reds[1:] + [f"warn: {w}" for w in report.warns])

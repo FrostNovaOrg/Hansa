@@ -481,7 +481,7 @@ class RegistrationTest(unittest.TestCase):
         data = json.loads(read(ROOT / "hooks" / "hooks.json"))["hooks"]
         self.assertEqual(set(data), {"SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"})
         self.assertEqual(data["SessionStart"][0]["matcher"], "startup|clear|compact")
-        self.assertEqual(data["PreToolUse"][0]["matcher"], "Edit|Write|Bash")
+        self.assertEqual(data["PreToolUse"][0]["matcher"], "Edit|MultiEdit|Write|NotebookEdit|Bash")
         for event, entries in data.items():
             for entry in entries:
                 for hook in entry["hooks"]:
@@ -491,7 +491,7 @@ class RegistrationTest(unittest.TestCase):
         data = json.loads(read(ROOT / "template" / ".claude" / "settings.json"))["hooks"]
         self.assertEqual(set(data), {"SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"})
         self.assertEqual(data["SessionStart"][0]["matcher"], "startup|clear|compact")
-        self.assertEqual(data["PreToolUse"][0]["matcher"], "Edit|Write|Bash")
+        self.assertEqual(data["PreToolUse"][0]["matcher"], "Edit|MultiEdit|Write|NotebookEdit|Bash")
         commands = [h["command"] for entries in data.values() for e in entries for h in e["hooks"]]
         self.assertEqual(sorted(commands), [
             "bellhop hook intake", "bellhop hook pre-tool",

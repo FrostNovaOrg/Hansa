@@ -39,7 +39,8 @@ from . import ledger as ledger_mod
 from . import state as state_mod
 from . import transcripts as tr
 from .locking import serialized
-from .config import Desk, price_table
+from . import rolegate as rolegate_mod
+from .config import Desk, helper_budget, price_table
 from .headers import FENCE_ACCEPTANCE, FENCE_RECEIPT, parse_header
 from .util import iso_week, read, read_json, run, write
 
@@ -525,6 +526,43 @@ def _tail_line(reading: Optional[tr.Reading], tail_tokens: int) -> str:
             f"{cost} of cost")
 
 
+def _helper_line(parsed: tr.Transcript, prices: dict, desk: Desk) -> str:
+    """How many helper sessions passed the declared budget, out of how many.
+
+    No transcripts is `n/a`, not zero: a helper nobody measured and a helper that
+    stayed inside its budget are the same line otherwise.
+    """
+    max_turns, max_cost = helper_budget(desk)
+    rows = tr.helpers(parsed, prices)
+    if not rows:
+        return f"{NOT_AVAILABLE} (no helper sessions in the transcripts given)"
+    over = tr.over_budget(rows, max_turns, max_cost)
+    unpriced = sum(1 for h in rows if not h.priced)
+    text = f"{len(over)} of {len(rows)} (over {max_turns} turns or ${max_cost:.2f})"
+    if over:
+        worst = max(over, key=lambda h: h.turns)
+        text += f"; worst {worst.turns} turns, {money(worst.cost)}"
+    if unpriced:
+        text += f"; {unpriced} unpriced"
+    return text
+
+
+def _self_written_line(desk: Desk, days: Sequence[str]) -> str:
+    """Writes the coordinator made itself, through a hand window, per day."""
+    try:
+        counted = rolegate_mod.writes_by_day(desk)
+    except Exception:
+        return NOT_AVAILABLE
+    if not rolegate_mod.enabled(desk):
+        return f"{NOT_AVAILABLE} (role_gate is off)"
+    week_days_counted = {d: n for d, n in counted.items() if d in set(days)}
+    total = sum(week_days_counted.values())
+    if not total:
+        return "0"
+    worst_day, worst = max(week_days_counted.items(), key=lambda kv: kv[1])
+    return f"{total} this week, most on one day {worst} ({worst_day})"
+
+
 def report(desk: Desk, week: Optional[str] = None, transcripts: Optional[list] = None) -> Path:
     week = week or iso_week()
     days = week_days(week)
@@ -591,7 +629,14 @@ def report(desk: Desk, week: Optional[str] = None, transcripts: Optional[list] =
               + (f"median {v_median:g}, max {v_max}" if v_median is not None else NOT_AVAILABLE) + " |",
               f"| Intake duplicates | {number(intake.duplicates) if intake.present else NOT_AVAILABLE} |",
               f"| Status questions | {share(intake.question_share())}"
-              + (f" of {intake.entries} intake entries" if intake.present else "") + " |"]
+              + (f" of {intake.entries} intake entries" if intake.present else "") + " |",
+              # Two rows about the desk's own habits, at the end of the table. A helper
+              # is read-only and never appears in the chain from bell to verdict, so
+              # nothing else in this report can show what one cost; a coordinator's own
+              # write leaves no packet, no receipt and no verdict, so nothing else can
+              # show that it happened.
+              f"| Helpers over budget | {_helper_line(parsed, prices, desk)} |",
+              f"| Self-implemented writes | {_self_written_line(desk, days)} |"]
 
     lines += ["", "## Where the coordinator's turns went", "",
               "Characters entering the context, by source. This is the table to read when the",

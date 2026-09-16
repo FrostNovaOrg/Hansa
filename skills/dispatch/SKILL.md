@@ -35,8 +35,14 @@ follow a refusal's recovery reason. Use `$BH accept status <id>` only when more 
    handed a wrong name does not stop: it rewrites the task around the name it can find.
 2. **Line numbers are signposts, never the target.** Give the identifier beside every line
    number; lines move between the brief and the worker's turn.
-3. **Criteria count items, not lines.** "three entries" survives reformatting; "the grep prints
-   1" goes red the day one declaration wraps onto two lines.
+3. **Every criterion says how it breaks, and counts items, not lines.** Write each one as
+   `- <criterion> — breaks when: <what makes it red>`; `bellhop dispatch` refuses a packet
+   whose acceptance section has a line without that clause, names the line, and writes
+   nothing (`--allow-unbreakable` dispatches anyway and records the exception in the ledger).
+   A criterion nobody can break has passed before the worker starts — on one desk that was
+   most of the self-caught mistakes and several returned tasks. Then count items, not lines:
+   "three entries" survives reformatting; "the grep prints 1" goes red the day one
+   declaration wraps onto two lines.
 4. **Quote the source, never a paraphrase.** Open the original lines before citing them: a
    summary of a summary is where a packet starts contradicting what it describes.
 5. **One packet, one thing.** Two tasks in one body come back as one receipt, where the half

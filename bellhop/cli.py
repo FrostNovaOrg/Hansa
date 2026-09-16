@@ -104,8 +104,10 @@ def cmd_dispatch(args):
     report = dispatch_mod.dispatch(
         desk, args.lane, args.title, args.body,
         inflight=args.inflight or "", next_=args.next, continue_id=getattr(args, "continue"),
-        return_id=args.return_, heavy=args.heavy, allow=args.allow or [],
+        return_id=args.return_, heavy=args.heavy, kind=getattr(args, "kind", "") or "",
+        allow=args.allow or [],
         exception=args.exception, demo=args.demo, commit=not getattr(args, "no_commit", False),
+        allow_unbreakable=getattr(args, "allow_unbreakable", False),
     )
     if args.demo and report.packet_text:
         print(report.packet_text, end="" if report.packet_text.endswith("\n") else "\n")
@@ -721,8 +723,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--continue", dest="continue", metavar="ID", help="pick up a packet that stopped without a receipt")
     g.add_argument("--return", dest="return_", metavar="ID", help="re-send a packet whose receipt was refused")
     s.add_argument("--heavy", action="store_true", help="mark the packet `effort: heavy`")
+    s.add_argument("--kind", help="the task's kind, written into the packet head; `report` raises the verdict body cap")
     s.add_argument("--allow", action="append", metavar="PATTERN", help="waive one forbidden-command pattern for this packet only (repeatable)")
     s.add_argument("--exception", metavar="REASON", help="dispatch under a stop-dispatch order; the reason is recorded and counted")
+    s.add_argument("--allow-unbreakable", dest="allow_unbreakable", action="store_true",
+                   help="dispatch although a criterion names no way to go red; the exception is written to the ledger")
     s.add_argument("--demo", action="store_true", help="render the packet to stdout and write nothing")
     s.set_defaults(fn=cmd_dispatch)
 

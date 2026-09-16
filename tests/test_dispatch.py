@@ -39,8 +39,8 @@ Add a short note file describing the health check. Keep the checks green.
 
 ## Acceptance
 
-- ./check.sh prints 'check.sh: all green'
-- a file named note.md exists in the working tree
+- ./check.sh prints 'check.sh: all green' — breaks when: the greeting line is removed from check.sh
+- a file named note.md exists in the working tree — breaks when: note.md is deleted
 """
 
 
@@ -132,8 +132,10 @@ class DispatchTest(unittest.TestCase):
         pkt = packet_mod.parse_packet(self.desk_dir / lines[1])
         self.assertEqual((pkt.id, pkt.lane, pkt.base), ("001", "api", self.base))
         self.assertEqual(pkt.acceptance,
-                         ["./check.sh prints 'check.sh: all green'",
-                          "a file named note.md exists in the working tree"])
+                         ["./check.sh prints 'check.sh: all green' — breaks when: "
+                          "the greeting line is removed from check.sh",
+                          "a file named note.md exists in the working tree — breaks when: "
+                          "note.md is deleted"])
         self.assertTrue((self.desk.bells_pending / lines[2]).exists())
         self.assertIn("- 001 api Add health check note |", self.inflight())
         self.assertEqual(self.card()["next"], "002 wire the metrics reader")
@@ -308,7 +310,8 @@ class DispatchTest(unittest.TestCase):
         on every return, so a packet that had neither section and one that had both
         left the same line behind."""
         plain = self.body_file("## What to do\n\nAdd a note.\n\n## Acceptance\n\n"
-                               "- ./check.sh prints 'check.sh: all green'\n", "plain.md")
+                               "- ./check.sh prints 'check.sh: all green' — breaks when: it prints anything else\n",
+                               "plain.md")
         code, out = self.dispatch("Original plain", plain)
         self.assertEqual(code, 0, out)
         prior = packet_mod.parse_packet(self.desk.inbox / "api" / "001-original-plain.md")
@@ -416,11 +419,12 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("Acceptance", out)
         # control: an Acceptance heading with bullets lifts them into the front matter
-        good = self.body_file("## What to do\n\nSomething.\n\n## Acceptance\n\n- ./check.sh exits 0\n", "g.md")
+        good = self.body_file("## What to do\n\nSomething.\n\n## Acceptance\n\n"
+                              "- ./check.sh exits 0 — breaks when: check.sh is made to exit 1\n", "g.md")
         code, out = self.dispatch("With checks", good)
         self.assertEqual(code, 0, out)
         pkt = packet_mod.parse_packet(self.desk.inbox / "api" / "001-with-checks.md")
-        self.assertEqual(pkt.acceptance, ["./check.sh exits 0"])
+        self.assertEqual(pkt.acceptance, ["./check.sh exits 0 — breaks when: check.sh is made to exit 1"])
 
     def test_empty_body_is_refused(self):
         code, out = self.dispatch("Nothing", self.body_file("   \n"))

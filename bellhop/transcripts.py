@@ -106,6 +106,10 @@ class Turn:
     tools: tuple = ()
     compaction: bool = False
     session: str = ""
+    # A helper's turn carries the subagent's id; the coordinator's carries none. The
+    # two are in the same transcript tree and cost the same money, and a reading that
+    # cannot tell them apart reports a helper's bill as the coordinator's.
+    agent: str = ""
 
     @property
     def context(self) -> int:
@@ -240,7 +244,8 @@ def parse_file(path: Path, acc: Optional[Transcript] = None, days: Optional[Sequ
                     mid = msg.get("id") or "{}#{}".format(Path(path).name, n)
                     turn = by_id.get(mid)
                     if turn is None:
-                        turn = Turn(day=day, model=str(msg.get("model") or ""), session=Path(path).stem)
+                        turn = Turn(day=day, model=str(msg.get("model") or ""), session=Path(path).stem,
+                                    agent=str(entry.get("agentId") or "") if entry.get("isSidechain") else "")
                         by_id[mid] = turn
                         acc.turns.append(turn)
                     # Same id, several lines, one usage: take the largest reading of
@@ -364,6 +369,56 @@ def summarise(turns: Sequence[Turn], label: str = "", tail_tokens: int = DEFAULT
         # printed as "46%", and cache reads are a tenth of the price of fresh input.
         r.tail_cost_share = (sum(c for t, c in known if t.context >= tail_tokens) / total) if total else None
     return r
+
+
+# -- helpers ---------------------------------------------------------------
+# A scout, a walkthrough and an acceptance reader are cheap per turn and invisible
+# per task: nothing in the chain from bell to verdict mentions them. On one desk
+# read-only scouts cost **more than the verifiers**, against no cap at
+# all. So a helper session is counted here as its own thing, and the only judgement
+# offered is whether it passed the budget the config declares.
+
+@dataclass
+class Helper:
+    """One subagent session: its turns, and its cost when every turn had a price."""
+
+    agent: str
+    day: str = ""
+    turns: int = 0
+    cost: Optional[float] = None
+    priced: bool = False
+
+
+def helpers(transcript: Transcript, prices: Optional[dict] = None) -> List[Helper]:
+    """One row per helper session, oldest day first.
+
+    A session with one unpriced turn has no cost at all rather than a partial sum: a
+    total that is missing a turn and a complete one read the same as a dollar amount,
+    and only one of them can be held against a budget.
+    """
+    groups: Dict[str, List[Turn]] = {}
+    for turn in transcript.turns:
+        if turn.agent:
+            groups.setdefault(turn.agent, []).append(turn)
+    out: List[Helper] = []
+    for agent, turns in groups.items():
+        costs = [t.cost(prices) for t in turns]
+        priced = all(c is not None for c in costs)
+        out.append(Helper(agent=agent, day=min(t.day for t in turns), turns=len(turns),
+                          cost=sum(c for c in costs if c is not None) if priced else None,
+                          priced=priced))
+    return sorted(out, key=lambda h: (h.day, h.agent))
+
+
+def over_budget(rows: Sequence[Helper], max_turns: int, max_cost: float) -> List[Helper]:
+    """The helper sessions that passed the declared budget, on turns or on money."""
+    out = []
+    for h in rows:
+        if max_turns and h.turns > max_turns:
+            out.append(h)
+        elif max_cost and h.cost is not None and h.cost > max_cost:
+            out.append(h)
+    return out
 
 
 def by_day(transcript: Transcript, tail_tokens: int = DEFAULT_TAIL_TOKENS,
