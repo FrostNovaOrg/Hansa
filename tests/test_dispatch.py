@@ -310,7 +310,8 @@ class DispatchTest(unittest.TestCase):
         on every return, so a packet that had neither section and one that had both
         left the same line behind."""
         plain = self.body_file("## What to do\n\nAdd a note.\n\n## Acceptance\n\n"
-                               "- ./check.sh prints 'check.sh: all green'\n", "plain.md")
+                               "- ./check.sh prints 'check.sh: all green' — breaks when: it prints anything else\n",
+                               "plain.md")
         code, out = self.dispatch("Original plain", plain)
         self.assertEqual(code, 0, out)
         prior = packet_mod.parse_packet(self.desk.inbox / "api" / "001-original-plain.md")
