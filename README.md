@@ -200,6 +200,17 @@ Installing a watchdog alone does not configure wake delivery. On upgrades, refre
 any vendored resident copy as well as the plugin, at an idle boundary. See
 [concurrency and recovery](docs/concurrency.md) and [sentinel setup](docs/sentinel.md).
 
+### Optional: codex bridge
+
+Most desks should skip this. If your coordinator has to run through a proxy that
+routes Claude Code onto another vendor's subscription, the optional
+[codex bridge](contrib/codex-bridge/README.md) plugin covers that detour: durable
+helper jobs through the same proxy, a launcher for the coordinator's own session,
+and a check that asks the endpoint which model actually answers. It is a separate
+plugin (`claude --plugin-dir contrib/codex-bridge`) with its own configuration, and
+the core neither imports it nor knows it exists. Its results are helper output for
+the coordinator to read, never a task result.
+
 ## Operate the desk
 
 | Intent | Claude Code commands |
