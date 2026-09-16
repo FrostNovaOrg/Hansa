@@ -3,6 +3,8 @@
 No model, no network: the "workers" here are short python programs that print, sleep,
 or refuse to die, which is all the runner is being asked about.
 """
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -15,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bellhop import health, sentinel  # noqa: E402
+from bellhop import cli, health, sentinel  # noqa: E402
 from bellhop.config import Desk  # noqa: E402
 from bellhop.util import BellhopError, read, write  # noqa: E402
 from bellhop.worker_session import run_worker  # noqa: E402
@@ -247,6 +249,42 @@ class RecordTest(HealthDeskCase):
         self.assertEqual(len(report["alerts"]), 1)
         self.assertEqual(report["total"], 2)
         self.assertEqual(len(health.status(self.desk, task="008")["recent"]), 1)
+
+
+class CommandTest(HealthDeskCase):
+    def run_cli(self, *argv):
+        buf = io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                code = cli.main(["--desk", str(self.root), *argv]) or 0
+            except SystemExit as exc:
+                code = exc.code or 0
+        return code, buf.getvalue()
+
+    def test_status_shows_the_settings_the_alerts_and_the_history(self):
+        event = health.record(self.desk, "017", "idle_warning", "no output for 700s", episode=1)
+        code, out = self.run_cli("health", "status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("worker health: on", out)
+        self.assertIn("ALERT " + event["event_id"], out)
+        self.assertIn("no output for 700s", out)
+
+    def test_a_desk_with_it_off_says_so_rather_than_looking_healthy(self):
+        self.make_desk(enabled=False)
+        code, out = self.run_cli("health", "status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("worker health: off", out)
+
+    def test_ack_clears_one_alert_and_refuses_an_id_that_is_not_open(self):
+        event = health.record(self.desk, "017", "idle_warning", "no output for 700s", episode=1)
+        code, out = self.run_cli("health", "ack", event["event_id"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 alert(s) left", out)
+        self.assertEqual(health.alerts(self.desk), [])
+        code, out = self.run_cli("health", "ack", event["event_id"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("no unacknowledged worker health alert", out)
 
 
 class SentinelCheckTest(HealthDeskCase):

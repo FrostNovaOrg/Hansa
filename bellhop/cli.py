@@ -715,11 +715,11 @@ def cmd_health(args):
         print(f"  ALERT {row['event_id']} {row['at']} {row['task']} {row['kind']}: {row.get('detail', '')}")
     if report["enabled"] and not report["alerts"]:
         print("  no unacknowledged alerts")
+    print(f"last {len(report['recent'])} of {report['total']} event(s):" if report["recent"]
+          else "no events recorded yet")
     for row in report["recent"]:
         print(f"  {row['at']} {row.get('task', '-')} {row['kind']}"
               + (f": {row['detail']}" if row.get("detail") else ""))
-    if not report["recent"]:
-        print("  nothing recorded yet")
 
 
 def build_parser() -> argparse.ArgumentParser:
