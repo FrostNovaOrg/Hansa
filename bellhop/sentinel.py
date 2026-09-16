@@ -219,13 +219,6 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
         check_seals(desk),
     ]
     checks.extend(check_stop_dispatch(desk))
-    if (desk.cfg.get('support') or {}).get('enabled'):
-        from .support import summary, reconcile
-        if persist:
-            reconcile(desk)
-        jobs = summary(desk)
-        checks.append(('support', not jobs['unread'],
-                       'results awaiting coordinator review: ' + ', '.join(jobs['unread']) if jobs['unread'] else 'no unread support results'))
     if persist:
         write_json(snap_path, snapshot)
     return checks
@@ -282,9 +275,6 @@ def board_fingerprint(desk: Desk) -> str:
     parts = [read(card_path) if card_path.exists() else ""]
     parts.extend(inflight_lines(desk))
     parts.extend(b.name for b in pending_bells(desk))
-    if (desk.cfg.get('support') or {}).get('enabled'):
-        from .support import summary
-        parts.extend(summary(desk)['unread'])
     return sha256_bytes("\n".join(parts).encode("utf-8"))[:16]
 
 

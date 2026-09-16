@@ -18,7 +18,7 @@ from bellhop.config import Desk  # noqa: E402
 from bellhop.util import read_json, write  # noqa: E402
 
 MAIN = str(ROOT / "bellhop_main.py")
-TOOL_NAMES = {"support_submit", "support_status", "support_result", "support_review","desk_status", "ring", "watch_once", "sample", "refresh_card", "ledger_add", "decide", "readings"}
+TOOL_NAMES = {"desk_status", "ring", "watch_once", "sample", "refresh_card", "ledger_add", "decide", "readings"}
 
 
 class PluginTest(unittest.TestCase):
@@ -94,7 +94,7 @@ class PluginTest(unittest.TestCase):
             listed = self.rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             self.assertEqual(listed["id"], 2)
             self.assertEqual({t["name"] for t in listed["result"]["tools"]}, TOOL_NAMES)
-            self.assertEqual(len(listed["result"]["tools"]), 12)
+            self.assertEqual(len(listed["result"]["tools"]), 8)
 
             status = self.rpc(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                                      "params": {"name": "desk_status", "arguments": {}}})
