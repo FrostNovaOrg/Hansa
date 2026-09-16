@@ -139,7 +139,7 @@ def launch_worker(desk: Desk, lane: dict, packet: Packet, worktree: Path, prompt
         "cost_usd": providers_mod.na_none(parsed["cost_usd"]),
         "stop_reason": providers_mod.na_none(parsed["stop_reason"]),
         # The provider's own two fields, kept unmerged beside the reading above. A run
-        # that the bridge cancelled prints `error_during_execution` with a native stop
+        # that the transport cancelled prints `error_during_execution` with a native stop
         # reason of `cancelled`; `stop_reason` collapses those into one string, and
         # afterwards nothing in the meta can say whether the model stopped or the
         # channel did. `None` where the provider said nothing, never invented.

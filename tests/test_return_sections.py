@@ -219,7 +219,7 @@ class ReturnSectionTest(unittest.TestCase):
         _path, prior = self.original(WHAT + "\n" + CRITERIA)
         code, out = self.dispatch("Return original", RETURN_BODY, "return.md", "--return", "001")
         self.assertEqual(code, 0, out)
-        self.assertIn("acceptance, forbids and required context inherited", out)
+        self.assertIn("inherited from the original packet: acceptance", out)
         self.assertNotIn("inherited verbatim", out)
         new = self.returned()
         self.assertEqual(SCOPE_RE.findall(new.body), [])
