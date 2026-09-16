@@ -47,7 +47,11 @@ def close(desk: Desk) -> str:
     # The sentinel owns the seal scan. Reuse its report for the ledger and caller
     # instead of walking every sealed file twice during the same close.
     green, text, checks = sentinel_mod.run_sentinel(desk, wake=False)
-    seal_note = next(detail for name, _, detail in checks if name == "seals")
+    # With a default: a sentinel that ran no seal check and one whose seals held must
+    # not both read as "Seals: all seals hold", and neither may stop the day's close
+    # with a StopIteration out of a generator nobody can see from the command line.
+    seal_note = next((detail for name, _, detail in checks if name == "seals"),
+                     "not reported by this sentinel run")
     count, size = ledger_mod.stats(desk)
     receipts_today = [p for p in desk.receipts.glob("*.meta.json") if (read_json(p, {}).get("finished_at", "").startswith(today()))]
     dead_today = [p for p in receipts_today if read_json(p, {}).get("dead")]
