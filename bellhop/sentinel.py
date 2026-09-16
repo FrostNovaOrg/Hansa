@@ -131,7 +131,10 @@ def check_worker_health(desk: Desk) -> Check:
     notifier that would have to be kept alive itself.
     """
     from . import health as health_mod
-    open_alerts = health_mod.alerts(desk)
+    try:
+        open_alerts = health_mod.alerts(desk)
+    except OSError as exc:
+        return ("worker-health", False, f"the worker health file could not be read: {exc}")
     if not open_alerts:
         return ("worker-health", True, "no unacknowledged worker alerts")
     first = open_alerts[0]
@@ -261,8 +264,13 @@ def run_checks(desk: Desk, persist: bool = True) -> List[Check]:
     checks.extend(check_stop_dispatch(desk))
     # -- opt-in worker observation (health.py); off by default ---------------
     from . import health as health_mod
-    if health_mod.options(desk)["enabled"]:
-        checks.append(check_worker_health(desk))
+    try:
+        # A misconfigured setting is a red line, never an exception: the sentinel is the
+        # one thing that still runs when the rest of the desk is wrong.
+        if health_mod.options(desk)["enabled"]:
+            checks.append(check_worker_health(desk))
+    except BellhopError as exc:
+        checks.append(("worker-health", False, str(exc)))
     # ------------------------------------------------------------------------
     # A merge taken on the coordinator's judgement is allowed; two of them in a week
     # means the acceptance gate is not the gate any more, and that is the principal's

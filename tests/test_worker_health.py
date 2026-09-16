@@ -264,6 +264,13 @@ class SentinelCheckTest(HealthDeskCase):
         health.ack(self.desk, event["event_id"])
         self.assertTrue(sentinel.check_worker_health(self.desk)[1])
 
+    def test_a_setting_the_desk_got_wrong_is_a_red_line_not_a_crash(self):
+        broken = self.make_desk(enabled=True, idle_s="ten minutes")
+        checks = {name: (ok, detail) for name, ok, detail in sentinel.run_checks(broken, persist=False)}
+        self.assertIn("worker-health", checks)
+        self.assertFalse(checks["worker-health"][0])
+        self.assertIn("idle_s", checks["worker-health"][1])
+
     def test_a_desk_that_did_not_ask_for_it_does_not_get_the_check(self):
         off = self.make_desk(enabled=False)
         self.assertNotIn("worker-health", self.names(off))
