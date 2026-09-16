@@ -141,6 +141,25 @@ class TranscriptTests(TZCase):
         self.assertAlmostEqual(r.tail_cost_share, 0.75)   # 600k of 800k cache-read tokens
         self.assertAlmostEqual(r.cost, 800_000 * 0.5 / 1_000_000)
 
+    def test_thinking_tokens_are_summed_and_shared_against_the_bill(self):
+        p = self.transcript("a.jsonl", [
+            assistant(at("09:00"), "m1", use=dict(usage(inp=1_000, out=1_000), thinking_tokens=500)),
+            assistant(at("09:01"), "m2", use=dict(usage(inp=1_000, out=1_000),
+                                                  output_tokens_details={"reasoning_tokens": 500})),
+        ])
+        r = tr.overall(tr.parse([p]))
+        self.assertEqual(r.thinking_tokens, 1_000)
+        self.assertEqual(r.billed_tokens, 4_000)
+        self.assertAlmostEqual(r.thinking_share, 0.25)
+
+    def test_a_provider_that_does_not_itemise_thinking_reads_na(self):
+        """Negative control: no separate number is not the same reading as no thinking."""
+        p = self.transcript("a.jsonl", [assistant(at("09:00"), "m1", use=usage(inp=10, out=5))])
+        r = tr.overall(tr.parse([p]))
+        self.assertIsNone(r.thinking_tokens)
+        self.assertIsNone(r.thinking_share)
+        self.assertEqual(r.billed_tokens, 15)
+
     def test_unknown_model_has_no_cost(self):
         """Negative control: a model with no price row yields None, never a guess."""
         p = self.transcript("a.jsonl", [
@@ -394,6 +413,20 @@ class DeskTests(TZCase):
 
     def test_daily_file_matches_the_template(self):
         self.assertEqual(read(ROOT / "template" / "state" / "readings.md"), readings.READINGS_HEADER)
+
+    def test_thinking_tokens_reach_the_day_line_and_the_report(self):
+        self.task("001")
+        entries = [assistant(at("09:00"), "m1",
+                             use=dict(usage(inp=1_000, out=1_000), thinking_tokens=1_000))]
+        body = self.report_text([self.transcript("coordinator.jsonl", entries)])
+        self.assertIn("| Thinking tokens | 1,000 (50% of 2,000 billed tokens) |", body)
+        row = self.readings_rows()[0]
+        self.assertIn("| 1000 | 50% |", row)
+        # negative control: a day whose provider itemised nothing reads n/a twice
+        body = self.report_text([self.coordinator_day()])
+        self.assertIn(f"| Thinking tokens | {readings.NOT_AVAILABLE} |", body)
+        self.assertIn(f"| {readings.NOT_AVAILABLE} | {readings.NOT_AVAILABLE} |",
+                      self.readings_rows()[0])
 
     # -- the weekly report -------------------------------------------------
     def test_report_keeps_the_old_sections_and_gains_two(self):

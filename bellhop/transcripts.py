@@ -110,11 +110,20 @@ class Turn:
     # two are in the same transcript tree and cost the same money, and a reading that
     # cannot tell them apart reports a helper's bill as the coordinator's.
     agent: str = ""
+    #: Tokens the provider billed as reasoning, when it itemised them. `None` is "it did
+    #: not say", and it is not `0`: a turn that did no thinking and a turn whose thinking
+    #: was billed inside the output tokens are different readings.
+    thinking_tokens: Optional[int] = None
 
     @property
     def context(self) -> int:
         """What the API call actually carried: fresh input plus both cache halves."""
         return self.input_tokens + self.cache_read + self.cache_write
+
+    @property
+    def billed(self) -> int:
+        """Every token this turn was charged for, carried in and written out."""
+        return self.context + self.output_tokens
 
     def cost(self, prices: Optional[dict] = None) -> Optional[float]:
         p = price_for(self.model, prices)
@@ -254,6 +263,9 @@ def parse_file(path: Path, acc: Optional[Transcript] = None, days: Optional[Sequ
                     turn.cache_read = max(turn.cache_read, _int(usage.get("cache_read_input_tokens")))
                     turn.cache_write = max(turn.cache_write, _int(usage.get("cache_creation_input_tokens")))
                     turn.output_tokens = max(turn.output_tokens, _int(usage.get("output_tokens")))
+                    billed_thinking = _thinking(usage)
+                    if billed_thinking is not None:
+                        turn.thinking_tokens = max(turn.thinking_tokens or 0, billed_thinking)
                     turn.tools = tuple(dict.fromkeys(turn.tools + names))
                     turn.compaction = turn.compaction or bool(entry.get("isCompactSummary"))
                 for b in blocks:
@@ -292,6 +304,24 @@ def _int(v) -> int:
         return 0
 
 
+#: Where a provider puts the reasoning it billed for. A vendor that itemises it is the
+#: only reason this number exists; a vendor that folds it into `output_tokens` reports
+#: nothing here, and the reading stays `n/a` rather than becoming a zero.
+THINKING_USAGE_KEYS = ("thinking_tokens", "reasoning_tokens", "thinking_output_tokens")
+
+
+def _thinking(usage: dict) -> Optional[int]:
+    for key in THINKING_USAGE_KEYS:
+        if isinstance(usage.get(key), (int, float)) and not isinstance(usage.get(key), bool):
+            return int(usage[key])
+    details = usage.get("output_tokens_details")
+    if isinstance(details, dict):
+        value = details.get("reasoning_tokens")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+    return None
+
+
 def parse(paths: Iterable, days: Optional[Sequence[str]] = None) -> Transcript:
     acc = Transcript()
     for f in iter_files(paths):
@@ -325,6 +355,9 @@ class Reading:
     cost: Optional[float] = None
     priced_turns: int = 0
     output_tokens: int = 0
+    billed_tokens: int = 0
+    thinking_tokens: Optional[int] = None
+    thinking_share: Optional[float] = None
     compactions: int = 0
     intake: Counter = field(default_factory=Counter)
     models: Counter = field(default_factory=Counter)
@@ -354,6 +387,14 @@ def summarise(turns: Sequence[Turn], label: str = "", tail_tokens: int = DEFAULT
     r.context_p90 = int(percentile(contexts, 0.9) or 0)
     r.context_max = max(contexts)
     r.output_tokens = sum(t.output_tokens for t in turns)
+    r.billed_tokens = sum(t.billed for t in turns)
+    # Only the turns whose provider itemised it. A day where nobody said reads `n/a`;
+    # a day where one turn said 1,100,000 reads 1,100,000 and says what share of the
+    # whole day's billed tokens that was.
+    itemised = [t.thinking_tokens for t in turns if t.thinking_tokens is not None]
+    r.thinking_tokens = sum(itemised) if itemised else None
+    if r.thinking_tokens is not None and r.billed_tokens:
+        r.thinking_share = r.thinking_tokens / r.billed_tokens
     r.models = Counter(t.model or NOT_AVAILABLE for t in turns)
     tail = [t for t in turns if t.context >= tail_tokens]
     r.tail_turns = len(tail)
