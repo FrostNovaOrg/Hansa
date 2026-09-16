@@ -503,10 +503,17 @@ def remove_copy(repo: Path, holder: Path, copy: Path) -> None:
     run(["git", "-C", str(repo), "worktree", "prune"], check=False)
 
 
-def _tree_state(copy: Path) -> Tuple[str, str]:
-    """(uncommitted lines, the hash of HEAD's tree). The first catches an edit, the
-    second catches a commit; a verifier that did both would otherwise show neither."""
-    return git(copy, "status", "--porcelain"), git(copy, "rev-parse", "HEAD^{tree}")
+def _tree_state(copy: Path) -> Tuple[str, str, str]:
+    """(uncommitted lines, the hash of HEAD's tree, HEAD itself).
+
+    The first catches an edit, the second catches a commit; a verifier that did both
+    would otherwise show neither. The third catches a commit that changed nothing: an
+    empty commit, or a commit and a revert, leaves `git status` empty and the tree hash
+    exactly as it was, and a verifier that wrote history into the copy then reads the
+    same as one that never touched it.
+    """
+    return (git(copy, "status", "--porcelain"), git(copy, "rev-parse", "HEAD^{tree}"),
+            git(copy, "rev-parse", "HEAD"))
 
 
 # -- the run ---------------------------------------------------------------
@@ -645,10 +652,10 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
 
         # -- snapshot ------------------------------------------------------
         try:
-            status_before, tree_before = _tree_state(copy)
+            status_before, tree_before, head_before = _tree_state(copy)
         except BellhopError as exc:
             return finish("snapshot", "could not measure the copy", str(exc))
-        meta["tree_before"] = tree_before
+        meta["tree_before"], meta["head_before"] = tree_before, head_before
         if status_before:
             return finish("snapshot", "the copy was not clean", status_before[:400])
 
@@ -707,12 +714,16 @@ def run_accept(desk: Desk, task_id: str, shadow: bool = False, force: bool = Fal
             except BellhopError as exc:
                 return finish("recheck", "packet provenance", str(exc))
             try:
-                status_after, tree_after = _tree_state(copy)
+                status_after, tree_after, head_after = _tree_state(copy)
             except BellhopError as exc:
                 return finish("recheck", STALL_TOUCHED, f"the copy could not be measured again: {exc}")
             meta["tree_after"], meta["status_after"] = tree_after, status_after
-            if status_after or tree_after != tree_before:
-                what = status_after or f"HEAD's tree moved {tree_before[:12]} -> {tree_after[:12]}"
+            meta["head_after"] = head_after
+            if status_after or tree_after != tree_before or head_after != head_before:
+                what = (status_after
+                        or (f"HEAD's tree moved {tree_before[:12]} -> {tree_after[:12]}"
+                            if tree_after != tree_before else
+                            f"HEAD moved {head_before[:12]} -> {head_after[:12]} with the same tree"))
                 return finish("recheck", STALL_TOUCHED, what[:400])
 
             body = ((result or {}).get("result") or session["stdout"] or "").strip()

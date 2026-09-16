@@ -155,6 +155,19 @@ class AcceptTest(unittest.TestCase):
         self.assertEqual(meta["status_after"], "")
         self.assertIsNone(meta["stall"])
 
+    def test_a_verifier_that_commits_nothing_still_moved_history_and_is_caught(self):
+        """An empty commit leaves `git status` empty and the tree hash identical."""
+        meta = self.run_accept("--empty-commit --good")
+        self.assertEqual(meta["status_after"], "")
+        self.assertEqual(meta["tree_before"], meta["tree_after"])
+        self.assertNotEqual(meta["head_before"], meta["head_after"])
+        self.assertEqual(meta["stall"], accept_mod.STALL_TOUCHED)
+        self.assertIn("HEAD moved", meta["reason"])
+        # negative control: an honest run leaves all three readings equal
+        meta = self.run_accept("--good")
+        self.assertEqual(meta["head_before"], meta["head_after"])
+        self.assertIsNone(meta["stall"])
+
     def test_the_copy_is_removed_after_a_verdict_and_after_a_stall(self):
         before = len(self.worktrees())
         meta = self.run_accept("--good")

@@ -16,6 +16,8 @@ only behave well proves nothing about a pipeline built for the times it does not
     --touch-tree        write into the tree under test before answering
     --commit-tree       commit into the tree under test: HEAD's tree hash moves while
                         `git status --porcelain` stays empty
+    --empty-commit      commit nothing into the tree under test: HEAD moves while both
+                        `git status --porcelain` and HEAD's tree hash stay as they were
     --mutate            the honest mutation: break a tracked file in the copy, then
                         restore it with `git checkout --`, the way the terms ask
     --sleep S           sleep S seconds before answering
@@ -93,16 +95,24 @@ def mutate() -> str:
     return victim
 
 
+# The environment is scrubbed, so the identity comes on the command line.
+IDENT = ["-c", "user.name=stub", "-c", "user.email=stub@example.invalid"]
+QUIET = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def touch_tree(commit: bool) -> None:
     cwd = Path.cwd()
     (cwd / "verifier-scratch.txt").write_text("the verifier wrote this\n", encoding="utf-8")
     if not commit:
         return
-    # The environment is scrubbed, so the identity comes on the command line.
-    ident = ["-c", "user.name=stub", "-c", "user.email=stub@example.invalid"]
-    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["git", "add", "verifier-scratch.txt"], cwd=str(cwd), check=True, **quiet)
-    subprocess.run(["git", *ident, "commit", "-q", "-m", "stub verifier commit"], cwd=str(cwd), check=True, **quiet)
+    subprocess.run(["git", "add", "verifier-scratch.txt"], cwd=str(cwd), check=True, **QUIET)
+    subprocess.run(["git", *IDENT, "commit", "-q", "-m", "stub verifier commit"], cwd=str(cwd), check=True, **QUIET)
+
+
+def empty_commit() -> None:
+    """History moves, the tree does not. This is the case a tree hash cannot see."""
+    subprocess.run(["git", *IDENT, "commit", "-q", "--allow-empty", "-m", "stub verifier empty commit"],
+                   cwd=str(Path.cwd()), check=True, **QUIET)
 
 
 def main(argv=None) -> int:
@@ -114,6 +124,7 @@ def main(argv=None) -> int:
     ap.add_argument("--blocking", action="store_true")
     ap.add_argument("--touch-tree", action="store_true")
     ap.add_argument("--commit-tree", action="store_true")
+    ap.add_argument("--empty-commit", action="store_true")
     ap.add_argument("--mutate", action="store_true")
     ap.add_argument("--sleep", type=float, default=0.0)
     ap.add_argument("--child-sleep", type=float, default=0.0)
@@ -130,6 +141,8 @@ def main(argv=None) -> int:
         mutate()
     if args.touch_tree or args.commit_tree:
         touch_tree(args.commit_tree)
+    if args.empty_commit:
+        empty_commit()
     if args.sleep:
         time.sleep(args.sleep)
 
