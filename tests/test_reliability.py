@@ -18,7 +18,7 @@ from unittest.mock import patch
 import test_gaps as fixtures
 from bellhop import archive, daemon, exceptions, ledger, mcp_server, merge, ring, sentinel, watch
 from bellhop.config import Desk
-from bellhop.locking import desk_lock, worker_slot
+from bellhop.locking import desk_lock, worker_limit, worker_slot
 from bellhop.util import BellhopError, now, read, write
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,7 +37,15 @@ class ReliabilityTest(unittest.TestCase):
             time.sleep(0.02)
         self.fail("condition did not become true before the bounded timeout")
 
+    def test_the_shipped_default_runs_one_worker_at_a_time(self):
+        """The default is serial. The test below raises it on purpose, which is the
+        only honest way to exercise the pool: a desk that overlapped two lanes because
+        nobody chose to and a desk that was configured for it look the same in a log."""
+        self.assertEqual(worker_limit(Desk(self.desk.root, {})), 1)
+        self.assertEqual(watch.WatchPool(Desk(self.desk.root, {})).limit, 1)
+
     def test_independent_lanes_overlap_but_third_waits_and_receipts_archive(self):
+        self.desk.cfg["max_parallel_workers"] = 2  # the default is 1; this tests the pool
         helper = self.tmp / "barrier.py"
         release = self.tmp / "release"
         write(helper, f'''import os, pathlib, runpy, time
