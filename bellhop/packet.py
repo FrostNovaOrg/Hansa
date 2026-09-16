@@ -180,13 +180,14 @@ def packet_section(body: str, starts: tuple) -> tuple:
 def standalone_sections(body: str, title: str) -> list:
     """Every `## <title>` section of the body, verbatim, in source order.
 
-    `packet_section` matches a heading at any level whose title *starts with* one of
-    its words, which is what an inherited "do not touch" paragraph needs. It is the
-    wrong collector for a section named exactly: a `### Rollout` written inside
+    `packet_section` takes its headings at any level and lifts them out of the prose,
+    which is what carrying a "do not touch" paragraph into a pack needs. It is the
+    wrong collector for a section a return inherits: a `### Rollout` written inside
     `## Required context` is part of that context, and lifting it out as a section of
     its own produces a packet nobody wrote. This one takes a level-2 heading whose
-    title is exactly `title`, and the section runs to the next heading at the same
-    level or above — so a `###` inside it is content, not a second section.
+    title is exactly `title`, leaves the body alone, and runs the section to the next
+    heading at the same level or above — so a `###` inside it is content, not a
+    second section.
 
     Fences are respected: a heading inside a code block is a line of code.
     """
