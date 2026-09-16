@@ -81,7 +81,11 @@ def cmd_packet_new(args):
 def cmd_packet_rebind(args):
     """One-time migration: bind a worker's metadata to the packet its bell recorded."""
     desk = _desk(args)
-    rows = packet_mod.rebind(desk, task_id=args.id or "", every=args.all, dry_run=args.dry_run)
+    # A bare `bellhop packet rebind` means every open task: that is the form the
+    # upgrade page tells a desk to run once, and a migration that refused to run
+    # because it was typed without a flag would be read as a migration that passed.
+    rows = packet_mod.rebind(desk, task_id=args.id or "", every=args.all or not args.id,
+                             dry_run=args.dry_run)
     if not rows:
         print("no worker metadata on this desk; nothing to rebind")
         return
@@ -736,7 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--base", help="base commit (default HEAD)"); n.add_argument("--id"); n.add_argument("--budget", type=int, default=45); n.set_defaults(fn=cmd_packet_new)
     b = ss.add_parser("rebind", help="one-time: write the dispatched packet's digest into a worker's metadata, from its bell")
     b.add_argument("id", nargs="?", help="the task id; leave it out and pass --all")
-    b.add_argument("--all", action="store_true", help="every worker metadata file on the desk")
+    b.add_argument("--all", action="store_true", help="every worker metadata file on the desk; this is what a bare `rebind` does")
     b.add_argument("--dry-run", action="store_true", help="print what it would do, change nothing")
     b.set_defaults(fn=cmd_packet_rebind)
 
