@@ -177,6 +177,47 @@ def packet_section(body: str, starts: tuple) -> tuple:
     return "\n".join(section).strip(), "\n".join(rest).strip()
 
 
+def standalone_sections(body: str, title: str) -> list:
+    """Every `## <title>` section of the body, verbatim, in source order.
+
+    `packet_section` matches a heading at any level whose title *starts with* one of
+    its words, which is what an inherited "do not touch" paragraph needs. It is the
+    wrong collector for a section named exactly: a `### Rollout` written inside
+    `## Required context` is part of that context, and lifting it out as a section of
+    its own produces a packet nobody wrote. This one takes a level-2 heading whose
+    title is exactly `title`, and the section runs to the next heading at the same
+    level or above — so a `###` inside it is content, not a second section.
+
+    Fences are respected: a heading inside a code block is a line of code.
+    """
+    wanted = title.strip().lower()
+    sections: List[str] = []
+    current: List[str] = []
+    inside = False
+    fence = None
+    for line in body.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        in_code = fence is not None
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1] and not marker[2].strip():
+                fence = None
+        elif marker:
+            fence = (marker[1][0], len(marker[1]))
+        heading = None if in_code or marker else re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", line)
+        if heading:
+            depth, name = len(heading.group(1)), heading.group(2).strip().lower()
+            if inside and depth <= 2:
+                sections.append("\n".join(current).strip())
+                current, inside = [], False
+            if depth == 2 and name == wanted:
+                inside = True
+        if inside:
+            current.append(line)
+    if inside:
+        sections.append("\n".join(current).strip())
+    return sections
+
+
 def next_packet_id(inbox: Path) -> str:
     ids = []
     for p in inbox.rglob("*.md"):

@@ -319,6 +319,35 @@ def inflight_row(desk: Desk, task_id: str) -> Optional[str]:
     return None
 
 
+def _inherit_sections(desk: Desk, report, body: str, prior_packet, resume_id: str) -> str:
+    """Carry the desk's named `## ` sections across a return, verbatim.
+
+    A return body is the few sections the return skill asks for, and a desk whose packet
+    adapter requires another one ends up dispatching a packet with a hole in it that
+    nobody typed. `return_inherit_sections` names those sections; each comes across the
+    way the forbids and Required context do — copied, never retyped, and never edited on
+    the way. A body that brought its own keeps it and gets no copy. An original carrying
+    two sections with the same title is refused rather than guessed at.
+    """
+    titles = desk.cfg.get("return_inherit_sections") or []
+    if not isinstance(titles, list) or any(not isinstance(t, str) or not t.strip() for t in titles):
+        raise Stopped(STEP_PACKET, "return_inherit_sections must be a list of section titles")
+    for title in titles:
+        title = title.strip().lstrip("#").strip()
+        if packet_mod.standalone_sections(body, title):
+            continue
+        found = packet_mod.standalone_sections(prior_packet.body, title)
+        if len(found) > 1:
+            raise Stopped(STEP_PACKET,
+                          f"the original packet {resume_id} carries {len(found)} '## {title}' "
+                          f"sections; exactly one can be inherited. Settle the original's "
+                          f"record, or scope a new task")
+        if found:
+            body = body.rstrip() + "\n\n" + found[0] + "\n"
+            report.notes.append(f"↩ '{title}' inherited verbatim from the original packet")
+    return body
+
+
 # --------------------------------------------------------------------------
 # the command
 # --------------------------------------------------------------------------
@@ -456,6 +485,7 @@ def _dispatch(report, desk, lane_name, title, body_file, inflight, next_, contin
                     carried.append(label)
             if carried:
                 report.notes.append("↩ inherited from the original packet: " + ", ".join(carried))
+            body = _inherit_sections(desk, report, body, prior_packet, resume_id)
         key = "continues" if continue_id else "returns"
         links.append((key, resume_id))
         links.append((f"{key}_receipt", str(receipt.relative_to(desk.root)) if receipt else "none"))
