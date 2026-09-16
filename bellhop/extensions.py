@@ -78,7 +78,9 @@ def _load(desk: Desk, name: str):
         if str(path) not in sys.path:
             # The extension's own package sits beside its entry file; without this
             # its first internal import fails and the reason reads like a bug in it.
-            sys.path.insert(0, str(path))
+            # Appended, never prepended: a directory at the front of sys.path would let
+            # an add-on shadow a module the framework itself imports by name.
+            sys.path.append(str(path))
         spec = importlib.util.spec_from_file_location("bellhop_ext_" + _label(name).replace("-", "_"), entry)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
