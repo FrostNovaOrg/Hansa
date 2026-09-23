@@ -246,7 +246,11 @@ def cmd_coordinator(a):
     env["PATH"] = str(Path(__file__).resolve().parent.parent / "bin") + os.pathsep + os.environ.get("PATH", "")
     env["BH_ROLE"] = "coordinator"
     env["BH_DESK"] = str(desk.root)
-    argv = [claude_bin(), "--model", co.get("model") or p["model"]]
+    # the lanes' checkouts are readable for planning and review; workers do the editing
+    repos = sorted({ln["repo"] for ln in s["lanes"].values()})
+    no_edit = [f"{t}(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir] for t in ("Edit", "Write")]
+    argv = [claude_bin()] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit]
+    argv += ["--model", co.get("model") or p["model"]]
     if co.get("effort"):
         argv += ["--effort", co["effort"]]
     os.chdir(desk.root)

@@ -46,6 +46,8 @@ should be rewritten.
 ## What you change, and what only the principal changes
 - Yours: tasks and their options; each lane's standing instructions in
   `lanes/<lane>/brief.md` (sent to every worker in that lane); pause/resume.
+  You can read the lanes' repositories to plan and review; editing them is
+  the workers' job, so edits there are refused.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, each lane's provider order, allowed commands and environment,
   prices, how many tasks run at once. Ask with `bh ask`; do not edit
