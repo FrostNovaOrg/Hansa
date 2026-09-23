@@ -95,7 +95,7 @@ def status_text(st: dict) -> str:
         out += [f"  #{a['id']}: {a['text'][:100]}" for a in st["asks"]]
     t = st["today"]
     out.append(f"today: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
-               f" (worth ${t['worker_usd']}; bh cost for everything)")
+               f" (worth ${t['worker_usd']:.2f}; bh cost for everything)")
     return "\n".join(out)
 
 

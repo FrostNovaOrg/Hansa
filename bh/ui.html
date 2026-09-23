@@ -162,7 +162,7 @@ async function loadStatus() {
     h("section", {}, h("div", {class:"row"},
       st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
                 : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)],
-      h("span", {class:"muted"}, `${T.today}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd} ${T.listValue}`))),
+      h("span", {class:"muted"}, `${T.today}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd.toFixed(2)} ${T.listValue}`))),
     section(T.lanes, table([T.lane, T.order, T.now], st.lanes.map(l => [l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : T.free]))),
     st.running.length ? section(T.running, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
       st.running.map(m => [taskLink(m.id), m.lane, `${m.provider} (${m.model})`, m.minutes, m.title]))) : null,
