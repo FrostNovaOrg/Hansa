@@ -95,7 +95,7 @@ def status_text(st: dict) -> str:
         out += [f"  #{a['id']}: {a['text'][:100]}" for a in st["asks"]]
     t = st["today"]
     out.append(f"today: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
-               f" (${t['worker_usd']} at list price; bh cost for everything)")
+               f" (worth ${t['worker_usd']}; bh cost for everything)")
     return "\n".join(out)
 
 
@@ -121,7 +121,9 @@ def show_text(desk: Desk, tid: str) -> str:
         out += ["  " + f for f in m.get("files", [])[:30]]
     if m.get("denials"):
         out.append(f"refused by the lane's allowed commands ({len(m['denials'])}):")
-        out += ["  " + x for x in m["denials"][:8]]
+        for x in m["denials"][:8]:
+            first, *more = x.splitlines() or [""]
+            out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else ""))
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
                    f" · cache write {u['cache_write']:,}")
@@ -185,7 +187,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
 def cost_text(rep: dict, by: str = "day") -> str:
     rows = rep["by"].get(by, {})
     out = [f"last {rep['days']} day(s), by {by}: {rep['total']['tokens']:,} tokens, "
-           f"${rep['total']['usd']:.2f} at list price"]
+           f"worth ${rep['total']['usd']:.2f}"]
     for k, v in rows.items():
         extra = f" (+{v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] else ""
         out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")

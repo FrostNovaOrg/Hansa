@@ -275,7 +275,7 @@ def main(argv=None):
     p = add("explain", cmd_explain, "what a setting or state means: lane NAME | provider NAME | task ID | states | server")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server"])
     p.add_argument("name", nargs="?")
-    p = add("cost", cmd_cost, "tokens and list-price value")
+    p = add("cost", cmd_cost, "tokens and what they are worth")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--by", default="day", choices=["day", "seat", "lane", "task", "model", "provider"])
     p.add_argument("--json", action="store_true")

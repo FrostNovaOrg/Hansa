@@ -1,13 +1,15 @@
-"""Tokens and what they are worth at list price, from Claude Code's own records.
+"""Tokens and what they are worth, from Claude Code's own records and the principal's prices.
 
 Two sources, never counted twice:
 - worker runs: the usage Claude Code returned for each task (tasks/<id>/meta.json);
 - the coordinator and its helpers: the transcripts Claude Code writes for sessions
   started in the desk (<config dir>/projects/<desk path>/**/*.jsonl).
 
-A subscription is paid by the month, so the dollar figure is what the same tokens
-would cost at list price. It is for comparing and spotting waste, not a bill.
-Prices come from the principal's table; a model with no price is listed, not guessed.
+Prices come from the principal's table. A Claude model with no entry, run on a
+subscription, falls back to Claude Code's own list-price figure; any other model
+with no price is listed, not guessed (Claude Code's figure for a model it does not
+know is a placeholder). A subscription is paid by the month, so the dollar figure
+is what the tokens are worth, for comparing and spotting waste, not a bill.
 """
 from __future__ import annotations
 
@@ -165,4 +167,4 @@ def report(desk: Desk, days: int = 7) -> dict:
     return {"days": days, "rows": rows, "by": by,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
-            "note": "Dollar figures are list-price value, not a bill: subscriptions are paid by the month."}
+            "note": "Dollars use the principal's price table (a Claude model without an entry uses Claude Code's list price). Subscriptions are paid by the month: this is what the tokens are worth, not a bill."}

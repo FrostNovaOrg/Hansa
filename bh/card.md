@@ -23,7 +23,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh cancel <id>` | stop a queued or running task |
 | `bh pause "<reason>"` / `bh resume` | stop / restart new work (running tasks finish) |
 | `bh explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
-| `bh cost [--days N] [--by day\|seat\|lane\|task\|model]` | tokens and their list-price value |
+| `bh cost [--days N] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
 | `bh ask "<request>"` | put a request on the principal's page |
 | `bh help` | this card |
 
@@ -53,5 +53,5 @@ should be rewritten.
   moves to the lane's next provider; `bh status` shows this.
 - A worker that runs past its lane's time limit is stopped and marked failed.
 - Anything a worker left uncommitted is committed on its branch when it ends.
-- Cost figures come from Claude Code's own records priced with the principal's
-  table. With a subscription they are list-price value, not a bill.
+- Cost figures are Claude Code's own token counts priced with the principal's
+  table. With a subscription they show what the tokens are worth, not a bill.
