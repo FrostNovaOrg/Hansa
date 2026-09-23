@@ -261,6 +261,16 @@ def cmd_help(a):
     print(CARD.read_text(encoding="utf-8"))
 
 
+def _split_claude_args(argv: list):
+    """Everything after `coordinator` belongs to claude, even when it looks like an option."""
+    for i, x in enumerate(argv):
+        if x == "coordinator":
+            return argv[:i + 1], argv[i + 1:]
+        if not x.startswith("-") and (i == 0 or argv[i - 1] != "--desk"):
+            break
+    return argv, []
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="bh", description="A file-based desk for a team of Claude Code agents. "
                                  "`bh help` prints the agent card.")
@@ -327,11 +337,13 @@ def main(argv=None):
     p.add_argument("--every", type=float, default=3.0, help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
     p.add_argument("--port", type=int, default=8765)
-    p = add("coordinator", cmd_coordinator, "start the coordinator session in this desk")
-    p.add_argument("rest", nargs=argparse.REMAINDER, help="extra arguments passed to claude")
+    add("coordinator", cmd_coordinator, "start the coordinator session in this desk; "
+        "anything after the word coordinator is passed to claude as is")
     add("help", cmd_help, "print the agent card")
 
+    argv, rest = _split_claude_args(sys.argv[1:] if argv is None else list(argv))
     a = ap.parse_args(argv)
+    a.rest = rest
     if not getattr(a, "fn", None):
         ap.print_help()
         return 0

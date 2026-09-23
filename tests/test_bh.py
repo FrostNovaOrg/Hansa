@@ -137,6 +137,19 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "wait"])
         self.assertIn("nothing to wait for", out.getvalue())
 
+    def test_coordinator_passes_its_options_to_claude(self):
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
+                            "coordinator", "--permission-mode", "dontAsk"],
+                           capture_output=True, text=True, env={**os.environ, "BH_CLAUDE": str(echo)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--permission-mode dontAsk", r.stdout)
+        repo = self.repo.resolve()
+        self.assertIn(f"--add-dir {repo}", r.stdout)
+        self.assertIn(f"Edit(//{str(repo).lstrip('/')}/**)", r.stdout)
+
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}
