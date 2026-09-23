@@ -141,6 +141,7 @@ class DeskTest(unittest.TestCase):
         echo = self.tmp / "echo-claude"
         echo.write_text("#!/bin/sh\necho \"$@\"\n")
         echo.chmod(0o755)
+        (self.desk.root / "CLAUDE.md").write_text("an older card\n")
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
                             "coordinator", "--permission-mode", "dontAsk"],
                            capture_output=True, text=True, env={**os.environ, "BH_CLAUDE": str(echo)})
@@ -149,6 +150,7 @@ class DeskTest(unittest.TestCase):
         repo = self.repo.resolve()
         self.assertIn(f"--add-dir {repo}", r.stdout)
         self.assertIn(f"Edit(//{str(repo).lstrip('/')}/**)", r.stdout)
+        self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (Path(__file__).resolve().parent.parent / "bh" / "card.md").read_text())
 
     def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
         s = self.desk.settings()

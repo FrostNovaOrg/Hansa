@@ -258,6 +258,13 @@ def cmd_coordinator(a):
     argv += ["--model", co.get("model") or p["model"]]
     if co.get("effort"):
         argv += ["--effort", co["effort"]]
+    card, mine = CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md"
+    if not mine.is_file() or mine.read_text(encoding="utf-8") != card:  # bh was upgraded: bring the card along
+        if mine.is_file():
+            desk.state_dir.mkdir(exist_ok=True)
+            (desk.state_dir / f"CLAUDE.md.{int(time.time())}").write_text(mine.read_text(encoding="utf-8"), encoding="utf-8")
+        mine.write_text(card, encoding="utf-8")
+        desk.event("card_refreshed")
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + a.rest, env)
 

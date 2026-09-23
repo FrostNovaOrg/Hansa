@@ -50,8 +50,10 @@ task's doing, merge with `--despite-check` and say why.
 ## What you change, and what only the principal changes
 - Yours: tasks and their options; each lane's standing instructions in
   `lanes/<lane>/brief.md` (sent to every worker in that lane); pause/resume.
-  You can read the lanes' repositories to plan and review; editing them is
-  the workers' job, so edits there are refused.
+  In this session you can run `bh`, read the desk and the lanes' repositories,
+  and edit `lanes/<lane>/brief.md`. Anything else (other commands, editing
+  code, running tests) is refused without asking: code changes and checks are
+  the workers' and the lane check's job.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, each lane's provider order, allowed commands, environment and check,
   prices, how many tasks run at once. Ask with `bh ask`; do not edit
