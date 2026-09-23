@@ -145,6 +145,37 @@ def cmd_resume(a):
     print("resumed")
 
 
+def cmd_wait(a):
+    """Return when a watched task stops running, the principal answers a request, or time is up.
+    Meant to run in the background, so the session is told when there is something to look at."""
+    desk = Desk.find(a.desk)
+    live = lambda t: desk.meta(t)["state"] in ("queued", "running")  # noqa: E731
+    watch = sorted(set(a.ids)) or sorted(m["id"] for m in desk.tasks() if m["state"] in ("queued", "running"))
+    open_asks = {x["id"] for x in desk.asks() if not x["closed"]}
+    done_already = [t for t in watch if not live(t)]
+    if not done_already and not any(map(live, watch)) and not open_asks:
+        print("nothing is queued or running and no request to the principal is open: nothing to wait for")
+        return
+    if not views.status(desk)["server_up"]:
+        print("note: bh serve is not running, so no task will start or finish until it is")
+    end = time.time() + a.timeout * 60
+    while True:
+        ended = [desk.meta(t) for t in watch if not live(t)]
+        answered = [x for x in desk.asks() if x["id"] in open_asks and x["closed"]]
+        if ended or answered or time.time() >= end:
+            break
+        time.sleep(a.every)
+    for m in ended:
+        print(f"{m['id']} {m['state']}: {m['title']}  (bh show {m['id']})")
+    for x in answered:
+        print(f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
+    still = [t for t in watch if live(t)]
+    if not ended and not answered:
+        print(f"nothing changed in {a.timeout:g} min")
+    if still:
+        print("still queued or running: " + ", ".join(still) + "  (bh wait again to keep waiting)")
+
+
 def cmd_ask(a):
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("BH_ROLE", "cli"))
     print(f"ask #{n} is on the principal's page")
@@ -270,6 +301,10 @@ def main(argv=None):
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")
     add("resume", cmd_resume, "let new tasks start again")
+    p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the background")
+    p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
+    p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
+    p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
     p = add("ask", cmd_ask, "put a request on the principal's page")
     p.add_argument("text", nargs="+")
     p = add("explain", cmd_explain, "what a setting or state means: lane NAME | provider NAME | task ID | states | server")

@@ -1,10 +1,13 @@
 """Tests for bh with a stand-in for claude, so no model is called."""
+import contextlib
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -110,6 +113,29 @@ class DeskTest(unittest.TestCase):
         self.assertIn("saving a new key", provider_problem(self.desk, self.desk.settings(), "mimo"))
         self.desk.write_key("mimo", "sk-right")
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
+
+    def test_wait_returns_when_a_task_ends(self):
+        tid = self.desk.new_task("Add hello.txt")
+        d, stop = Dispatcher(self.desk), threading.Event()
+
+        def ticker():
+            while not stop.is_set():
+                d.tick()
+                time.sleep(0.1)
+        th = threading.Thread(target=ticker)
+        th.start()
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                main(["--desk", str(self.desk.root), "wait", "--timeout", "0.5", "--every", "0.1"])
+        finally:
+            stop.set()
+            th.join()
+        self.assertIn(f"{tid} done", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "wait"])
+        self.assertIn("nothing to wait for", out.getvalue())
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()

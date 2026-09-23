@@ -9,7 +9,9 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 2. `bh serve` (always running) starts it in a free lane: a separate Claude Code
    run in the lane's own git worktree, on a fresh branch `task/<id>`.
 3. The worker commits there and ends with a short report. It cannot push.
-4. You review and merge, or send it back with what to change.
+4. Meanwhile run `bh wait` in the background (the Bash tool's background option);
+   it returns, and you are told, when a task finishes or fails.
+5. You review and merge, or send it back with what to change.
 
 ## Commands
 | command | what it does |
@@ -21,6 +23,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh merge <id>` | merge the task branch into the lane's base branch |
 | `bh retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base) |
 | `bh cancel <id>` | stop a queued or running task |
+| `bh wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
 | `bh pause "<reason>"` / `bh resume` | stop / restart new work (running tasks finish) |
 | `bh explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
 | `bh cost [--days N] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
