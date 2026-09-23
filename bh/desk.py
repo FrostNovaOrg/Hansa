@@ -255,6 +255,7 @@ class Desk:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(value.strip() + "\n")
         os.replace(tmp, f)
+        self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
         self.event("key_set", provider=provider, by=by)
 
     # -- log, lock, pause -------------------------------------------------

@@ -23,6 +23,10 @@ FAKE = r'''#!/usr/bin/env python3
 import json, os, sys
 prompt = sys.stdin.read()
 compat = bool(os.environ.get("ANTHROPIC_BASE_URL"))
+if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
+                      "result": "API Error: 401 authentication_error", "session_id": "s-key", "num_turns": 1}))
+    sys.exit(1)
 if compat and os.environ.get("FAKE_QUOTA_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
                       "result": "API Error: 429 rate_limit_error", "session_id": "s-quota", "num_turns": 1}))
@@ -93,6 +97,19 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["provider"], "claude")
         self.assertEqual(m["attempts"][0]["provider"], "mimo")
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "mimo"))
+
+    def test_rejected_key_rests_provider_until_a_new_key(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo", "claude"]
+        s["lanes"]["a"]["env"] = {"FAKE_BADKEY_ON_COMPAT": "1"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-wrong")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
+        self.assertIn("key rejected", provider_problem(self.desk, self.desk.settings(), "mimo"))
+        self.desk.write_key("mimo", "sk-right")
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()

@@ -23,6 +23,9 @@ from .desk import Desk, now, read_json
 QUOTA = re.compile(r"API Error: (402|429)|rate_limit_error|usage limit reached|credit balance is too low|"
                    r"insufficient[_ ](quota|balance)|quota exceeded|too many requests|余额不足|额度不足|额度已用", re.I)
 QUOTA_STATUS = {402, 429}
+AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
+AUTH_STATUS = {401, 403}
+KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 GIT_ID = {"GIT_AUTHOR_NAME": "bh", "GIT_AUTHOR_EMAIL": "bh@localhost",
           "GIT_COMMITTER_NAME": "bh", "GIT_COMMITTER_EMAIL": "bh@localhost"}
 PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in this directory,
@@ -170,13 +173,21 @@ def denial_of(d) -> str:
     return f"{d.get('tool_name', '?')}: {str(what)[:140]}"
 
 
-def quota_reason(run: dict, err: str) -> str:
+def unusable_reason(run: dict, err: str):
+    """Why this provider cannot be used right now: ("quota" | "key" | "", words)."""
     status = run.get("api_error_status")
     if status in QUOTA_STATUS:
-        return f"HTTP {status}"
+        return "quota", f"out of quota (HTTP {status})"
+    if status in AUTH_STATUS:
+        return "key", f"key rejected (HTTP {status})"
     text = f"{run.get('result') or ''} {err}" if (run.get("is_error") or not run) else ""
     m = QUOTA.search(text)
-    return m.group(0) if m else ""
+    if m:
+        return "quota", f"out of quota ({m.group(0)})"
+    m = AUTH.search(text)
+    if m:
+        return "key", f"key rejected ({m.group(0)})"
+    return "", ""
 
 
 def finish(desk: Desk, tid: str, returncode) -> dict:
@@ -204,18 +215,17 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
 
     attempts = list(meta.get("attempts", []))
-    quota = "" if meta.get("cancel") else quota_reason(run, err)
+    kind, why = ("", "") if meta.get("cancel") else unusable_reason(run, err)
     if meta.get("cancel"):
         state, error = "cancelled", "cancelled"
     elif meta.get("timed_out"):
         state, error = "failed", "stopped: ran past the lane's time limit"
-    elif quota:
-        s = desk.settings()
-        until = time.time() + 60 * s.get("cool_minutes", 30)
-        desk.set_provider_state(meta["provider"], cool_until=until, reason=quota)
-        attempts.append({"provider": meta["provider"], "at": now(), "error": quota})
+    elif kind:
+        minutes = desk.settings().get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
+        desk.set_provider_state(meta["provider"], cool_until=time.time() + 60 * minutes, reason=why)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why})
         state = "queued" if len(attempts) < 3 else "failed"
-        error = f"{meta['provider']} hit its limit ({quota}); " + (
+        error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "gave up after 3 tries")
     elif run.get("is_error") or run.get("subtype") not in ("success", None) or not run:
         state = "failed"
@@ -350,7 +360,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
         run = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
         ok = bool(run) and not run.get("is_error") and "ok" in (run.get("result") or "").lower()
         detail = ", ".join(run.get("modelUsage") or {}) if ok else \
-            (quota_reason(run, r.stderr) or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200])
+            (unusable_reason(run, r.stderr)[1] or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200])
     except subprocess.TimeoutExpired:
         ok, detail = False, f"no answer in {timeout}s"
     except Exception as e:  # noqa: BLE001
