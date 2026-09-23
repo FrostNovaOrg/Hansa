@@ -188,6 +188,21 @@ def validate(s: dict) -> list:
     return p
 
 
+def key_problem(k: str) -> str:
+    """What makes this not look like a bare key; '' when it looks fine."""
+    if re.search(r"\s", k):
+        return "the key has spaces or line breaks in it; paste only the key"
+    if k[:1] in "\"'“‘" or k[-1:] in "\"'”’":
+        return "the key is wrapped in quotes; paste it without them"
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", k):
+        return "this looks like NAME=key; paste only the part after ="
+    if re.search(r"[*•…]|\.\.\.", k):
+        return "this looks like a masked key (with * or ...); copy the full key"
+    if k.lower().startswith("bearer"):
+        return "leave out the word Bearer; paste only the key"
+    return ""
+
+
 class Desk:
     def __init__(self, root) -> None:
         self.root = Path(root).resolve()
@@ -250,6 +265,9 @@ class Desk:
             f.unlink(missing_ok=True)
             self.event("key_removed", provider=provider, by=by)
             return
+        problem = key_problem(value.strip())
+        if problem:
+            raise ValueError(problem)
         tmp = f.with_name(f.name + ".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

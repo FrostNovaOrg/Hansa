@@ -70,7 +70,9 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             return "no key"
     st = desk.provider_state().get(name, {})
     if st.get("cool_until", 0) > time.time():
-        return f"resting until {time.strftime('%H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
+        if str(st.get("reason", "")).startswith("key rejected"):
+            return f"{st['reason']}; saving a new key brings it back"
+        return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
     return ""
 
 
@@ -80,6 +82,7 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
     env = {k: os.environ[k] for k in ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
            if k in os.environ}
     env["TERM"] = "dumb"
+    env["CLAUDE_CODE_MAX_RETRIES"] = "3"  # a rejected key fails in seconds, not after eleven tries
     if p["kind"] == "subscription":
         if p.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = p["config_dir"]
@@ -354,13 +357,20 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     tmp.mkdir(parents=True, exist_ok=True)
     argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"]]
     t0 = time.time()
+    kind = ""
     try:
-        r = subprocess.run(argv, cwd=str(tmp), env=provider_env(desk, name, p), input="Reply with the single word OK.",
+        env = {**provider_env(desk, name, p), "CLAUDE_CODE_MAX_RETRIES": "0"}
+        r = subprocess.run(argv, cwd=str(tmp), env=env, input="Reply with the single word OK.",
                            capture_output=True, text=True, timeout=timeout)
         run = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
         ok = bool(run) and not run.get("is_error") and "ok" in (run.get("result") or "").lower()
-        detail = ", ".join(run.get("modelUsage") or {}) if ok else \
-            (unusable_reason(run, r.stderr)[1] or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200])
+        if ok:
+            detail = ", ".join(run.get("modelUsage") or {})
+        else:
+            kind, why = unusable_reason(run, r.stderr)
+            said = re.search(r'"message"\s*:\s*"([^"]{1,120})"', f"{run.get('result') or ''} {r.stderr}")
+            detail = (why or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200]) + \
+                (f": {said.group(1)}" if said and why else "")
     except subprocess.TimeoutExpired:
         ok, detail = False, f"no answer in {timeout}s"
     except Exception as e:  # noqa: BLE001
@@ -369,5 +379,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     desk.set_provider_state(name, check=result)
     if ok:
         desk.set_provider_state(name, cool_until=0, reason="")
+    elif kind:
+        minutes = desk.settings().get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
+        desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
     return result

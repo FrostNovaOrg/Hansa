@@ -241,7 +241,8 @@ function renderSettings(problems) {
               ? [T.endpoint, bind(p, "base_url"), T.key, h("div", {class:"row"},
                   h("span", {class: KEYS[name] ? "ok" : "warn"}, KEYS[name] ? T.keySet : T.keyMissing), keyBox,
                   h("button", {onclick: () => api("/api/key", {provider:name, key:keyBox.value})
-                    .then(() => { KEYS[name] = !!keyBox.value.trim(); renderSettings(); }).catch(err)}, T.saveKey),
+                    .then(r => { if (r.ok === false) return renderSettings(r.problems);
+                      KEYS[name] = !!keyBox.value.trim(); renderSettings(); }).catch(err)}, T.saveKey),
                   KEYS[name] ? h("button", {onclick: () => api("/api/key", {provider:name, key:""})
                     .then(() => { KEYS[name] = false; renderSettings(); }).catch(err)}, T.clearKey) : null)]
               : [T.loginDir, bind(p, "config_dir")])));

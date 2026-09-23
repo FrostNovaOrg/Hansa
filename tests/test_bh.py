@@ -107,7 +107,7 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("mimo", "sk-wrong")
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
-        self.assertIn("key rejected", provider_problem(self.desk, self.desk.settings(), "mimo"))
+        self.assertIn("saving a new key", provider_problem(self.desk, self.desk.settings(), "mimo"))
         self.desk.write_key("mimo", "sk-right")
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
 
@@ -132,6 +132,12 @@ class DeskTest(unittest.TestCase):
         probs = validate(s)
         self.assertTrue(any("unknown field" in p for p in probs))
         self.assertTrue(any("set from the provider" in p for p in probs))
+
+    def test_key_that_does_not_look_like_a_key_is_refused(self):
+        for bad in ("MIMO_API_KEY=abc", "sk-abc def", '"sk-abc"', "sk-ab***yz", "Bearer sk-abc"):
+            with self.assertRaises(ValueError):
+                self.desk.write_key("mimo", bad)
+        self.assertFalse(self.desk.has_key("mimo"))
 
     def test_keys_are_private_and_never_shown(self):
         self.desk.write_key("mimo", "sk-secret")
