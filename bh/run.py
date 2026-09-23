@@ -102,7 +102,7 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
-    files = [rule(t, wt) for t in ("Read", "Edit", "Write", "Glob", "Grep")]
+    files = [rule(t, wt) for t in ("Read", "Edit")]  # Read covers Glob and Grep; Edit covers Write
     return files + ["TodoWrite"] + list(lane.get("allow", []))
 
 

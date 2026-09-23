@@ -34,9 +34,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     r = str(desk.root).lstrip("/")
     guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.bh/**", f"//{r}/events.jsonl"]
     perms = {"permissions": {
-        "allow": ["Bash(bh:*)", f"Edit(//{r}/lanes/**)", f"Write(//{r}/lanes/**)"],
+        "allow": ["Bash(bh:*)", f"Edit(//{r}/lanes/**)"],  # an Edit rule covers every file-editing tool
         "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.bh/**)"]
-                + [f"{t}({g})" for g in guarded for t in ("Edit", "Write")]}}
+                + [f"Edit({g})" for g in guarded]}}
     (desk.root / ".claude").mkdir(exist_ok=True)
     write_json(desk.root / ".claude" / "settings.json", perms)
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
@@ -248,7 +248,7 @@ def cmd_coordinator(a):
     env["BH_DESK"] = str(desk.root)
     # the lanes' checkouts are readable for planning and review; workers do the editing
     repos = sorted({ln["repo"] for ln in s["lanes"].values()})
-    no_edit = [f"{t}(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir] for t in ("Edit", "Write")]
+    no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     argv = [claude_bin()] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit]
     argv += ["--model", co.get("model") or p["model"]]
     if co.get("effort"):
