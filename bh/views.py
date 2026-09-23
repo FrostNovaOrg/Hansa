@@ -11,7 +11,7 @@ from .run import provider_problem, waiting_reason
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
-    "running": "a worker is on it",
+    "running": "a worker is on it, or bh is running the lane's check on its work",
     "done": "the worker finished; waiting for your review (bh show / bh merge / bh retry)",
     "failed": "the run ended with an error; bh show says why",
     "merged": "merged into the lane's base branch",
@@ -50,11 +50,13 @@ def status(desk: Desk) -> dict:
                        "problem": provider_problem(desk, s, n), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
-                     "model": m.get("model_asked"), "minutes": _mins(m.get("started"))} for m in running],
+                     "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
+                     "checking": m.get("phase") == "checking"} for m in running],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
-                    "commits": m.get("commits", 0), "denied": len(m.get("denials", []))}
+                    "commits": m.get("commits", 0), "denied": len(m.get("denials", [])),
+                    "check": None if not m.get("check") else m["check"]["ok"]}
                    for m in tasks if m["state"] == "done"],
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
@@ -75,14 +77,16 @@ def status_text(st: dict) -> str:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or 'free'}")
     if st["running"]:
         out.append("running:")
-        out += [f"  {m['id']} {m['lane']} on {m['provider']} ({m['model']}), {m['minutes']} min: {m['title']}"
-                for m in st["running"]]
+        out += [f"  {m['id']} {m['lane']} " + ("worker done, bh is running the lane's check" if m["checking"]
+                                               else f"on {m['provider']} ({m['model']})")
+                + f", {m['minutes']} min: {m['title']}" for m in st["running"]]
     if st["queued"]:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
     if st["review"]:
         out.append("waiting for review (bh show <id>):")
         out += [f"  {m['id']} {m['lane']}: {m['title']} [{m['stat'] or 'no changes'}"
+                + {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]]
                 + (f"; {m['denied']} command(s) refused" if m["denied"] else "") + "]" for m in st["review"]]
     if st["failed"]:
         out.append("failed (latest):")
@@ -124,10 +128,19 @@ def show_text(desk: Desk, tid: str) -> str:
         for x in m["denials"][:8]:
             first, *more = x.splitlines() or [""]
             out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else ""))
+    chk = m.get("check")
+    if chk:
+        how = "passed" if chk["ok"] else "FAILED" + (f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})")
+        out.append(f"check (run by bh, not the worker): {how} in {chk['seconds']} s: {chk['command']}")
+        if not chk["ok"]:
+            out += ["  " + x[:200] for x in chk["tail"]]
+    elif m.get("phase") == "checking":
+        out.append(f"check: running now: {m.get('check_command', '')}")
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
                    f" · cache write {u['cache_write']:,}")
-    nxt = {"done": f"bh diff {tid} · bh merge {tid} · bh retry {tid} \"what to change\"",
+    nxt = {"done": f"bh diff {tid} · bh merge {tid} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
+           else f"bh retry {tid} \"make the check pass: ...\" · bh diff {tid} · bh merge {tid} --despite-check",
            "failed": f"bh retry {tid} \"what to change\" (or --fresh to start over)",
            "queued": "bh status shows what it is waiting for", "running": f"bh cancel {tid} to stop it"}
     if m["state"] in nxt:
@@ -147,7 +160,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             f"lane {name} (set by the principal on the web page; ask with bh ask to change it)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
-            f"  per task: at most {ln.get('max_turns', 80)} turns, {ln.get('timeout_min', 60)} minutes",
+            f"  per task: at most {ln.get('max_turns', 80)} turns, {ln.get('timeout_min', 60)} minutes (check included)",
+            "  check after each task: " + (f"{ln['check']} (bh runs it in the worktree after the worker ends;"
+                                            " bh merge refuses a failed check)" if ln.get("check") else "none"),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (anything else is refused and shows up in bh show):",
             "    Read, Edit, Write, Glob, Grep and TodoWrite, inside the lane's worktree only",

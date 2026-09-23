@@ -150,6 +150,39 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"--add-dir {repo}", r.stdout)
         self.assertIn(f"Edit(//{str(repo).lstrip('/')}/**)", r.stdout)
 
+    def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "test -f hello.txt && echo checked"
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        m = self.settle(d, self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+        self.assertIn("checked", m["check"]["tail"])
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "echo not good; exit 3"
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+        self.assertEqual((m["state"], m["check"]["ok"], m["check"]["exit"]), ("done", False, 3), m)
+        self.assertIn("FAILED (exit 3)", views.show_text(self.desk, m["id"]))
+        self.assertIn("check FAILED", views.status_text(views.status(self.desk)))
+        with self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "merge", m["id"]])
+        main(["--desk", str(self.desk.root), "merge", m["id"], "--despite-check"])
+        self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
+
+    def test_check_result_survives_a_server_restart(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "sleep 0.5; exit 0"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d, end = Dispatcher(self.desk), time.time() + 20
+        while not self.desk.meta(tid).get("check_started") and time.time() < end:
+            d.tick()
+            time.sleep(0.05)
+        d.procs[tid].wait()  # the old server is gone; its check still wrote the exit code
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}

@@ -83,6 +83,11 @@ def cmd_merge(a):
     m = desk.meta(a.id)
     if m["state"] != "done":
         raise SystemExit(f"bh: only a finished task can be merged; {a.id} is {m['state']}")
+    chk = m.get("check")
+    if chk and not chk["ok"] and not a.despite_check:
+        raise SystemExit(f"bh: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
+                         f"nothing was merged. bh show {a.id} has the output. "
+                         f"To merge it anyway: bh merge {a.id} --despite-check")
     lane = desk.settings()["lanes"].get(m["lane"])
     if not lane:
         raise SystemExit(f"bh: lane {m['lane']} is no longer in settings")
@@ -102,7 +107,7 @@ def cmd_merge(a):
         raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
                          f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
     desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
-    desk.event("task_merged", task=a.id, into=base)
+    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if chk and not chk["ok"] else {}))
     print(f"{a.id} merged into {base} at {repo}")
 
 
@@ -305,6 +310,7 @@ def main(argv=None):
     p.add_argument("--stat", action="store_true")
     p = add("merge", cmd_merge, "merge a finished task into the lane's base branch")
     p.add_argument("id")
+    p.add_argument("--despite-check", action="store_true", help="merge even though the lane's check failed (recorded)")
     p = add("retry", cmd_retry, "queue a follow-up to a task")
     p.add_argument("id")
     p.add_argument("note", nargs="*")

@@ -134,7 +134,7 @@ def validate(s: dict) -> list:
         if not isinstance(ln, dict):
             p.append(f"{at}: must be an object")
             continue
-        extra = set(ln) - {"repo", "base", "providers", "allow", "env", "max_turns", "timeout_min", "note"}
+        extra = set(ln) - {"repo", "base", "providers", "allow", "env", "check", "max_turns", "timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -156,6 +156,8 @@ def validate(s: dict) -> list:
                     p.append(f"{at}: env {k} must be NAME=text")
                 elif k in MANAGED_ENV or k.startswith("ANTHROPIC_"):
                     p.append(f"{at}: env {k} is set from the provider, not the lane")
+        if not isinstance(ln.get("check", ""), str) or len(ln.get("check", "")) > 1000:
+            p.append(f"{at}: check must be one shell command line (up to 1000 characters)")
         if not _is_int(ln.get("max_turns", 80), 1, 500):
             p.append(f"{at}: max_turns must be from 1 to 500")
         if not _is_int(ln.get("timeout_min", 60), 1, 600):

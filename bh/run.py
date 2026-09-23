@@ -26,6 +26,7 @@ QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
+BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
 GIT_ID = {"GIT_AUTHOR_NAME": "bh", "GIT_AUTHOR_EMAIL": "bh@localhost",
           "GIT_COMMITTER_NAME": "bh", "GIT_COMMITTER_EMAIL": "bh@localhost"}
 PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in this directory,
@@ -79,8 +80,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
 def provider_env(desk: Desk, name: str, p: dict) -> dict:
     """Environment for one Claude Code run on this provider. Starts clean, so a
     worker never inherits keys that are not its own."""
-    env = {k: os.environ[k] for k in ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
-           if k in os.environ}
+    env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env["TERM"] = "dumb"
     env["CLAUDE_CODE_MAX_RETRIES"] = "3"  # a rejected key fails in seconds, not after eleven tries
     if p["kind"] == "subscription":
@@ -236,9 +236,47 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         error = f"{run.get('subtype') or 'error'}: {lines[-1][:200] if lines else f'no output (exit {returncode})'}"
     else:
         state, error = "done", ""
-    meta = desk.update(tid, state=state, error=error, attempts=attempts, **fields)
-    desk.event("task_finished", task=tid, state=state, provider=meta.get("provider"), error=error)
+    lane = desk.settings()["lanes"].get(meta.get("lane"), {})
+    checking = state == "done" and bool(lane.get("check")) and bool(fields.get("head"))
+    meta = desk.update(tid, state="running" if checking else state, phase="checking" if checking else "",
+                       error=error, attempts=attempts, **fields)
+    desk.event("task_finished", task=tid, state="checking" if checking else state,
+               provider=meta.get("provider"), error=error)
     return meta
+
+
+def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
+    """Run the lane's check command in the worktree, as bh, after the worker is done.
+    The exit code goes to a file, so a restarted server can still read it."""
+    d = desk.tasks_dir / tid
+    (d / "check.exit").unlink(missing_ok=True)
+    env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
+    env.update({**lane.get("env", {}), "BH_TASK": tid, "TERM": "dumb"})
+    with open(d / "check.log", "wb") as out:
+        proc = subprocess.Popen(["/bin/sh", "-c", 'sh -c "$1"; echo $? > "$2"', "bh-check", lane["check"],
+                                 str(d / "check.exit")], cwd=str(desk.worktrees_dir / lane_name), env=env,
+                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+    desk.update(tid, pid=proc.pid, check_started=now(), check_command=lane["check"])
+    desk.event("check_started", task=tid, lane=lane_name)
+    return proc
+
+
+def finish_check(desk: Desk, tid: str) -> dict:
+    m = desk.meta(tid)
+    d = desk.tasks_dir / tid
+    try:
+        code = int((d / "check.exit").read_text().strip())
+    except (OSError, ValueError):
+        code = None
+    log = (d / "check.log").read_text(encoding="utf-8", errors="replace") if (d / "check.log").exists() else ""
+    note = ("stopped on request" if m.get("cancel") else "stopped: ran past the lane's time limit"
+            if m.get("timed_out") else "" if code is not None else "the check was interrupted")
+    check = {"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
+             "seconds": round(now() - (m.get("check_started") or now())), "tail": log.strip().splitlines()[-15:]}
+    state = "cancelled" if m.get("cancel") else "done"
+    m = desk.update(tid, state=state, phase="", pid=None, check=check, error="cancelled" if m.get("cancel") else "")
+    desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
+    return m
 
 
 def alive(pid) -> bool:
@@ -252,6 +290,8 @@ def alive(pid) -> bool:
 
 
 def stop(pid) -> None:
+    if not pid:
+        return
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pid, sig)
@@ -270,6 +310,12 @@ class Dispatcher:
         self.desk = desk
         self.procs = {}
 
+    def ended(self, tid: str, returncode) -> None:
+        if self.desk.meta(tid).get("phase") == "checking":
+            finish_check(self.desk, tid)
+        else:
+            finish(self.desk, tid, returncode)
+
     def tick(self) -> None:
         desk = self.desk
         s = desk.settings()
@@ -278,12 +324,18 @@ class Dispatcher:
         for tid, proc in list(self.procs.items()):
             if proc.poll() is not None:
                 del self.procs[tid]
-                finish(desk, tid, proc.returncode)
+                self.ended(tid, proc.returncode)
         for m in desk.tasks():
             if m["state"] != "running" or m["id"] in self.procs:
                 continue
-            if not alive(m.get("pid")):  # started by an earlier server
-                finish(desk, m["id"], None)
+            if m.get("phase") == "checking" and not m.get("pid"):
+                lane = s["lanes"].get(m.get("lane"), {})
+                if lane.get("check"):
+                    self.procs[m["id"]] = start_check(desk, m["id"], m["lane"], lane)
+                else:  # the principal removed the check meanwhile
+                    desk.update(m["id"], state="done", phase="")
+            elif not alive(m.get("pid")):  # started by an earlier server
+                self.ended(m["id"], None)
         for m in desk.tasks():
             if m["state"] != "running":
                 continue

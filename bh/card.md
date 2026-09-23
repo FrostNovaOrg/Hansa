@@ -8,7 +8,9 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 1. You queue a task: one change a worker can make and check on its own.
 2. `bh serve` (always running) starts it in a free lane: a separate Claude Code
    run in the lane's own git worktree, on a fresh branch `task/<id>`.
-3. The worker commits there and ends with a short report. It cannot push.
+3. The worker commits there and ends with a short report. It cannot push. If
+   the lane has a check command, bh then runs it on the branch itself, so the
+   result does not depend on what the worker says.
 4. Meanwhile run `bh wait` in the background (the Bash tool's background option);
    it returns, and you are told, when a task finishes or fails.
 5. You review and merge, or send it back with what to change.
@@ -20,7 +22,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh add "<task>" [--lane L] [--effort high] [--model M] [--title T]` | queue a task; `--file PATH` reads the text from a file |
 | `bh show <id>` | report, changed files, refused commands, usage, and what to do next |
 | `bh diff <id> [--stat]` | the task branch against its base |
-| `bh merge <id>` | merge the task branch into the lane's base branch |
+| `bh merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |
 | `bh retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base) |
 | `bh cancel <id>` | stop a queued or running task |
 | `bh wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
@@ -39,9 +41,11 @@ needs, `bh explain lane L` shows what is allowed; ask the principal to add it.
 
 ## Reading the result
 `bh show <id>` gives the worker's report plus facts bh recorded itself: changed
-files, commits, commands the lane refused, tokens. A refused command means the
-worker could not do something; decide whether the task needs it (then ask) or
-should be rewritten.
+files, commits, the lane's check result, commands the lane refused, tokens. A
+refused command means the worker could not do something; decide whether the
+task needs it (then ask) or should be rewritten. A failed check shows its last
+lines; send the task back with `bh retry`, or, if the failure is not the
+task's doing, merge with `--despite-check` and say why.
 
 ## What you change, and what only the principal changes
 - Yours: tasks and their options; each lane's standing instructions in
@@ -49,7 +53,7 @@ should be rewritten.
   You can read the lanes' repositories to plan and review; editing them is
   the workers' job, so edits there are refused.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
-  defaults, each lane's provider order, allowed commands and environment,
+  defaults, each lane's provider order, allowed commands, environment and check,
   prices, how many tasks run at once. Ask with `bh ask`; do not edit
   `settings.json`. Keys live in `secrets/`, which you cannot read, by design.
 
