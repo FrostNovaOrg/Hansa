@@ -155,8 +155,10 @@ def _ts(text) -> float:
         return 0.0
 
 
-def report(desk: Desk, days: int = 7) -> dict:
-    since = time.time() - days * 86400
+def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
+    window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
+              else f"last {days} day(s)")
+    since = since if since is not None else time.time() - days * 86400
     rows = worker_rows(desk, since) + transcript_rows(desk, since)
     by = {}
     for key in ("day", "seat", "lane", "task", "model", "provider"):
@@ -173,7 +175,7 @@ def report(desk: Desk, days: int = 7) -> dict:
                 a["usd"] += r["usd"]
         by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
     total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
-    return {"days": days, "rows": rows, "by": by,
+    return {"days": days, "window": window, "rows": rows, "by": by,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
             "note": "Dollars use the principal's price table (a Claude model without an entry uses Claude Code's list price). Subscriptions are paid by the month: this is what the tokens are worth, not a bill."}

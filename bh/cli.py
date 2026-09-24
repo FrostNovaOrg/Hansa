@@ -205,8 +205,23 @@ def cmd_explain(a):
     print(views.explain_text(Desk.find(a.desk), a.what or "", a.name or ""))
 
 
+def _since(text: str) -> float:
+    """'13:45' (today, or yesterday if that is still ahead) or '2026-09-24 13:45', local time."""
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%H:%M"):
+        try:
+            t = time.strptime(text.strip(), fmt)
+        except ValueError:
+            continue
+        if fmt != "%H:%M":
+            return time.mktime(t)
+        now = time.localtime()
+        ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, t.tm_hour, t.tm_min, 0, 0, 0, -1))
+        return ts - 86400 if ts > time.time() else ts
+    raise SystemExit("bh: --since takes HH:MM (today) or YYYY-MM-DD HH:MM")
+
+
 def cmd_cost(a):
-    rep = cost.report(Desk.find(a.desk), a.days)
+    rep = cost.report(Desk.find(a.desk), a.days, _since(a.since) if a.since else None)
     if a.json:
         rep = {k: v for k, v in rep.items() if k != "rows"} if not a.rows else rep
         print(json.dumps(rep, ensure_ascii=False, indent=1))
@@ -366,6 +381,7 @@ def main(argv=None):
     p.add_argument("name", nargs="?")
     p = add("cost", cmd_cost, "tokens and what they are worth")
     p.add_argument("--days", type=int, default=7)
+    p.add_argument("--since", help="HH:MM today, or YYYY-MM-DD HH:MM: count from then instead of --days")
     p.add_argument("--by", default="day", choices=["day", "seat", "lane", "task", "model", "provider"])
     p.add_argument("--json", action="store_true")
     p.add_argument("--rows", action="store_true", help="with --json: include every row")

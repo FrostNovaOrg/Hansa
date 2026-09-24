@@ -28,7 +28,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
 | `bh pause "<reason>"` / `bh resume` | stop / restart new work (running tasks finish) |
 | `bh explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
-| `bh cost [--days N] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
+| `bh cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
 | `bh ask "<request>"` | put a request on the principal's page |
 | `bh help` | this card |
 
@@ -98,3 +98,5 @@ that needs code changed, commands run or a browser goes to a worker.
 - Anything a worker left uncommitted is committed on its branch when it ends.
 - Cost figures are Claude Code's own token counts priced with the principal's
   table. With a subscription they show what the tokens are worth, not a bill.
+  To say what one job cost, note the time `bh status` shows when you start it
+  and run `bh cost --since HH:MM --by seat` when it is done.

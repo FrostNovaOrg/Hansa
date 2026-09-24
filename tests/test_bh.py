@@ -371,6 +371,12 @@ class DeskTest(unittest.TestCase):
         rep = cost.report(self.desk, 1)
         self.assertEqual(rep["by"]["seat"]["coordinator"]["tokens"], 110)
         self.assertEqual(rep["by"]["seat"]["helper:scout"]["tokens"], 110)
+        later = cost.report(self.desk, 1, since=time.time() + 60)  # bh cost --since: nothing after "now"
+        self.assertEqual((later["total"]["tokens"], later["window"][:6]), (0, "since "))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "cost", "--since", time.strftime("%H:%M"), "--by", "seat"])
+        self.assertIn("since ", out.getvalue())
         self.assertAlmostEqual(rep["by"]["seat"]["coordinator"]["usd"], (100 * 5 + 10 * 25) / 1e6, places=6)
         self.assertEqual(rep["by"]["seat"]["worker"]["tokens"], 6300)
         self.assertEqual(rep["unpriced_models"], [])

@@ -72,7 +72,7 @@ def status_text(st: dict) -> str:
     out = [f"desk {st['desk']}",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
            "server up" if st["server_up"] else "server NOT running: start it with `bh serve` (see bh explain server)"]
-    out = [" · ".join(out)]
+    out = [" · ".join(out + [time.strftime("now %H:%M")])]
     out.append("lanes:")
     for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or 'free'}")
@@ -217,7 +217,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
 
 def cost_text(rep: dict, by: str = "day") -> str:
     rows = rep["by"].get(by, {})
-    out = [f"last {rep['days']} day(s), by {by}: {rep['total']['tokens']:,} tokens, "
+    window = rep.get("window") or f"last {rep['days']} day(s)"
+    out = [f"{window}, by {by}: {rep['total']['tokens']:,} tokens, "
            f"worth ${rep['total']['usd']:.2f}"]
     for k, v in rows.items():
         extra = f" (+{v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] else ""
