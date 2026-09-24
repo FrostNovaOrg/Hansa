@@ -19,12 +19,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bh import cost, views  # noqa: E402
 from bh.cli import init_desk, main  # noqa: E402
 from bh.desk import Desk, public_settings, validate  # noqa: E402
-from bh.run import Dispatcher, provider_problem, waiting_reason  # noqa: E402
+from bh.run import Dispatcher, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
 from bh.web import start_web  # noqa: E402
 
 FAKE = r'''#!/usr/bin/env python3
-import json, os, sys
-prompt = sys.stdin.read()
+import json, os, sys, time
+prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
+if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
+    if os.environ.get("FAKE_SHOW_ARGV"):
+        open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
+    sid = sys.argv[sys.argv.index("--session-id") + 1]
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-design", sid + ".jsonl")
+    os.makedirs(os.path.dirname(rec), exist_ok=True)
+    open("badge.txt", "w").write("bigger\n")
+    with open(rec, "w") as f:
+        for i, t in enumerate(("Here is how it looks now.", "Hand-in: the badge is bigger; the checks pass.")):
+            f.write(json.dumps({"type": "assistant", "message": {"id": f"d{i}", "model": "claude-x", "content": [
+                {"type": "text", "text": t}], "usage": {"input_tokens": 100, "output_tokens": 20}}}) + "\n")
+    time.sleep(float(os.environ.get("FAKE_DESIGN_SECONDS", "0")))
+    sys.exit(0)
 compat = bool(os.environ.get("ANTHROPIC_BASE_URL"))
 if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
@@ -339,6 +352,53 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
         self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(vid)["state"]), ("merged", "cancelled"))
         self.assertIn("verdict: does not hold", views.show_text(self.desk, vid))
+
+    def test_design_session_opens_for_the_principal_and_comes_back_for_review(self):
+        try:
+            tmux = tmux_bin()
+        except RuntimeError:
+            self.skipTest("no tmux here")
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "cc")
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen), "FAKE_DESIGN_SECONDS": "2"}
+        s["lanes"]["a"]["preview"] = "npm run dev"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.addCleanup(subprocess.run, [tmux, "-L", tmux_socket(self.desk), "kill-server"], capture_output=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "design", "Make the week badge bigger", "--lane", "a"])
+        tid = "t0001"
+        with self.assertRaises(SystemExit):  # one design session per lane at a time
+            main(["--desk", str(self.desk.root), "design", "Another one", "--lane", "a"])
+        d = Dispatcher(self.desk)
+        d.tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["kind"], Path(m["worktree"]).name), ("running", "design", "a-design"))
+        st = views.status(self.desk)
+        self.assertIn(f"attach -t design-{tid}", st["design"][0]["join"])
+        self.assertEqual(st["running"], [])  # it does not take the lane's worker slot
+        self.assertIn(f"design-{tid}", [a for a in st["asks"] if a["by"] == "bh"][0]["text"])
+        work = self.desk.new_task("Add hello.txt", lane="a")
+        self.assertEqual(self.settle(d, work)["state"], "done")  # the lane kept working meanwhile
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual((m["files"], m["turns"]), (["badge.txt"], 2))
+        self.assertEqual(m["usage"]["claude-x"]["in"], 200)
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("Hand-in: the badge is bigger", shown)
+        self.assertEqual([a for a in self.desk.asks() if a["by"] == "bh" and not a["closed"]], [])
+        runs = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(sum("-p" in a for a in runs), 1)  # the worker's; the design session is interactive
+        argv = next(a for a in runs if "-p" not in a)
+        self.assertIn("Make the week badge bigger", argv[1])
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertIn("Bash(npm run dev:*)", argv)
+        self.assertIn("Bash(git merge:*)", argv)
+        self.assertIn("No browser is set up", argv[argv.index("--append-system-prompt") + 1])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "merge", tid])
+        self.assertTrue((self.repo / "badge.txt").exists())
+        self.assertEqual({r["task"]: r["seat"] for r in cost.worker_rows(self.desk, 0)}, {tid: "design", work: "worker"})
 
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
         s = self.desk.settings()

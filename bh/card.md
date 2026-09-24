@@ -24,6 +24,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh diff <id> [--stat]` | the task branch against its base |
 | `bh merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |
 | `bh retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base); the follow-up replaces it |
+| `bh design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `bh verify <id> ["what to look at"] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `bh show <id>`; never merged |
 | `bh cancel <id>` | stop a queued or running task, or close a finished one without merging |
 | `bh wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
@@ -71,6 +72,28 @@ change touches, which `bh diff <id> --stat` shows:
 - Security, credentials, money, releases or stored data: `bh verify <id>`, and
   also have the `reviewer` helper read the change.
 
+## Shaping a feature with the principal
+Changes come in three sizes. Something a sentence or two can say ("make this
+bigger", "move that to the left") is an ordinary task. A new feature, or an
+improvement the principal wants to shape by looking at it over a few rounds,
+gets a design session: `bh design "<brief>" --lane L`. A system that is nearly
+all new is designed elsewhere and comes to you as a finished design.
+- bh opens the session in seconds, on its own branch in a separate directory,
+  and asks the principal to join. It changes the real code there and shows them
+  screenshots; they talk to it directly, not through you. The lane's workers
+  keep working meanwhile.
+- Brief it as you would a task, in the language the principal uses: which
+  feature, where it lives in the code, what must not change. Then leave it to
+  them.
+- While it is open, do not queue tasks that change the same part of the code.
+  One design session per lane at a time.
+- When they end it, it comes back like a finished task: the lane's check runs,
+  and you verify and merge as usual. How it looks and works is the principal's
+  decision: send back only what does not work or does not fit the code.
+- Once something is built, what is built is the reference. Do not hold it
+  against an older prototype or design, and do not ask the principal about
+  differences from one.
+
 ## Your helpers
 Two kinds of helper run inside this session, on your model. They read and never
 change anything:
@@ -91,8 +114,10 @@ that needs code changed, commands run or a browser goes to a worker.
   commands, editing code, running tests) is refused without asking: code
   changes and checks are the workers' and the lane check's job.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
-  defaults, each lane's provider order, allowed commands, environment and check,
-  prices, how many tasks run at once. Ask with `bh ask`; do not edit
+  defaults, each lane's provider order, allowed commands, environment, check,
+  the command that starts the app for design sessions (preview) and the one that installs a new
+  worktree's dependencies (setup), the model for design sessions, prices, how
+  many tasks run at once. Ask with `bh ask`; do not edit
   `settings.json`. Keys live in `secrets/`, which you cannot read, by design.
 
 ## Facts you can rely on

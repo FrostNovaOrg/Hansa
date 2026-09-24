@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import cost
 from .desk import Desk, read_json
-from .run import progress_of, provider_problem, waiting_reason
+from .run import join_command, progress_of, provider_problem, waiting_reason
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -60,7 +60,8 @@ def status(desk: Desk) -> dict:
     s = desk.settings()
     tasks = desk.tasks()
     pst = desk.provider_state()
-    running = [m for m in tasks if m["state"] == "running"]
+    designing = [m for m in tasks if m["state"] == "running" and m.get("kind") == "design"]
+    running = [m for m in tasks if m["state"] == "running" and m.get("kind") != "design"]
     busy = {m.get("lane") for m in running}
     hb = read_json(desk.state_dir / "heartbeat", 0) or 0
     today = [m for m in tasks if (m.get("finished") or 0) >= _midnight()]
@@ -81,6 +82,9 @@ def status(desk: Desk) -> dict:
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
                      "checking": m.get("phase") == "checking", "browser": bool(m.get("browser")),
                      "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in running],
+        "design": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "minutes": _mins(m.get("started")),
+                    "join": join_command(m), "checking": m.get("phase") == "checking",
+                    "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
@@ -111,6 +115,12 @@ def status_text(st: dict) -> str:
                 + (" with a browser" if m["browser"] else "") + f", {m['minutes']} min: {m['title']}"
                 + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["running"]]
+    if st.get("design"):
+        out.append("design sessions (the principal works in them directly; each comes back for review when they end it):")
+        out += [f"  {m['id']} lane {m['lane']}, {m['minutes']} min: {m['title']}"
+                + ("\n      ended; bh is running the lane's check" if m["checking"] else
+                   f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
+                for m in st["design"]]
     if st["queued"]:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
@@ -148,6 +158,10 @@ def show_text(desk: Desk, tid: str) -> str:
     verifying = m.get("kind") == "verify"
     meaning = (f"a verification of {m.get('parent')}: a worker ran its change to see whether it holds; never merged"
                if verifying else STATES.get(m["state"], ""))
+    if m.get("kind") == "design":
+        meaning = ("a design session: the principal shapes this feature with it directly, on the real code; "
+                   + ("it is open now" if m["state"] == "running" and m.get("phase") != "checking"
+                      else "it comes back for review when they end it" if m["state"] == "queued" else meaning))
     out = [head, f"title: {m['title']}", f"meaning: {meaning}"]
     if m.get("error"):
         out.append(f"error: {m['error']}")
@@ -185,6 +199,8 @@ def show_text(desk: Desk, tid: str) -> str:
         out.append(f"check: running now: {m.get('check_command', '')}")
     if m["state"] == "running" and m.get("phase") != "checking":
         out.append(f"so far: {_progress_line(progress_of(desk, m))} (turns and tokens are recorded when it ends)")
+        if m.get("kind") == "design":
+            out.append(f"the principal joins it with: {join_command(m)}")
     v = verification(desk, m)
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"

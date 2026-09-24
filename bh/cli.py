@@ -75,6 +75,23 @@ def cmd_add(a):
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "") + f". Follow it with: bh show {tid}")
 
 
+def cmd_design(a):
+    desk = Desk.find(a.desk)
+    s = desk.settings()
+    lane = a.lane or (next(iter(s["lanes"])) if len(s["lanes"]) == 1 else "")
+    if lane not in s["lanes"]:
+        raise SystemExit("bh: say which lane the design session is for: --lane L" if not lane
+                         else f"bh: there is no lane {lane}")
+    open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
+             and m["state"] in ("queued", "running")]
+    if open_:
+        raise SystemExit(f"bh: lane {lane} already has design session {open_[0]} open; one at a time per lane "
+                         f"(bh show {open_[0]})")
+    tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "", browser=bool(s.get("browser")) or None)
+    print(f"{tid} queued: bh opens the design session in seconds and asks the principal to join it. "
+          f"It comes back for review when they are done: bh wait {tid}")
+
+
 def cmd_status(a):
     st = views.status(Desk.find(a.desk))
     print(json.dumps(st, ensure_ascii=False, indent=1) if a.json else views.status_text(st))
@@ -422,6 +439,11 @@ def main(argv=None):
     p.add_argument("--title")
     p.add_argument("--max-turns", type=int)
     p.add_argument("--browser", action="store_true", help="give this one task a browser (read pages, take screenshots)")
+    p = add("design", cmd_design, "open a session the principal joins to shape one feature on the real code")
+    p.add_argument("text", nargs="*")
+    p.add_argument("--file")
+    p.add_argument("--lane")
+    p.add_argument("--title")
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
     p = add("show", cmd_show, "one task: report, changes, refused commands, usage, next step")

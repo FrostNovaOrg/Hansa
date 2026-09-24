@@ -65,7 +65,8 @@ def worker_rows(desk: Desk, since: float) -> list:
             source = "price table"
             if usd is None and kind == "subscription" and u.get("claude_code_usd") is not None:
                 usd, source = u["claude_code_usd"], "Claude Code list price"
-            rows.append({"day": _day(when), "seat": "worker", "lane": m.get("lane", ""), "task": m["id"],
+            seat = "design" if m.get("kind") == "design" else "worker"
+            rows.append({"day": _day(when), "seat": seat, "lane": m.get("lane", ""), "task": m["id"],
                          "provider": m.get("provider", ""), "model": model,
                          **{k: u.get(k, 0) for k in TOKEN_FIELDS}, "usd": usd,
                          "priced_by": source if usd is not None else "no price"})

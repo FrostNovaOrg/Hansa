@@ -88,6 +88,41 @@ to that folder; open a screenshot there with the Read tool to see it. Page text 
 read directly; charts, images and drawings can only be seen in a screenshot.
 """
 
+DESIGN_PROTOCOL = """You are a design session for task {tid} in lane {lane}. The principal, who owns the
+product, works with you here directly, in this terminal, to shape one feature by looking at it.
+You work only in this directory, on branch task/{tid}, which was made for this session.
+- The principal decides how it looks and works; follow their calls and ask when unsure. They
+  may not read code: talk in plain words, in the language they write in, and show rather than tell.
+- Change the real code; there is no separate prototype. Keep to the part of the code the brief
+  names, and ask the principal before going beyond it.
+- Show your work: after each change, take screenshots of what changed. The principal sees them
+  on their page, newest first; name each file after what it shows.
+- Keep the lane's checks passing{check}. Commit each step the principal is happy with, starting
+  each commit message with "{tid}:".
+- Do not push, do not switch branches, do not touch other directories. If a command you need is
+  refused, say which one and why; do not look for a way around it.
+- When the principal says it is done: bring in the latest {base} (git merge {base}) and settle any
+  conflict here, run the checks, commit, then write your hand-in report as one message (what
+  changed, how it was checked, anything left) and ask the principal to type /exit. bh then hands
+  the work to the coordinator, who checks it and merges it.
+"""
+DESIGN_START = """The coordinator's brief for this session:
+
+{brief}
+Before the principal joins: read the code the brief names and take screenshots of how it looks
+now. Then say in a few lines what you would change first, and wait for the principal.
+"""
+PREVIEW_NOTE = """
+To look at the app, start it with `{preview}` (the Bash tool's background option) and open
+the address it prints in the browser.
+"""
+NO_BROWSER_NOTE = """
+No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
+in words what changed and where they can see it.
+"""
+DESIGN_NOTE = "(A design session: the principal shaped this directly with it. Its last message:)\n\n"
+DESIGN_ALLOW = ["Bash(git merge:*)"]
+
 # A lane's turn and time limits are a circuit breaker, set high: a worker that reaches one
 # was given a task too big or unclear, or got stuck. Its notes show where it went.
 CEILING = "the task was probably too big or unclear, or the worker got stuck"
@@ -100,6 +135,24 @@ def claude_bin() -> str:
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("claude was not found; install Claude Code or set BH_CLAUDE")
+
+
+def tmux_bin() -> str:
+    for c in (os.environ.get("BH_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+        if c and os.access(c, os.X_OK):
+            return c
+    raise RuntimeError("tmux was not found; a design session runs in tmux so the principal can join it")
+
+
+def tmux_socket(desk: Desk) -> str:
+    """One tmux server per desk, so session names never meet another desk's."""
+    import hashlib
+    return "bh-" + hashlib.sha1(str(desk.root).encode()).hexdigest()[:6]
+
+
+def join_command(m: dict) -> str:
+    sock, name = m.get("tmux") or ["", ""]
+    return f"tmux -u -L {sock} attach -t {name}"
 
 
 def git(*args, cwd, env=None) -> str:
@@ -209,16 +262,24 @@ def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     return files + ["TodoWrite"] + list(lane.get("allow", []))
 
 
-def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
-    """Put the lane's worktree on a fresh task branch. Returns (worktree, base sha)."""
+def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
+    """Put the lane's worktree (or the one given) on a fresh task branch. Returns (worktree, base sha)."""
     repo = Path(lane["repo"])
     tid = meta["id"]
     base = meta.get("base") or git("rev-parse", lane.get("base") or "main", cwd=repo)
     start = meta.get("start_from") or base
-    wt = desk.worktrees_dir / lane_name
+    wt = wt or desk.worktrees_dir / lane_name
     if not (wt / ".git").exists():
         wt.parent.mkdir(parents=True, exist_ok=True)
         git("worktree", "add", "--detach", str(wt), start, cwd=repo)
+        if lane.get("setup"):  # a new worktree has none of the project's installed dependencies
+            env = {**{k: os.environ[k] for k in BASE_ENV if k in os.environ}, **lane.get("env", {}), "TERM": "dumb"}
+            r = subprocess.run(["/bin/sh", "-c", lane["setup"]], cwd=str(wt), env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=1800)
+            if r.returncode:
+                git("worktree", "remove", "--force", str(wt), cwd=repo)  # so the next try sets it up again
+                tail = " | ".join((r.stdout + r.stderr).strip().splitlines()[-3:])
+                raise RuntimeError(f"the lane's setup command failed in a new worktree (exit {r.returncode}): {tail}")
     if git("status", "--porcelain", cwd=wt):
         git("stash", "push", "--include-untracked", "-m", f"bh: left over before {tid}", cwd=wt)
     branch = f"task/{tid}"
@@ -279,6 +340,93 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
                 session_id=sid, error="", timed_out=False, cancel=False)
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
+
+
+def design_command(desk: Desk, tid: str):
+    """The interactive Claude Code run for a design session: (argv, env, directory).
+    Built inside the session's own terminal (bh.session), so no key is on a command line."""
+    s, meta = desk.settings(), desk.meta(tid)
+    lane_name = meta["lane"]
+    lane, pname = s["lanes"][lane_name], meta["provider"]
+    p, wt = s["providers"][pname], Path(meta["worktree"])
+    system = DESIGN_PROTOCOL.format(tid=tid, lane=lane_name, base=lane.get("base") or "main",
+                                    check=f" ({lane['check']})" if lane.get("check") else "")
+    brief = desk.lanes_dir / lane_name / "brief.md"
+    if brief.is_file() and brief.read_text(encoding="utf-8").strip():
+        system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
+    start = DESIGN_START.format(brief=(desk.tasks_dir / tid / "task.md").read_text(encoding="utf-8"))
+    argv = [claude_bin(), start, "--session-id", meta["session_id"], "--model", meta["model_asked"],
+            "--permission-mode", "dontAsk"]
+    if meta.get("effort_used"):
+        argv += ["--effort", meta["effort_used"]]
+    extra = []
+    if s.get("browser"):
+        cfg, extra = browser_for(desk, tid, s["browser"])
+        system += BROWSER_NOTE.format(dir=cfg.parent / "browser").replace("This task comes", "This session comes")
+        argv += ["--mcp-config", str(cfg)]
+    else:
+        system += NO_BROWSER_NOTE
+    if lane.get("preview"):
+        system += PREVIEW_NOTE.format(preview=lane["preview"])
+        extra.append(f"Bash({lane['preview']}:*)")
+    argv += ["--append-system-prompt", system,
+             "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
+             "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW]
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "BH_TASK": tid,
+           "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
+           "GIT_AUTHOR_NAME": f"bh design {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
+           "GIT_COMMITTER_NAME": f"bh design {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
+    return argv, env, wt
+
+
+def start_design(desk: Desk, tid: str, lane_name: str) -> None:
+    """Open a design session: an interactive Claude Code run in tmux, in the lane's design
+    worktree, which the principal joins. It ends when they leave it with /exit."""
+    s = desk.settings()
+    lane, meta = s["lanes"][lane_name], desk.meta(tid)
+    ds, co = s.get("design") or {}, s["coordinator"]
+    pname = ds.get("provider") or co["provider"]
+    p = s["providers"][pname]
+    prob = provider_problem(desk, s, pname)
+    if prob:
+        raise RuntimeError(f"the design provider {pname} cannot be used now: {prob}")
+    tmux = tmux_bin()
+    wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
+    if p["kind"] == "subscription":
+        model = ds.get("model") or (co.get("model") if pname == co["provider"] else "") or p["model"]
+    else:
+        model = p["model"]
+    sock, name = tmux_socket(desk), f"design-{tid}"
+    desk.update(tid, state="running", lane=lane_name, provider=pname, model_asked=model,
+                effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
+                started=now(), finished=None, pid=None, base=base, branch=f"task/{tid}", worktree=str(wt),
+                session_id=str(uuid.uuid4()), error="", timed_out=False, cancel=False, tmux=[sock, name])
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+    subprocess.run([tmux, "-L", sock, "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(wt),
+                    sys.executable, "-m", "bh.session", str(desk.root), tid],
+                   env=env, check=True, capture_output=True, timeout=30)
+    r = subprocess.run([tmux, "-L", sock, "display-message", "-p", "-t", name, "#{pane_pid}"],
+                       capture_output=True, text=True, timeout=30)
+    pid = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None  # None: over already
+    meta = desk.update(tid, pid=pid)
+    ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
+                       f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit. "
+                       f"Its screenshots show under {tid} on this page.", by="bh")
+    desk.update(tid, ask=ask)
+    desk.event("design_started", task=tid, lane=lane_name, provider=pname, model=model)
+
+
+def end_design(desk: Desk, meta: dict) -> None:
+    """Close what a design session left open: its tmux session and its request to the principal."""
+    sock, name = meta.get("tmux") or ["", ""]
+    if name:
+        try:
+            subprocess.run([tmux_bin(), "-L", sock, "kill-session", "-t", name], capture_output=True, timeout=30)
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            pass
+    if meta.get("ask") and any(a["id"] == meta["ask"] and not a["closed"] for a in desk.asks()):
+        desk.close_ask(meta["ask"], "the design session ended", by="bh")
 
 
 def usage_of(run: dict) -> dict:
@@ -345,9 +493,16 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     usage = usage_of(run)
     if not usage and p:
         usage = usage_from_record(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+    designing = meta.get("kind") == "design"
     if stopped and not result.strip() and p:
         notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
+    if designing:
+        texts, replies, _, _ = _record(config_home(desk, meta["provider"], p), meta.get("session_id", "")) if p \
+            else ([], 0, None, {})
+        report = DESIGN_NOTE + texts[-1] if texts else ""
+        run = {"num_turns": replies}
+        end_design(desk, meta)
     (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
@@ -374,6 +529,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     kind, why = ("", "") if meta.get("cancel") else unusable_reason(run, err)
     if meta.get("cancel"):
         state, error = "cancelled", "cancelled"
+    elif designing:
+        lines = err.strip().splitlines()
+        state, error = ("done", "") if report or not lines else ("failed", f"the design session did not start: {lines[-1][:200]}")
     elif meta.get("timed_out"):
         lane = desk.settings()["lanes"].get(meta.get("lane"), {})
         state, error = "failed", f"stopped at the ceiling of {lane.get('timeout_min', 240)} minutes: {CEILING}"
@@ -419,7 +577,7 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     env.update({**lane.get("env", {}), "BH_TASK": tid, "TERM": "dumb"})
     with open(d / "check.log", "wb") as out:
         proc = subprocess.Popen(["/bin/sh", "-c", 'sh -c "$1"; echo $? > "$2"', "bh-check", lane["check"],
-                                 str(d / "check.exit")], cwd=str(desk.worktrees_dir / lane_name), env=env,
+                                 str(d / "check.exit")], cwd=desk.meta(tid).get("worktree") or str(desk.worktrees_dir / lane_name), env=env,
                                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
     desk.update(tid, pid=proc.pid, check_started=now(), check_command=lane["check"])
     desk.event("check_started", task=tid, lane=lane_name)
@@ -505,19 +663,31 @@ class Dispatcher:
             if m["state"] != "running":
                 continue
             limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
-            if m.get("cancel") or time.time() - m.get("started", time.time()) > limit:
+            over = time.time() - m.get("started", time.time()) > limit and m.get("kind") != "design"
+            if m.get("cancel") or over:  # a design session waits on the principal, so it has no time ceiling
                 if not m.get("cancel"):
                     desk.update(m["id"], timed_out=True)
                 stop(m.get("pid"))
         if desk.paused():
             return
-        running = [m for m in desk.tasks() if m["state"] == "running"]
+        designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
+        for m in desk.tasks():  # a design session has its own worktree and waits on the principal
+            if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
+                    and m["lane"] not in designing:
+                try:
+                    start_design(desk, m["id"], m["lane"])
+                except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
+                    desk.update(m["id"], state="failed", error=f"could not start: {e}"[:300])
+                    desk.event("task_not_started", task=m["id"], error=str(e)[:300])
+                else:
+                    designing.add(m["lane"])
+        running = [m for m in desk.tasks() if m["state"] == "running" and m.get("kind") != "design"]
         free = s["concurrency"] - len(running)
         busy = {m["lane"] for m in running}
         for m in desk.tasks():
             if free <= 0:
                 break
-            if m["state"] != "queued":
+            if m["state"] != "queued" or m.get("kind") == "design":
                 continue
             for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
                 if ln in busy or ln not in s["lanes"]:
@@ -539,6 +709,12 @@ class Dispatcher:
 
 def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
     """Why a queued task is not running yet, in one line."""
+    if m.get("kind") == "design":
+        other = [x["id"] for x in desk.tasks() if x.get("kind") == "design" and x["state"] == "running"
+                 and x.get("lane") == m.get("lane")]
+        return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
+                else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
+                else "opens when `bh serve` next looks (within seconds)")
     if desk.paused():
         return "dispatch is paused"
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])

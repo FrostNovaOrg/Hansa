@@ -46,6 +46,9 @@ def default_settings() -> dict:
         "concurrency": 1,
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
+        # Design sessions, which the principal works in directly (`bh design`). Blank provider
+        # or model: the coordinator's.
+        "design": {"provider": "", "model": "", "effort": ""},
         "providers": {
             "claude": {"kind": "subscription", "model": "sonnet", "effort": "", "config_dir": ""},
         },
@@ -93,7 +96,8 @@ def validate(s: dict) -> list:
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
-    known = {"version", "concurrency", "cool_minutes", "coordinator", "providers", "lanes", "prices", "browser"}
+    known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
+             "browser"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
@@ -139,7 +143,8 @@ def validate(s: dict) -> list:
         if not isinstance(ln, dict):
             p.append(f"{at}: must be an object")
             continue
-        extra = set(ln) - {"repo", "base", "providers", "allow", "env", "check", "max_turns", "timeout_min", "note"}
+        extra = set(ln) - {"repo", "base", "providers", "allow", "env", "check", "preview", "setup", "max_turns",
+                           "timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -161,8 +166,9 @@ def validate(s: dict) -> list:
                     p.append(f"{at}: env {k} must be NAME=text")
                 elif k in MANAGED_ENV or k.startswith("ANTHROPIC_"):
                     p.append(f"{at}: env {k} is set from the provider, not the lane")
-        if not isinstance(ln.get("check", ""), str) or len(ln.get("check", "")) > 1000:
-            p.append(f"{at}: check must be one shell command line (up to 1000 characters)")
+        for field in ("check", "preview", "setup"):
+            if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
+                p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
         if not _is_int(ln.get("max_turns", 300), 1, 1000):
             p.append(f"{at}: max_turns must be from 1 to 1000")
         if not _is_int(ln.get("timeout_min", 240), 1, 1440):
@@ -178,6 +184,16 @@ def validate(s: dict) -> list:
             p.append("coordinator: effort is not a known level")
         if not isinstance(co.get("audits_cost", False), bool):
             p.append("coordinator: audits_cost must be true or false")
+    ds = s.get("design", {})
+    if not isinstance(ds, dict) or set(ds) - {"provider", "model", "effort"}:
+        p.append("design must be an object with provider, model and effort")
+    else:
+        if ds.get("provider") and ds["provider"] not in provs:
+            p.append("design: unknown provider")
+        if not isinstance(ds.get("model", ""), str):
+            p.append("design: model must be text")
+        if ds.get("effort", "") not in EFFORTS:
+            p.append("design: effort is not a known level")
 
     prices = s.get("prices")
     if not isinstance(prices, dict):
