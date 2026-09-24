@@ -38,6 +38,8 @@ PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in th
 on branch task/{tid}, which was made for this task.
 - Commit your work on this branch; start each commit message with "{tid}:".
 - Do not push, do not switch branches, do not touch other directories.
+- To search, run read-only commands such as grep -rn, find and sed -n on paths in this
+  directory; they are allowed here.
 - If a command you need is refused, say which one and why you need it in your report;
   do not look for a way around the refusal.
 - End with a short report: what you changed, how you checked it, and anything left undone.
@@ -49,6 +51,7 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - Change files as your checks need (undo code, add a throwaway test), but do not commit. For
   undoing, `git checkout <commit> -- <path>`, `git restore` and `git stash` are allowed here.
 - Do not push, do not switch branches, do not touch other directories.
+- To search, run read-only commands such as grep -rn, find and sed -n on paths in this directory.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
 """
 

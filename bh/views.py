@@ -232,7 +232,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
                                             " bh merge refuses a failed check)" if ln.get("check") else "none"),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (anything else is refused and shows up in bh show):",
-            "    Read, Edit, Write, Glob, Grep and TodoWrite, inside the lane's worktree only",
+            "    Read, Edit and Write inside the lane's worktree only, and read-only commands there"
+            " such as grep, find and sed -n",
             *["    " + r for r in ln.get("allow", [])],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             " you may edit this file)"])
