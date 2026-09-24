@@ -194,8 +194,10 @@ def show_text(desk: Desk, tid: str) -> str:
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
                    f" · cache write {u['cache_write']:,}")
+    review = (f"bh merge {tid}" if v and v["verdict"] == "holds"
+              else f"bh diff {tid} --stat, then bh verify {tid} (code or tests) or bh merge {tid} (text only)")
     nxt = {"done": f"bh retry {tid} \"what to change\" · bh cancel {tid} to close it" if not m.get("commits")
-           else f"bh diff {tid} · bh merge {tid} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
+           else f"{review} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
            else f"bh retry {tid} \"make the check pass: ...\" · bh diff {tid} · bh merge {tid} --despite-check",
            "failed": (f"read its notes, then split the task or make it clearer (bh add ...); do not re-run it unchanged"
                       if str(m.get("error", "")).startswith("stopped at the ceiling")

@@ -311,6 +311,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "does not hold", "FAKE_SHOW_ARGV": str(seen)}
         s["lanes"]["a"]["check"] = "exit 1"  # a verification is never merged, so its branch is not checked
         self.assertEqual(self.desk.save_settings(s), [])
+        self.assertIn(f"then bh verify {tid} (code or tests) or bh merge {tid}", views.show_text(self.desk, tid))
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "verify", tid, "the file's contents"])
         vid = self.desk.meta(tid)["verify"]
