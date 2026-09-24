@@ -203,6 +203,8 @@ def show_text(desk: Desk, tid: str) -> str:
            "queued": "bh status shows what it is waiting for", "running": f"bh cancel {tid} to stop it"}
     if v and v["verdict"] == "does not hold" and m["state"] == "done":
         nxt["done"] = f"bh retry {tid} \"fix what {v['task']} found: ...\" · bh merge {tid} --despite-check"
+    if v and v["state"] in ("queued", "running") and m["state"] == "done":
+        nxt["done"] = f"wait for the verification: bh wait {v['task']} (bh merge {tid} is held until it ends)"
     if verifying:
         nxt = {"done": f"read the report above, then merge or send back {m.get('parent')}",
                "failed": f"bh verify {m.get('parent')} to try again", "running": f"bh cancel {tid} to stop it",

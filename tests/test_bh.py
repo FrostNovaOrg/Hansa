@@ -318,6 +318,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((v["kind"], v["parent"], v["start_from"]), ("verify", tid, self.desk.meta(tid)["head"]))
         with self.assertRaises(SystemExit):  # not while the verification runs
             main(["--desk", str(self.desk.root), "merge", tid])
+        self.assertIn(f"next: wait for the verification: bh wait {vid}", views.show_text(self.desk, tid))
         v = self.settle(d, vid)
         self.assertEqual((v["state"], v["verdict"], v.get("check")), ("done", "does not hold", None))
         argv = json.loads(seen.read_text().splitlines()[-1])
