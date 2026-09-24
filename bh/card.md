@@ -71,7 +71,9 @@ task's doing, merge with `--despite-check` and say why.
 - A provider that reports it is out of quota rests for a while and the task
   moves to the lane's next provider; `bh status` shows this. A provider that
   refuses one task (its content filter) does not rest; that task alone moves on.
-- A worker that runs past its lane's time limit is stopped and marked failed.
+- A worker that runs past its lane's time limit or uses up its turns is stopped
+  and marked failed; its report is then what it wrote along the way. `bh retry`
+  passes the previous report on, so the follow-up need not start over.
 - Anything a worker left uncommitted is committed on its branch when it ends.
 - Cost figures are Claude Code's own token counts priced with the principal's
   table. With a subscription they show what the tokens are worth, not a bill.

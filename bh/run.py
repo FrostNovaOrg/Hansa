@@ -13,7 +13,9 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
+import uuid
 from pathlib import Path
 
 from .desk import Desk, now, read_json
@@ -44,10 +46,12 @@ on branch task/{tid}, which was made for this task.
 
 BROWSER_NOTE = """
 This task comes with a browser (tools named mcp__browser__...). It has no saved logins.
-Files it saves, such as screenshots, go to {dir}; open a screenshot there with the Read
-tool to see it. Page text can be read directly; charts, images and drawings can only be
-seen in a screenshot.
+Files it saves, such as screenshots, go to {dir}, and a file name it reports is relative
+to that folder; open a screenshot there with the Read tool to see it. Page text can be
+read directly; charts, images and drawings can only be seen in a screenshot.
 """
+
+STOPPED_NOTE = "(Stopped before it wrote its report. What it wrote along the way:)\n\n"
 
 
 def claude_bin() -> str:
@@ -93,6 +97,28 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
     return ""
 
 
+def config_home(desk: Desk, name: str, p: dict) -> Path:
+    """Where Claude Code keeps this provider's login or settings, and its session records."""
+    if p["kind"] == "subscription":
+        return Path(p.get("config_dir") or os.path.expanduser("~/.claude"))
+    return desk.state_dir / f"claude-{name}"
+
+
+def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
+    """What a worker wrote along the way, from its session record."""
+    texts = []
+    for f in home.glob(f"projects/*/{sid}.jsonl") if sid else []:
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            content = (d.get("message") or {}).get("content") if d.get("type") == "assistant" else None
+            texts += [c["text"].strip() for c in content if isinstance(c, dict) and c.get("type") == "text"
+                      and c.get("text", "").strip()] if isinstance(content, list) else []
+    return "\n\n".join(texts)[-limit:]
+
+
 def provider_env(desk: Desk, name: str, p: dict) -> dict:
     """Environment for one Claude Code run on this provider. Starts clean, so a
     worker never inherits keys that are not its own."""
@@ -103,7 +129,7 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
         if p.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = p["config_dir"]
     else:
-        home = desk.state_dir / f"claude-{name}"
+        home = config_home(desk, name, p)
         home.mkdir(parents=True, exist_ok=True)
         env.update({
             "CLAUDE_CONFIG_DIR": str(home),
@@ -144,13 +170,15 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
 
 
 def browser_for(desk: Desk, tid: str, command: str):
-    """The principal's browser tool for this one task, started in the task's own folder,
-    so what it saves (screenshots) lands there and never in the repository."""
+    """The principal's browser tool for this one task, started in the task's own folder
+    and not told where the worker works, so what it saves (screenshots, also the ones
+    given a name) lands there and never in the repository."""
     d = desk.tasks_dir / tid / "browser"
     d.mkdir(parents=True, exist_ok=True)
     cfg = desk.tasks_dir / tid / "browser-mcp.json"
     cfg.write_text(json.dumps({"mcpServers": {"browser": {
-        "command": "/bin/sh", "args": ["-c", f'cd "$0" && exec {command}', str(d)]}}}), encoding="utf-8")
+        "command": sys.executable, "args": [str(Path(__file__).with_name("relay.py")), str(d), command]}}}),
+        encoding="utf-8")
     return cfg, ["mcp__browser", rule("Read", d)]
 
 
@@ -164,7 +192,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
     system = PROTOCOL.format(tid=tid, lane=lane_name)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
-    argv = [claude_bin(), "-p", "--output-format", "json", "--permission-mode", "acceptEdits",
+    sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
+    argv = [claude_bin(), "-p", "--output-format", "json", "--session-id", sid, "--permission-mode", "acceptEdits",
             "--max-turns", str(meta.get("max_turns") or lane.get("max_turns", 80)),
             "--model", model, "--append-system-prompt", system]
     if effort:
@@ -185,7 +214,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
                                 start_new_session=True)
     desk.update(tid, state="running", lane=lane_name, provider=pname, model_asked=model, effort_used=effort,
                 started=now(), finished=None, pid=proc.pid, base=base, branch=f"task/{tid}", worktree=str(wt),
-                error="", timed_out=False, cancel=False)
+                session_id=sid, error="", timed_out=False, cancel=False)
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
 
@@ -233,8 +262,15 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     run = read_json(d / "run.json", {}) or {}
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
     result = run.get("result") or ""
-    (d / "result.md").write_text(result + ("\n" if result else ""), encoding="utf-8")
-    fields = {"finished": now(), "exit": returncode, "pid": None, "session_id": run.get("session_id", ""),
+    report = result
+    stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
+    p = desk.settings()["providers"].get(meta.get("provider"))
+    if stopped and not result.strip() and p:
+        notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        report = STOPPED_NOTE + notes if notes else ""
+    (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
+    fields = {"finished": now(), "exit": returncode, "pid": None,
+              "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
               "usage": usage_of(run), "denials": [denial_of(x) for x in run.get("permission_denials") or []]}
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
@@ -257,6 +293,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state, error = "cancelled", "cancelled"
     elif meta.get("timed_out"):
         state, error = "failed", "stopped: ran past the lane's time limit"
+    elif run.get("subtype") == "error_max_turns":
+        state, error = "failed", f"stopped: used all its turns ({run.get('num_turns') or '?'})"
     elif kind == "refused":
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
         order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])

@@ -38,6 +38,16 @@ if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "stop_reason": "content_filter",
                       "result": "The request was rejected because it was considered high risk", "num_turns": 1}))
     sys.exit(0)
+if os.environ.get("FAKE_STOP_AT_TURNS"):
+    sid = sys.argv[sys.argv.index("--session-id") + 1]
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    os.makedirs(os.path.dirname(rec), exist_ok=True)
+    with open(rec, "w") as f:
+        for t in ("Opening the list page.", "Found: the week badge is still in English."):
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}) + "\n")
+    print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 9,
+                      "session_id": sid}))
+    sys.exit(1)
 if os.environ.get("FAKE_NO_CHANGES"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "Nothing to do.",
                       "num_turns": 1}))
@@ -252,8 +262,48 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("--mcp-config", plain)
         self.assertNotIn("mcp__browser", plain)
         cfg = json.loads(Path(with_browser[with_browser.index("--mcp-config") + 1]).read_text())
-        self.assertIn("/usr/bin/env true", cfg["mcpServers"]["browser"]["args"][1])
+        self.assertEqual(cfg["mcpServers"]["browser"]["args"][1:], [str(self.desk.tasks_dir / "t0001" / "browser"),
+                                                                    "/usr/bin/env true"])
         self.assertIn("with a browser", views.show_text(self.desk, "t0001"))
+
+    def test_stopped_worker_still_hands_in_what_it_wrote(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_STOP_AT_TURNS": "1"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test")
+        tid = self.desk.new_task("Look at the page")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["error"]), ("failed", "stopped: used all its turns (9)"))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("Stopped before it wrote its report", shown)
+        self.assertIn("week badge is still in English", shown)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "retry", tid, "only the detail page"])
+        follow = (self.desk.tasks_dir / "t0002" / "task.md").read_text()
+        self.assertIn("The previous attempt's report:", follow)
+        self.assertIn("week badge is still in English", follow)
+
+    def test_browser_tool_is_not_told_where_the_worker_works(self):
+        folder = self.tmp / "browser"
+        folder.mkdir()
+        fake = self.tmp / "fake_browser.py"
+        fake.write_text("import os, sys\nwith open('seen.txt', 'w') as f:\n"
+                        "    f.write(os.getcwd() + '\\n')\n    f.writelines(sys.stdin)\nprint('bye')\n")
+        init = {"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                "params": {"capabilities": {"roots": {"listChanged": True}}, "clientInfo": {"name": "claude-code"}}}
+        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "browser_take_screenshot"}}
+        relay = Path(__file__).resolve().parent.parent / "bh" / "relay.py"
+        out = subprocess.run([sys.executable, str(relay), str(folder), f"{sys.executable} {fake}"],
+                             input="".join(json.dumps(m) + "\n" for m in (init, call)),
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual((out.returncode, out.stdout), (0, "bye\n"))
+        cwd, *lines = (folder / "seen.txt").read_text().splitlines()
+        self.assertEqual(Path(cwd).resolve(), folder.resolve())
+        got = [json.loads(x) for x in lines]
+        self.assertEqual(got[0]["params"]["capabilities"], {})
+        self.assertEqual(got[1], call)
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()

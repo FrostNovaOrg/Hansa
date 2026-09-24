@@ -119,6 +119,9 @@ def cmd_retry(a):
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
     note = " ".join(a.note).strip()
     text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
+    report = desk.tasks_dir / a.id / "result.md"
+    if report.exists() and report.read_text(encoding="utf-8").strip():
+        text += "\nThe previous attempt's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
     if a.browser and not desk.settings().get("browser"):
         raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
