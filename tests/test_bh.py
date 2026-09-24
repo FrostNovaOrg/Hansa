@@ -331,6 +331,22 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
         self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(vid)["state"]), ("merged", "cancelled"))
 
+    def test_a_running_task_shows_how_far_the_worker_has_got(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Look at something slowly")
+        self.desk.update(tid, state="running", lane="a", provider="mimo", model_asked="mimo-x", started=time.time() - 600,
+                         session_id="sid-1", pid=None)
+        rec = self.desk.state_dir / "claude-mimo" / "projects" / "-work" / "sid-1.jsonl"
+        rec.parent.mkdir(parents=True)
+        rec.write_text("".join(json.dumps({"type": "assistant", "message": {"id": f"m{i}", "content": [
+            {"type": "text", "text": t}]}}) + "\n" for i, t in enumerate(["Reading the code.", "Now the tests."])))
+        run = views.status(self.desk)["running"][0]
+        self.assertEqual((run["progress"]["replies"], run["progress"]["idle_min"]), (2, 0))
+        self.assertIn("so far: 2 model replies, last activity 0 min ago; last note: Now the tests.",
+                      views.show_text(self.desk, tid))
+
     def test_browser_tool_is_not_told_where_the_worker_works(self):
         folder = self.tmp / "browser"
         folder.mkdir()

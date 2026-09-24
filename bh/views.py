@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import cost
 from .desk import Desk, read_json
-from .run import provider_problem, waiting_reason
+from .run import progress_of, provider_problem, waiting_reason
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -33,6 +33,13 @@ def _verification_line(v) -> str:
     if v["state"] in ("queued", "running"):
         return f"{v['task']} {v['state']}"
     return f"{v['task']}: {v['verdict']}" if v["verdict"] else f"{v['task']} {v['state']} without a verdict"
+
+
+def _progress_line(p: dict) -> str:
+    if p["idle_min"] is None:
+        return "no reply from the model yet"
+    return (f"{p['replies']} model replies, last activity {p['idle_min']} min ago"
+            + (f"; last note: {p['note']}" if p["note"] else ""))
 
 
 def _mins(since) -> int:
@@ -67,7 +74,8 @@ def status(desk: Desk) -> dict:
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
-                     "checking": m.get("phase") == "checking", "browser": bool(m.get("browser"))} for m in running],
+                     "checking": m.get("phase") == "checking", "browser": bool(m.get("browser")),
+                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in running],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
@@ -96,6 +104,7 @@ def status_text(st: dict) -> str:
         out += [f"  {m['id']} {m['lane']} " + ("worker done, bh is running the lane's check" if m["checking"]
                                                else f"on {m['provider']} ({m['model']})")
                 + (" with a browser" if m["browser"] else "") + f", {m['minutes']} min: {m['title']}"
+                + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["running"]]
     if st["queued"]:
         out.append("queued:")
@@ -167,6 +176,8 @@ def show_text(desk: Desk, tid: str) -> str:
             out += ["  " + x[:200] for x in chk["tail"]]
     elif m.get("phase") == "checking":
         out.append(f"check: running now: {m.get('check_command', '')}")
+    if m["state"] == "running" and m.get("phase") != "checking":
+        out.append(f"so far: {_progress_line(progress_of(desk, m))} (turns and tokens are recorded when it ends)")
     v = verification(desk, m)
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"

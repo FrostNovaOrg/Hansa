@@ -138,19 +138,37 @@ def config_home(desk: Desk, name: str, p: dict) -> Path:
     return desk.state_dir / f"claude-{name}"
 
 
-def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
-    """What a worker wrote along the way, from its session record."""
-    texts = []
+def _record(home: Path, sid: str):
+    """A worker's session record as Claude Code writes it while it works: (texts, replies, last write)."""
+    texts, replies, last = [], set(), None
     for f in home.glob(f"projects/*/{sid}.jsonl") if sid else []:
+        last = max(last or 0, f.stat().st_mtime)
         for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 d = json.loads(line)
             except ValueError:
                 continue
-            content = (d.get("message") or {}).get("content") if d.get("type") == "assistant" else None
+            msg = d.get("message") or {} if d.get("type") == "assistant" else {}
+            if msg.get("id"):
+                replies.add(msg["id"])
+            content = msg.get("content")
             texts += [c["text"].strip() for c in content if isinstance(c, dict) and c.get("type") == "text"
                       and c.get("text", "").strip()] if isinstance(content, list) else []
-    return "\n\n".join(texts)[-limit:]
+    return texts, len(replies), last
+
+
+def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
+    """What a worker wrote along the way, from its session record."""
+    return "\n\n".join(_record(home, sid)[0])[-limit:]
+
+
+def progress_of(desk: Desk, m: dict) -> dict:
+    """How far a running worker has got: model replies so far, minutes since it last did
+    anything, and the last thing it wrote. bh records turns and tokens only at the end."""
+    p = desk.settings()["providers"].get(m.get("provider") or "")
+    texts, replies, last = _record(config_home(desk, m["provider"], p), m.get("session_id", "")) if p else ([], 0, None)
+    return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last else None,
+            "note": texts[-1].splitlines()[0][:160] if texts else ""}
 
 
 def provider_env(desk: Desk, name: str, p: dict) -> dict:
