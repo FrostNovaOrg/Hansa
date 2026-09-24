@@ -10,10 +10,11 @@ from pathlib import Path
 
 from . import __version__, cost, views
 from .desk import DEFAULT_ALLOW, Desk, default_lane, default_settings, write_json
-from .run import Dispatcher, check_provider, git, provider_env, stop
+from .run import VERIFY_TASK, Dispatcher, check_provider, git, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
-HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, verifier, verifier-high
+HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer
+RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by bh verify and the reviewer
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
 BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
@@ -87,8 +88,18 @@ def cmd_diff(a):
 def cmd_merge(a):
     desk = Desk.find(a.desk)
     m = desk.meta(a.id)
+    if m.get("kind") == "verify":
+        raise SystemExit(f"bh: {a.id} is a verification of {m.get('parent')}; it is never merged. "
+                         f"Read it, then merge or send back {m.get('parent')}")
     if m["state"] != "done":
         raise SystemExit(f"bh: only a finished task can be merged; {a.id} is {m['state']}")
+    v = views.verification(desk, m)
+    if v and v["state"] in ("queued", "running"):
+        raise SystemExit(f"bh: {v['task']} is still verifying {a.id}; nothing was merged. Wait for it: bh wait {v['task']}")
+    if v and v["verdict"] == "does not hold" and not a.despite_check:
+        raise SystemExit(f"bh: the verification {v['task']} found that {a.id} does not hold; nothing was merged. "
+                         f"bh show {v['task']} says what it ran. Send it back with bh retry {a.id} \"...\", "
+                         f"or merge anyway: bh merge {a.id} --despite-check")
     chk = m.get("check")
     if chk and not chk["ok"] and not a.despite_check:
         raise SystemExit(f"bh: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
@@ -113,13 +124,17 @@ def cmd_merge(a):
         raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
                          f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
     desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
-    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if chk and not chk["ok"] else {}))
+    despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold")
+    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}))
+    _close_verification(desk, m, f"closed: {a.id} was merged")
     print(f"{a.id} merged into {base} at {repo}")
 
 
 def cmd_retry(a):
     desk = Desk.find(a.desk)
     m = desk.meta(a.id)
+    if m.get("kind") == "verify":
+        raise SystemExit(f"bh: {a.id} is a verification; send back the task it checked: bh retry {m.get('parent')} \"...\"")
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
     note = " ".join(a.note).strip()
     text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
@@ -136,6 +151,7 @@ def cmd_retry(a):
     tid = desk.new_task(text, **opts)
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
         desk.update(a.id, state="replaced", replaced_by=tid)
+        _close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
     print(f"{tid} queued as a follow-up to {a.id}" + (" from the base branch" if a.fresh else ""))
 
 
@@ -151,8 +167,51 @@ def cmd_cancel(a):
         desk.update(a.id, state="cancelled", error="closed without merging")
     else:
         raise SystemExit(f"bh: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be cancelled")
+    _close_verification(desk, m, f"closed: {a.id} was cancelled")
     desk.event("task_cancel", task=a.id)
     print(f"{a.id} cancelled")
+
+
+def cmd_verify(a):
+    desk = Desk.find(a.desk)
+    m = desk.meta(a.id)
+    if m.get("kind") == "verify":
+        raise SystemExit(f"bh: {a.id} is itself a verification; verify the task it checks ({m.get('parent')})")
+    if m["state"] != "done" or not m.get("commits"):
+        raise SystemExit(f"bh: only a finished task with changes can be verified; {a.id} is {m['state']}"
+                         + ("" if m.get("commits") else ", with nothing to merge"))
+    if a.browser and not desk.settings().get("browser"):
+        raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
+    v = views.verification(desk, m)
+    if v and v["state"] in ("queued", "running"):
+        raise SystemExit(f"bh: {v['task']} is already verifying {a.id}")
+    d = desk.tasks_dir / a.id
+    task = (d / "task.md").read_text(encoding="utf-8").strip()
+    report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
+    note = " ".join(a.note).strip()
+    text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12])
+            + (f"\nLook in particular at: {note}\n" if note else "")
+            + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
+    vid = desk.new_task(text, kind="verify", parent=a.id, lane=m.get("lane", ""), effort=a.effort or "",
+                        start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
+                        browser=a.browser or m.get("browser"))
+    if v:
+        _close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
+    desk.update(a.id, verify=vid)
+    print(f"{vid} queued: a worker will run {a.id}'s change to see whether it holds. "
+          f"Follow it with: bh wait {vid}; the verdict shows in bh show {a.id}")
+
+
+def _close_verification(desk: Desk, m: dict, why: str) -> None:
+    """A verification belongs to the task it checks, and ends with it."""
+    v = views.verification(desk, m)
+    if not v:
+        return
+    if v["state"] in ("queued", "done"):
+        desk.update(v["task"], state="cancelled", error=why)
+    elif v["state"] == "running":
+        desk.update(v["task"], cancel=True)
+        stop(desk.meta(v["task"]).get("pid"))
 
 
 def cmd_pause(a):
@@ -292,6 +351,12 @@ def cmd_coordinator(a):
     _bring(desk, CARD, desk.root / "CLAUDE.md", "card_refreshed")
     for f in sorted(HELPERS.glob("*.md")):
         _bring(desk, f, desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
+    for name in RETIRED_HELPERS:
+        old = desk.root / ".claude" / "agents" / name
+        if old.is_file():
+            desk.state_dir.mkdir(exist_ok=True)
+            old.rename(desk.state_dir / f"{name}.{int(time.time())}")
+            desk.event("helper_retired", file=name)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + a.rest, env)
 
@@ -365,6 +430,11 @@ def main(argv=None):
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--browser", action="store_true", help="give the follow-up a browser")
+    p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
+    p.add_argument("id")
+    p.add_argument("note", nargs="*", help="what to look at in particular")
+    p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--browser", action="store_true", help="give the verification a browser")
     p = add("cancel", cmd_cancel, "stop a queued or running task, or close a finished one without merging")
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")

@@ -44,6 +44,37 @@ on branch task/{tid}, which was made for this task.
 """
 
 
+VERIFY_PROTOCOL = """You are a worker in lane {lane}, checking another worker's finished task. You are
+on branch task/{tid}, a copy of that task's branch made for this check; nothing here is merged.
+- Change files as your checks need (undo code, add a throwaway test), but do not commit. For
+  undoing, `git checkout <commit> -- <path>`, `git restore` and `git stash` are allowed here.
+- Do not push, do not switch branches, do not touch other directories.
+- If a command you need is refused, say which one and why in your report; do not look for a way around it.
+"""
+
+VERIFY_TASK = """Find out, by running things, whether task {id} does what it asked. Its change is
+`git diff {base}..{head}`, already on this branch. Do not fix anything.
+
+1. Run first.
+   - If the change adds or changes tests: undo the code part of the change (keep the tests) and
+     run those tests. They should fail; if they still pass, they do not test the change. Then put
+     the code back.
+   - Run what the task is about the way a user or caller would meet it.
+   - Try the edge cases you can think of: empty or missing values, data or settings left from
+     before the change, errors, other languages.
+2. Read the code only to decide what to run and to explain what you saw.
+3. For text or documentation, compare what it says with the code it describes.
+
+Report what you ran and what happened (the command and the lines that matter); then, for each
+thing the task asked, whether it holds, does not hold or is unsure, with that evidence; then
+anything the change does that the task did not ask for. End with exactly one of these lines:
+VERDICT: holds
+VERDICT: does not hold
+VERDICT: unsure
+"""
+VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
+VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)", "Bash(git stash:*)"]
+
 BROWSER_NOTE = """
 This task comes with a browser (tools named mcp__browser__...). It has no saved logins.
 Files it saves, such as screenshots, go to {dir}, and a file name it reports is relative
@@ -192,7 +223,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
     model = meta.get("model") or p["model"]
     effort = meta.get("effort") or p.get("effort", "")
     brief = desk.lanes_dir / lane_name / "brief.md"
-    system = PROTOCOL.format(tid=tid, lane=lane_name)
+    verifying = meta.get("kind") == "verify"
+    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
@@ -207,7 +239,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
         argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
         argv += ["--mcp-config", str(cfg)]
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir)]
-    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra]
+    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *(VERIFY_ALLOW if verifying else [])]
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "BH_TASK": tid,
            "GIT_AUTHOR_NAME": f"bh worker {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
            "GIT_COMMITTER_NAME": f"bh worker {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
@@ -276,6 +308,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
               "usage": usage_of(run), "denials": [denial_of(x) for x in run.get("permission_denials") or []]}
+    if meta.get("kind") == "verify":
+        found = VERDICT.findall(result)
+        fields["verdict"] = found[-1].lower() if found else ""
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     try:
         if wt is None:
@@ -321,7 +356,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
-    checking = state == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
+    checking = (state == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
+                and meta.get("kind") != "verify")  # a verification is never merged, so never checked
     meta = desk.update(tid, state="running" if checking else state, phase="checking" if checking else "",
                        error=error, attempts=attempts, **fields)
     desk.event("task_finished", task=tid, state="checking" if checking else state,

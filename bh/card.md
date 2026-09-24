@@ -24,6 +24,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh diff <id> [--stat]` | the task branch against its base |
 | `bh merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |
 | `bh retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base); the follow-up replaces it |
+| `bh verify <id> ["what to look at"] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `bh show <id>`; never merged |
 | `bh cancel <id>` | stop a queued or running task, or close a finished one without merging |
 | `bh wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
 | `bh pause "<reason>"` / `bh resume` | stop / restart new work (running tasks finish) |
@@ -57,18 +58,27 @@ refused command means the worker could not do something; decide whether the
 task needs it (then ask) or should be rewritten. A failed check shows its last
 lines; send the task back with `bh retry`, or, if the failure is not the
 task's doing, merge with `--despite-check` and say why.
-Before merging a change that matters, you can send the `verifier` helper to
-check it and read its verdict instead of re-reading everything yourself.
+
+## Checking before you merge
+The lane's check runs on every task. What else a task gets depends on what the
+change touches, which `bh diff <id> --stat` shows:
+- Text or documentation only: the lane's check is enough; read the diff yourself.
+- Code or tests: `bh verify <id>` first. A worker then runs the change rather
+  than reading it: it undoes the code to see the new tests fail, runs what the
+  task is about, and tries edge cases. Its verdict (holds, does not hold,
+  unsure) shows in `bh show <id>`; bh will not merge while it runs, nor after
+  "does not hold" unless you say `--despite-check`.
+- Security, credentials, money, releases or stored data: `bh verify <id>`, and
+  also have the `reviewer` helper read the change.
 
 ## Your helpers
-Two kinds of helper run inside this session, on your model at a lower effort.
-They read and never change anything:
-- `scout`: one question about the desk or a repository: where something is,
-  what a value is now, how something works now. It answers with file:line.
-- `verifier`: checks one finished task against what the task asked, using the
-  task, its report and `bh diff`, and says point by point whether it holds.
-  `verifier-high` is the same at high effort, for hard cases: security,
-  credentials, wide or risky changes.
+Two kinds of helper run inside this session, on your model. They read and never
+change anything:
+- `scout` (medium effort): one question about the desk or a repository: where
+  something is, what a value is now, how something works now. It answers with
+  file:line.
+- `reviewer` (high effort): reads one finished task's change for high-stakes
+  cases, looking for what a test run would miss.
 Brief a helper as you would a task: one question or one task id, and what you
 need back. Claude Code's general-purpose helpers are switched off here; work
 that needs code changed, commands run or a browser goes to a worker.

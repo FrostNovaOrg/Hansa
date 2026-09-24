@@ -20,6 +20,21 @@ STATES = {
 }
 
 
+def verification(desk: Desk, m: dict):
+    """The latest verification of a task: {task, state, verdict}, or None."""
+    vid = m.get("verify")
+    if not vid:
+        return None
+    v = desk.meta(vid)
+    return {"task": vid, "state": v["state"], "verdict": v.get("verdict", "")}
+
+
+def _verification_line(v) -> str:
+    if v["state"] in ("queued", "running"):
+        return f"{v['task']} {v['state']}"
+    return f"{v['task']}: {v['verdict']}" if v["verdict"] else f"{v['task']} {v['state']} without a verdict"
+
+
 def _mins(since) -> int:
     return int((time.time() - (since or time.time())) // 60)
 
@@ -57,8 +72,8 @@ def status(desk: Desk) -> dict:
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
                     "commits": m.get("commits", 0), "denied": len(m.get("denials", [])),
-                    "check": None if not m.get("check") else m["check"]["ok"]}
-                   for m in tasks if m["state"] == "done"],
+                    "check": None if not m.get("check") else m["check"]["ok"], "verify": verification(desk, m)}
+                   for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
         "asks": [a for a in desk.asks() if not a.get("closed")],
@@ -89,6 +104,7 @@ def status_text(st: dict) -> str:
         out.append("waiting for review (bh show <id>):")
         out += [f"  {m['id']} {m['lane']}: {m['title']} [{m['stat'] or 'no changes'}"
                 + {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]]
+                + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
                 + (f"; {m['denied']} command(s) refused" if m["denied"] else "") + "]" for m in st["review"]]
     if st["failed"]:
         out.append("failed (latest):")
@@ -115,7 +131,10 @@ def show_text(desk: Desk, tid: str) -> str:
         head += f" · {max(0, int(((m.get('finished') or time.time()) - m['started']) // 60))} min"
     if m.get("browser"):
         head += " · with a browser"
-    out = [head, f"title: {m['title']}", f"meaning: {STATES.get(m['state'], '')}"]
+    verifying = m.get("kind") == "verify"
+    meaning = (f"a verification of {m.get('parent')}: a worker ran its change to see whether it holds; never merged"
+               if verifying else STATES.get(m["state"], ""))
+    out = [head, f"title: {m['title']}", f"meaning: {meaning}"]
     if m.get("error"):
         out.append(f"error: {m['error']}")
     for a in m.get("attempts", []):
@@ -148,6 +167,12 @@ def show_text(desk: Desk, tid: str) -> str:
             out += ["  " + x[:200] for x in chk["tail"]]
     elif m.get("phase") == "checking":
         out.append(f"check: running now: {m.get('check_command', '')}")
+    v = verification(desk, m)
+    if v:
+        out.append(f"verification (a worker ran the change): {_verification_line(v)}"
+                   + ("" if v["state"] in ("queued", "running") else f"; bh show {v['task']} says what it ran"))
+    if verifying and m.get("state") == "done":
+        out.append(f"verdict: {m.get('verdict') or 'none given'}")
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
                    f" · cache write {u['cache_write']:,}")
@@ -158,6 +183,12 @@ def show_text(desk: Desk, tid: str) -> str:
                       if str(m.get("error", "")).startswith("stopped at the ceiling")
                       else f"bh retry {tid} \"what to change\" (or --fresh to start over)"),
            "queued": "bh status shows what it is waiting for", "running": f"bh cancel {tid} to stop it"}
+    if v and v["verdict"] == "does not hold" and m["state"] == "done":
+        nxt["done"] = f"bh retry {tid} \"fix what {v['task']} found: ...\" · bh merge {tid} --despite-check"
+    if verifying:
+        nxt = {"done": f"read the report above, then merge or send back {m.get('parent')}",
+               "failed": f"bh verify {m.get('parent')} to try again", "running": f"bh cancel {tid} to stop it",
+               "queued": "bh status shows what it is waiting for"}
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
     return "\n".join(out)

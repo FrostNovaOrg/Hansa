@@ -60,7 +60,8 @@ open("hello.txt", "w").write("hello from " + os.environ.get("BH_TASK", "?") + "\
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
-    "result": "Added hello.txt. Checked it exists.", "session_id": "s-ok",
+    "result": "Added hello.txt. Checked it exists." + ("\nVERDICT: " + os.environ["FAKE_VERDICT"] if os.environ.get("FAKE_VERDICT") else ""),
+    "session_id": "s-ok",
     "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "env JAVA_HOME=/x mvn test"}}],
     "modelUsage": {"claude-haiku-4-5-20251001": {"inputTokens": 1000, "outputTokens": 200,
         "cacheReadInputTokens": 5000, "cacheCreationInputTokens": 100, "costUSD": 0.0031, "costBasis": "list"}}}))
@@ -162,6 +163,8 @@ class DeskTest(unittest.TestCase):
         echo.write_text("#!/bin/sh\necho \"$@\"\n")
         echo.chmod(0o755)
         (self.desk.root / "CLAUDE.md").write_text("an older card\n")
+        (self.desk.root / ".claude" / "agents").mkdir(parents=True)
+        (self.desk.root / ".claude" / "agents" / "verifier.md").write_text("a retired helper\n")
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
                             "coordinator", "--permission-mode", "dontAsk"],
                            capture_output=True, text=True, env={**os.environ, "BH_CLAUDE": str(echo)})
@@ -173,9 +176,12 @@ class DeskTest(unittest.TestCase):
         self.assertIn("Agent(general-purpose) Agent(Explore)", r.stdout)  # Claude Code's own helpers are off
         code = Path(__file__).resolve().parent.parent / "bh"
         self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (code / "card.md").read_text())
-        for name in ("scout.md", "verifier.md", "verifier-high.md"):  # the desk's helpers come along
-            self.assertEqual((self.desk.root / ".claude" / "agents" / name).read_text(), (code / "agents" / name).read_text())
-        self.assertIn("effort: medium", (self.desk.root / ".claude" / "agents" / "scout.md").read_text())
+        agents = self.desk.root / ".claude" / "agents"
+        for name in ("scout.md", "reviewer.md"):  # the desk's helpers come along
+            self.assertEqual((agents / name).read_text(), (code / "agents" / name).read_text())
+        self.assertIn("effort: medium", (agents / "scout.md").read_text())
+        self.assertFalse((agents / "verifier.md").exists())  # retired, kept in .bh/
+        self.assertTrue(list(self.desk.state_dir.glob("verifier.md.*")))
 
     def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
         s = self.desk.settings()
@@ -291,6 +297,39 @@ class DeskTest(unittest.TestCase):
         follow = (self.desk.tasks_dir / "t0002" / "task.md").read_text()
         self.assertIn("The previous attempt's report:", follow)
         self.assertIn("week badge is still in English", follow)
+
+    def test_verify_runs_the_change_and_holds_the_merge(self):
+        seen = self.tmp / "argv.jsonl"
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "does not hold", "FAKE_SHOW_ARGV": str(seen)}
+        s["lanes"]["a"]["check"] = "exit 1"  # a verification is never merged, so its branch is not checked
+        self.assertEqual(self.desk.save_settings(s), [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid, "the file's contents"])
+        vid = self.desk.meta(tid)["verify"]
+        v = self.desk.meta(vid)
+        self.assertEqual((v["kind"], v["parent"], v["start_from"]), ("verify", tid, self.desk.meta(tid)["head"]))
+        with self.assertRaises(SystemExit):  # not while the verification runs
+            main(["--desk", str(self.desk.root), "merge", tid])
+        v = self.settle(d, vid)
+        self.assertEqual((v["state"], v["verdict"], v.get("check")), ("done", "does not hold", None))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn("Bash(git checkout:*)", argv)
+        self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
+        self.assertIn("Run first", (self.desk.tasks_dir / vid / "task.md").read_text())
+        st = views.status(self.desk)
+        self.assertEqual([m["id"] for m in st["review"]], [tid])  # the verification is not up for review itself
+        self.assertIn(f"verification {vid}: does not hold", views.status_text(st))
+        self.assertIn(f"{vid}: does not hold", views.show_text(self.desk, tid))
+        for args in (["merge", vid], ["merge", tid]):  # never merged itself; "does not hold" holds the task
+            with self.assertRaises(SystemExit):
+                main(["--desk", str(self.desk.root), *args])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
+        self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(vid)["state"]), ("merged", "cancelled"))
 
     def test_browser_tool_is_not_told_where_the_worker_works(self):
         folder = self.tmp / "browser"
