@@ -151,7 +151,9 @@ def show_text(desk: Desk, tid: str) -> str:
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
     if report:
         lines = report.splitlines()
-        out += ["report:"] + ["  " + x for x in lines[:60]] + (["  ..."] if len(lines) > 60 else [])
+        out += ["report:"] + ["  " + x for x in lines[:60]]
+        if len(lines) > 60:
+            out.append(f"  ... {len(lines) - 60} more lines; the whole report is {d / 'result.md'}")
     if m.get("replaced_by"):
         out.append(f"replaced by: {m['replaced_by']}")
     if m.get("files") is not None and m.get("state") != "queued":

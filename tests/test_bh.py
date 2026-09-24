@@ -60,7 +60,8 @@ open("hello.txt", "w").write("hello from " + os.environ.get("BH_TASK", "?") + "\
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
-    "result": "Added hello.txt. Checked it exists." + ("\nVERDICT: " + os.environ["FAKE_VERDICT"] if os.environ.get("FAKE_VERDICT") else ""),
+    "result": "Added hello.txt. Checked it exists." + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
+                                                      if os.environ.get("FAKE_VERDICT") else ""),
     "session_id": "s-ok",
     "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "env JAVA_HOME=/x mvn test"}}],
     "modelUsage": {"claude-haiku-4-5-20251001": {"inputTokens": 1000, "outputTokens": 200,
@@ -324,6 +325,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in st["review"]], [tid])  # the verification is not up for review itself
         self.assertIn(f"verification {vid}: does not hold", views.status_text(st))
         self.assertIn(f"{vid}: does not hold", views.show_text(self.desk, tid))
+        self.assertIn(f"more lines; the whole report is {self.desk.tasks_dir / vid / 'result.md'}",
+                      views.show_text(self.desk, vid))
         for args in (["merge", vid], ["merge", tid]):  # never merged itself; "does not hold" holds the task
             with self.assertRaises(SystemExit):
                 main(["--desk", str(self.desk.root), *args])
