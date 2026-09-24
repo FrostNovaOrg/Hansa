@@ -248,11 +248,16 @@ def cmd_wait(a):
         print(f"{m['id']} {m['state']}: {m['title']}  (bh show {m['id']})")
     for x in answered:
         print(f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
-    still = [t for t in watch if live(t)]
+    still = [desk.meta(t) for t in watch if live(t)]
     if not ended and not answered:
-        print(f"nothing changed in {a.timeout:g} min")
+        print(f"no task finished in {a.timeout:g} min")
+    for m in still:
+        mins = int((time.time() - m["started"]) // 60) if m.get("started") else 0
+        print(f"{m['id']} {m['state']}" + (f" {mins} min, so far: {views.progress_text(desk, m)}"
+                                           if m["state"] == "running" else ""))
     if still:
-        print("still queued or running: " + ", ".join(still) + "  (bh wait again to keep waiting)")
+        print("bh wait again to keep waiting. Some providers take minutes per reply; a task is stuck"
+              " only when nothing has happened for a long while.")
 
 
 def cmd_ask(a):

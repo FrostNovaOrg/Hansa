@@ -351,6 +351,11 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((run["progress"]["replies"], run["progress"]["idle_min"]), (2, 0))
         self.assertIn("so far: 2 model replies, last activity 0 min ago; last note: Now the tests.",
                       views.show_text(self.desk, tid))
+        self.assertNotIn("0 turns", views.show_text(self.desk, tid))  # turns are counted when it ends
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "wait", tid, "--timeout", "0.001", "--every", "0.01"])
+        self.assertIn(f"no task finished in 0.001 min\n{tid} running 10 min, so far: 2 model replies", out.getvalue())
 
     def test_browser_tool_is_not_told_where_the_worker_works(self):
         folder = self.tmp / "browser"

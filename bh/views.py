@@ -42,6 +42,11 @@ def _progress_line(p: dict) -> str:
             + (f"; last note: {p['note']}" if p["note"] else ""))
 
 
+def progress_text(desk: Desk, m: dict) -> str:
+    """How far a running task's worker has got, in words."""
+    return "checking now" if m.get("phase") == "checking" else _progress_line(progress_of(desk, m))
+
+
 def _mins(since) -> int:
     return int((time.time() - (since or time.time())) // 60)
 
@@ -135,7 +140,7 @@ def show_text(desk: Desk, tid: str) -> str:
     d = desk.tasks_dir / tid
     head = f"{tid} · {m['state']} · lane {m.get('lane') or 'any'}"
     if m.get("provider"):
-        head += f" · {m['provider']} ({m.get('model_asked')}) · {m.get('turns') or 0} turns"
+        head += f" · {m['provider']} ({m.get('model_asked')})" + (f" · {m['turns']} turns" if m.get("turns") else "")
     if m.get("started"):
         head += f" · {max(0, int(((m.get('finished') or time.time()) - m['started']) // 60))} min"
     if m.get("browser"):
