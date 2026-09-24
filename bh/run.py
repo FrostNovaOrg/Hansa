@@ -71,6 +71,9 @@ anything the change does that the task did not ask for. End with exactly one of 
 VERDICT: holds
 VERDICT: does not hold
 VERDICT: unsure
+Say "does not hold" when something the task asked for does not hold, and also when a test the
+change adds or changes still passes with the code undone: such a test checks nothing, even if
+the task asked for it that way.
 """
 VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
 VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)", "Bash(git stash:*)"]
