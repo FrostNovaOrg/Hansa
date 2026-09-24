@@ -96,7 +96,7 @@ def transcript_rows(desk: Desk, since: float) -> list:
         for f in proj.rglob("*.jsonl"):
             if f.stat().st_mtime < since:
                 continue
-            seat = "helper" if "subagents" in f.parts else "coordinator"
+            seat = helper_seat(f) if "subagents" in f.parts else "coordinator"
             with open(f, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     if '"usage"' not in line:
@@ -130,6 +130,15 @@ def transcript_rows(desk: Desk, since: float) -> list:
                      "model": model, **{k: u[k] for k in TOKEN_FIELDS}, "usd": usd,
                      "priced_by": "price table" if usd is not None else "no price"})
     return rows
+
+
+def helper_seat(f: Path) -> str:
+    """'helper:scout' and the like, from the note Claude Code keeps beside a helper's transcript."""
+    try:
+        kind = json.loads(f.with_suffix(".meta.json").read_text(encoding="utf-8")).get("agentType")
+    except (OSError, ValueError, AttributeError):
+        kind = None
+    return f"helper:{kind}" if kind else "helper"
 
 
 def cc_split_known(u) -> bool:

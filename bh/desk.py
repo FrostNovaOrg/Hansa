@@ -64,7 +64,7 @@ def default_settings() -> dict:
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
     return {"repo": repo, "base": base, "providers": providers or ["claude"],
-            "allow": list(DEFAULT_ALLOW), "env": {}, "max_turns": 80, "timeout_min": 60}
+            "allow": list(DEFAULT_ALLOW), "env": {}, "max_turns": 300, "timeout_min": 240}
 
 
 def now() -> float:
@@ -163,10 +163,10 @@ def validate(s: dict) -> list:
                     p.append(f"{at}: env {k} is set from the provider, not the lane")
         if not isinstance(ln.get("check", ""), str) or len(ln.get("check", "")) > 1000:
             p.append(f"{at}: check must be one shell command line (up to 1000 characters)")
-        if not _is_int(ln.get("max_turns", 80), 1, 500):
-            p.append(f"{at}: max_turns must be from 1 to 500")
-        if not _is_int(ln.get("timeout_min", 60), 1, 600):
-            p.append(f"{at}: timeout_min must be from 1 to 600")
+        if not _is_int(ln.get("max_turns", 300), 1, 1000):
+            p.append(f"{at}: max_turns must be from 1 to 1000")
+        if not _is_int(ln.get("timeout_min", 240), 1, 1440):
+            p.append(f"{at}: timeout_min must be from 1 to 1440")
 
     co = s.get("coordinator")
     if not isinstance(co, dict):

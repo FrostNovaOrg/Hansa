@@ -64,7 +64,7 @@ const T = ZH ? {
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"填在这里，只存在本机、谁也看不到内容", check:"检查接口", checking:"检查中…",
   ready:"可用", lastCheck:"上次检查", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
   general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟", coordinator:"协调席",
-  auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数", timeout:"每件最长分钟",
+  auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"执行层能跑的命令（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。不在这里的命令一律被拒，被拒的会记在任务详情里）",
   laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）",
@@ -77,7 +77,7 @@ const T = ZH ? {
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
-  seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层",
+  seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 bh web 给的地址打开",
   noPrice:"没价目", tokensNoPrice:"token 没价目"
 } : {
@@ -93,7 +93,7 @@ const T = ZH ? {
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Stored on this machine only; nobody can read it back", check:"Check", checking:"checking…",
   ready:"ready", lastCheck:"last check", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
   general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a quota error (min)", coordinator:"Coordinator",
-  auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task", timeout:"Max minutes per task",
+  auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
   allow:"Commands workers may run (one rule per line; Bash(pnpm test:*) means any command starting with pnpm test; anything else is refused and listed on the task)",
   laneCheck:"Check command: bh runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", checkingWork:"worker done, checking", withBrowser:" (with a browser)",
@@ -106,7 +106,7 @@ const T = ZH ? {
   days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
   costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill.",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
-  seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers",
+  seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by bh web",
   noPrice:"no price", tokensNoPrice:"tokens without a price"
 };
@@ -272,7 +272,7 @@ function renderSettings(problems) {
       h("div", {class:"row"}, newLane, newRepo, h("button", {onclick: () => { const n = newLane.value.trim();
         if (n && !S.lanes[n]) { S.lanes[n] = {repo:newRepo.value.trim(), base:"main", providers:Object.keys(S.providers).slice(0, 1),
           allow:["Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(ls:*)"],
-          env:{}, max_turns:80, timeout_min:60}; renderSettings(); } }}, T.addLane))),
+          env:{}, max_turns:300, timeout_min:240}; renderSettings(); } }}, T.addLane))),
     section(T.general, h("div", {class:"grid"},
       T.concurrency, bind(S, "concurrency", "number"), T.coolMinutes, bind(S, "cool_minutes", "number"),
       T.coordinator, h("div", {class:"row"}, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers)),
@@ -298,7 +298,7 @@ function renderSettings(problems) {
 let costDays = 7;
 async function loadCost() {
   const r = await api("/api/cost?days=" + costDays);
-  const seatName = k => T["seat_" + k] || k;
+  const seatName = k => k.startsWith("helper:") ? `${T.seat_helper}: ${T["helper_" + k.slice(7)] || k.slice(7)}` : T["seat_" + k] || k;
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
     if (!rows.length) return null;

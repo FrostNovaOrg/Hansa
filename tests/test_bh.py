@@ -170,7 +170,12 @@ class DeskTest(unittest.TestCase):
         repo = self.repo.resolve()
         self.assertIn(f"--add-dir {repo}", r.stdout)
         self.assertIn(f"Edit(//{str(repo).lstrip('/')}/**)", r.stdout)
-        self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (Path(__file__).resolve().parent.parent / "bh" / "card.md").read_text())
+        self.assertIn("Agent(general-purpose) Agent(Explore)", r.stdout)  # Claude Code's own helpers are off
+        code = Path(__file__).resolve().parent.parent / "bh"
+        self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (code / "card.md").read_text())
+        for name in ("scout.md", "verifier.md", "verifier-high.md"):  # the desk's helpers come along
+            self.assertEqual((self.desk.root / ".claude" / "agents" / name).read_text(), (code / "agents" / name).read_text())
+        self.assertIn("effort: medium", (self.desk.root / ".claude" / "agents" / "scout.md").read_text())
 
     def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
         s = self.desk.settings()
@@ -275,10 +280,12 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("mimo", "sk-test")
         tid = self.desk.new_task("Look at the page")
         m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual((m["state"], m["error"]), ("failed", "stopped: used all its turns (9)"))
+        self.assertEqual(m["state"], "failed")
+        self.assertTrue(m["error"].startswith("stopped at the ceiling of 300 turns: the task was probably too big"), m)
         shown = views.show_text(self.desk, tid)
-        self.assertIn("Stopped before it wrote its report", shown)
+        self.assertIn("Stopped at the ceiling before it wrote its report", shown)
         self.assertIn("week badge is still in English", shown)
+        self.assertIn("split the task or make it clearer", shown)
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "retry", tid, "only the detail page"])
         follow = (self.desk.tasks_dir / "t0002" / "task.md").read_text()
@@ -354,11 +361,16 @@ class DeskTest(unittest.TestCase):
             "id": "msg_1", "model": "claude-opus-5", "usage": {"input_tokens": 100, "output_tokens": 10,
                                                                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
         (proj / "s.jsonl").write_text((json.dumps(line) + "\n") * 3)  # one message, logged three times
+        helper = proj / "s" / "subagents"
+        helper.mkdir(parents=True)
+        (helper / "agent-1.jsonl").write_text(json.dumps({**line, "message": {**line["message"], "id": "msg_2"}}) + "\n")
+        (helper / "agent-1.meta.json").write_text(json.dumps({"agentType": "scout"}))
         s = self.desk.settings()
         s["providers"]["claude"]["config_dir"] = str(conf)
         self.desk.save_settings(s)
         rep = cost.report(self.desk, 1)
         self.assertEqual(rep["by"]["seat"]["coordinator"]["tokens"], 110)
+        self.assertEqual(rep["by"]["seat"]["helper:scout"]["tokens"], 110)
         self.assertAlmostEqual(rep["by"]["seat"]["coordinator"]["usd"], (100 * 5 + 10 * 25) / 1e6, places=6)
         self.assertEqual(rep["by"]["seat"]["worker"]["tokens"], 6300)
         self.assertEqual(rep["unpriced_models"], [])

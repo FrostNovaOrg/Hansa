@@ -154,7 +154,9 @@ def show_text(desk: Desk, tid: str) -> str:
     nxt = {"done": f"bh retry {tid} \"what to change\" · bh cancel {tid} to close it" if not m.get("commits")
            else f"bh diff {tid} · bh merge {tid} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
            else f"bh retry {tid} \"make the check pass: ...\" · bh diff {tid} · bh merge {tid} --despite-check",
-           "failed": f"bh retry {tid} \"what to change\" (or --fresh to start over)",
+           "failed": (f"read its notes, then split the task or make it clearer (bh add ...); do not re-run it unchanged"
+                      if str(m.get("error", "")).startswith("stopped at the ceiling")
+                      else f"bh retry {tid} \"what to change\" (or --fresh to start over)"),
            "queued": "bh status shows what it is waiting for", "running": f"bh cancel {tid} to stop it"}
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
@@ -173,7 +175,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             f"lane {name} (set by the principal on the web page; ask with bh ask to change it)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
-            f"  per task: at most {ln.get('max_turns', 80)} turns, {ln.get('timeout_min', 60)} minutes (check included)",
+            f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
+            " (check included); set high, so reaching it means something went wrong",
             "  check after each task: " + (f"{ln['check']} (bh runs it in the worktree after the worker ends;"
                                             " bh merge refuses a failed check)" if ln.get("check") else "none"),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),

@@ -51,7 +51,10 @@ to that folder; open a screenshot there with the Read tool to see it. Page text 
 read directly; charts, images and drawings can only be seen in a screenshot.
 """
 
-STOPPED_NOTE = "(Stopped before it wrote its report. What it wrote along the way:)\n\n"
+# A lane's turn and time limits are a circuit breaker, set high: a worker that reaches one
+# was given a task too big or unclear, or got stuck. Its notes show where it went.
+CEILING = "the task was probably too big or unclear, or the worker got stuck"
+STOPPED_NOTE = "(Stopped at the ceiling before it wrote its report. Its notes along the way, to see what went wrong:)\n\n"
 
 
 def claude_bin() -> str:
@@ -194,7 +197,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
     argv = [claude_bin(), "-p", "--output-format", "json", "--session-id", sid, "--permission-mode", "acceptEdits",
-            "--max-turns", str(meta.get("max_turns") or lane.get("max_turns", 80)),
+            "--max-turns", str(meta.get("max_turns") or lane.get("max_turns", 300)),
             "--model", model, "--append-system-prompt", system]
     if effort:
         argv += ["--effort", effort]
@@ -292,9 +295,11 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     if meta.get("cancel"):
         state, error = "cancelled", "cancelled"
     elif meta.get("timed_out"):
-        state, error = "failed", "stopped: ran past the lane's time limit"
+        lane = desk.settings()["lanes"].get(meta.get("lane"), {})
+        state, error = "failed", f"stopped at the ceiling of {lane.get('timeout_min', 240)} minutes: {CEILING}"
     elif run.get("subtype") == "error_max_turns":
-        state, error = "failed", f"stopped: used all its turns ({run.get('num_turns') or '?'})"
+        turns = meta.get("max_turns") or desk.settings()["lanes"].get(meta.get("lane"), {}).get("max_turns", 300)
+        state, error = "failed", f"stopped at the ceiling of {turns} turns: {CEILING}"
     elif kind == "refused":
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
         order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
@@ -348,7 +353,7 @@ def finish_check(desk: Desk, tid: str) -> dict:
     except (OSError, ValueError):
         code = None
     log = (d / "check.log").read_text(encoding="utf-8", errors="replace") if (d / "check.log").exists() else ""
-    note = ("stopped on request" if m.get("cancel") else "stopped: ran past the lane's time limit"
+    note = ("stopped on request" if m.get("cancel") else "stopped at the lane's time ceiling"
             if m.get("timed_out") else "" if code is not None else "the check was interrupted")
     check = {"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
              "seconds": round(now() - (m.get("check_started") or now())), "tail": log.strip().splitlines()[-15:]}
@@ -418,7 +423,7 @@ class Dispatcher:
         for m in desk.tasks():
             if m["state"] != "running":
                 continue
-            limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 60)
+            limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
             if m.get("cancel") or time.time() - m.get("started", time.time()) > limit:
                 if not m.get("cancel"):
                     desk.update(m["id"], timed_out=True)

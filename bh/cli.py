@@ -13,6 +13,10 @@ from .desk import DEFAULT_ALLOW, Desk, default_lane, default_settings, write_jso
 from .run import Dispatcher, check_provider, git, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
+HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, verifier, verifier-high
+# Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
+# limits of their own; the desk's helpers do the same jobs at a set effort instead.
+BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
 
 
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> Desk:
@@ -265,19 +269,29 @@ def cmd_coordinator(a):
     # the lanes' checkouts are readable for planning and review; workers do the editing
     repos = sorted({ln["repo"] for ln in s["lanes"].values()})
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
-    argv = [claude_bin()] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit]
+    no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
+    argv = [claude_bin()] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit, *no_builtin]
     argv += ["--model", co.get("model") or p["model"]]
     if co.get("effort"):
         argv += ["--effort", co["effort"]]
-    card, mine = CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md"
-    if not mine.is_file() or mine.read_text(encoding="utf-8") != card:  # bh was upgraded: bring the card along
-        if mine.is_file():
-            desk.state_dir.mkdir(exist_ok=True)
-            (desk.state_dir / f"CLAUDE.md.{int(time.time())}").write_text(mine.read_text(encoding="utf-8"), encoding="utf-8")
-        mine.write_text(card, encoding="utf-8")
-        desk.event("card_refreshed")
+    _bring(desk, CARD, desk.root / "CLAUDE.md", "card_refreshed")
+    for f in sorted(HELPERS.glob("*.md")):
+        _bring(desk, f, desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + a.rest, env)
+
+
+def _bring(desk: Desk, src: Path, dst: Path, event: str) -> None:
+    """Put bh's current copy of a file into the desk (bh was upgraded), keeping the old one in .bh/."""
+    new = src.read_text(encoding="utf-8")
+    if dst.is_file() and dst.read_text(encoding="utf-8") == new:
+        return
+    if dst.is_file():
+        desk.state_dir.mkdir(exist_ok=True)
+        (desk.state_dir / f"{dst.name}.{int(time.time())}").write_text(dst.read_text(encoding="utf-8"), encoding="utf-8")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(new, encoding="utf-8")
+    desk.event(event, file=dst.name)
 
 
 def cmd_help(a):
