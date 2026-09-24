@@ -38,6 +38,9 @@ Add `--json` to `status` or `cost` for machine-readable output.
 Say what to change, where, and how the worker can check it (a command, a file to
 look at). Keep one task to one change. If the lane lacks a command the check
 needs, `bh explain lane L` shows what is allowed; ask the principal to add it.
+A task starts from the lane's base branch as it is at that moment, which can be
+before you merge the one ahead of it. If a task needs an earlier task's change,
+queue it after that merge.
 
 ## Reading the result
 `bh show <id>` gives the worker's report plus facts bh recorded itself: changed
