@@ -411,7 +411,9 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     pid = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None  # None: over already
     meta = desk.update(tid, pid=pid)
     ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
-                       f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit. "
+                       f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit. The first "
+                       f"session in a new folder asks whether you trust it: choose \"Yes, I trust this folder\" "
+                       f"(the default, No, ends the session). "
                        f"Its screenshots show under {tid} on this page.", by="bh")
     desk.update(tid, ask=ask)
     desk.event("design_started", task=tid, lane=lane_name, provider=pname, model=model)
