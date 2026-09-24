@@ -189,7 +189,7 @@ def show_text(desk: Desk, tid: str) -> str:
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"
                    + ("" if v["state"] in ("queued", "running") else f"; bh show {v['task']} says what it ran"))
-    if verifying and m.get("state") == "done":
+    if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
         out.append(f"verdict: {m.get('verdict') or 'none given'}")
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"

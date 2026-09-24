@@ -338,6 +338,7 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
         self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(vid)["state"]), ("merged", "cancelled"))
+        self.assertIn("verdict: does not hold", views.show_text(self.desk, vid))
 
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
         s = self.desk.settings()
