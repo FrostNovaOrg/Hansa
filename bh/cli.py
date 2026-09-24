@@ -123,6 +123,8 @@ def cmd_retry(a):
         opts.update(start_from=m["head"], base=m["base"])
         text += f"\nYou start from the previous attempt's last commit ({m['head'][:10]})."
     tid = desk.new_task(text, **opts)
+    if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
+        desk.update(a.id, state="replaced", replaced_by=tid)
     print(f"{tid} queued as a follow-up to {a.id}" + (" from the base branch" if a.fresh else ""))
 
 
@@ -134,8 +136,10 @@ def cmd_cancel(a):
     elif m["state"] == "running":
         desk.update(a.id, cancel=True)
         stop(m.get("pid"))
+    elif m["state"] == "done":
+        desk.update(a.id, state="cancelled", error="closed without merging")
     else:
-        raise SystemExit(f"bh: {a.id} is {m['state']}; only queued or running tasks can be cancelled")
+        raise SystemExit(f"bh: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be cancelled")
     desk.event("task_cancel", task=a.id)
     print(f"{a.id} cancelled")
 
@@ -323,7 +327,7 @@ def main(argv=None):
     p.add_argument("note", nargs="*")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
-    p = add("cancel", cmd_cancel, "stop a queued or running task")
+    p = add("cancel", cmd_cancel, "stop a queued or running task, or close a finished one without merging")
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")

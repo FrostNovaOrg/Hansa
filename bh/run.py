@@ -26,6 +26,9 @@ QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
+# The provider would not answer this request (its content filter or a refusal). That
+# says nothing about other tasks, so the provider does not rest; the task moves on.
+REFUSED_STOPS = {"content_filter", "refusal"}
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
 GIT_ID = {"GIT_AUTHOR_NAME": "bh", "GIT_AUTHOR_EMAIL": "bh@localhost",
           "GIT_COMMITTER_NAME": "bh", "GIT_COMMITTER_EMAIL": "bh@localhost"}
@@ -57,6 +60,11 @@ def git(*args, cwd, env=None) -> str:
 
 def rule(tool: str, path: Path) -> str:
     return f"{tool}(//{str(path).lstrip('/')}/**)"
+
+
+def refused_by(m: dict) -> set:
+    """Providers that refused this task; it is not offered to them again."""
+    return {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
 
 
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
@@ -177,7 +185,9 @@ def denial_of(d) -> str:
 
 
 def unusable_reason(run: dict, err: str):
-    """Why this provider cannot be used right now: ("quota" | "key" | "", words)."""
+    """Why this provider cannot be used for this run: ("quota" | "key" | "refused" | "", words)."""
+    if run.get("stop_reason") in REFUSED_STOPS:
+        return "refused", f"refused the request ({run['stop_reason']})"
     status = run.get("api_error_status")
     if status in QUOTA_STATUS:
         return "quota", f"out of quota (HTTP {status})"
@@ -223,6 +233,13 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state, error = "cancelled", "cancelled"
     elif meta.get("timed_out"):
         state, error = "failed", "stopped: ran past the lane's time limit"
+    elif kind == "refused":
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
+        order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
+        left = [p for p in order if p not in refused_by({"attempts": attempts})]
+        state = "queued" if left and len(attempts) < 3 else "failed"
+        error = f"{meta['provider']}: {why}; " + (
+            "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
     elif kind:
         minutes = desk.settings().get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
         desk.set_provider_state(meta["provider"], cool_until=time.time() + 60 * minutes, reason=why)
@@ -237,7 +254,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
-    checking = state == "done" and bool(lane.get("check")) and bool(fields.get("head"))
+    checking = state == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
     meta = desk.update(tid, state="running" if checking else state, phase="checking" if checking else "",
                        error=error, attempts=attempts, **fields)
     desk.event("task_finished", task=tid, state="checking" if checking else state,
@@ -357,7 +374,8 @@ class Dispatcher:
             for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
                 if ln in busy or ln not in s["lanes"]:
                     continue
-                pname = next((p for p in s["lanes"][ln]["providers"] if not provider_problem(desk, s, p)), None)
+                pname = next((p for p in s["lanes"][ln]["providers"]
+                              if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
                 if not pname:
                     continue
                 try:
@@ -386,7 +404,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
         if ln in busy:
             why.append(f"lane {ln} is busy")
             continue
-        probs = {p: provider_problem(desk, s, p) for p in s["lanes"][ln]["providers"]}
+        probs = {p: "refused this task" if p in refused_by(m) else provider_problem(desk, s, p)
+                 for p in s["lanes"][ln]["providers"]}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
             hb = read_json(desk.state_dir / "heartbeat", 0) or 0

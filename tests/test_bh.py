@@ -34,6 +34,14 @@ if compat and os.environ.get("FAKE_QUOTA_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
                       "result": "API Error: 429 rate_limit_error", "session_id": "s-quota", "num_turns": 1}))
     sys.exit(1)
+if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "stop_reason": "content_filter",
+                      "result": "The request was rejected because it was considered high risk", "num_turns": 1}))
+    sys.exit(0)
+if os.environ.get("FAKE_NO_CHANGES"):
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "Nothing to do.",
+                      "num_turns": 1}))
+    sys.exit(0)
 if "single word OK" in prompt:
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "OK",
                       "modelUsage": {"fake-model": {"inputTokens": 1, "outputTokens": 1}}}))
@@ -184,6 +192,43 @@ class DeskTest(unittest.TestCase):
         d.procs[tid].wait()  # the old server is gone; its check still wrote the exit code
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+
+    def test_a_refused_task_moves_on_without_resting_the_provider(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo", "claude"]
+        s["lanes"]["a"]["env"] = {"FAKE_REFUSE_ON_COMPAT": "1"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
+        self.assertEqual(m["attempts"][0]["kind"], "refused")
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
+        s = self.desk.settings()
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt again"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("no other provider", m["error"])
+
+    def test_no_commits_means_no_check_and_the_task_can_be_closed(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_NO_CHANGES": "1"}
+        s["lanes"]["a"]["check"] = "false"
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Look around"))
+        self.assertEqual((m["state"], m.get("commits"), m.get("check")), ("done", 0, None), m)
+        self.assertIn("nothing to merge", views.show_text(self.desk, m["id"]))
+        main(["--desk", str(self.desk.root), "cancel", m["id"]])
+        self.assertEqual(self.desk.meta(m["id"])["state"], "cancelled")
+
+    def test_retry_replaces_the_original(self):
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        main(["--desk", str(self.desk.root), "retry", m["id"], "also", "add", "a", "second", "line"])
+        old = self.desk.meta(m["id"])
+        self.assertEqual(old["state"], "replaced")
+        self.assertNotIn(m["id"], [r["id"] for r in views.status(self.desk)["review"]])
+        self.assertEqual(self.desk.meta(old["replaced_by"])["parent"], m["id"])
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()

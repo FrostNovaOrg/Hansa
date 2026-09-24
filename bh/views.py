@@ -15,7 +15,8 @@ STATES = {
     "done": "the worker finished; waiting for your review (bh show / bh merge / bh retry)",
     "failed": "the run ended with an error; bh show says why",
     "merged": "merged into the lane's base branch",
-    "cancelled": "stopped on request",
+    "cancelled": "stopped or closed on request",
+    "replaced": "a follow-up task took its place",
 }
 
 
@@ -120,8 +121,12 @@ def show_text(desk: Desk, tid: str) -> str:
     if report:
         lines = report.splitlines()
         out += ["report:"] + ["  " + x for x in lines[:60]] + (["  ..."] if len(lines) > 60 else [])
+    if m.get("replaced_by"):
+        out.append(f"replaced by: {m['replaced_by']}")
     if m.get("files") is not None and m.get("state") != "queued":
-        out.append(f"changes: {m.get('stat') or 'none'}; {m.get('commits', 0)} commit(s) on {m.get('branch')}")
+        out.append(f"changes: {m.get('stat') or 'none'}; {m.get('commits', 0)} commit(s) on {m.get('branch')}"
+                   + ("; nothing to merge, so the lane's check was not run" if m.get("state") == "done"
+                      and not m.get("commits") else ""))
         out += ["  " + f for f in m.get("files", [])[:30]]
     if m.get("denials"):
         out.append(f"refused by the lane's allowed commands ({len(m['denials'])}):")
@@ -139,7 +144,8 @@ def show_text(desk: Desk, tid: str) -> str:
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
                    f" · cache write {u['cache_write']:,}")
-    nxt = {"done": f"bh diff {tid} · bh merge {tid} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
+    nxt = {"done": f"bh retry {tid} \"what to change\" · bh cancel {tid} to close it" if not m.get("commits")
+           else f"bh diff {tid} · bh merge {tid} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
            else f"bh retry {tid} \"make the check pass: ...\" · bh diff {tid} · bh merge {tid} --despite-check",
            "failed": f"bh retry {tid} \"what to change\" (or --fresh to start over)",
            "queued": "bh status shows what it is waiting for", "running": f"bh cancel {tid} to stop it"}

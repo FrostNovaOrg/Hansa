@@ -23,8 +23,8 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | `bh show <id>` | report, changed files, refused commands, usage, and what to do next |
 | `bh diff <id> [--stat]` | the task branch against its base |
 | `bh merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |
-| `bh retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base) |
-| `bh cancel <id>` | stop a queued or running task |
+| `bh retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base); the follow-up replaces it |
+| `bh cancel <id>` | stop a queued or running task, or close a finished one without merging |
 | `bh wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
 | `bh pause "<reason>"` / `bh resume` | stop / restart new work (running tasks finish) |
 | `bh explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
@@ -64,7 +64,8 @@ task's doing, merge with `--despite-check` and say why.
 
 ## Facts you can rely on
 - A provider that reports it is out of quota rests for a while and the task
-  moves to the lane's next provider; `bh status` shows this.
+  moves to the lane's next provider; `bh status` shows this. A provider that
+  refuses one task (its content filter) does not rest; that task alone moves on.
 - A worker that runs past its lane's time limit is stopped and marked failed.
 - Anything a worker left uncommitted is committed on its branch when it ends.
 - Cost figures are Claude Code's own token counts priced with the principal's
