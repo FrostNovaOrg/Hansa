@@ -102,9 +102,9 @@ You work only in this directory, on branch task/{tid}, which was made for this s
 - Do not push, do not switch branches, do not touch other directories. If a command you need is
   refused, say which one and why; do not look for a way around it.
 - When the principal says it is done: bring in the latest {base} (git merge {base}) and settle any
-  conflict here, run the checks, commit, then write your hand-in report as one message (what
-  changed, how it was checked, anything left) and ask the principal to type /exit. bh then hands
-  the work to the coordinator, who checks it and merges it.
+  conflict here, run the checks, commit, stop the app if you started it, then write your hand-in
+  report as one message (what changed, how it was checked, anything left) and ask the principal
+  to type /exit. bh then hands the work to the coordinator, who checks it and merges it.
 """
 DESIGN_START = """The coordinator's brief for this session:
 
@@ -411,7 +411,8 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     pid = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None  # None: over already
     meta = desk.update(tid, pid=pid)
     ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
-                       f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit. The first "
+                       f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit (if it "
+                       f"then asks about background work, press Enter: the first choice stops it). The first "
                        f"session in a new folder asks whether you trust it: choose \"Yes, I trust this folder\" "
                        f"(the default, No, ends the session). "
                        f"Its screenshots show under {tid} on this page.", by="bh")
