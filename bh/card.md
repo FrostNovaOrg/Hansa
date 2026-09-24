@@ -19,7 +19,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | command | what it does |
 |---|---|
 | `bh status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, today's usage |
-| `bh add "<task>" [--lane L] [--effort high] [--model M] [--title T]` | queue a task; `--file PATH` reads the text from a file |
+| `bh add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file; `--browser` gives this one task a browser |
 | `bh show <id>` | report, changed files, refused commands, usage, and what to do next |
 | `bh diff <id> [--stat]` | the task branch against its base |
 | `bh merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |
@@ -38,6 +38,11 @@ Add `--json` to `status` or `cost` for machine-readable output.
 Say what to change, where, and how the worker can check it (a command, a file to
 look at). Keep one task to one change. If the lane lacks a command the check
 needs, `bh explain lane L` shows what is allowed; ask the principal to add it.
+If a task has to look at web pages, add `--browser`: that task's worker, and no
+other, gets a browser with no saved logins. It reads page text directly; charts,
+images and drawings it can only see in screenshots, which bh keeps with the task.
+The page must be reachable from this machine. If the principal has not set up a
+browser, bh says so and queues nothing.
 A task starts from the lane's base branch as it is at that moment, which can be
 before you merge the one ahead of it. If a task needs an earlier task's change,
 queue it after that merge.

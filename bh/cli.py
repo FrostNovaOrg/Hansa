@@ -57,9 +57,11 @@ def cmd_init(a):
 
 def cmd_add(a):
     desk = Desk.find(a.desk)
-    tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
-                        title=a.title or "", max_turns=a.max_turns or 0)
     s = desk.settings()
+    if a.browser and not s.get("browser"):
+        raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
+    tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
+                        title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None)
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until the principal adds it")
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "") + f". Follow it with: bh show {tid}")
@@ -117,8 +119,10 @@ def cmd_retry(a):
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
     note = " ".join(a.note).strip()
     text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
+    if a.browser and not desk.settings().get("browser"):
+        raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
-            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80]}
+            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser")}
     if not a.fresh and m.get("head"):
         opts.update(start_from=m["head"], base=m["base"])
         text += f"\nYou start from the previous attempt's last commit ({m['head'][:10]})."
@@ -312,6 +316,7 @@ def main(argv=None):
     p.add_argument("--model")
     p.add_argument("--title")
     p.add_argument("--max-turns", type=int)
+    p.add_argument("--browser", action="store_true", help="give this one task a browser (read pages, take screenshots)")
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
     p = add("show", cmd_show, "one task: report, changes, refused commands, usage, next step")
@@ -327,6 +332,7 @@ def main(argv=None):
     p.add_argument("note", nargs="*")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--browser", action="store_true", help="give the follow-up a browser")
     p = add("cancel", cmd_cancel, "stop a queued or running task, or close a finished one without merging")
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")

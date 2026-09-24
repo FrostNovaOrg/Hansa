@@ -50,6 +50,9 @@ def default_settings() -> dict:
             "claude": {"kind": "subscription", "model": "sonnet", "effort": "", "config_dir": ""},
         },
         "lanes": {},
+        # The command that starts a browser tool (an MCP server on stdio). The coordinator
+        # gives it to one task at a time with `bh add --browser`. Empty: no browser.
+        "browser": "",
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -90,8 +93,10 @@ def validate(s: dict) -> list:
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
-    known = {"version", "concurrency", "cool_minutes", "coordinator", "providers", "lanes", "prices"}
+    known = {"version", "concurrency", "cool_minutes", "coordinator", "providers", "lanes", "prices", "browser"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
+    if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
+        p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
         p.append("concurrency must be a whole number from 1 to 8")
     if not _is_int(s.get("cool_minutes"), 1, 1440):
@@ -325,7 +330,7 @@ class Desk:
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}
             meta.update({k: v for k, v in opts.items() if v not in (None, "")})
             write_json(d / "meta.json", meta)
-        self.event("task_added", task=tid, lane=meta["lane"])
+        self.event("task_added", task=tid, lane=meta["lane"], **({"browser": True} if meta.get("browser") else {}))
         return tid
 
     def meta(self, tid: str) -> dict:

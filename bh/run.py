@@ -42,6 +42,14 @@ on branch task/{tid}, which was made for this task.
 """
 
 
+BROWSER_NOTE = """
+This task comes with a browser (tools named mcp__browser__...). It has no saved logins.
+Files it saves, such as screenshots, go to {dir}; open a screenshot there with the Read
+tool to see it. Page text can be read directly; charts, images and drawings can only be
+seen in a screenshot.
+"""
+
+
 def claude_bin() -> str:
     for c in (os.environ.get("BH_CLAUDE"), shutil.which("claude"),
               os.path.expanduser("~/.local/bin/claude")):
@@ -135,6 +143,17 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
     return wt, base
 
 
+def browser_for(desk: Desk, tid: str, command: str):
+    """The principal's browser tool for this one task, started in the task's own folder,
+    so what it saves (screenshots) lands there and never in the repository."""
+    d = desk.tasks_dir / tid / "browser"
+    d.mkdir(parents=True, exist_ok=True)
+    cfg = desk.tasks_dir / tid / "browser-mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"browser": {
+        "command": "/bin/sh", "args": ["-c", f'cd "$0" && exec {command}', str(d)]}}}), encoding="utf-8")
+    return cfg, ["mcp__browser", rule("Read", d)]
+
+
 def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
     s = desk.settings()
     lane, p, meta = s["lanes"][lane_name], s["providers"][pname], desk.meta(tid)
@@ -150,8 +169,13 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
             "--model", model, "--append-system-prompt", system]
     if effort:
         argv += ["--effort", effort]
+    extra = []
+    if meta.get("browser") and s.get("browser"):
+        cfg, extra = browser_for(desk, tid, s["browser"])
+        argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
+        argv += ["--mcp-config", str(cfg)]
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir)]
-    argv += ["--allowedTools", *lane_allow(desk, lane, wt)]
+    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra]
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "BH_TASK": tid,
            "GIT_AUTHOR_NAME": f"bh worker {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
            "GIT_COMMITTER_NAME": f"bh worker {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}

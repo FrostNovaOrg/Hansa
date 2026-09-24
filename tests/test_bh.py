@@ -47,6 +47,8 @@ if "single word OK" in prompt:
                       "modelUsage": {"fake-model": {"inputTokens": 1, "outputTokens": 1}}}))
     sys.exit(0)
 open("hello.txt", "w").write("hello from " + os.environ.get("BH_TASK", "?") + "\n")
+if os.environ.get("FAKE_SHOW_ARGV"):
+    open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
     "result": "Added hello.txt. Checked it exists.", "session_id": "s-ok",
     "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "env JAVA_HOME=/x mvn test"}}],
@@ -229,6 +231,29 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(old["state"], "replaced")
         self.assertNotIn(m["id"], [r["id"] for r in views.status(self.desk)["review"]])
         self.assertEqual(self.desk.meta(old["replaced_by"])["parent"], m["id"])
+
+    def test_browser_is_given_to_one_task_at_a_time(self):
+        with self.assertRaises(SystemExit):  # no browser set up: refuse, queue nothing
+            main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
+        self.assertEqual(self.desk.tasks(), [])
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["browser"] = "/usr/bin/env true"
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
+        main(["--desk", str(self.desk.root), "add", "Plain task"])
+        d = Dispatcher(self.desk)
+        for m in self.desk.tasks():
+            self.settle(d, m["id"])
+        with_browser, plain = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertIn("--mcp-config", with_browser)
+        self.assertIn("mcp__browser", with_browser)
+        self.assertNotIn("--mcp-config", plain)
+        self.assertNotIn("mcp__browser", plain)
+        cfg = json.loads(Path(with_browser[with_browser.index("--mcp-config") + 1]).read_text())
+        self.assertIn("/usr/bin/env true", cfg["mcpServers"]["browser"]["args"][1])
+        self.assertIn("with a browser", views.show_text(self.desk, "t0001"))
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()

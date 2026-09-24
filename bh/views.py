@@ -52,7 +52,7 @@ def status(desk: Desk) -> dict:
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
-                     "checking": m.get("phase") == "checking"} for m in running],
+                     "checking": m.get("phase") == "checking", "browser": bool(m.get("browser"))} for m in running],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
@@ -80,7 +80,8 @@ def status_text(st: dict) -> str:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + ("worker done, bh is running the lane's check" if m["checking"]
                                                else f"on {m['provider']} ({m['model']})")
-                + f", {m['minutes']} min: {m['title']}" for m in st["running"]]
+                + (" with a browser" if m["browser"] else "") + f", {m['minutes']} min: {m['title']}"
+                for m in st["running"]]
     if st["queued"]:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
@@ -112,6 +113,8 @@ def show_text(desk: Desk, tid: str) -> str:
         head += f" · {m['provider']} ({m.get('model_asked')}) · {m.get('turns') or 0} turns"
     if m.get("started"):
         head += f" · {max(0, int(((m.get('finished') or time.time()) - m['started']) // 60))} min"
+    if m.get("browser"):
+        head += " · with a browser"
     out = [head, f"title: {m['title']}", f"meaning: {STATES.get(m['state'], '')}"]
     if m.get("error"):
         out.append(f"error: {m['error']}")
@@ -133,6 +136,10 @@ def show_text(desk: Desk, tid: str) -> str:
         for x in m["denials"][:8]:
             first, *more = x.splitlines() or [""]
             out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else ""))
+    shots = sorted((d / "browser").glob("*")) if (d / "browser").is_dir() else []
+    if shots:
+        out.append(f"browser files ({len(shots)}) in {d / 'browser'}: " + ", ".join(x.name for x in shots[:6])
+                   + (" ..." if len(shots) > 6 else ""))
     chk = m.get("check")
     if chk:
         how = "passed" if chk["ok"] else "FAILED" + (f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})")
