@@ -286,9 +286,10 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["env"] = {"FAKE_STOP_AT_TURNS": "1"}
         self.assertEqual(self.desk.save_settings(s), [])
         self.desk.write_key("mimo", "sk-test")
-        tid = self.desk.new_task("Look at the page")
+        tid = self.desk.new_task("Look at the page", model="sonnet")
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "failed")
+        self.assertEqual(m["model_asked"], "mimo-x")  # a task's --model is for Claude providers only
         self.assertTrue(m["error"].startswith("stopped at the ceiling of 300 turns: the task was probably too big"), m)
         shown = views.show_text(self.desk, tid)
         self.assertIn("Stopped at the ceiling before it wrote its report", shown)

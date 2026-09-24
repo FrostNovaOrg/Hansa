@@ -19,7 +19,7 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 | command | what it does |
 |---|---|
 | `bh status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, today's usage |
-| `bh add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file; `--browser` gives this one task a browser |
+| `bh add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `bh show <id>` | report, changed files, refused commands, usage, and what to do next |
 | `bh diff <id> [--stat]` | the task branch against its base |
 | `bh merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |

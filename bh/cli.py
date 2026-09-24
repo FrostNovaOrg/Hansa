@@ -69,6 +69,9 @@ def cmd_add(a):
                         title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None)
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until the principal adds it")
+    if a.model:
+        print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
+              f" their own model. Which provider runs it follows the lane's order: bh explain lane {a.lane or 'L'}")
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "") + f". Follow it with: bh show {tid}")
 
 

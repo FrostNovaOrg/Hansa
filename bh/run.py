@@ -244,7 +244,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
     s = desk.settings()
     lane, p, meta = s["lanes"][lane_name], s["providers"][pname], desk.meta(tid)
     wt, base = prepare(desk, lane_name, lane, meta)
-    model = meta.get("model") or p["model"]
+    model = (meta.get("model") if p["kind"] == "subscription" else "") or p["model"]  # other providers: their own
     effort = meta.get("effort") or p.get("effort", "")
     brief = desk.lanes_dir / lane_name / "brief.md"
     verifying = meta.get("kind") == "verify"
