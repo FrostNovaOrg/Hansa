@@ -142,8 +142,9 @@ def config_home(desk: Desk, name: str, p: dict) -> Path:
 
 
 def _record(home: Path, sid: str):
-    """A worker's session record as Claude Code writes it while it works: (texts, replies, last write)."""
-    texts, replies, last = [], set(), None
+    """A worker's session record as Claude Code writes it while it works:
+    (texts, replies, last write, {reply id: (model, token counts)})."""
+    texts, replies, last, counts = [], set(), None, {}
     for f in home.glob(f"projects/*/{sid}.jsonl") if sid else []:
         last = max(last or 0, f.stat().st_mtime)
         for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -154,10 +155,12 @@ def _record(home: Path, sid: str):
             msg = d.get("message") or {} if d.get("type") == "assistant" else {}
             if msg.get("id"):
                 replies.add(msg["id"])
+                if isinstance(msg.get("usage"), dict):
+                    counts[msg["id"]] = (msg.get("model") or "?", msg["usage"])
             content = msg.get("content")
             texts += [c["text"].strip() for c in content if isinstance(c, dict) and c.get("type") == "text"
                       and c.get("text", "").strip()] if isinstance(content, list) else []
-    return texts, len(replies), last
+    return texts, len(replies), last, counts
 
 
 def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
@@ -169,7 +172,7 @@ def progress_of(desk: Desk, m: dict) -> dict:
     """How far a running worker has got: model replies so far, minutes since it last did
     anything, and the last thing it wrote. bh records turns and tokens only at the end."""
     p = desk.settings()["providers"].get(m.get("provider") or "")
-    texts, replies, last = _record(config_home(desk, m["provider"], p), m.get("session_id", "")) if p else ([], 0, None)
+    texts, replies, last, _ = _record(config_home(desk, m["provider"], p), m.get("session_id", "")) if p else ([], 0, None, {})
     return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last else None,
             "note": texts[-1].splitlines()[0][:160] if texts else ""}
 
@@ -285,6 +288,21 @@ def usage_of(run: dict) -> dict:
     return out
 
 
+def usage_from_record(home: Path, sid: str) -> dict:
+    """Token counts from the session record, for a run stopped before Claude Code wrote its totals
+    (cancelled, or stopped at the time ceiling). Some providers leave output tokens out of the
+    record, so these can be short."""
+    out = {}
+    for model, u in _record(home, sid)[3].values():
+        t = out.setdefault(model, {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
+                                   "claude_code_usd": None, "basis": "session record"})
+        t["in"] += u.get("input_tokens") or 0
+        t["out"] += u.get("output_tokens") or 0
+        t["cache_read"] += u.get("cache_read_input_tokens") or 0
+        t["cache_write"] += u.get("cache_creation_input_tokens") or 0
+    return out
+
+
 def denial_of(d) -> str:
     if not isinstance(d, dict):
         return str(d)[:160]
@@ -321,6 +339,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
     p = desk.settings()["providers"].get(meta.get("provider"))
+    usage = usage_of(run)
+    if not usage and p:
+        usage = usage_from_record(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
     if stopped and not result.strip() and p:
         notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
@@ -328,7 +349,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
-              "usage": usage_of(run), "denials": [denial_of(x) for x in run.get("permission_denials") or []]}
+              "usage": usage, "denials": [denial_of(x) for x in run.get("permission_denials") or []]}
     if meta.get("kind") == "verify":
         found = VERDICT.findall(result)
         fields["verdict"] = found[-1].lower() if found else ""

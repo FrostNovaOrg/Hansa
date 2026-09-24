@@ -44,7 +44,8 @@ if os.environ.get("FAKE_STOP_AT_TURNS"):
     os.makedirs(os.path.dirname(rec), exist_ok=True)
     with open(rec, "w") as f:
         for t in ("Opening the list page.", "Found: the week badge is still in English."):
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"id": t, "model": "mimo-x", "content": [
+                {"type": "text", "text": t}], "usage": {"input_tokens": 700, "cache_read_input_tokens": 3000}}}) + "\n")
     print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 9,
                       "session_id": sid}))
     sys.exit(1)
@@ -293,6 +294,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("Stopped at the ceiling before it wrote its report", shown)
         self.assertIn("week badge is still in English", shown)
         self.assertIn("split the task or make it clearer", shown)
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["cache_read"]), (1400, 6000))  # no totals
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "retry", tid, "only the detail page"])
         follow = (self.desk.tasks_dir / "t0002" / "task.md").read_text()
