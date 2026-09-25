@@ -1,10 +1,10 @@
 # Contributing
 
-- Standard library only. If a feature needs a dependency, it probably belongs in the adapter layer, not here.
-- Every script that changes desk state must be append-only or keep the previous version.
-- Run `python3 -m unittest discover tests` and `./examples/demo.sh` before opening a change.
-- Keep `template/rules/core.md` under 40 lines. A rule a script can enforce goes in a script.
-- No real product names, paths, or transcripts in this repository. The example service is fictional on purpose.
+- Standard library only.
+- Change a task through the desk (`Desk.change`, under the desk lock); the event log is append-only.
+- `bh/card.md` is the coordinator's whole interface: when a change alters what the coordinator can rely on, the card says so. Nobody should need to read the code to use bh.
+- Run `python3 -m unittest tests.test_bh` before opening a change. It uses a stand-in for `claude`, so no model is called.
+- No real product names, paths, or transcripts in this repository.
 
 ## Licensing of contributions
 

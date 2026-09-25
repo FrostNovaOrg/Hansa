@@ -1,4 +1,0 @@
-#!/bin/sh
-# Bellhop CLI shim: runs the package from this checkout without installation.
-HERE=$(cd "$(dirname "$0")/.." && pwd)
-exec python3 "$HERE/bellhop_main.py" "$@"

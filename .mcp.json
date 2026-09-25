@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "bellhop": {
-      "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bellhop_main.py", "mcp"]
-    }
-  }
-}
