@@ -80,7 +80,7 @@ const T = ZH ? {
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
-  seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
+  seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 bh web 给的地址打开",
   noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并"
 } : {
@@ -112,7 +112,7 @@ const T = ZH ? {
   days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
   costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill.",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
-  seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
+  seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by bh web",
   noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged"
 };
@@ -229,10 +229,10 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, KEYS = {};
+let S = null, KEYS = {}, REV = null;
 async function loadSettings(problems) {
   const r = await api("/api/settings");
-  S = r.settings; KEYS = r.keys;
+  S = r.settings; KEYS = r.keys; REV = r.rev;
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 function bind(obj, key, kind) {
@@ -316,7 +316,7 @@ function renderSettings(problems) {
         if (n && !S.prices[n]) { S.prices[n] = {in:0, out:0}; renderSettings(); } }}, T.addPrice))),
     h("div", {class:"row bar"},
       h("button", {class:"primary", onclick: async () => {
-        try { const r = await api("/api/settings", {settings:S});
+        try { const r = await api("/api/settings", {settings:S, rev:REV});
           if (r.ok) { await loadSettings(); msg.textContent = T.saved; msg.className = "ok"; $("#tab-settings").append(msg); }
           else { renderSettings(r.problems); window.scrollTo(0, 0); } } catch (e) { err(e); } }}, T.save),
       h("button", {onclick: () => loadSettings()}, T.reload), msg)

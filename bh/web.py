@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.cookies
 import http.server
 import json
+import re
 import threading
 import urllib.parse
 from pathlib import Path
@@ -45,7 +46,7 @@ def _events(desk: Desk, n: int = 60) -> list:
 
 
 def _save_settings(desk: Desk, body: dict) -> dict:
-    problems = desk.save_settings(body.get("settings"), by="page")
+    problems = desk.save_settings(body.get("settings"), by="page", rev=body.get("rev"))
     if not problems:
         for name in desk.settings()["lanes"]:
             brief = desk.lanes_dir / name / "brief.md"
@@ -101,7 +102,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(200, _events(desk))
             if url.path == "/api/task":
                 tid = q.get("id", [""])[0]
-                if not (desk.tasks_dir / tid / "meta.json").is_file():
+                if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
                     return self._send(404, {"error": "no such task"})
                 return self._send(200, {"meta": read_json(desk.tasks_dir / tid / "meta.json"),
                                         "text": views.show_text(desk, tid), "shots": _shots(desk, tid)})

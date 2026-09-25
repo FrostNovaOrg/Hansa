@@ -19,6 +19,11 @@ terminal open. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), lanes, allowed
 commands, prices. Then start the coordinator with `bh coordinator`.
 
+The first time Claude Code opens in a new desk, it asks whether you trust the
+folder: choose yes. Claude Code ignores the allowed commands of a folder it does
+not trust, and the coordinator could not run `bh`. The same question comes up
+once for each lane's design worktree, in the first design session.
+
 ## Who changes what
 - The principal, on the page: providers, models, endpoints, keys, effort,
   each lane's provider order, allowed commands and environment, prices,

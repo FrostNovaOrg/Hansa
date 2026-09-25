@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, cost, views
+from . import build, cost, views
 from .desk import Desk, default_lane, default_settings, now, write_json
 from .run import VERIFY_TASK, Dispatcher, check_provider, git, provider_env, stop
 
@@ -458,10 +458,17 @@ def _split_claude_args(argv: list):
     return argv, []
 
 
+class _Version(argparse.Action):
+    """--version, worked out only when asked (it may ask git which commit this is)."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(f"bh {build()}")
+        parser.exit()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="bh", description="A file-based desk for a team of Claude Code agents. "
                                  "`bh help` prints the agent card.")
-    ap.add_argument("--version", action="version", version=f"bh {__version__}")
+    ap.add_argument("--version", action=_Version, nargs=0, help="show which bh this is and exit")
     ap.add_argument("--desk", help="desk directory (default: the desk containing the current directory, or BH_DESK)")
     sub = ap.add_subparsers(dest="cmd", metavar="command")
 

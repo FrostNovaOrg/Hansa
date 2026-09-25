@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -263,13 +264,25 @@ class Desk:
             s.update(loaded)
         return s
 
-    def save_settings(self, new: dict, by: str = "") -> list:
-        problems = validate(new)
-        if problems:
-            return problems
-        old = self.settings()
-        changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
-        write_json(self.settings_path, new)
+    def settings_rev(self) -> str:
+        """Changes whenever settings.json does, so a page saves only over the settings it loaded."""
+        try:
+            return hashlib.sha256(self.settings_path.read_bytes()).hexdigest()[:16]
+        except OSError:
+            return ""
+
+    def save_settings(self, new: dict, by: str = "", rev: str | None = None) -> list:
+        """rev: the settings_rev() the change was made on; a save over newer settings is refused."""
+        with self.lock():
+            if rev is not None and rev != self.settings_rev():
+                return ["the settings changed since this page loaded them (another tab or a command); "
+                        "press Reload, then make the change again"]
+            problems = validate(new)
+            if problems:
+                return problems
+            old = self.settings()
+            changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+            write_json(self.settings_path, new)
         self.event("settings_saved", by=by, changed=changed)
         return []
 
@@ -465,6 +478,7 @@ class Desk:
 
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
+    rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
-    return {"settings": s, "keys": keys, "problems": validate(s)}
+    return {"settings": s, "keys": keys, "problems": validate(s), "rev": rev}

@@ -65,7 +65,7 @@ def worker_rows(desk: Desk, since: float) -> list:
             source = "price table"
             if usd is None and kind == "subscription" and u.get("claude_code_usd") is not None:
                 usd, source = u["claude_code_usd"], "Claude Code list price"
-            seat = "design" if m.get("kind") == "design" else "worker"
+            seat = {"design": "design", "verify": "verify"}.get(m.get("kind"), "worker")
             rows.append({"day": _day(when), "seat": seat, "lane": m.get("lane", ""), "task": m["id"],
                          "provider": m.get("provider", ""), "model": model,
                          **{k: u.get(k, 0) for k in TOKEN_FIELDS}, "usd": usd,
@@ -78,20 +78,26 @@ def slug(path: Path) -> str:
 
 
 def coordinator_dirs(desk: Desk) -> list:
+    """(provider, folder of the coordinator's session records) for every provider it may have run
+    on: when the principal moves it to another provider, what it spent before still counts."""
     s = desk.settings()
-    p = s["providers"].get(s["coordinator"]["provider"], {})
-    if p.get("kind") == "compatible":
-        base = desk.state_dir / f"claude-{s['coordinator']['provider']}"
-    else:
-        base = Path(p.get("config_dir") or os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    return [base / "projects" / slug(desk.root)]
+    co = s["coordinator"]["provider"]
+    homes = {}
+    for name in sorted(sorted(s["providers"]), key=lambda n: n != co):  # a shared home goes by the coordinator's
+        p = s["providers"][name]
+        if p.get("kind") == "compatible":
+            home = desk.state_dir / f"claude-{name}"
+        else:
+            home = Path(p.get("config_dir") or os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        homes.setdefault(str(home), name)
+    return [(name, Path(home) / "projects" / slug(desk.root)) for home, name in homes.items()]
 
 
 def transcript_rows(desk: Desk, since: float) -> list:
     s = desk.settings()
     per = defaultdict(lambda: defaultdict(int))
     seen = set()
-    for proj in coordinator_dirs(desk):
+    for provider, proj in coordinator_dirs(desk):
         if not proj.is_dir():
             continue
         for f in proj.rglob("*.jsonl"):
@@ -115,7 +121,7 @@ def transcript_rows(desk: Desk, since: float) -> list:
                     if ts < since:
                         continue
                     cc = u.get("cache_creation") or {}
-                    row = per[(_day(ts), seat, msg.get("model", "?"))]
+                    row = per[(_day(ts), seat, msg.get("model", "?"), provider)]
                     row["in"] += u.get("input_tokens", 0)
                     row["out"] += u.get("output_tokens", 0)
                     row["cache_read"] += u.get("cache_read_input_tokens", 0)
@@ -123,11 +129,11 @@ def transcript_rows(desk: Desk, since: float) -> list:
                     row["cache_write_5m"] += cc.get("ephemeral_5m_input_tokens", 0)
                     row["cache_write_1h"] += cc.get("ephemeral_1h_input_tokens", 0)
     rows = []
-    for (day, seat, model), u in sorted(per.items()):
+    for (day, seat, model, provider), u in sorted(per.items()):
         if not cc_split_known(u):
             u.pop("cache_write_5m"), u.pop("cache_write_1h")
         usd = value(model, u, s["prices"])
-        rows.append({"day": day, "seat": seat, "lane": "", "task": "", "provider": s["coordinator"]["provider"],
+        rows.append({"day": day, "seat": seat, "lane": "", "task": "", "provider": provider,
                      "model": model, **{k: u[k] for k in TOKEN_FIELDS}, "usd": usd,
                      "priced_by": "price table" if usd is not None else "no price"})
     return rows

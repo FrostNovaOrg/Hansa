@@ -843,6 +843,11 @@ class Dispatcher:
                 break
 
 
+def server_up(desk: Desk) -> bool:
+    """Whether bh serve has looked at the desk in the last half minute."""
+    return time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0) < 30
+
+
 def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
     """Why a queued task is not running yet, in one line."""
     if m.get("kind") == "design":
@@ -850,7 +855,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  and x.get("lane") == m.get("lane")]
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
-                else "opens when `bh serve` next looks (within seconds)")
+                else "opens when `bh serve` next looks (within seconds)" if server_up(desk)
+                else "opens once `bh serve` runs; `bh serve` is not running")
     if desk.paused():
         return "dispatch is paused"
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
@@ -868,11 +874,19 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  for p in s["lanes"][ln]["providers"]}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
-            hb = read_json(desk.state_dir / "heartbeat", 0) or 0
             return (f"ready for lane {ln} on {ready[0]}; starts when `bh serve` next looks (within seconds)"
-                    if time.time() - hb < 30 else f"ready for lane {ln} on {ready[0]}, but `bh serve` is not running")
+                    if server_up(desk) else f"ready for lane {ln} on {ready[0]}, but `bh serve` is not running")
         why.append(f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})")
     return "; ".join(why) if why else "waiting for a free slot"
+
+
+def key_stamp(desk: Desk, name: str) -> tuple:
+    """Which key file is there now (saving a key always makes a new file); () if none."""
+    try:
+        st = desk.key_file(name).stat()
+    except (OSError, ValueError):
+        return ()
+    return st.st_ino, st.st_mtime_ns
 
 
 def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
@@ -888,6 +902,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     tmp.mkdir(parents=True, exist_ok=True)
     argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"]]
     t0 = time.time()
+    key = key_stamp(desk, name)
     kind = ""
     try:
         env = {**provider_env(desk, name, p), "CLAUDE_CODE_MAX_RETRIES": "0"}
@@ -907,6 +922,9 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     except Exception as e:  # noqa: BLE001
         ok, detail = False, str(e)[:200]
     detail = desk.redact(detail)
+    if key_stamp(desk, name) != key:  # the principal saved another key meanwhile: this says nothing about it
+        return {"ok": False, "detail": "the key changed while this check ran; check again", "at": now(),
+                "seconds": round(time.time() - t0, 1)}
     result = {"ok": ok, "detail": detail, "at": now(), "seconds": round(time.time() - t0, 1)}
     desk.set_provider_state(name, check=result)
     if ok:

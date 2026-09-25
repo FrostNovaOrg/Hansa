@@ -5,9 +5,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import cost
+from . import build, cost
 from .desk import Desk, read_json
-from .run import join_command, progress_of, provider_problem, waiting_reason
+from .run import join_command, progress_of, provider_problem, server_up, waiting_reason
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -69,8 +69,10 @@ def status(desk: Desk) -> dict:
     rows = cost.worker_rows(desk, _midnight())
     return {
         "desk": str(desk.root),
+        "build": build(),
+        "audits_cost": bool(s["coordinator"].get("audits_cost")),
         "paused": desk.paused(),
-        "server_up": time.time() - hb < 30,
+        "server_up": server_up(desk),
         "server_seconds_ago": int(time.time() - hb) if hb else None,
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
@@ -107,7 +109,8 @@ def status_text(st: dict) -> str:
     out = [f"desk {st['desk']}",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
            "server up" if st["server_up"] else "server NOT running: start it with `bh serve` (see bh explain server)"]
-    out = [" · ".join(out + [time.strftime("now %H:%M")])]
+    out += ["cost audit on"] if st.get("audits_cost") else []
+    out = [" · ".join(out + [f"bh {st['build']}", time.strftime("now %H:%M")])]
     out.append("lanes:")
     for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or 'free'}")

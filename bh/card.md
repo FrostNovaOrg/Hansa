@@ -148,3 +148,7 @@ that needs code changed, commands run or a browser goes to a worker.
   table. With a subscription they show what the tokens are worth, not a bill.
   To say what one job cost, note the time `bh status` shows when you start it
   and run `bh cost --since HH:MM --by seat` when it is done.
+- When `bh status` says cost audit on, the principal wants the cost in every
+  report: end each report with what that round of work cost (as above), and
+  point out anything unusual, such as one task costing far more than the others
+  or a seat that grew. When it does not say so, do not spend turns on cost.

@@ -667,6 +667,85 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(rep["by"]["seat"]["worker"]["tokens"], 6300)
         self.assertEqual(rep["unpriced_models"], [])
 
+    def test_verifications_are_their_own_seat_in_the_cost(self):
+        tid = self.desk.new_task("Run the change", kind="verify", parent="t0000")
+        self.desk.update(tid, state="done", finished=time.time(), provider="claude",
+                         usage={"claude-x": {"in": 10, "out": 1, "cache_read": 0, "cache_write": 0}})
+        self.assertEqual([r["seat"] for r in cost.worker_rows(self.desk, 0)], ["verify"])
+
+    def test_coordinator_cost_counts_every_provider_it_ran_on(self):
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "cc")
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for home, mid in ((self.tmp / "cc", "m1"), (self.desk.state_dir / "claude-mimo", "m2")):
+            proj = home / "projects" / cost.slug(self.desk.root)
+            proj.mkdir(parents=True)
+            (proj / "s.jsonl").write_text(json.dumps({"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                "message": {"id": mid, "model": "claude-x", "usage": {"input_tokens": 10, "output_tokens": 2}}}) + "\n")
+        rows = cost.transcript_rows(self.desk, 0)  # the coordinator ran on claude, then on mimo
+        self.assertEqual(sorted((r["provider"], r["in"]) for r in rows), [("claude", 10), ("mimo", 10)])
+
+    def test_settings_saved_from_a_stale_page_are_refused(self):
+        first, second = public_settings(self.desk), public_settings(self.desk)  # two tabs, opened together
+        first["settings"]["concurrency"] = 3
+        self.assertEqual(self.desk.save_settings(first["settings"], rev=first["rev"]), [])
+        second["settings"]["cool_minutes"] = 5
+        problems = self.desk.save_settings(second["settings"], rev=second["rev"])
+        self.assertTrue(problems and "changed since" in problems[0], problems)
+        self.assertEqual((self.desk.settings()["concurrency"], self.desk.settings().get("cool_minutes", 30)), (3, 30))
+
+    def test_a_check_that_ran_on_a_replaced_key_is_not_recorded(self):
+        import bh.run as run
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-old-key-0001")
+
+        def key_replaced_meanwhile(argv, **kwargs):
+            self.desk.write_key("mimo", "sk-new-key-0002")
+            return subprocess.CompletedProcess(argv, 1, json.dumps({"type": "result", "is_error": True,
+                "api_error_status": 401, "result": "API Error: 401 authentication_error"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", key_replaced_meanwhile):
+            r = run.check_provider(self.desk, "mimo")
+        self.assertFalse(r["ok"])
+        self.assertIn("key changed", r["detail"])
+        self.assertFalse(provider_problem(self.desk, self.desk.settings(), "mimo"))  # the new key is not rested
+
+    def test_status_says_which_build_runs_and_whether_cost_is_audited(self):
+        st = views.status(self.desk)
+        self.assertTrue(st["build"])
+        self.assertIn(st["build"], views.status_text(st))
+        self.assertNotIn("cost audit on", views.status_text(st))
+        s = self.desk.settings()
+        s["coordinator"]["audits_cost"] = True
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertIn("cost audit on", views.status_text(views.status(self.desk)))
+        self.assertIn("cost audit on", (Path(__file__).resolve().parent.parent / "bh" / "card.md").read_text())
+
+    def test_a_design_session_waiting_for_a_stopped_server_says_so(self):
+        self.desk.new_task("Shape the badge", kind="design", lane="a")
+        self.assertIn("`bh serve` is not running", views.status(self.desk)["queued"][0]["waiting"])
+
+    def test_helpers_name_only_tools_claude_code_has(self):
+        code = Path(__file__).resolve().parent.parent / "bh" / "agents"
+        for f in code.glob("*.md"):
+            tools = next(x for x in f.read_text().splitlines() if x.startswith("tools:"))
+            self.assertEqual(tools, "tools: Read, Bash", f.name)
+
+    def test_the_page_only_shows_tasks_by_their_id(self):
+        (self.desk.root / "x").mkdir()
+        (self.desk.root / "x" / "meta.json").write_text(json.dumps({"id": "x", "title": "not a task", "state": "done"}))
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(f"{base}/api/task?t={self.desk.web_token()}&id=../x")
+            self.assertEqual(e.exception.code, 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_web_needs_token_and_header(self):
         httpd = start_web(self.desk, "127.0.0.1", 0)
         port = httpd.server_address[1]
