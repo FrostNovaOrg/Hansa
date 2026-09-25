@@ -59,7 +59,9 @@ files, commits, the lane's check result, commands the lane refused, tokens. A
 refused command means the worker could not do something; decide whether the
 task needs it (then ask) or should be rewritten. A failed check shows its last
 lines; send the task back with `bh retry`, or, if the failure is not the
-task's doing, merge with `--despite-check` and say why.
+task's doing, merge with `--despite-check` and say why. If the lane's setup
+command failed, the worker never started: `bh show` has the setup's last lines;
+ask the principal to fix the command, then `bh retry` the task.
 
 ## Checking before you merge
 The lane's check runs on every task that changed something. What else a task
@@ -116,8 +118,8 @@ that needs code changed, commands run or a browser goes to a worker.
   changes and checks are the workers' and the lane check's job.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, each lane's provider order, allowed commands, environment, check,
-  the command that starts the app for design sessions (preview) and the one that installs a new
-  worktree's dependencies (setup), the model for design sessions, prices, how
+  the command that starts the app for design sessions (preview) and the one that installs
+  dependencies before each task (setup), the model for design sessions, prices, how
   many tasks run at once. Ask with `bh ask`; do not edit
   `settings.json`. Keys live in `secrets/`, which you cannot read, by design.
 

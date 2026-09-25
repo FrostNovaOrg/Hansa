@@ -27,6 +27,20 @@ QUOTA = re.compile(r"API Error: (402|429)|rate_limit_error|usage limit reached|c
 QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
+KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
+SETUP_FAILED = re.compile(r"^bh: the lane's setup command failed \(exit (\d+)\)$", re.M)
+# The lane's setup command runs first in the worker's own process, then the worker replaces it:
+# bh serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
+# What it changes in the repository (a lock file, say) is set aside, so it is not part of the task.
+# sh -c SETUP_SCRIPT bh-setup <setup> <log> <error file> <worker command...>
+SETUP_SCRIPT = ("env " + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
+  rc=$?; echo "bh: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
+if [ -n "$(git status --porcelain)" ]; then
+  git stash push --include-untracked -q -m "bh: what the lane's setup changed" >>"$2" 2>&1
+  echo "bh: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
+fi
+shift 3; exec "$@"
+""")
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # The provider would not answer this request (its content filter or a refusal). That
 # says nothing about other tasks, so the provider does not rest; the task moves on.
@@ -282,14 +296,6 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     if not (wt / ".git").exists():
         wt.parent.mkdir(parents=True, exist_ok=True)
         git("worktree", "add", "--detach", str(wt), start, cwd=repo)
-        if lane.get("setup"):  # a new worktree has none of the project's installed dependencies
-            env = {**{k: os.environ[k] for k in BASE_ENV if k in os.environ}, **lane.get("env", {}), "TERM": "dumb"}
-            r = subprocess.run(["/bin/sh", "-c", lane["setup"]], cwd=str(wt), env=env, stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=1800)
-            if r.returncode:
-                git("worktree", "remove", "--force", str(wt), cwd=repo)  # so the next try sets it up again
-                tail = " | ".join((r.stdout + r.stderr).strip().splitlines()[-3:])
-                raise RuntimeError(f"the lane's setup command failed in a new worktree (exit {r.returncode}): {tail}")
     if git("status", "--porcelain", cwd=wt):
         git("stash", "push", "--include-untracked", "-m", f"bh: left over before {tid}", cwd=wt)
     branch = f"task/{tid}"
@@ -299,6 +305,13 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
         git("branch", "-m", branch, f"{branch}-try{n}", cwd=wt)
     git("checkout", "-q", "-B", branch, start, cwd=wt)
     return wt, base
+
+
+def with_setup(argv: list, lane: dict, d: Path) -> list:
+    """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT)."""
+    if not lane.get("setup"):
+        return argv
+    return ["/bin/sh", "-c", SETUP_SCRIPT, "bh-setup", lane["setup"], str(d / "setup.log"), str(d / "run.err"), *argv]
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
@@ -370,8 +383,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if cancelled_before_start(desk, tid):
         return None
     with open(d / "task.md", "rb") as stdin, open(d / "run.json", "wb") as out, open(d / "run.err", "wb") as err:
-        proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
-                                start_new_session=True)
+        proc = subprocess.Popen(with_setup(argv, lane, d), cwd=str(wt), env=env, stdin=stdin, stdout=out,
+                                stderr=err, start_new_session=True)
     desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid, pid_start=proc_start(proc.pid),
                 base=base, branch=f"task/{tid}", worktree=str(wt), session_id=sid)
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
@@ -414,7 +427,7 @@ def design_command(desk: Desk, tid: str):
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"bh design {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
            "GIT_COMMITTER_NAME": f"bh design {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
-    return argv, env, wt
+    return with_setup(argv, lane, desk.tasks_dir / tid), env, wt
 
 
 def start_design(desk: Desk, tid: str, lane_name: str) -> None:
@@ -531,7 +544,7 @@ def unusable_reason(run: dict, err: str):
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
-    for f in (d / "run.json", d / "run.err"):  # what a provider sent back never keeps a key in the task folder
+    for f in (d / "run.json", d / "run.err", d / "setup.log"):  # no key stays in the task folder
         if f.exists():
             text = f.read_text(encoding="utf-8", errors="replace")
             if desk.redact(text) != text:
@@ -586,9 +599,15 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
 
     attempts = list(meta.get("attempts", []))
-    kind, why = ("", "") if meta.get("cancel") else unusable_reason(run, err)
+    setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
+    if setup:
+        fields["setup_exit"] = int(setup.group(1))
+    kind, why = ("", "") if meta.get("cancel") or setup else unusable_reason(run, err)
     if meta.get("cancel"):
         state, error = "cancelled", "cancelled"
+    elif setup:
+        state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
+                                  f"started; bh show {tid} has the setup's last lines")
     elif designing:
         lines = err.strip().splitlines()
         state, error = ("done", "") if report or not lines else ("failed", f"the design session did not start: {lines[-1][:200]}")

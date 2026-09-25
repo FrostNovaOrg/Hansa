@@ -188,6 +188,10 @@ def show_text(desk: Desk, tid: str) -> str:
         out += ["  " + f for f in m.get("files", [])[:30]]
     if m.get("leaked"):
         out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so bh will not merge it")
+    if m.get("setup_exit") is not None and (d / "setup.log").exists():
+        tail = (d / "setup.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
+        out += [f"setup (the lane's command that installs dependencies) failed with exit {m['setup_exit']}; "
+                "its last lines:"] + ["  " + x[:200] for x in tail]
     if m.get("denials"):
         out.append(f"refused by the lane's allowed commands ({len(m['denials'])}):")
         for x in m["denials"][:8]:
@@ -261,6 +265,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " (check included); set high, so reaching it means something went wrong",
             "  check after each task: " + (f"{ln['check']} (bh runs it in the worktree after the worker ends;"
                                             " bh merge refuses a failed check)" if ln.get("check") else "none"),
+            "  setup before each task: " + (f"{ln['setup']} (bh runs it in the worktree before the worker starts;"
+                                             " what it changes in the repository is set aside; if it fails, the"
+                                             " task fails and bh show has its last lines)" if ln.get("setup")
+                                             else "none"),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (anything else is refused and shows up in bh show):",
             "    Read, Edit and Write inside the lane's worktree only, and read-only commands there"
@@ -289,7 +297,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         return "\n".join(f"{k:<10} {v}" for k, v in STATES.items())
     if what == "server":
         return ("`bh serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
-                "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued.")
+                "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
+                "desk: a second one refuses to start.")
     return "\n".join([
         "What you can look up: bh explain lane <name> | provider <name> | task <id> | states | server",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",

@@ -220,6 +220,49 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         self.assertFalse(alive(child))  # it ignored the polite signal, so the group was killed
 
+    def test_the_lane_setup_runs_before_every_task_without_provider_keys(self):
+        trace = self.tmp / "setup-trace.txt"
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["setup"] = f'echo installing; echo "token=${{ANTHROPIC_AUTH_TOKEN:-none}}" >> "{trace}"'
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-setup-0001")
+        d = Dispatcher(self.desk)
+        first = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, first)["state"], "done")
+        second = self.desk.new_task("Add hello.txt again")
+        self.assertEqual(self.settle(d, second)["state"], "done")
+        self.assertEqual(trace.read_text().splitlines(), ["token=none", "token=none"])  # the same worktree, again
+        self.assertIn("installing", (self.desk.tasks_dir / second / "setup.log").read_text())
+
+    def test_what_the_setup_changes_in_the_repository_is_not_part_of_the_task(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = "echo generated > made-by-setup.txt; echo 'lock v2' >> README.md"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
+        stashes = subprocess.run(["git", "stash", "list"], cwd=m["worktree"], capture_output=True, text=True).stdout
+        self.assertIn("bh: what the lane's setup changed", stashes)
+        self.assertIn("set aside", (self.desk.tasks_dir / tid / "setup.log").read_text())
+
+    def test_a_failing_setup_fails_the_task_with_its_output_and_never_holds_up_the_server(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = "sleep 2; echo 'registry: API Error: 429 rate_limit_error'; exit 3"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        t0 = time.time()
+        d.tick()
+        self.assertLess(time.time() - t0, 1.5)  # the setup runs in the worker's own process, not in bh serve
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("setup command failed (exit 3)", m["error"])
+        self.assertIn("registry: API Error: 429", views.show_text(self.desk, tid))
+        self.assertFalse(provider_problem(self.desk, self.desk.settings(), "claude"))  # not the provider's quota
+        self.assertEqual(m["attempts"], [])
+
     def test_retry_is_only_for_a_task_that_has_ended(self):
         tid = self.desk.new_task("Add hello.txt")
         with self.assertRaises(SystemExit):
@@ -473,6 +516,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen), "FAKE_DESIGN_SECONDS": "2"}
         s["lanes"]["a"]["preview"] = "npm run dev"
         s["lanes"]["a"]["check"] = "true && echo checked"
+        s["lanes"]["a"]["setup"] = "echo installing"
         self.assertEqual(self.desk.save_settings(s), [])
         self.addCleanup(subprocess.run, [tmux, "-L", tmux_socket(self.desk), "kill-server"], capture_output=True)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -494,6 +538,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         self.assertEqual((m["files"], m["turns"]), (["badge.txt"], 2))
         self.assertEqual(m["usage"]["claude-x"]["in"], 200)
+        self.assertIn("installing", (self.desk.tasks_dir / tid / "setup.log").read_text())  # set up before it opened
         shown = views.show_text(self.desk, tid)
         self.assertIn("Hand-in: the badge is bigger", shown)
         self.assertEqual([a for a in self.desk.asks() if a["by"] == "bh" and not a["closed"]], [])
