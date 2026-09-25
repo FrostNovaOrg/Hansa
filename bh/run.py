@@ -36,7 +36,8 @@ GIT_ID = {"GIT_AUTHOR_NAME": "bh", "GIT_AUTHOR_EMAIL": "bh@localhost",
           "GIT_COMMITTER_NAME": "bh", "GIT_COMMITTER_EMAIL": "bh@localhost"}
 PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in this directory,
 on branch task/{tid}, which was made for this task.
-- Commit your work on this branch; start each commit message with "{tid}:".
+- Do not commit: when you end, bh commits everything you changed here. To look at your
+  work, git status, git diff, git log and git show are allowed.
 - Do not push, do not switch branches, do not touch other directories.
 - To search, run read-only commands such as grep -rn, find and sed -n on paths in this
   directory; they are allowed here.
@@ -48,8 +49,9 @@ on branch task/{tid}, which was made for this task.
 
 VERIFY_PROTOCOL = """You are a worker in lane {lane}, checking another worker's finished task. You are
 on branch task/{tid}, a copy of that task's branch made for this check; nothing here is merged.
-- Change files as your checks need (undo code, add a throwaway test), but do not commit. For
-  undoing, `git checkout <commit> -- <path>`, `git restore` and `git stash` are allowed here.
+- Change files as your checks need (undo code, add a throwaway test), but do not commit; bh sets
+  your changes aside when you end. For undoing, `git checkout <commit> -- <path>` and
+  `git restore` are allowed here.
 - Do not push, do not switch branches, do not touch other directories.
 - To search, run read-only commands such as grep -rn, find and sed -n on paths in this directory.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
@@ -79,7 +81,7 @@ change adds or changes still passes with the code undone: such a test checks not
 the task asked for it that way.
 """
 VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
-VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)", "Bash(git stash:*)"]
+VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
 
 BROWSER_NOTE = """
 This task comes with a browser (tools named mcp__browser__...). It has no saved logins.
@@ -121,7 +123,8 @@ No browser is set up on this desk, so you cannot take screenshots: tell the prin
 in words what changed and where they can see it.
 """
 DESIGN_NOTE = "(A design session: the principal shaped this directly with it. Its last message:)\n\n"
-DESIGN_ALLOW = ["Bash(git merge:*)"]
+# The principal is in the session, so it commits each step itself and brings in the base.
+DESIGN_ALLOW = ["Bash(git add:*)", "Bash(git commit:*)", "Bash(git merge:*)"]
 
 # A lane's turn and time limits are a circuit breaker, set high: a worker that reaches one
 # was given a task too big or unclear, or got stuck. Its notes show where it went.
@@ -258,8 +261,15 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
-    files = [rule(t, wt) for t in ("Read", "Edit")]  # Read covers Glob and Grep; Edit covers Write
-    return files + ["TodoWrite"] + list(lane.get("allow", []))
+    """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
+    are left out: bh does the committing, and read-only git needs no rule."""
+    files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
+    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not r.startswith("Bash(git")]
+
+
+def command_rules(command: str) -> list:
+    """One allow rule per command in a shell line such as `pnpm test && pnpm typecheck`."""
+    return [f"Bash({part}:*)" for part in re.split(r"\s*(?:&&|\|\||;|\n)\s*", command.strip()) if part]
 
 
 def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
@@ -369,6 +379,8 @@ def design_command(desk: Desk, tid: str):
     if lane.get("preview"):
         system += PREVIEW_NOTE.format(preview=lane["preview"])
         extra.append(f"Bash({lane['preview']}:*)")
+    if lane.get("check"):  # it is told to keep the checks passing, so it may run them
+        extra += command_rules(lane["check"])
     argv += ["--append-system-prompt", system,
              "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW]
@@ -519,8 +531,11 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
         if git("status", "--porcelain", cwd=wt):
-            git("add", "-A", cwd=wt)
-            git("commit", "-q", "--no-verify", "-m", f"{tid}: changes left uncommitted at exit", cwd=wt)
+            if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
+                git("stash", "push", "--include-untracked", "-m", f"bh: {tid} scratch changes", cwd=wt)
+            else:
+                git("add", "-A", cwd=wt)
+                git("commit", "-q", "--no-verify", "-m", f"{tid}: {meta.get('title') or 'work'}"[:100], cwd=wt)
         head = git("rev-parse", "HEAD", cwd=wt)
         fields.update(head=head, commits=int(git("rev-list", "--count", f"{meta['base']}..{head}", cwd=wt) or 0),
                       files=git("diff", "--name-only", meta["base"], head, cwd=wt).splitlines(),

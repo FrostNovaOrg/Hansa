@@ -123,6 +123,24 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
         self.assertTrue((self.repo / "hello.txt").exists())
 
+    def test_bh_commits_for_the_worker_and_keeps_git_rules_from_it(self):
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = ["Bash(git commit:*)", "Bash(pnpm test:*)"]  # saved before bh took over git
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertTrue(any("git is handled by bh" in p for p in validate(s)))  # the page refuses new ones
+        tid = self.desk.new_task("Add hello.txt", title="Add a greeting")
+        m = self.settle(Dispatcher(self.desk), tid)
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertNotIn("Bash(git commit:*)", argv)
+        self.assertIn("Bash(pnpm test:*)", argv)
+        self.assertIn("bh commits", argv[argv.index("--append-system-prompt") + 1])
+        msg = subprocess.run(["git", "log", "-1", "--format=%s", m["head"]], cwd=self.repo,
+                             capture_output=True, text=True).stdout.strip()
+        self.assertEqual(msg, f"{tid}: Add a greeting")
+        self.assertIn("ignored", views.explain_text(self.desk, "lane", "a"))
+
     def test_quota_moves_task_to_next_provider(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
@@ -335,8 +353,14 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"next: wait for the verification: bh wait {vid}", views.show_text(self.desk, tid))
         v = self.settle(d, vid)
         self.assertEqual((v["state"], v["verdict"], v.get("check")), ("done", "does not hold", None))
+        self.assertEqual((v["commits"], v["files"]), (0, []))  # its scratch changes are set aside, not committed
+        wt = Path(v["worktree"])
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True,
+                                        text=True).stdout, "")
+        self.assertIn(vid, subprocess.run(["git", "stash", "list"], cwd=wt, capture_output=True, text=True).stdout)
         argv = json.loads(seen.read_text().splitlines()[-1])
         self.assertIn("Bash(git checkout:*)", argv)
+        self.assertNotIn("Bash(git stash:*)", argv)
         self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
         self.assertIn("Run first", (self.desk.tasks_dir / vid / "task.md").read_text())
         st = views.status(self.desk)
@@ -363,6 +387,7 @@ class DeskTest(unittest.TestCase):
         s["providers"]["claude"]["config_dir"] = str(self.tmp / "cc")
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen), "FAKE_DESIGN_SECONDS": "2"}
         s["lanes"]["a"]["preview"] = "npm run dev"
+        s["lanes"]["a"]["check"] = "true && echo checked"
         self.assertEqual(self.desk.save_settings(s), [])
         self.addCleanup(subprocess.run, [tmux, "-L", tmux_socket(self.desk), "kill-server"], capture_output=True)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -394,6 +419,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         self.assertIn("Bash(npm run dev:*)", argv)
         self.assertIn("Bash(git merge:*)", argv)
+        self.assertIn("Bash(git commit:*)", argv)  # the principal is there: the session commits each step itself
+        self.assertIn("Bash(echo checked:*)", argv)  # and may run the lane's check, one rule per command in it
         self.assertIn("No browser is set up", argv[argv.index("--append-system-prompt") + 1])
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "merge", tid])

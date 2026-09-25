@@ -251,8 +251,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (anything else is refused and shows up in bh show):",
             "    Read, Edit and Write inside the lane's worktree only, and read-only commands there"
-            " such as grep, find and sed -n",
-            *["    " + r for r in ln.get("allow", [])],
+            " such as ls, grep, find, sed -n, git status, git diff and git log; bh commits its changes",
+            *["    " + r + (" (ignored: bh handles git)" if r.startswith("Bash(git") else "")
+              for r in ln.get("allow", [])],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             " you may edit this file)"])
     if what == "provider":

@@ -32,12 +32,11 @@ EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
 MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "BH_TASK")
 
-# Bash commands every lane may run. File tools are added per run, scoped to
-# the lane's worktree, so they are not listed here.
-DEFAULT_ALLOW = [
-    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-    "Bash(git add:*)", "Bash(git commit:*)", "Bash(ls:*)",
-]
+# Bash commands every lane may run: none. File tools are added per run, scoped to the
+# lane's worktree; Claude Code already lets a worker run read-only commands there (ls,
+# grep, git status, git diff, git log); and bh commits a worker's changes itself. A lane
+# lists only its own tools, such as its tests.
+DEFAULT_ALLOW: list = []
 
 
 def default_settings() -> dict:
@@ -157,6 +156,9 @@ def validate(s: dict) -> list:
         allow = ln.get("allow", [])
         if not isinstance(allow, list) or not all(isinstance(r, str) and RULE.match(r) for r in allow):
             p.append(f"{at}: allow must be a list of rules such as Bash(pnpm test:*)")
+        elif any(r.startswith("Bash(git") for r in allow):
+            p.append(f"{at}: git is handled by bh (workers can already look at status, diffs and history, "
+                     "and bh commits for them); remove the Bash(git ...) rules")
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")

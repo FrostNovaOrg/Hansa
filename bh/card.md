@@ -8,9 +8,10 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 1. You queue a task: one change a worker can make and check on its own.
 2. `bh serve` (always running) starts it in a free lane: a separate Claude Code
    run in the lane's own git worktree, on a fresh branch `task/<id>`.
-3. The worker commits there and ends with a short report. It cannot push. If
-   the lane has a check command, bh then runs it on the branch itself, so the
-   result does not depend on what the worker says.
+3. The worker changes files there and ends with a short report; bh then
+   commits the changes on the branch. The worker cannot commit or push. If the
+   task changed something and the lane has a check command, bh runs it on the
+   branch itself, so the result does not depend on what the worker says.
 4. Meanwhile run `bh wait` in the background (the Bash tool's background option);
    it returns, and you are told, when a task finishes or fails.
 5. You review and merge, or send it back with what to change.
@@ -61,8 +62,8 @@ lines; send the task back with `bh retry`, or, if the failure is not the
 task's doing, merge with `--despite-check` and say why.
 
 ## Checking before you merge
-The lane's check runs on every task. What else a task gets depends on what the
-change touches, which `bh diff <id> --stat` shows:
+The lane's check runs on every task that changed something. What else a task
+gets depends on what the change touches, which `bh diff <id> --stat` shows:
 - Text or documentation only: the lane's check is enough; read the diff yourself.
 - Code or tests: `bh verify <id>` first. A worker then runs the change rather
   than reading it: it undoes the code to see the new tests fail, runs what the
@@ -134,7 +135,9 @@ that needs code changed, commands run or a browser goes to a worker.
   notes along the way: read them to see what went wrong, then split the task or
   make it clearer rather than re-running it unchanged. `bh retry` passes the
   previous report on.
-- Anything a worker left uncommitted is committed on its branch when it ends.
+- Workers do not commit: when one ends, bh commits its changes on its branch as
+  one commit named after the task. A verification's scratch changes are set
+  aside, never committed.
 - Cost figures are Claude Code's own token counts priced with the principal's
   table. With a subscription they show what the tokens are worth, not a bill.
   To say what one job cost, note the time `bh status` shows when you start it

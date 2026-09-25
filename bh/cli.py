@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import __version__, cost, views
-from .desk import DEFAULT_ALLOW, Desk, default_lane, default_settings, write_json
+from .desk import Desk, default_lane, default_settings, write_json
 from .run import VERIFY_TASK, Dispatcher, check_provider, git, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
