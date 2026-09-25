@@ -71,10 +71,12 @@ if "single word OK" in prompt:
                       "modelUsage": {"fake-model": {"inputTokens": 1, "outputTokens": 1}}}))
     sys.exit(0)
 open("hello.txt", "w").write("hello from " + os.environ.get("BH_TASK", "?") + "\n")
+if os.environ.get("FAKE_WRITE"):
+    open("notes.txt", "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
-    "result": "Added hello.txt. Checked it exists." + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
+    "result": "Added hello.txt. Checked it exists." + (" Notes: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "") + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
                                                       if os.environ.get("FAKE_VERDICT") else ""),
     "session_id": "s-ok",
     "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "env JAVA_HOME=/x mvn test"}}],
@@ -140,6 +142,27 @@ class DeskTest(unittest.TestCase):
                              capture_output=True, text=True).stdout.strip()
         self.assertEqual(msg, f"{tid}: Add a greeting")
         self.assertIn("ignored", views.explain_text(self.desk, "lane", "a"))
+
+    def test_a_change_holding_a_stored_key_is_never_merged_and_the_key_is_never_shown(self):
+        key = "sk-test-0123456789"
+        self.desk.write_key("mimo", key)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": key}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["leaked"]), ("done", ["mimo"]), m)
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("key of mimo", shown)
+        self.assertNotIn(key, shown)
+        self.assertNotIn(key, (self.desk.tasks_dir / tid / "result.md").read_text())
+        self.assertNotIn(key, self.desk.events_path.read_text())
+        self.assertIn("key", views.status_text(views.status(self.desk)))
+        with self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
+        self.assertFalse((self.repo / "notes.txt").exists())
+        self.desk.event("anything", detail=f"the endpoint said: bad key {key}")
+        self.assertNotIn(key, self.desk.events_path.read_text())
 
     def test_quota_moves_task_to_next_provider(self):
         s = self.desk.settings()

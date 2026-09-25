@@ -113,6 +113,10 @@ def cmd_merge(a):
                          f"Read it, then merge or send back {m.get('parent')}")
     if m["state"] != "done":
         raise SystemExit(f"bh: only a finished task can be merged; {a.id} is {m['state']}")
+    if m.get("leaked"):
+        raise SystemExit(f"bh: the change in {a.id} holds the key of {', '.join(m['leaked'])}; nothing was merged, "
+                         f"and no flag overrides this. Redo it from the base without the key: bh retry {a.id} --fresh "
+                         f"\"...\", and tell the principal with bh ask: they may want to change that key.")
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"bh: {v['task']} is still verifying {a.id}; nothing was merged. Wait for it: bh wait {v['task']}")

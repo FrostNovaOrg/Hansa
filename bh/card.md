@@ -135,6 +135,10 @@ that needs code changed, commands run or a browser goes to a worker.
   notes along the way: read them to see what went wrong, then split the task or
   make it clearer rather than re-running it unchanged. `bh retry` passes the
   previous report on.
+- A key of the principal's never shows in reports, errors or the event log: bh
+  replaces it with [key of <provider>]. If a change itself holds a key, `bh show`
+  says so and bh never merges it: redo the work with `bh retry <id> --fresh`
+  and tell the principal with `bh ask`.
 - Workers do not commit: when one ends, bh commits its changes on its branch as
   one commit named after the task. A verification's scratch changes are set
   aside, never committed.

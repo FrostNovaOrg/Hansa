@@ -233,7 +233,7 @@ def progress_of(desk: Desk, m: dict) -> dict:
     p = desk.settings()["providers"].get(m.get("provider") or "")
     texts, replies, last, _ = _record(config_home(desk, m["provider"], p), m.get("session_id", "")) if p else ([], 0, None, {})
     return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last else None,
-            "note": texts[-1].splitlines()[0][:160] if texts else ""}
+            "note": desk.redact(texts[-1].splitlines()[0][:160]) if texts else ""}
 
 
 def provider_env(desk: Desk, name: str, p: dict) -> dict:
@@ -499,6 +499,11 @@ def unusable_reason(run: dict, err: str):
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
+    for f in (d / "run.json", d / "run.err"):  # what a provider sent back never keeps a key in the task folder
+        if f.exists():
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if desk.redact(text) != text:
+                f.write_text(desk.redact(text), encoding="utf-8")
     run = read_json(d / "run.json", {}) or {}
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
     result = run.get("result") or ""
@@ -518,11 +523,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         report = DESIGN_NOTE + texts[-1] if texts else ""
         run = {"num_turns": replies}
         end_design(desk, meta)
+    report = desk.redact(report)
     (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
-              "usage": usage, "denials": [denial_of(x) for x in run.get("permission_denials") or []]}
+              "usage": usage, "denials": [desk.redact(denial_of(x)) for x in run.get("permission_denials") or []]}
     if meta.get("kind") == "verify":
         found = VERDICT.findall(result)
         fields["verdict"] = found[-1].lower() if found else ""
@@ -540,6 +546,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields.update(head=head, commits=int(git("rev-list", "--count", f"{meta['base']}..{head}", cwd=wt) or 0),
                       files=git("diff", "--name-only", meta["base"], head, cwd=wt).splitlines(),
                       stat=git("diff", "--shortstat", meta["base"], head, cwd=wt))
+        # a key in the change (its files or its messages) would travel with the merge
+        fields["leaked"] = desk.keys_in(git("log", "-p", "--format=%B", f"{meta['base']}..{head}", cwd=wt))
+        if fields["leaked"]:
+            desk.event("key_in_change", task=tid, providers=fields["leaked"])
     except (RuntimeError, KeyError, OSError) as e:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
 
@@ -580,7 +590,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     checking = (state == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                 and meta.get("kind") != "verify")  # a verification is never merged, so never checked
     meta = desk.update(tid, state="running" if checking else state, phase="checking" if checking else "",
-                       error=error, attempts=attempts, **fields)
+                       error=desk.redact(error), attempts=attempts, **fields)
     desk.event("task_finished", task=tid, state="checking" if checking else state,
                provider=meta.get("provider"), error=error)
     return meta
@@ -788,6 +798,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
         ok, detail = False, f"no answer in {timeout}s"
     except Exception as e:  # noqa: BLE001
         ok, detail = False, str(e)[:200]
+    detail = desk.redact(detail)
     result = {"ok": ok, "detail": detail, "at": now(), "seconds": round(time.time() - t0, 1)}
     desk.set_provider_state(name, check=result)
     if ok:

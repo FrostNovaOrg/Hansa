@@ -82,7 +82,7 @@ const T = ZH ? {
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 bh web 给的地址打开",
-  noPrice:"没价目", tokensNoPrice:"token 没价目"
+  noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并"
 } : {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
@@ -114,7 +114,7 @@ const T = ZH ? {
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by bh web",
-  noPrice:"no price", tokensNoPrice:"tokens without a price"
+  noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged"
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
@@ -197,7 +197,7 @@ async function loadStatus() {
     st.queued.length ? section(T.queued, table([T.task, T.lane, T.titleCol, T.waiting],
       st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : null,
     st.review.length ? section(T.review, table([T.task, T.lane, T.titleCol, T.changes, T.checkCol, T.verifyCol, T.refused],
-      st.review.map(m => [taskLink(m.id), m.lane, m.title, m.stat || T.none,
+      st.review.map(m => [taskLink(m.id), m.lane, m.title, [m.stat || T.none, (m.leaked || []).length ? h("span", {class:"bad"}, " · " + T.keyInChange) : null],
         m.check == null ? "—" : h("span", {class: m.check ? "ok" : "bad"}, m.check ? T.passed : T.notPassed),
         !m.verify ? "—" : ["queued", "running"].includes(m.verify.state) ? h("span", {class:"muted"}, T.v_running)
           : h("span", {class: {holds:"ok", "does not hold":"bad"}[m.verify.verdict] || "warn"}, T["v_" + m.verify.verdict] || T.v_none),

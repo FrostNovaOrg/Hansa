@@ -88,7 +88,7 @@ def status(desk: Desk) -> dict:
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
-                    "commits": m.get("commits", 0), "denied": len(m.get("denials", [])),
+                    "commits": m.get("commits", 0), "denied": len(m.get("denials", [])), "leaked": m.get("leaked", []),
                     "check": None if not m.get("check") else m["check"]["ok"], "verify": verification(desk, m)}
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
@@ -129,7 +129,9 @@ def status_text(st: dict) -> str:
         out += [f"  {m['id']} {m['lane']}: {m['title']} [{m['stat'] or 'no changes'}"
                 + {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]]
                 + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
-                + (f"; {m['denied']} command(s) refused" if m["denied"] else "") + "]" for m in st["review"]]
+                + (f"; {m['denied']} command(s) refused" if m["denied"] else "")
+                + (f"; holds the key of {', '.join(m['leaked'])}: cannot be merged" if m.get("leaked") else "")
+                + "]" for m in st["review"]]
     if st["failed"]:
         out.append("failed (latest):")
         out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
@@ -180,6 +182,8 @@ def show_text(desk: Desk, tid: str) -> str:
                    + ("; nothing to merge, so the lane's check was not run" if m.get("state") == "done"
                       and not m.get("commits") else ""))
         out += ["  " + f for f in m.get("files", [])[:30]]
+    if m.get("leaked"):
+        out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so bh will not merge it")
     if m.get("denials"):
         out.append(f"refused by the lane's allowed commands ({len(m['denials'])}):")
         for x in m["denials"][:8]:
@@ -223,6 +227,9 @@ def show_text(desk: Desk, tid: str) -> str:
         nxt["done"] = f"bh retry {tid} \"fix what {v['task']} found: ...\" · bh merge {tid} --despite-check"
     if v and v["state"] in ("queued", "running") and m["state"] == "done":
         nxt["done"] = f"wait for the verification: bh wait {v['task']} (bh merge {tid} is held until it ends)"
+    if m.get("leaked") and m["state"] == "done":
+        nxt["done"] = (f"bh retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
+                       f"bh ask (they may want to change that key) · bh cancel {tid}")
     if verifying:
         nxt = {"done": f"read the report above, then merge or send back {m.get('parent')}",
                "failed": f"bh verify {m.get('parent')} to try again", "running": f"bh cancel {tid} to stop it",

@@ -301,9 +301,32 @@ class Desk:
         self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
         self.event("key_set", provider=provider, by=by)
 
+    def keys(self) -> dict:
+        """Every stored key by provider name, for checking text against; never shown."""
+        out = {}
+        for f in sorted(self.secrets_dir.glob("*.key")) if self.secrets_dir.is_dir() else []:
+            try:
+                k = f.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if len(k) >= 8:  # shorter strings would match ordinary text
+                out[f.stem] = k
+        return out
+
+    def keys_in(self, text: str) -> list:
+        """Names of the providers whose key appears in this text."""
+        return sorted(n for n, k in self.keys().items() if k in text)
+
+    def redact(self, text: str) -> str:
+        for n, k in self.keys().items():
+            text = text.replace(k, f"[key of {n}]")
+        return text
+
     # -- log, lock, pause -------------------------------------------------
     def event(self, kind: str, **fields) -> None:
-        line = json.dumps({"ts": now(), "event": kind, **fields}, ensure_ascii=False)
+        def clean(v):
+            return self.redact(v) if isinstance(v, str) else [clean(x) for x in v] if isinstance(v, list) else v
+        line = json.dumps({"ts": now(), "event": kind, **{k: clean(v) for k, v in fields.items()}}, ensure_ascii=False)
         with open(self.events_path, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
