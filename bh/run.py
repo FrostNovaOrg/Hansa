@@ -285,8 +285,8 @@ def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
 
 
 def command_rules(command: str) -> list:
-    """One allow rule per command in a shell line such as `pnpm test && pnpm typecheck | tee log`;
-    quoted text stays whole."""
+    """One allow rule per command in a shell line such as `pnpm test && pnpm typecheck`; quoted
+    text and pipelines stay whole."""
     parts, cur, quote, i = [], "", "", 0
     while i < len(command):
         c = command[i]
@@ -302,7 +302,7 @@ def command_rules(command: str) -> list:
             cur, i = cur + c + command[i + 1], i + 1
         elif command.startswith(("&&", "||"), i):
             parts, cur, i = parts + [cur], "", i + 1
-        elif c in ";|\n":
+        elif c in ";\n":  # a pipeline stays one rule: its stages alone (| sh, say) would allow far more
             parts, cur = parts + [cur], ""
         else:
             cur += c
@@ -312,24 +312,26 @@ def command_rules(command: str) -> list:
 
 def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
     """Providers whose stored key is in a change: in its files, binary ones too, or its commit messages."""
-    r = subprocess.run(["git", "log", "-p", "--text", "--format=%B", f"{base}..{head}"], cwd=str(cwd),
-                       capture_output=True)
+    r = subprocess.run(["git", "log", "-p", "-m", "--text", "--format=%B", f"{base}..{head}"], cwd=str(cwd),
+                       capture_output=True)  # -m: what a merge commit changes itself counts too
     return desk.keys_in(r.stdout.decode("utf-8", "replace"))
 
 
 def publish(desk: Desk, tid: str, *names: str) -> None:
     """Move what a task's processes wrote from .bh/runs/<id>/ into its folder, keys removed."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
-    for name in names:
-        src = raw / name if (raw / name).exists() else d / name  # in d: started before bh kept them apart
-        if src.exists():
-            (d / name).write_text(desk.redact(src.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
-            if src.parent == raw:
-                src.unlink()
-    try:
-        raw.rmdir()
-    except OSError:
-        pass
+    with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
+        for name in names:
+            src = raw / name if (raw / name).exists() else d / name  # in d: started before bh kept them apart
+            if src.exists():
+                (d / name).write_text(desk.redact(src.read_text(encoding="utf-8", errors="replace")),
+                                      encoding="utf-8")
+                if src.parent == raw:
+                    src.unlink()
+        try:
+            raw.rmdir()
+        except OSError:
+            pass
 
 
 def pids_with_arg(token: str) -> list:
@@ -350,6 +352,17 @@ def pids_with_arg(token: str) -> list:
                            timeout=30)
         found = [int(x.split(None, 1)[0]) for x in r.stdout.splitlines() if token in x.split()[1:]]
     return [p for p in found if p != os.getpid()]
+
+
+def leader(pids: list):
+    """The one of these that leads its own process group, as each process bh starts does."""
+    for p in pids:
+        try:
+            if os.getpgid(p) == p:
+                return p
+        except OSError:
+            pass
+    return None
 
 
 def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
@@ -792,37 +805,68 @@ def alive(pid, start: str = "") -> bool:
     return not seen or seen == start  # when its start cannot be read now, assume it is the same process
 
 
-def _group_left(pgid, proc=None) -> bool:
-    if proc is not None:
-        proc.poll()  # bh's own child that ended must not linger as a zombie; poll keeps its exit code
-    else:
-        try:
-            os.waitpid(pgid, os.WNOHANG)
-        except ChildProcessError:  # not this process's child: its parent reaps it
-            pass
+def _state(pid) -> str:
+    """A process's state letter (Z: ended, waiting to be reaped); '' if unknown."""
     try:
-        os.killpg(pgid, 0)
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        pass
+    try:
+        return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=10).stdout.strip()[:1]
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def has_ended(proc) -> bool:
+    """Whether bh's child has ended, found without reaping it: until it is reaped, its number,
+    and so its process group's, cannot pass to another process."""
+    if proc.returncode is not None:
         return True
-    except OSError:
+    try:
+        os.kill(proc.pid, 0)
+    except OSError:  # gone altogether
+        proc.poll()
+        return True
+    return _state(proc.pid) == "Z"
+
+
+def group_running(pgid) -> bool:
+    """Whether anything in this process group still runs (one that only waits to be reaped does not)."""
+    if Path("/proc").is_dir():
+        for p in Path("/proc").iterdir():
+            try:
+                if p.name.isdigit():
+                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    if f[0] != "Z" and int(f[2]) == pgid:
+                        return True
+            except (OSError, IndexError, ValueError):
+                pass
         return False
+    r = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True, text=True, timeout=30)
+    return any(x.split()[0] == str(pgid) and not x.split()[1].startswith("Z")
+               for x in r.stdout.splitlines() if len(x.split()) >= 2)
 
 
 def stop(pid, start: str = "", proc=None) -> None:
-    """Stop the process group bh started, politely and then for good, until nothing in it is
-    left, also when its leader has ended already. A number that now belongs to some other process
-    is left alone. proc: the Popen, when this process started the leader: its number stays ours
-    while anything in its group runs."""
-    if not pid or (proc is None and not alive(pid, start)):
+    """Stop the process group bh started, politely and then for good, until nothing in it runs,
+    also when its leader has ended already. proc: the Popen, when this process started the
+    leader; it is reaped only at the end, so the group's number cannot pass to another process
+    meanwhile. Without it, a number that now belongs to another process is left alone."""
+    if not pid or (proc is not None and proc.returncode is not None) or (proc is None and not alive(pid, start)):
         return
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pid, sig)
         except OSError:
-            return
-        for _ in range(20):
-            if not _group_left(pid, proc):
-                return
+            break
+        end = time.time() + 10
+        while group_running(pid) and time.time() < end:
             time.sleep(0.5)
+        if not group_running(pid):
+            break
+    if proc is not None:
+        proc.poll()
 
 
 class Dispatcher:
@@ -838,11 +882,13 @@ class Dispatcher:
         else:
             finish(self.desk, tid, returncode)
 
-    def requeue(self, m: dict) -> None:
-        """A task an earlier server claimed but never recorded as started goes back to the queue,
-        or ends there if it was cancelled. A worker that server did start is stopped first."""
-        for pid in pids_with_arg(m.get("launch", "")):
-            stop(pid)
+    def recover(self, m: dict) -> None:
+        """A task an earlier server claimed but did not record as started: a worker it did start
+        is taken over; otherwise the task goes back to the queue, or ends there if cancelled."""
+        found = leader(pids_with_arg(m.get("launch", ""))) if m.get("kind") != "design" else None
+        if found:
+            self.desk.update(m["id"], phase="", pid=found, pid_start=proc_start(found))
+            return
         if m.get("tmux"):  # a design session it may have opened, which nobody was asked to join yet
             try:
                 subprocess.run([tmux_bin(), "-L", m["tmux"][0], "kill-session", "-t", m["tmux"][1]],
@@ -854,13 +900,33 @@ class Dispatcher:
                           "finished": now()} if x.get("cancel") else
                          {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None})
 
+    def check(self, m: dict, s: dict) -> None:
+        """Run the lane's check on a task whose worker is done: or take over the one an earlier
+        server started, or finish the one it left finished."""
+        desk, tid = self.desk, m["id"]
+        found = leader(pids_with_arg(m.get("launch", "")))
+        if found:
+            desk.update(tid, pid=found, pid_start=proc_start(found))
+            return
+        if (desk.state_dir / "runs" / tid / "check.exit").exists():
+            finish_check(desk, tid)
+            return
+        lane = s["lanes"].get(m.get("lane"), {})
+        proc = start_check(desk, tid, m["lane"], lane) if lane.get("check") else None
+        if proc:
+            self.procs[tid] = proc
+            return
+        publish(desk, tid, "check.log")  # cancelled first, or the principal removed the check meanwhile
+        desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled", "finished": now()}
+                    if x.get("cancel") else {"state": "done", "phase": ""})
+
     def tick(self) -> None:
         desk = self.desk
         s = desk.settings()
         desk.state_dir.mkdir(exist_ok=True)
         (desk.state_dir / "heartbeat").write_text(str(now()))
         for tid, proc in list(self.procs.items()):
-            if proc.poll() is not None:
+            if has_ended(proc):
                 del self.procs[tid]
                 stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
                 self.ended(tid, proc.returncode)
@@ -868,18 +934,9 @@ class Dispatcher:
             if m["state"] != "running" or m["id"] in self.procs:
                 continue
             if m.get("phase") == "starting":  # an earlier server stopped while it prepared this task
-                self.requeue(m)
+                self.recover(m)
             elif m.get("phase") == "checking" and not m.get("pid"):
-                for pid in pids_with_arg(m.get("launch", "")):  # a check an earlier server started
-                    stop(pid)
-                lane = s["lanes"].get(m.get("lane"), {})
-                proc = start_check(desk, m["id"], m["lane"], lane) if lane.get("check") else None
-                if proc:
-                    self.procs[m["id"]] = proc
-                else:  # cancelled first, or the principal removed the check meanwhile
-                    desk.change(m["id"], lambda x: {"state": "cancelled", "phase": "", "error": "cancelled",
-                                                    "finished": now()} if x.get("cancel") else
-                                {"state": "done", "phase": ""})
+                self.check(m, s)
             elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
                 self.ended(m["id"], None)
         for m in desk.tasks():

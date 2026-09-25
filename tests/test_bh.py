@@ -237,16 +237,64 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["commits"], m["files"]), ("failed", 0, []), m)
 
-    def test_a_worker_started_just_before_the_server_stopped_is_stopped_before_the_task_runs_again(self):
+    def test_a_worker_started_just_before_the_server_stopped_is_taken_over(self):
         token = "bh-launch-test-5b9f"
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
         self.addCleanup(lambda: orphan.poll() is None and orphan.kill())
         tid = self.desk.new_task("Add hello.txt")
         self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=time.time(),
                          pid=None, launch=token)
+        Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", orphan.pid), m)
+        self.assertIsNone(orphan.poll())  # still working, not stopped and started over
+
+    def test_a_check_an_earlier_server_finished_is_not_run_again(self):
+        marker = self.tmp / "checked"
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"touch {marker}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", phase="checking", lane="a", provider="claude", started=time.time(),
+                         pid=None, launch="bh-check-t0001-gone", worktree=str(self.repo), check_command=f"touch {marker}")
+        raw = self.desk.raw_dir(tid)
+        (raw / "check.exit").write_text("0\n")
+        (raw / "check.log").write_text("all passed\n")
         m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "done", m)
-        orphan.wait(timeout=10)
+        self.assertEqual((m["state"], m["check"]["ok"], m["check"]["tail"]), ("done", True, ["all passed"]), m)
+        self.assertFalse(marker.exists())
+
+    def test_a_key_saved_later_is_removed_from_what_was_already_published(self):
+        later = "sk-saved-later-0654"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": later}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        report = self.desk.tasks_dir / tid / "result.md"
+        self.assertIn(later, report.read_text())  # not a key yet
+        self.desk.write_key("mimo", later)
+        self.assertNotIn(later, report.read_text())
+        self.assertIn("[key of mimo]", report.read_text())
+        self.assertNotIn(later, views.show_text(self.desk, tid))
+
+    def test_a_key_that_only_a_merge_commit_brings_is_found(self):
+        from bh.run import keys_in_change
+        key = "sk-test-in-merge-0987"
+        self.desk.write_key("mimo", key)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.repo,
+                                      check=True, capture_output=True, text=True).stdout.strip()
+        base = g("rev-parse", "HEAD")
+        g("checkout", "-q", "-b", "side")
+        (self.repo / "side.txt").write_text("side\n")
+        g("add", ".")
+        g("commit", "-q", "-m", "side")
+        g("checkout", "-q", "main")
+        g("merge", "--no-ff", "--no-commit", "side")
+        (self.repo / "side.txt").write_text(key + "\n")  # changed in the merge itself
+        g("add", ".")
+        g("commit", "-q", "-m", "merge side")  # no other commit shows that line
+        self.assertEqual(keys_in_change(self.desk, self.repo, base, g("rev-parse", "HEAD")), ["mimo"])
 
     def test_a_task_cancelled_before_its_check_starts_is_not_checked(self):
         marker = self.tmp / "checked"
@@ -282,7 +330,8 @@ class DeskTest(unittest.TestCase):
         from bh.run import lane_allow
         s = self.desk.settings()
         s["lanes"]["a"]["allow"] = ["Bash(env git commit:*)", "Bash(GIT_DIR=x git log:*)", "Bash(command git push:*)",
-                                    "Bash(/usr/bin/git show:*)", "Bash(pnpm test:*)", "Bash(gitleaks detect:*)"]
+                                    "Bash(/usr/bin/git show:*)", "Bash(sudo -u deploy git log:*)",
+                                    'Bash(bash -c "git commit -am x":*)', "Bash(pnpm test:*)", "Bash(gitleaks detect:*)"]
         self.assertEqual(sum("git is handled by bh" in p for p in validate(s)), 1)
         self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
                          ["Bash(pnpm test:*)", "Bash(gitleaks detect:*)"])
@@ -296,12 +345,18 @@ class DeskTest(unittest.TestCase):
         hook.chmod(0o755)
         r = subprocess.run([bh, "--desk", str(self.desk.root), "merge", tid], capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len(self.desk.tasks()), 2)
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+        self.assertEqual(len(self.desk.tasks()), 1)  # the hook's bh add was refused at once, not left waiting
+        r = subprocess.run([bh, "--desk", str(self.desk.root), "add", "x"], capture_output=True, text=True, timeout=15,
+                           env={**os.environ, "BH_MERGING": "1"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("hook of a bh merge", r.stderr)
 
     def test_design_rules_for_a_check_keep_quoted_text_together(self):
         from bh.run import command_rules
         self.assertEqual(command_rules("python3 -c 'print(\"a;b\")' && echo ok; pnpm test"),
                          ["Bash(python3 -c 'print(\"a;b\")':*)", "Bash(echo ok:*)", "Bash(pnpm test:*)"])
+        self.assertEqual(command_rules("curl -s https://x.invalid/t | sh"), ["Bash(curl -s https://x.invalid/t | sh:*)"])
 
     def test_a_check_that_ran_on_changed_settings_is_not_recorded(self):
         import bh.run as run

@@ -110,19 +110,20 @@ def cmd_diff(a):
 
 def cmd_merge(a):
     desk = Desk.find(a.desk)
-    with desk.lock():  # checked with nothing changing meanwhile
-        m, v, chk, repo, base = _mergeable(desk, a)
-    # git merges without the desk lock: a slow merge hook does not hold up bh serve, and a hook may run bh
-    try:
-        git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo)
-    except RuntimeError as e:
-        try:
-            git("merge", "--abort", cwd=repo)
-        except RuntimeError:
-            pass
-        raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
-                         f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
+    # Nothing changes the task, its verification, the keys or another merge until this one is done.
+    # The repository's merge hooks run inside it: bh serve waits for them, and a bh command in a hook
+    # that would change the desk stops at once (BH_MERGING) instead of waiting for this merge forever.
     with desk.lock():
+        m, v, chk, repo, base = _mergeable(desk, a)
+        try:
+            git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"BH_MERGING": "1"})
+        except RuntimeError as e:
+            try:
+                git("merge", "--abort", cwd=repo)
+            except RuntimeError:
+                pass
+            raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
+                             f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
         desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
         _close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold")

@@ -233,17 +233,11 @@ def key_problem(k: str) -> str:
     return ""
 
 
-GIT_WRAPPERS = {"env", "command", "exec", "builtin", "nice", "nohup", "time", "sudo", "xargs"}
-
-
 def is_git_rule(rule: str) -> bool:
-    """Whether an allowed-command rule runs git, also behind env, a variable or a path."""
+    """Whether an allowed-command rule runs git anywhere in it: also behind env, sudo, a variable,
+    a path or a shell's -c."""
     m = re.match(r"^Bash\((.*)\)$", rule.strip())
-    for word in m.group(1).split() if m else []:
-        if word in GIT_WRAPPERS or "=" in word or word.startswith("-"):
-            continue
-        return word.rsplit("/", 1)[-1].split(":", 1)[0] == "git"
-    return False
+    return any(w.strip("'\"").rsplit("/", 1)[-1].split(":", 1)[0] == "git" for w in (m.group(1).split() if m else []))
 
 
 class Desk:
@@ -334,7 +328,24 @@ class Desk:
                 fh.write(value.strip() + "\n")
             os.replace(tmp, f)
             self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
+            self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
+
+    PUBLISHED = ("result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json")
+
+    def scrub(self, key: str, provider: str) -> None:
+        """Take a newly saved key out of what bh has already published (text that was not a key
+        when it was written): the task folders. The event log only ever grows, so it keeps it."""
+        for d in self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []:
+            for name in self.PUBLISHED:
+                f = d / name
+                try:
+                    text = f.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if key in text:
+                    write_json(f, json.loads(text.replace(key, f"[key of {provider}]"))) if name == "meta.json" \
+                        else f.write_text(text.replace(key, f"[key of {provider}]"), encoding="utf-8")
 
     def raw_dir(self, tid: str) -> Path:
         """Where a task's processes write before bh removes keys from what they wrote: under
@@ -377,6 +388,9 @@ class Desk:
         """The desk lock: one holder at a time across processes and threads; a holder may take it again."""
         with self._mutex:
             if not self._held:
+                if os.environ.get("BH_MERGING"):  # waiting would never end: the merge running the hook holds it
+                    raise SystemExit("bh: this runs in a git hook of a bh merge, which holds the desk until the merge "
+                                     "ends; commands that change the desk cannot run here")
                 self.state_dir.mkdir(exist_ok=True)
                 self._lock_file = open(self.state_dir / "lock", "w")
                 fcntl.flock(self._lock_file, fcntl.LOCK_EX)

@@ -57,6 +57,13 @@ change that holds one.
   Code a worker runs (tests, the lane's check and setup commands) runs as the
   desk's user. Run a desk as a user, or on a machine, whose files you are
   content for that code to reach.
+- bh replaces the principal's keys wherever it shows or records text, and will not
+  merge a change that holds one. It cannot see into compressed files, and the
+  event log keeps what it recorded before a key was saved.
+- What a worker leaves running is stopped when the worker ends, unless `bh serve`
+  was restarted in between.
+- A lane repository's merge hooks run while `bh merge` holds the desk, so
+  `bh serve` waits for them.
 - One `bh serve` per desk, on one machine.
 
 ## Tests
