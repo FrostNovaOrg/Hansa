@@ -301,6 +301,24 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     return wt, base
 
 
+def cancelled_before_start(desk: Desk, tid: str) -> bool:
+    """A task cancelled while bh prepared it ends there, and its worker never starts."""
+    m = desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled before it started",
+                                    "finished": now()} if x.get("cancel") else None)
+    if m:
+        desk.event("task_finished", task=tid, state="cancelled", provider=m.get("provider"), error=m["error"])
+    return bool(m)
+
+
+def not_started(desk: Desk, tid: str, e: Exception) -> None:
+    """Record why a task could not start; one cancelled meanwhile stays cancelled."""
+    why = desk.redact(f"could not start: {e}")[:300]
+    desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
+                {"state": "cancelled", "phase": "", "error": "cancelled before it started", "finished": now()}
+                if m.get("cancel") else {"state": "failed", "phase": "", "error": why, "finished": now()})
+    desk.event("task_not_started", task=tid, error=why)
+
+
 def browser_for(desk: Desk, tid: str, command: str):
     """The principal's browser tool for this one task, started in the task's own folder
     and not told where the worker works, so what it saves (screenshots, also the ones
@@ -314,9 +332,16 @@ def browser_for(desk: Desk, tid: str, command: str):
     return cfg, ["mcp__browser", rule("Read", d)]
 
 
-def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
+def start(desk: Desk, tid: str, lane_name: str, pname: str):
+    """Claim a queued task and start its worker. None when the task was no longer queued, or was
+    cancelled while bh prepared it."""
+    meta = desk.transition(tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname,
+                           started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False,
+                           cancel=False)
+    if not meta:
+        return None
     s = desk.settings()
-    lane, p, meta = s["lanes"][lane_name], s["providers"][pname], desk.meta(tid)
+    lane, p = s["lanes"][lane_name], s["providers"][pname]
     wt, base = prepare(desk, lane_name, lane, meta)
     model = (meta.get("model") if p["kind"] == "subscription" else "") or p["model"]  # other providers: their own
     effort = meta.get("effort") or p.get("effort", "")
@@ -342,12 +367,13 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str) -> subprocess.Popen:
            "GIT_AUTHOR_NAME": f"bh worker {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
            "GIT_COMMITTER_NAME": f"bh worker {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
     d = desk.tasks_dir / tid
+    if cancelled_before_start(desk, tid):
+        return None
     with open(d / "task.md", "rb") as stdin, open(d / "run.json", "wb") as out, open(d / "run.err", "wb") as err:
         proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
                                 start_new_session=True)
-    desk.update(tid, state="running", lane=lane_name, provider=pname, model_asked=model, effort_used=effort,
-                started=now(), finished=None, pid=proc.pid, base=base, branch=f"task/{tid}", worktree=str(wt),
-                session_id=sid, error="", timed_out=False, cancel=False)
+    desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid, pid_start=proc_start(proc.pid),
+                base=base, branch=f"task/{tid}", worktree=str(wt), session_id=sid)
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
 
@@ -395,7 +421,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     """Open a design session: an interactive Claude Code run in tmux, in the lane's design
     worktree, which the principal joins. It ends when they leave it with /exit."""
     s = desk.settings()
-    lane, meta = s["lanes"][lane_name], desk.meta(tid)
+    lane = s["lanes"][lane_name]
     ds, co = s.get("design") or {}, s["coordinator"]
     pname = ds.get("provider") or co["provider"]
     p = s["providers"][pname]
@@ -403,16 +429,22 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     if prob:
         raise RuntimeError(f"the design provider {pname} cannot be used now: {prob}")
     tmux = tmux_bin()
-    wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
     if p["kind"] == "subscription":
         model = ds.get("model") or (co.get("model") if pname == co["provider"] else "") or p["model"]
     else:
         model = p["model"]
     sock, name = tmux_socket(desk), f"design-{tid}"
-    desk.update(tid, state="running", lane=lane_name, provider=pname, model_asked=model,
-                effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
-                started=now(), finished=None, pid=None, base=base, branch=f"task/{tid}", worktree=str(wt),
-                session_id=str(uuid.uuid4()), error="", timed_out=False, cancel=False, tmux=[sock, name])
+    meta = desk.transition(
+        tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname, model_asked=model,
+        effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
+        started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False, cancel=False,
+        tmux=[sock, name])
+    if not meta:
+        return
+    wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
+    desk.update(tid, base=base, branch=f"task/{tid}", worktree=str(wt), session_id=str(uuid.uuid4()))
+    if cancelled_before_start(desk, tid):
+        return
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
     subprocess.run([tmux, "-L", sock, "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(wt),
@@ -421,7 +453,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     r = subprocess.run([tmux, "-L", sock, "display-message", "-p", "-t", name, "#{pane_pid}"],
                        capture_output=True, text=True, timeout=30)
     pid = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None  # None: over already
-    meta = desk.update(tid, pid=pid)
+    meta = desk.update(tid, phase="", pid=pid, pid_start=proc_start(pid))
     ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
                        f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit (if it "
                        f"then asks about background work, press Enter: the first choice stops it). The first "
@@ -587,12 +619,16 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
-    checking = (state == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
-                and meta.get("kind") != "verify")  # a verification is never merged, so never checked
-    meta = desk.update(tid, state="running" if checking else state, phase="checking" if checking else "",
-                       error=desk.redact(error), attempts=attempts, **fields)
-    desk.event("task_finished", task=tid, state="checking" if checking else state,
-               provider=meta.get("provider"), error=error)
+
+    def decide(now_meta):
+        final, message = ("cancelled", "cancelled") if now_meta.get("cancel") else (state, error)
+        checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
+                    and meta.get("kind") != "verify")  # a verification is never merged, so never checked
+        return {"state": "running" if checking else final, "phase": "checking" if checking else "",
+                "error": desk.redact(message), "attempts": attempts, "pid_start": "", **fields}
+    meta = desk.change(tid, decide)
+    desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
+               provider=meta.get("provider"), error=meta["error"])
     return meta
 
 
@@ -607,7 +643,7 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         proc = subprocess.Popen(["/bin/sh", "-c", 'sh -c "$1"; echo $? > "$2"', "bh-check", lane["check"],
                                  str(d / "check.exit")], cwd=desk.meta(tid).get("worktree") or str(desk.worktrees_dir / lane_name), env=env,
                                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
-    desk.update(tid, pid=proc.pid, check_started=now(), check_command=lane["check"])
+    desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid), check_started=now(), check_command=lane["check"])
     desk.event("check_started", task=tid, lane=lane_name)
     return proc
 
@@ -624,24 +660,61 @@ def finish_check(desk: Desk, tid: str) -> dict:
             if m.get("timed_out") else "" if code is not None else "the check was interrupted")
     check = {"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
              "seconds": round(now() - (m.get("check_started") or now())), "tail": log.strip().splitlines()[-15:]}
-    state = "cancelled" if m.get("cancel") else "done"
-    m = desk.update(tid, state=state, phase="", pid=None, check=check, error="cancelled" if m.get("cancel") else "")
+    m = desk.change(tid, lambda now_meta: {"state": "cancelled" if now_meta.get("cancel") else "done", "phase": "",
+                                           "pid": None, "pid_start": "", "check": check,
+                                           "error": "cancelled" if now_meta.get("cancel") else ""})
     desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
     return m
 
 
-def alive(pid) -> bool:
+def proc_start(pid) -> str:
+    """When a process started, to tell it from a later one given the same number; '' if unknown."""
+    if not pid:
+        return ""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        return boot + ":" + Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    try:
+        return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def alive(pid, start: str = "") -> bool:
+    """Whether this process is still running, and, when its start is known, still the same one."""
     if not pid:
         return False
     try:
         os.kill(pid, 0)
+    except OSError:
+        return False
+    seen = proc_start(pid) if start else ""
+    return not seen or seen == start  # when its start cannot be read now, assume it is the same process
+
+
+def _group_left(pgid, proc=None) -> bool:
+    if proc is not None:
+        proc.poll()  # bh's own child that ended must not linger as a zombie; poll keeps its exit code
+    else:
+        try:
+            os.waitpid(pgid, os.WNOHANG)
+        except ChildProcessError:  # not this process's child: its parent reaps it
+            pass
+    try:
+        os.killpg(pgid, 0)
         return True
     except OSError:
         return False
 
 
-def stop(pid) -> None:
-    if not pid:
+def stop(pid, start: str = "", proc=None) -> None:
+    """Stop the process group bh started, politely and then for good, until nothing in it is
+    left. A number that now belongs to some other process is left alone. proc: the Popen, when
+    this process started it."""
+    if not alive(pid, start):
         return
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -649,7 +722,7 @@ def stop(pid) -> None:
         except OSError:
             return
         for _ in range(20):
-            if not alive(pid):
+            if not _group_left(pid, proc):
                 return
             time.sleep(0.5)
 
@@ -667,6 +740,20 @@ class Dispatcher:
         else:
             finish(self.desk, tid, returncode)
 
+    def requeue(self, m: dict) -> None:
+        """A task an earlier server claimed but never started goes back to the queue, or ends
+        there if it was cancelled."""
+        if m.get("tmux"):  # a design session it may have opened, which nobody was asked to join yet
+            try:
+                subprocess.run([tmux_bin(), "-L", m["tmux"][0], "kill-session", "-t", m["tmux"][1]],
+                               capture_output=True, timeout=30)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
+        self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
+                         {"state": "cancelled", "phase": "", "error": "cancelled before it started",
+                          "finished": now()} if x.get("cancel") else
+                         {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None})
+
     def tick(self) -> None:
         desk = self.desk
         s = desk.settings()
@@ -679,13 +766,15 @@ class Dispatcher:
         for m in desk.tasks():
             if m["state"] != "running" or m["id"] in self.procs:
                 continue
-            if m.get("phase") == "checking" and not m.get("pid"):
+            if m.get("phase") == "starting":  # an earlier server stopped while it prepared this task
+                self.requeue(m)
+            elif m.get("phase") == "checking" and not m.get("pid"):
                 lane = s["lanes"].get(m.get("lane"), {})
                 if lane.get("check"):
                     self.procs[m["id"]] = start_check(desk, m["id"], m["lane"], lane)
                 else:  # the principal removed the check meanwhile
                     desk.update(m["id"], state="done", phase="")
-            elif not alive(m.get("pid")):  # started by an earlier server
+            elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
                 self.ended(m["id"], None)
         for m in desk.tasks():
             if m["state"] != "running":
@@ -695,7 +784,7 @@ class Dispatcher:
             if m.get("cancel") or over:  # a design session waits on the principal, so it has no time ceiling
                 if not m.get("cancel"):
                     desk.update(m["id"], timed_out=True)
-                stop(m.get("pid"))
+                stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
         if desk.paused():
             return
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
@@ -705,8 +794,7 @@ class Dispatcher:
                 try:
                     start_design(desk, m["id"], m["lane"])
                 except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
-                    desk.update(m["id"], state="failed", error=f"could not start: {e}"[:300])
-                    desk.event("task_not_started", task=m["id"], error=str(e)[:300])
+                    not_started(desk, m["id"], e)
                 else:
                     designing.add(m["lane"])
         running = [m for m in desk.tasks() if m["state"] == "running" and m.get("kind") != "design"]
@@ -725,13 +813,14 @@ class Dispatcher:
                 if not pname:
                     continue
                 try:
-                    self.procs[m["id"]] = start(desk, m["id"], ln, pname)
+                    proc = start(desk, m["id"], ln, pname)
                 except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
-                    desk.update(m["id"], state="failed", error=f"could not start: {e}"[:300])
-                    desk.event("task_not_started", task=m["id"], error=str(e)[:300])
+                    not_started(desk, m["id"], e)
                 else:
-                    busy.add(ln)
-                    free -= 1
+                    if proc:
+                        self.procs[m["id"]] = proc
+                        busy.add(ln)
+                        free -= 1
                 break
 
 

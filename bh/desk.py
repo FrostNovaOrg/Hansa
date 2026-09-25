@@ -21,6 +21,7 @@ import json
 import os
 import re
 import secrets as _secrets
+import threading
 import time
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def now() -> float:
 
 
 def write_json(path: Path, data) -> None:
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")  # writers never share one
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
@@ -240,6 +241,9 @@ class Desk:
         self.events_path = self.root / "events.jsonl"
         self.asks_path = self.root / "asks.json"
         self.paused_path = self.root / "PAUSED"
+        self._mutex = threading.RLock()  # the desk lock, within this process
+        self._held = 0
+        self._lock_file = None
 
     @classmethod
     def find(cls, explicit: str | None = None) -> "Desk":
@@ -332,13 +336,21 @@ class Desk:
 
     @contextlib.contextmanager
     def lock(self):
-        self.state_dir.mkdir(exist_ok=True)
-        with open(self.state_dir / "lock", "w") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+        """The desk lock: one holder at a time across processes and threads; a holder may take it again."""
+        with self._mutex:
+            if not self._held:
+                self.state_dir.mkdir(exist_ok=True)
+                self._lock_file = open(self.state_dir / "lock", "w")
+                fcntl.flock(self._lock_file, fcntl.LOCK_EX)
+            self._held += 1
             try:
                 yield
             finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                self._held -= 1
+                if not self._held:
+                    fcntl.flock(self._lock_file, fcntl.LOCK_UN)
+                    self._lock_file.close()
+                    self._lock_file = None
 
     def paused(self) -> str | None:
         try:
@@ -381,11 +393,23 @@ class Desk:
         return m
 
     def update(self, tid: str, **fields) -> dict:
+        return self.change(tid, lambda m: fields)
+
+    def change(self, tid: str, decide) -> dict | None:
+        """Read a task, decide and write in one step under the lock. decide(meta) returns the
+        fields to set, or None to leave the task as it is (then this returns None)."""
         with self.lock():
             m = self.meta(tid)
+            fields = decide(m)
+            if fields is None:
+                return None
             m.update(fields)
             write_json(self.tasks_dir / tid / "meta.json", m)
         return m
+
+    def transition(self, tid: str, states, **fields) -> dict | None:
+        """Set these fields only while the task is in one of these states; None when it has moved on."""
+        return self.change(tid, lambda m: fields if m["state"] in states else None)
 
     def tasks(self) -> list:
         if not self.tasks_dir.is_dir():

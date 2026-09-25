@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -163,6 +164,67 @@ class DeskTest(unittest.TestCase):
         self.assertFalse((self.repo / "notes.txt").exists())
         self.desk.event("anything", detail=f"the endpoint said: bad key {key}")
         self.assertNotIn(key, self.desk.events_path.read_text())
+
+    def test_a_second_server_on_the_same_desk_refuses_to_start(self):
+        from bh.cli import hold_server_lock
+        held = hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
+                            "serve", "--port", "0"], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("another bh serve", r.stdout + r.stderr)
+
+    def test_a_task_cancelled_while_bh_prepares_it_never_runs(self):
+        import bh.run as run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        real = run.prepare
+
+        def cancelled_meanwhile(desk, *args, **kwargs):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(desk.root), "cancel", tid])
+            return real(desk, *args, **kwargs)
+        with unittest.mock.patch.object(run, "prepare", cancelled_meanwhile):
+            Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+        self.assertFalse(seen.exists())  # no worker was started
+
+    def test_a_task_left_half_started_by_a_stopped_server_is_queued_again(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=time.time(),
+                         pid=None)
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
+
+    def test_bh_only_stops_the_process_it_started_and_all_of_its_group(self):
+        from bh.run import alive, proc_start, stop
+        leader = subprocess.Popen([sys.executable, "-c",
+            "import subprocess, sys, time\n"
+            "c = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+            "print(c.pid, flush=True); time.sleep(60)"], stdout=subprocess.PIPE, text=True, start_new_session=True)
+        child = int(leader.stdout.readline())
+        self.addCleanup(lambda: [os.kill(p, 9) for p in (child, leader.pid) if alive(p)])
+        started = proc_start(leader.pid)
+        self.assertTrue(started)
+        self.assertFalse(alive(leader.pid, "not-this-process"))  # a pid reused by another process is not ours
+        stop(leader.pid, "not-this-process")
+        self.assertIsNone(leader.poll())
+        stop(leader.pid, started)
+        leader.wait(timeout=20)
+        end = time.time() + 10
+        while alive(child) and time.time() < end:
+            time.sleep(0.1)
+        self.assertFalse(alive(child))  # it ignored the polite signal, so the group was killed
+
+    def test_retry_is_only_for_a_task_that_has_ended(self):
+        tid = self.desk.new_task("Add hello.txt")
+        with self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "retry", tid, "again"])
+        self.assertEqual([m["id"] for m in self.desk.tasks()], [tid])
 
     def test_quota_moves_task_to_next_provider(self):
         s = self.desk.settings()

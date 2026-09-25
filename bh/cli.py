@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import __version__, cost, views
-from .desk import Desk, default_lane, default_settings, write_json
+from .desk import Desk, default_lane, default_settings, now, write_json
 from .run import VERIFY_TASK, Dispatcher, check_provider, git, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
@@ -82,12 +83,14 @@ def cmd_design(a):
     if lane not in s["lanes"]:
         raise SystemExit("bh: say which lane the design session is for: --lane L" if not lane
                          else f"bh: there is no lane {lane}")
-    open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
-             and m["state"] in ("queued", "running")]
-    if open_:
-        raise SystemExit(f"bh: lane {lane} already has design session {open_[0]} open; one at a time per lane "
-                         f"(bh show {open_[0]})")
-    tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "", browser=bool(s.get("browser")) or None)
+    with desk.lock():
+        open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
+                 and m["state"] in ("queued", "running")]
+        if open_:
+            raise SystemExit(f"bh: lane {lane} already has design session {open_[0]} open; one at a time per lane "
+                             f"(bh show {open_[0]})")
+        tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "",
+                            browser=bool(s.get("browser")) or None)
     print(f"{tid} queued: bh opens the design session in seconds and asks the principal to join it. "
           f"It comes back for review when they are done: bh wait {tid}")
 
@@ -107,6 +110,11 @@ def cmd_diff(a):
 
 def cmd_merge(a):
     desk = Desk.find(a.desk)
+    with desk.lock():  # nothing changes the task, or queues its verification, while it is checked and merged
+        _merge(desk, a)
+
+
+def _merge(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"bh: {a.id} is a verification of {m.get('parent')}; it is never merged. "
@@ -156,9 +164,19 @@ def cmd_merge(a):
 
 def cmd_retry(a):
     desk = Desk.find(a.desk)
+    with desk.lock():  # the task cannot start, end or be sent back twice meanwhile
+        _retry(desk, a)
+
+
+def _retry(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"bh: {a.id} is a verification; send back the task it checked: bh retry {m.get('parent')} \"...\"")
+    if m["state"] in ("queued", "running"):
+        raise SystemExit(f"bh: {a.id} is {m['state']}; a follow-up is for a task that has ended. Wait for it "
+                         f"(bh wait {a.id}), or cancel it first (bh cancel {a.id})")
+    if m["state"] == "replaced":
+        raise SystemExit(f"bh: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
     note = " ".join(a.note).strip()
     text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
@@ -181,23 +199,31 @@ def cmd_retry(a):
 
 def cmd_cancel(a):
     desk = Desk.find(a.desk)
-    m = desk.meta(a.id)
-    if m["state"] == "queued":
-        desk.update(a.id, state="cancelled", error="cancelled before it started")
-    elif m["state"] == "running":
-        desk.update(a.id, cancel=True)
-        stop(m.get("pid"))
-    elif m["state"] == "done":
-        desk.update(a.id, state="cancelled", error="closed without merging")
-    else:
-        raise SystemExit(f"bh: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be cancelled")
-    _close_verification(desk, m, f"closed: {a.id} was cancelled")
+    with desk.lock():  # the state read here is the state changed here
+        m = desk.meta(a.id)
+        if m["state"] == "queued":
+            desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now())
+        elif m["state"] == "running":  # bh serve stops it; stopping it here as well is only quicker
+            m = desk.update(a.id, cancel=True)
+        elif m["state"] == "done":
+            desk.update(a.id, state="cancelled", error="closed without merging")
+        else:
+            raise SystemExit(f"bh: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be "
+                             f"cancelled")
+        _close_verification(desk, m, f"closed: {a.id} was cancelled")
+    if m["state"] == "running":
+        stop(m.get("pid"), m.get("pid_start", ""))
     desk.event("task_cancel", task=a.id)
     print(f"{a.id} cancelled")
 
 
 def cmd_verify(a):
     desk = Desk.find(a.desk)
+    with desk.lock():  # one verification at a time, of a task that stays as it was checked
+        _verify(desk, a)
+
+
+def _verify(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"bh: {a.id} is itself a verification; verify the task it checks ({m.get('parent')})")
@@ -233,9 +259,8 @@ def _close_verification(desk: Desk, m: dict, why: str) -> None:
         return
     if v["state"] in ("queued", "done"):
         desk.update(v["task"], state="cancelled", error=why)
-    elif v["state"] == "running":
+    elif v["state"] == "running":  # bh serve stops it within seconds
         desk.update(v["task"], cancel=True)
-        stop(desk.meta(v["task"]).get("pid"))
 
 
 def cmd_pause(a):
@@ -325,9 +350,25 @@ def cmd_check(a):
         print(f"{n}: {'ok' if r['ok'] else 'NOT ok'} - {r['detail']}")
 
 
+def hold_server_lock(desk: Desk):
+    """One bh serve per desk: it holds this lock while it runs. None when another server holds it."""
+    desk.state_dir.mkdir(exist_ok=True)
+    f = open(desk.state_dir / "serve.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
 def cmd_serve(a):
     from .web import start_web
     desk = Desk.find(a.desk)
+    held = hold_server_lock(desk)  # kept open while this server runs
+    if not held:
+        raise SystemExit(f"bh: another bh serve is already running on {desk.root}; one per desk, so no task is "
+                         f"started twice. Stop that one first if you want to restart it")
     start_web(desk, a.host, a.port)
     d = Dispatcher(desk)
     desk.event("server_started", port=a.port)
