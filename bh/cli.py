@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import build, cost, views
 from .desk import Desk, default_lane, default_settings, now, write_json
-from .run import VERIFY_TASK, Dispatcher, check_provider, git, provider_env, stop
+from .run import VERIFY_TASK, Dispatcher, check_provider, git, keys_in_change, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer
@@ -110,19 +110,43 @@ def cmd_diff(a):
 
 def cmd_merge(a):
     desk = Desk.find(a.desk)
-    with desk.lock():  # nothing changes the task, or queues its verification, while it is checked and merged
-        _merge(desk, a)
+    with desk.lock():  # checked with nothing changing meanwhile
+        m, v, chk, repo, base = _mergeable(desk, a)
+    # git merges without the desk lock: a slow merge hook does not hold up bh serve, and a hook may run bh
+    try:
+        git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo)
+    except RuntimeError as e:
+        try:
+            git("merge", "--abort", cwd=repo)
+        except RuntimeError:
+            pass
+        raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
+                         f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
+    with desk.lock():
+        desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
+        _close_verification(desk, m, f"closed: {a.id} was merged")
+    despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold")
+    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}))
+    print(f"{a.id} merged into {base} at {repo}")
 
 
-def _merge(desk: Desk, a) -> None:
+def _mergeable(desk: Desk, a):
+    """Everything that must hold before a merge; says why not and exits when something does not."""
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"bh: {a.id} is a verification of {m.get('parent')}; it is never merged. "
                          f"Read it, then merge or send back {m.get('parent')}")
     if m["state"] != "done":
         raise SystemExit(f"bh: only a finished task can be merged; {a.id} is {m['state']}")
-    if m.get("leaked"):
-        raise SystemExit(f"bh: the change in {a.id} holds the key of {', '.join(m['leaked'])}; nothing was merged, "
+    lane = desk.settings()["lanes"].get(m["lane"])
+    if not lane:
+        raise SystemExit(f"bh: lane {m['lane']} is no longer in settings")
+    repo, base = lane["repo"], lane.get("base", "main")
+    leaked = keys_in_change(desk, repo, m["base"], m["head"]) or m.get("leaked")  # a key saved since counts too
+    if leaked:
+        if leaked != m.get("leaked"):
+            desk.update(a.id, leaked=leaked)
+        raise SystemExit(f"bh: the change in {a.id} holds the key of {', '.join(leaked)}; nothing was merged, "
                          f"and no flag overrides this. Redo it from the base without the key: bh retry {a.id} --fresh "
                          f"\"...\", and tell the principal with bh ask: they may want to change that key.")
     v = views.verification(desk, m)
@@ -137,29 +161,12 @@ def _merge(desk: Desk, a) -> None:
         raise SystemExit(f"bh: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
                          f"nothing was merged. bh show {a.id} has the output. "
                          f"To merge it anyway: bh merge {a.id} --despite-check")
-    lane = desk.settings()["lanes"].get(m["lane"])
-    if not lane:
-        raise SystemExit(f"bh: lane {m['lane']} is no longer in settings")
-    repo, base = lane["repo"], lane.get("base", "main")
     current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     if current != base:
         raise SystemExit(f"bh: the checkout at {repo} is on {current}, not {base}; the principal needs to switch it back")
     if git("status", "--porcelain", "--untracked-files=no", cwd=repo):
         raise SystemExit(f"bh: the checkout at {repo} has uncommitted changes; nothing was merged")
-    try:
-        git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo)
-    except RuntimeError as e:
-        try:
-            git("merge", "--abort", cwd=repo)
-        except RuntimeError:
-            pass
-        raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
-                         f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
-    desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
-    despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold")
-    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}))
-    _close_verification(desk, m, f"closed: {a.id} was merged")
-    print(f"{a.id} merged into {base} at {repo}")
+    return m, v, chk, repo, base
 
 
 def cmd_retry(a):

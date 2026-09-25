@@ -9,9 +9,10 @@ to do next, that is a gap in bh, not in you: say so with `bh ask`.
 2. `bh serve` (always running) starts it in a free lane: a separate Claude Code
    run in the lane's own git worktree, on a fresh branch `task/<id>`.
 3. The worker changes files there and ends with a short report; bh then
-   commits the changes on the branch. The worker cannot commit or push. If the
-   task changed something and the lane has a check command, bh runs it on the
-   branch itself, so the result does not depend on what the worker says.
+   commits the changes on the branch (workers are not given git commands that
+   commit or push). If the task changed something and the lane has a check
+   command, bh runs it on the branch itself, so the result does not depend on
+   what the worker says.
 4. Meanwhile run `bh wait` in the background (the Bash tool's background option);
    it returns, and you are told, when a task finishes or fails.
 5. You review and merge, or send it back with what to change.

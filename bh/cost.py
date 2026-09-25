@@ -90,6 +90,8 @@ def coordinator_dirs(desk: Desk) -> list:
         else:
             home = Path(p.get("config_dir") or os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
         homes.setdefault(str(home), name)
+    for home in sorted(desk.state_dir.glob("claude-*")) if desk.state_dir.is_dir() else []:
+        homes.setdefault(str(home), home.name[len("claude-"):])  # a provider the principal has since removed
     return [(name, Path(home) / "projects" / slug(desk.root)) for home, name in homes.items()]
 
 

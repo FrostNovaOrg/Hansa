@@ -3,7 +3,8 @@ keep the queue moving.
 
 A worker is `claude -p` in the lane's git worktree, on a branch of its own
 (task/<id>). The prompt goes in on stdin; the JSON result lands in
-tasks/<id>/run.json. Nothing here needs the worker to know about bh.
+.bh/runs/<id>/run.json, and bh publishes it into tasks/<id>/ without keys when the
+worker ends. Nothing here needs the worker to know about bh.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desk import Desk, now, read_json
+from .desk import Desk, is_git_rule, now, read_json
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -34,7 +35,9 @@ SETUP_FAILED = re.compile(r"^bh: the lane's setup command failed \(exit (\d+)\)$
 # What it changes in the repository (a lock file, say) is set aside, so it is not part of the task.
 # sh -c SETUP_SCRIPT bh-setup <setup> <log> <error file> <worker command...>
 SETUP_SCRIPT = ("env " + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
-  rc=$?; echo "bh: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
+  rc=$?
+  [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "bh: what the lane's failed setup changed" >>"$2" 2>&1
+  echo "bh: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
 if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -q -m "bh: what the lane's setup changed" >>"$2" 2>&1
   echo "bh: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
@@ -174,7 +177,7 @@ def join_command(m: dict) -> str:
 
 def git(*args, cwd, env=None) -> str:
     e = {**os.environ, **GIT_ID, **(env or {})}
-    r = subprocess.run(["git", *args], cwd=str(cwd), env=e, capture_output=True, text=True)
+    r = subprocess.run(["git", *args], cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
     if r.returncode:
         raise RuntimeError(f"git {' '.join(args[:2])} failed: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout.strip()
@@ -278,12 +281,75 @@ def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
     are left out: bh does the committing, and read-only git needs no rule."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
-    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not r.startswith("Bash(git")]
+    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not is_git_rule(r)]
 
 
 def command_rules(command: str) -> list:
-    """One allow rule per command in a shell line such as `pnpm test && pnpm typecheck`."""
-    return [f"Bash({part}:*)" for part in re.split(r"\s*(?:&&|\|\||;|\n)\s*", command.strip()) if part]
+    """One allow rule per command in a shell line such as `pnpm test && pnpm typecheck | tee log`;
+    quoted text stays whole."""
+    parts, cur, quote, i = [], "", "", 0
+    while i < len(command):
+        c = command[i]
+        if quote:
+            cur += c
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"' and i + 1 < len(command):
+                cur, i = cur + command[i + 1], i + 1
+        elif c in "'\"":
+            cur, quote = cur + c, c
+        elif c == "\\" and i + 1 < len(command):
+            cur, i = cur + c + command[i + 1], i + 1
+        elif command.startswith(("&&", "||"), i):
+            parts, cur, i = parts + [cur], "", i + 1
+        elif c in ";|\n":
+            parts, cur = parts + [cur], ""
+        else:
+            cur += c
+        i += 1
+    return [f"Bash({p.strip()}:*)" for p in parts + [cur] if p.strip()]
+
+
+def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
+    """Providers whose stored key is in a change: in its files, binary ones too, or its commit messages."""
+    r = subprocess.run(["git", "log", "-p", "--text", "--format=%B", f"{base}..{head}"], cwd=str(cwd),
+                       capture_output=True)
+    return desk.keys_in(r.stdout.decode("utf-8", "replace"))
+
+
+def publish(desk: Desk, tid: str, *names: str) -> None:
+    """Move what a task's processes wrote from .bh/runs/<id>/ into its folder, keys removed."""
+    raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
+    for name in names:
+        src = raw / name if (raw / name).exists() else d / name  # in d: started before bh kept them apart
+        if src.exists():
+            (d / name).write_text(desk.redact(src.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+            if src.parent == raw:
+                src.unlink()
+    try:
+        raw.rmdir()
+    except OSError:
+        pass
+
+
+def pids_with_arg(token: str) -> list:
+    """Processes whose command line holds this word: bh puts one on each process it starts, so a
+    restarted server can find one whose number it never recorded."""
+    if not token:
+        return []
+    found = []
+    if Path("/proc").is_dir():
+        for p in Path("/proc").iterdir():
+            try:
+                if p.name.isdigit() and token.encode() in (p / "cmdline").read_bytes().split(b"\0"):
+                    found.append(int(p.name))
+            except OSError:
+                pass
+    else:
+        r = subprocess.run(["ps", "-axww", "-o", "pid=,args="], capture_output=True, text=True, errors="replace",
+                           timeout=30)
+        found = [int(x.split(None, 1)[0]) for x in r.stdout.splitlines() if token in x.split()[1:]]
+    return [p for p in found if p != os.getpid()]
 
 
 def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
@@ -307,11 +373,12 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     return wt, base
 
 
-def with_setup(argv: list, lane: dict, d: Path) -> list:
+def with_setup(argv: list, lane: dict, raw: Path) -> list:
     """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT)."""
     if not lane.get("setup"):
         return argv
-    return ["/bin/sh", "-c", SETUP_SCRIPT, "bh-setup", lane["setup"], str(d / "setup.log"), str(d / "run.err"), *argv]
+    return ["/bin/sh", "-c", SETUP_SCRIPT, "bh-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
+            *argv]
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
@@ -379,14 +446,19 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "BH_TASK": tid,
            "GIT_AUTHOR_NAME": f"bh worker {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
            "GIT_COMMITTER_NAME": f"bh worker {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
-    d = desk.tasks_dir / tid
-    if cancelled_before_start(desk, tid):
-        return None
-    with open(d / "task.md", "rb") as stdin, open(d / "run.json", "wb") as out, open(d / "run.err", "wb") as err:
-        proc = subprocess.Popen(with_setup(argv, lane, d), cwd=str(wt), env=env, stdin=stdin, stdout=out,
-                                stderr=err, start_new_session=True)
-    desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid, pid_start=proc_start(proc.pid),
-                base=base, branch=f"task/{tid}", worktree=str(wt), session_id=sid)
+    d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
+    with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
+        if cancelled_before_start(desk, tid):
+            return None
+        # the session id is on the worker's command line: a server that stops right after starting it
+        # can still find it when it comes back
+        desk.update(tid, launch=sid, session_id=sid, base=base, branch=f"task/{tid}", worktree=str(wt))
+        with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
+                open(raw / "run.err", "wb") as err:
+            proc = subprocess.Popen(with_setup(argv, lane, raw), cwd=str(wt), env=env, stdin=stdin, stdout=out,
+                                    stderr=err, start_new_session=True)
+        desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid,
+                    pid_start=proc_start(proc.pid))
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
 
@@ -427,7 +499,7 @@ def design_command(desk: Desk, tid: str):
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"bh design {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
            "GIT_COMMITTER_NAME": f"bh design {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
-    return with_setup(argv, lane, desk.tasks_dir / tid), env, wt
+    return with_setup(argv, lane, desk.raw_dir(tid)), env, wt
 
 
 def start_design(desk: Desk, tid: str, lane_name: str) -> None:
@@ -544,13 +616,10 @@ def unusable_reason(run: dict, err: str):
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
-    for f in (d / "run.json", d / "run.err", d / "setup.log"):  # no key stays in the task folder
-        if f.exists():
-            text = f.read_text(encoding="utf-8", errors="replace")
-            if desk.redact(text) != text:
-                f.write_text(desk.redact(text), encoding="utf-8")
+    publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
+    setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
     result = run.get("result") or ""
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
@@ -581,7 +650,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     try:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
-        if git("status", "--porcelain", cwd=wt):
+        if git("status", "--porcelain", cwd=wt) and not setup:  # a failed setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 git("stash", "push", "--include-untracked", "-m", f"bh: {tid} scratch changes", cwd=wt)
             else:
@@ -591,15 +660,13 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields.update(head=head, commits=int(git("rev-list", "--count", f"{meta['base']}..{head}", cwd=wt) or 0),
                       files=git("diff", "--name-only", meta["base"], head, cwd=wt).splitlines(),
                       stat=git("diff", "--shortstat", meta["base"], head, cwd=wt))
-        # a key in the change (its files or its messages) would travel with the merge
-        fields["leaked"] = desk.keys_in(git("log", "-p", "--format=%B", f"{meta['base']}..{head}", cwd=wt))
+        fields["leaked"] = keys_in_change(desk, wt, meta["base"], head)  # it would travel with the merge
         if fields["leaked"]:
             desk.event("key_in_change", task=tid, providers=fields["leaked"])
     except (RuntimeError, KeyError, OSError) as e:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
 
     attempts = list(meta.get("attempts", []))
-    setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
     if setup:
         fields["setup_exit"] = int(setup.group(1))
     kind, why = ("", "") if meta.get("cancel") or setup else unusable_reason(run, err)
@@ -652,28 +719,39 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
 
 
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
-    """Run the lane's check command in the worktree, as bh, after the worker is done.
-    The exit code goes to a file, so a restarted server can still read it."""
-    d = desk.tasks_dir / tid
-    (d / "check.exit").unlink(missing_ok=True)
+    """Run the lane's check command in the worktree, as bh, after the worker is done; None when
+    the task was cancelled first. The exit code goes to a file, so a restarted server can still
+    read it."""
+    raw = desk.raw_dir(tid)
+    (raw / "check.exit").unlink(missing_ok=True)
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env.update({**lane.get("env", {}), "BH_TASK": tid, "TERM": "dumb"})
-    with open(d / "check.log", "wb") as out:
-        proc = subprocess.Popen(["/bin/sh", "-c", 'sh -c "$1"; echo $? > "$2"', "bh-check", lane["check"],
-                                 str(d / "check.exit")], cwd=desk.meta(tid).get("worktree") or str(desk.worktrees_dir / lane_name), env=env,
-                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
-    desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid), check_started=now(), check_command=lane["check"])
+    token = f"bh-check-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
+    with desk.lock():  # a cancel lands before this (no check) or after it (the check is stopped)
+        m = desk.change(tid, lambda x: None if x.get("cancel") else
+                        {"launch": token, "check_started": now(), "check_command": lane["check"]})
+        if m is None:
+            return None
+        with open(raw / "check.log", "wb") as out:
+            proc = subprocess.Popen(["/bin/sh", "-c", 'sh -c "$1"; echo $? > "$2"', token, lane["check"],
+                                     str(raw / "check.exit")], cwd=m.get("worktree") or str(desk.worktrees_dir / lane_name),
+                                    env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+        desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
     desk.event("check_started", task=tid, lane=lane_name)
     return proc
 
 
 def finish_check(desk: Desk, tid: str) -> dict:
     m = desk.meta(tid)
-    d = desk.tasks_dir / tid
+    raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
+    done = raw / "check.exit" if (raw / "check.exit").exists() else d / "check.exit"
     try:
-        code = int((d / "check.exit").read_text().strip())
+        code = int(done.read_text().strip())
     except (OSError, ValueError):
         code = None
+    done.unlink(missing_ok=True)
+    publish(desk, tid, "check.log")  # what the check printed can hold a key the change holds
     log = (d / "check.log").read_text(encoding="utf-8", errors="replace") if (d / "check.log").exists() else ""
     note = ("stopped on request" if m.get("cancel") else "stopped at the lane's time ceiling"
             if m.get("timed_out") else "" if code is not None else "the check was interrupted")
@@ -731,9 +809,10 @@ def _group_left(pgid, proc=None) -> bool:
 
 def stop(pid, start: str = "", proc=None) -> None:
     """Stop the process group bh started, politely and then for good, until nothing in it is
-    left. A number that now belongs to some other process is left alone. proc: the Popen, when
-    this process started it."""
-    if not alive(pid, start):
+    left, also when its leader has ended already. A number that now belongs to some other process
+    is left alone. proc: the Popen, when this process started the leader: its number stays ours
+    while anything in its group runs."""
+    if not pid or (proc is None and not alive(pid, start)):
         return
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -760,8 +839,10 @@ class Dispatcher:
             finish(self.desk, tid, returncode)
 
     def requeue(self, m: dict) -> None:
-        """A task an earlier server claimed but never started goes back to the queue, or ends
-        there if it was cancelled."""
+        """A task an earlier server claimed but never recorded as started goes back to the queue,
+        or ends there if it was cancelled. A worker that server did start is stopped first."""
+        for pid in pids_with_arg(m.get("launch", "")):
+            stop(pid)
         if m.get("tmux"):  # a design session it may have opened, which nobody was asked to join yet
             try:
                 subprocess.run([tmux_bin(), "-L", m["tmux"][0], "kill-session", "-t", m["tmux"][1]],
@@ -781,6 +862,7 @@ class Dispatcher:
         for tid, proc in list(self.procs.items()):
             if proc.poll() is not None:
                 del self.procs[tid]
+                stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
                 self.ended(tid, proc.returncode)
         for m in desk.tasks():
             if m["state"] != "running" or m["id"] in self.procs:
@@ -788,11 +870,16 @@ class Dispatcher:
             if m.get("phase") == "starting":  # an earlier server stopped while it prepared this task
                 self.requeue(m)
             elif m.get("phase") == "checking" and not m.get("pid"):
+                for pid in pids_with_arg(m.get("launch", "")):  # a check an earlier server started
+                    stop(pid)
                 lane = s["lanes"].get(m.get("lane"), {})
-                if lane.get("check"):
-                    self.procs[m["id"]] = start_check(desk, m["id"], m["lane"], lane)
-                else:  # the principal removed the check meanwhile
-                    desk.update(m["id"], state="done", phase="")
+                proc = start_check(desk, m["id"], m["lane"], lane) if lane.get("check") else None
+                if proc:
+                    self.procs[m["id"]] = proc
+                else:  # cancelled first, or the principal removed the check meanwhile
+                    desk.change(m["id"], lambda x: {"state": "cancelled", "phase": "", "error": "cancelled",
+                                                    "finished": now()} if x.get("cancel") else
+                                {"state": "done", "phase": ""})
             elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
                 self.ended(m["id"], None)
         for m in desk.tasks():
@@ -902,7 +989,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     tmp.mkdir(parents=True, exist_ok=True)
     argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"]]
     t0 = time.time()
-    key = key_stamp(desk, name)
+    stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))
     kind = ""
     try:
         env = {**provider_env(desk, name, p), "CLAUDE_CODE_MAX_RETRIES": "0"}
@@ -922,15 +1009,17 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     except Exception as e:  # noqa: BLE001
         ok, detail = False, str(e)[:200]
     detail = desk.redact(detail)
-    if key_stamp(desk, name) != key:  # the principal saved another key meanwhile: this says nothing about it
-        return {"ok": False, "detail": "the key changed while this check ran; check again", "at": now(),
-                "seconds": round(time.time() - t0, 1)}
     result = {"ok": ok, "detail": detail, "at": now(), "seconds": round(time.time() - t0, 1)}
-    desk.set_provider_state(name, check=result)
-    if ok:
-        desk.set_provider_state(name, cool_until=0, reason="")
-    elif kind:
-        minutes = desk.settings().get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
-        desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
+    with desk.lock():  # keys and settings are saved under this lock too, so nothing lands in between
+        s = desk.settings()
+        if (key_stamp(desk, name), json.dumps(s["providers"].get(name), sort_keys=True)) != stamp:
+            return {**result, "ok": False, "detail": "the provider's key or settings changed while this check "
+                                                     "ran, so it says nothing about them now; check again"}
+        desk.set_provider_state(name, check=result)
+        if ok:
+            desk.set_provider_state(name, cool_until=0, reason="")
+        elif kind:
+            minutes = s.get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
+            desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
     return result

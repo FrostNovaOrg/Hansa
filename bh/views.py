@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from . import build, cost
-from .desk import Desk, read_json
+from .desk import Desk, is_git_rule, read_json
 from .run import join_command, progress_of, provider_problem, server_up, waiting_reason
 
 STATES = {
@@ -276,7 +276,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "  what a worker may use (anything else is refused and shows up in bh show):",
             "    Read, Edit and Write inside the lane's worktree only, and read-only commands there"
             " such as ls, grep, find, sed -n, git status, git diff and git log; bh commits its changes",
-            *["    " + r + (" (ignored: bh handles git)" if r.startswith("Bash(git") else "")
+            *["    " + r + (" (ignored: bh handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             " you may edit this file)"])
@@ -331,4 +331,4 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False) -> str:
     if not m.get("head") or not m.get("worktree"):
         return f"{tid} has no changes recorded yet (state: {m['state']})"
     args = ["diff", "--stat" if stat_only else "--patch", m["base"], m["head"]]
-    return git(*args, cwd=Path(m["worktree"])) or "(no changes)"
+    return desk.redact(git(*args, cwd=Path(m["worktree"]))) or "(no changes)"

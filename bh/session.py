@@ -21,7 +21,7 @@ def main() -> int:
         os.chdir(cwd)
         os.execvpe(argv[0], argv, env)
     except Exception:  # noqa: BLE001 - whatever stops the start is kept for bh show
-        (desk.tasks_dir / tid / "run.err").write_text(traceback.format_exc(), encoding="utf-8")
+        (desk.raw_dir(tid) / "run.err").write_text(traceback.format_exc(), encoding="utf-8")
     return 1
 
 

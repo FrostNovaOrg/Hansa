@@ -5,12 +5,13 @@ Layout (everything under one directory):
     settings.json        the principal's settings (edited on the web page)
     secrets/<name>.key   provider keys; written by the page, never shown
     lanes/<lane>/brief.md  standing instructions sent to every worker in a lane
-    tasks/<id>/          task.md, meta.json, result.md, run.json, run.err
+    tasks/<id>/          task.md, meta.json, result.md, and what its processes wrote, keys removed
     worktrees/<lane>/    one git worktree per lane
     events.jsonl         append-only record of everything that happened
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
-    .bh/                 runtime state: provider cooling, heartbeat, web token
+    .bh/                 runtime state: provider cooling, heartbeat, web token, and runs/<id>/
+                         (what a task's processes write, until bh publishes it without keys)
 """
 from __future__ import annotations
 
@@ -158,9 +159,9 @@ def validate(s: dict) -> list:
         allow = ln.get("allow", [])
         if not isinstance(allow, list) or not all(isinstance(r, str) and RULE.match(r) for r in allow):
             p.append(f"{at}: allow must be a list of rules such as Bash(pnpm test:*)")
-        elif any(r.startswith("Bash(git") for r in allow):
+        elif any(is_git_rule(r) for r in allow):
             p.append(f"{at}: git is handled by bh (workers can already look at status, diffs and history, "
-                     "and bh commits for them); remove the Bash(git ...) rules")
+                     "and bh commits for them); remove the rules that run git")
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -227,7 +228,22 @@ def key_problem(k: str) -> str:
         return "this looks like a masked key (with * or ...); copy the full key"
     if k.lower().startswith("bearer"):
         return "leave out the word Bearer; paste only the key"
+    if len(k) < 8:  # bh looks for keys in what agents write; one this short would match ordinary text
+        return "this is too short to be a key; paste the whole key"
     return ""
+
+
+GIT_WRAPPERS = {"env", "command", "exec", "builtin", "nice", "nohup", "time", "sudo", "xargs"}
+
+
+def is_git_rule(rule: str) -> bool:
+    """Whether an allowed-command rule runs git, also behind env, a variable or a path."""
+    m = re.match(r"^Bash\((.*)\)$", rule.strip())
+    for word in m.group(1).split() if m else []:
+        if word in GIT_WRAPPERS or "=" in word or word.startswith("-"):
+            continue
+        return word.rsplit("/", 1)[-1].split(":", 1)[0] == "git"
+    return False
 
 
 class Desk:
@@ -304,19 +320,28 @@ class Desk:
         self.secrets_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.secrets_dir, 0o700)
         if not value.strip():
-            f.unlink(missing_ok=True)
+            with self.lock():
+                f.unlink(missing_ok=True)
             self.event("key_removed", provider=provider, by=by)
             return
         problem = key_problem(value.strip())
         if problem:
             raise ValueError(problem)
-        tmp = f.with_name(f.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(value.strip() + "\n")
-        os.replace(tmp, f)
-        self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
+        with self.lock():  # a provider check compares and records under the same lock
+            tmp = f.with_name(f.name + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(value.strip() + "\n")
+            os.replace(tmp, f)
+            self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
         self.event("key_set", provider=provider, by=by)
+
+    def raw_dir(self, tid: str) -> Path:
+        """Where a task's processes write before bh removes keys from what they wrote: under
+        .bh/, which no agent may read. bh publishes it into the task's folder when they end."""
+        d = self.state_dir / "runs" / tid
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     def keys(self) -> dict:
         """Every stored key by provider name, for checking text against; never shown."""

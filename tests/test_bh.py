@@ -24,7 +24,7 @@ from bh.run import Dispatcher, provider_problem, tmux_bin, tmux_socket, waiting_
 from bh.web import start_web  # noqa: E402
 
 FAKE = r'''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
 if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
     if os.environ.get("FAKE_SHOW_ARGV"):
@@ -71,7 +71,15 @@ if "single word OK" in prompt:
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "OK",
                       "modelUsage": {"fake-model": {"inputTokens": 1, "outputTokens": 1}}}))
     sys.exit(0)
+if os.environ.get("FAKE_SAY_KEY"):  # an endpoint's error that repeats the key
+    print("endpoint said: bad token " + os.environ.get("ANTHROPIC_AUTH_TOKEN", ""), file=sys.stderr, flush=True)
+    time.sleep(float(os.environ["FAKE_SAY_KEY"]))
 open("hello.txt", "w").write("hello from " + os.environ.get("BH_TASK", "?") + "\n")
+if os.environ.get("FAKE_WRITE_BINARY"):
+    open("blob.bin", "wb").write(b"\x00\x01PK" + os.environ["FAKE_WRITE_BINARY"].encode() + b"\x00\xff")
+if os.environ.get("FAKE_LEAVE_CHILD"):  # something it started and left running, in its process group
+    c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    open(os.environ["FAKE_LEAVE_CHILD"], "w").write(str(c.pid))
 if os.environ.get("FAKE_WRITE"):
     open("notes.txt", "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_SHOW_ARGV"):
@@ -149,6 +157,7 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("mimo", key)
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_WRITE": key}
+        s["lanes"]["a"]["check"] = "cat notes.txt"  # a check that prints what the change holds
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         m = self.settle(Dispatcher(self.desk), tid)
@@ -156,6 +165,10 @@ class DeskTest(unittest.TestCase):
         shown = views.show_text(self.desk, tid)
         self.assertIn("key of mimo", shown)
         self.assertNotIn(key, shown)
+        self.assertNotIn(key, views.diff_text(self.desk, tid))
+        self.assertIn("key of mimo", views.diff_text(self.desk, tid))
+        self.assertNotIn(key, json.dumps(m["check"]))
+        self.assertNotIn(key, (self.desk.tasks_dir / tid / "check.log").read_text())
         self.assertNotIn(key, (self.desk.tasks_dir / tid / "result.md").read_text())
         self.assertNotIn(key, self.desk.events_path.read_text())
         self.assertIn("key", views.status_text(views.status(self.desk)))
@@ -164,6 +177,156 @@ class DeskTest(unittest.TestCase):
         self.assertFalse((self.repo / "notes.txt").exists())
         self.desk.event("anything", detail=f"the endpoint said: bad key {key}")
         self.assertNotIn(key, self.desk.events_path.read_text())
+
+    def test_a_key_too_short_to_look_for_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.desk.write_key("mimo", "sk-1234")
+        self.assertFalse(self.desk.has_key("mimo"))
+
+    def test_a_key_inside_a_binary_file_is_found_too(self):
+        key = "sk-test-binary-0456"
+        self.desk.write_key("mimo", key)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE_BINARY": key}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["leaked"]), ("done", ["mimo"]), m)
+
+    def test_merge_looks_for_keys_again_when_it_merges(self):
+        later = "sk-saved-later-0789"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": later}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["leaked"]), ("done", []), m)
+        self.desk.write_key("mimo", later)  # that text became a key after the task ended
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "merge", tid])
+        self.assertFalse((self.repo / "notes.txt").exists())
+
+    def test_what_a_worker_prints_stays_out_of_the_task_folder_until_bh_removes_keys(self):
+        key = "sk-test-printed-0321"
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_SAY_KEY": "2"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", key)
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        d.tick()
+        raw = self.desk.state_dir / "runs" / tid / "run.err"
+        end = time.time() + 10
+        while key not in (raw.read_text() if raw.exists() else "") and time.time() < end:
+            time.sleep(0.1)
+        self.assertIn(key, raw.read_text())  # raw output goes where no agent may read
+        folder = self.desk.tasks_dir / tid
+        self.assertFalse([f.name for f in folder.iterdir() if f.is_file() and key in f.read_text(errors="replace")])
+        self.settle(d, tid)
+        self.assertIn("key of mimo", (folder / "run.err").read_text())
+        self.assertFalse([f.name for f in folder.iterdir() if f.is_file() and key in f.read_text(errors="replace")])
+        self.assertFalse(raw.exists())  # no raw copy is kept once it is published
+
+    def test_what_a_failing_setup_leaves_is_not_part_of_the_task(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = "echo partial > config.txt; exit 1"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["commits"], m["files"]), ("failed", 0, []), m)
+
+    def test_a_worker_started_just_before_the_server_stopped_is_stopped_before_the_task_runs_again(self):
+        token = "bh-launch-test-5b9f"
+        orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
+        self.addCleanup(lambda: orphan.poll() is None and orphan.kill())
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=time.time(),
+                         pid=None, launch=token)
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        orphan.wait(timeout=10)
+
+    def test_a_task_cancelled_before_its_check_starts_is_not_checked(self):
+        marker = self.tmp / "checked"
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"touch {marker}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", phase="checking", lane="a", provider="claude", started=time.time(),
+                         pid=None, cancel=True, worktree=str(self.repo))
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        started = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                   if e["event"] == "check_started" and e.get("task") == tid]
+        self.assertEqual(started, [])  # not started and then stopped: never started
+        self.assertFalse(marker.exists())
+
+    def test_what_a_worker_leaves_running_ends_with_it(self):
+        from bh.run import alive
+        pidfile = self.tmp / "child.pid"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_LEAVE_CHILD": str(pidfile)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        child = int(pidfile.read_text())
+        self.addCleanup(lambda: alive(child) and os.kill(child, 9))
+        end = time.time() + 10
+        while alive(child) and time.time() < end:
+            time.sleep(0.1)
+        self.assertFalse(alive(child))
+
+    def test_git_behind_a_wrapper_is_still_git(self):
+        from bh.run import lane_allow
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = ["Bash(env git commit:*)", "Bash(GIT_DIR=x git log:*)", "Bash(command git push:*)",
+                                    "Bash(/usr/bin/git show:*)", "Bash(pnpm test:*)", "Bash(gitleaks detect:*)"]
+        self.assertEqual(sum("git is handled by bh" in p for p in validate(s)), 1)
+        self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(pnpm test:*)", "Bash(gitleaks detect:*)"])
+
+    def test_a_merge_hook_that_uses_bh_does_not_hang_the_merge(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        bh = str(Path(__file__).resolve().parent.parent / "bin" / "bh")
+        hook = self.repo / ".git" / "hooks" / "post-merge"
+        hook.write_text(f'#!/bin/sh\n"{bh}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
+        hook.chmod(0o755)
+        r = subprocess.run([bh, "--desk", str(self.desk.root), "merge", tid], capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.desk.tasks()), 2)
+
+    def test_design_rules_for_a_check_keep_quoted_text_together(self):
+        from bh.run import command_rules
+        self.assertEqual(command_rules("python3 -c 'print(\"a;b\")' && echo ok; pnpm test"),
+                         ["Bash(python3 -c 'print(\"a;b\")':*)", "Bash(echo ok:*)", "Bash(pnpm test:*)"])
+
+    def test_a_check_that_ran_on_changed_settings_is_not_recorded(self):
+        import bh.run as run
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-model-0001")
+
+        def model_changed_meanwhile(argv, **kwargs):
+            s2 = self.desk.settings()
+            s2["providers"]["mimo"]["model"] = "mimo-y"
+            self.desk.save_settings(s2)
+            return subprocess.CompletedProcess(argv, 1, json.dumps({"type": "result", "is_error": True,
+                "api_error_status": 401, "result": "API Error: 401 authentication_error"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", model_changed_meanwhile):
+            r = run.check_provider(self.desk, "mimo")
+        self.assertIn("changed while this check ran", r["detail"])
+        self.assertFalse(provider_problem(self.desk, self.desk.settings(), "mimo"))
+
+    def test_coordinator_cost_keeps_a_provider_the_principal_removed(self):
+        proj = self.desk.state_dir / "claude-old" / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text(json.dumps({"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "message": {"id": "m9", "model": "claude-x", "usage": {"input_tokens": 7, "output_tokens": 1}}}) + "\n")
+        self.assertIn(("old", 7), [(r["provider"], r["in"]) for r in cost.transcript_rows(self.desk, 0)])
 
     def test_a_second_server_on_the_same_desk_refuses_to_start(self):
         from bh.cli import hold_server_lock
@@ -275,7 +438,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["providers"] = ["mimo", "claude"]
         s["lanes"]["a"]["env"] = {"FAKE_QUOTA_ON_COMPAT": "1"}
         self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.write_key("mimo", "sk-test")
+        self.desk.write_key("mimo", "sk-test-01")
         tid = self.desk.new_task("Add hello.txt")
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "done", m)
@@ -383,7 +546,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["providers"] = ["mimo", "claude"]
         s["lanes"]["a"]["env"] = {"FAKE_REFUSE_ON_COMPAT": "1"}
         self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.write_key("mimo", "sk-test")
+        self.desk.write_key("mimo", "sk-test-01")
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
         self.assertEqual(m["attempts"][0]["kind"], "refused")
@@ -444,7 +607,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["providers"] = ["mimo"]
         s["lanes"]["a"]["env"] = {"FAKE_STOP_AT_TURNS": "1"}
         self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.write_key("mimo", "sk-test")
+        self.desk.write_key("mimo", "sk-test-01")
         tid = self.desk.new_task("Look at the page", model="sonnet")
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "failed")
@@ -709,7 +872,7 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(run.subprocess, "run", key_replaced_meanwhile):
             r = run.check_provider(self.desk, "mimo")
         self.assertFalse(r["ok"])
-        self.assertIn("key changed", r["detail"])
+        self.assertIn("changed while this check ran", r["detail"])
         self.assertFalse(provider_problem(self.desk, self.desk.settings(), "mimo"))  # the new key is not rested
 
     def test_status_says_which_build_runs_and_whether_cost_is_audited(self):
