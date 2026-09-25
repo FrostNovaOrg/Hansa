@@ -331,21 +331,22 @@ class Desk:
             self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
 
-    PUBLISHED = ("result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json")
+    PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json")
 
     def scrub(self, key: str, provider: str) -> None:
-        """Take a newly saved key out of what bh has already published (text that was not a key
-        when it was written): the task folders. The event log only ever grows, so it keeps it."""
-        for d in self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []:
-            for name in self.PUBLISHED:
-                f = d / name
-                try:
-                    text = f.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                if key in text:
-                    write_json(f, json.loads(text.replace(key, f"[key of {provider}]"))) if name == "meta.json" \
-                        else f.write_text(text.replace(key, f"[key of {provider}]"), encoding="utf-8")
+        """Take a newly saved key out of what bh has already written down (text that was not a key
+        when it was written): the task folders and the requests. The event log only ever grows, so
+        it keeps it."""
+        tasks = self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []
+        for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED)]:
+            try:
+                text = f.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if key in text:
+                text = text.replace(key, f"[key of {provider}]")
+                write_json(f, json.loads(text)) if f.name in ("meta.json", "asks.json") \
+                    else f.write_text(text, encoding="utf-8")
 
     def raw_dir(self, tid: str) -> Path:
         """Where a task's processes write before bh removes keys from what they wrote: under
@@ -423,14 +424,15 @@ class Desk:
         text = text.strip()
         if not text:
             raise ValueError("the task text is empty")
-        with self.lock():
+        with self.lock():  # a key saved meanwhile is either known here or scrubbed from the task after
+            text = self.redact(text)  # a worker never gets a key in its task
             self.tasks_dir.mkdir(exist_ok=True)
             ids = [int(d.name[1:]) for d in self.tasks_dir.iterdir() if d.name[1:].isdigit()]
             tid = f"t{max(ids, default=0) + 1:04d}"
             d = self.tasks_dir / tid
             d.mkdir()
             (d / "task.md").write_text(text + "\n", encoding="utf-8")
-            title = opts.pop("title", "") or text.splitlines()[0][:80]
+            title = self.redact(opts.pop("title", "")) or text.splitlines()[0][:80]
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}
             meta.update({k: v for k, v in opts.items() if v not in (None, "")})
@@ -491,7 +493,8 @@ class Desk:
         with self.lock():
             asks = self.asks()
             n = max((a["id"] for a in asks), default=0) + 1
-            asks.append({"id": n, "text": text.strip(), "by": by, "created": now(), "closed": None, "answer": ""})
+            asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
+                         "answer": ""})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)
         return n
@@ -501,7 +504,7 @@ class Desk:
             asks = self.asks()
             for a in asks:
                 if a["id"] == n:
-                    a["closed"], a["answer"] = now(), answer.strip()
+                    a["closed"], a["answer"] = now(), self.redact(answer.strip())
             write_json(self.asks_path, asks)
         self.event("ask_closed", id=n, by=by)
 

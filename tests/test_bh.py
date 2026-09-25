@@ -383,6 +383,39 @@ class DeskTest(unittest.TestCase):
             "message": {"id": "m9", "model": "claude-x", "usage": {"input_tokens": 7, "output_tokens": 1}}}) + "\n")
         self.assertIn(("old", 7), [(r["provider"], r["in"]) for r in cost.transcript_rows(self.desk, 0)])
 
+    def test_a_cancel_during_setup_leaves_nothing_committed(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = "echo 'lock v2' >> README.md; sleep 5"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        (self.desk.raw_dir(tid) / "setup.log.done").touch()  # an earlier try's, left by a server that stopped
+        d = Dispatcher(self.desk)
+        d.tick()
+        readme = self.desk.worktrees_dir / "a" / "README.md"
+        end = time.time() + 10
+        while "lock v2" not in readme.read_text() and time.time() < end:
+            time.sleep(0.1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "cancel", tid])
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["commits"], m["files"]), ("cancelled", 0, []), m)
+
+    def test_keys_are_kept_out_of_task_texts_and_requests(self):
+        key = "sk-test-in-text-0111"
+        self.desk.write_key("mimo", key)
+        tid = self.desk.new_task(f"Use {key} to call the endpoint", title=f"call with {key}")
+        n = self.desk.add_ask(f"Is {key} still valid?")
+        self.assertNotIn(key, (self.desk.tasks_dir / tid / "task.md").read_text())
+        self.assertNotIn(key, (self.desk.tasks_dir / tid / "meta.json").read_text())
+        self.assertNotIn(key, self.desk.asks_path.read_text())
+        later = "sk-saved-later-0222"
+        tid2 = self.desk.new_task(f"Mention {later} in the notes")
+        self.desk.close_ask(n, f"use {later} instead")
+        self.desk.write_key("mimo", later)  # saved after it was written down
+        self.assertNotIn(later, (self.desk.tasks_dir / tid2 / "task.md").read_text())
+        self.assertNotIn(later, self.desk.asks_path.read_text())
+        self.assertIn("[key of mimo]", (self.desk.tasks_dir / tid2 / "task.md").read_text())
+
     def test_a_second_server_on_the_same_desk_refuses_to_start(self):
         from bh.cli import hold_server_lock
         held = hold_server_lock(self.desk)

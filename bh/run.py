@@ -32,7 +32,8 @@ KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's k
 SETUP_FAILED = re.compile(r"^bh: the lane's setup command failed \(exit (\d+)\)$", re.M)
 # The lane's setup command runs first in the worker's own process, then the worker replaces it:
 # bh serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
-# What it changes in the repository (a lock file, say) is set aside, so it is not part of the task.
+# What it changes in the repository (a lock file, say) is set aside, so it is not part of the task;
+# <log>.done says it got that far (a setup stopped midway leaves its changes uncommitted).
 # sh -c SETUP_SCRIPT bh-setup <setup> <log> <error file> <worker command...>
 SETUP_SCRIPT = ("env " + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
   rc=$?
@@ -42,6 +43,7 @@ if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -q -m "bh: what the lane's setup changed" >>"$2" 2>&1
   echo "bh: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
 fi
+: > "$2.done"
 shift 3; exec "$@"
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
@@ -390,6 +392,7 @@ def with_setup(argv: list, lane: dict, raw: Path) -> list:
     """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT)."""
     if not lane.get("setup"):
         return argv
+    (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
     return ["/bin/sh", "-c", SETUP_SCRIPT, "bh-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
             *argv]
 
@@ -465,7 +468,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             return None
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
-        desk.update(tid, launch=sid, session_id=sid, base=base, branch=f"task/{tid}", worktree=str(wt))
+        desk.update(tid, launch=sid, session_id=sid, base=base, branch=f"task/{tid}", worktree=str(wt),
+                    setup_ran=bool(lane.get("setup")))
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(with_setup(argv, lane, raw), cwd=str(wt), env=env, stdin=stdin, stdout=out,
@@ -536,7 +540,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname, model_asked=model,
         effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
         started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False, cancel=False,
-        tmux=[sock, name])
+        tmux=[sock, name], setup_ran=bool(lane.get("setup")))
     if not meta:
         return
     wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
@@ -629,6 +633,9 @@ def unusable_reason(run: dict, err: str):
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
+    done = desk.state_dir / "runs" / tid / "setup.log.done"
+    set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
+    done.unlink(missing_ok=True)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
@@ -663,7 +670,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     try:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
-        if git("status", "--porcelain", cwd=wt) and not setup:  # a failed setup's leftovers are nobody's work
+        if git("status", "--porcelain", cwd=wt) and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 git("stash", "push", "--include-untracked", "-m", f"bh: {tid} scratch changes", cwd=wt)
             else:
