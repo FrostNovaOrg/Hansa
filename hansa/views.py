@@ -6,7 +6,7 @@ import re
 import time
 from pathlib import Path
 
-from . import build, cost
+from . import build, cost, notify
 from .desk import Desk, is_git_rule, read_json
 from .run import (join_command, lane_occupied, markers_in_change, markers_text, progress_of, provider_problem,
                   server_up, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
@@ -160,6 +160,7 @@ def status(desk: Desk) -> dict:
         "server_seconds_ago": int(time.time() - hb) if hb else None,
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
+        "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -212,6 +213,8 @@ def status_text(st: dict) -> str:
     out += ["cost audit on"] if st.get("audits_cost") else []
     out = [" · ".join(out + [f"hansa {st['build']}", time.strftime("now %H:%M")])]
     out += [st["srt_missing"]] if st.get("srt_missing") else []
+    out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
+               "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out.append("lanes:")
     for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or ('held by a try (hansa lane try)' if ln.get('trying') else 'free')}")
@@ -509,8 +512,30 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "(the lane's env, or the server's, then restart hansa serve). Then, for a task whose "
             "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the lane's check "
             "again and merges if it passes; a task whose setup could not run: hansa retry ID."])
+    if what == "notify":
+        who = notify.names(desk)
+        return "\n".join([
+            "hansa posts to the coordinator's Claude Code session through the session's inbox (a local socket every "
+            "interactive session listens on), so the session need not keep hansa wait running in the background.",
+            "A follower does it: a small background process per session and desk, which reads the event log from "
+            "where it left off and ends when the session's process ends. hansa coordinator starts one for the "
+            "session it launches; hansa notify on starts one for the session it is run from; hansa notify off stops "
+            "it; hansa notify lists them.",
+            "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
+            "could not start), a verification's verdict, a design session that ended, a queued merge check that "
+            "ended, a request the principal answered or closed (with the answer), hansa serve stopping, srt not "
+            "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
+            "line per event and the next command; events seconds apart come in one message.",
+            "Who hears what: a task or request goes to the session that made it (hansa add, retry, verify, merge, "
+            "design and ask record it) while that session has a follower; otherwise to every follower of the desk, "
+            "as do desk-wide events. A follower that starts after one ended first posts what was missed meanwhile, "
+            "as it is now.",
+            "These messages come from hansa, not from the principal, and approve nothing. A session whose settings "
+            "hold messages from other sessions (crossSessionInbound) does not get them; only the principal can "
+            "change that.",
+            "  now: " + (", ".join(who) if who else "no session")])
     return "\n".join([
-        "What you can look up: hansa explain lane <name> | provider <name> | task <id> | states | server",
+        "What you can look up: hansa explain lane <name> | provider <name> | task <id> | states | server | notify",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",

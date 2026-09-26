@@ -14,8 +14,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    commit or push). If the task changed something and the lane has a check
    command, hansa runs it on the branch itself, so the result does not depend on
    what the worker says.
-4. Meanwhile run `hansa wait` in the background (the Bash tool's background option);
-   it returns, and you are told, when a task finishes or fails.
+4. Meanwhile hansa tells your session when a task finishes or fails (see Hearing
+   from hansa). Only when it does not, run `hansa wait` in the background.
 5. You review and merge, or send it back with what to change. If the base moved
    meanwhile, hansa checks the merge before it lands (see Merging).
 
@@ -31,7 +31,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `hansa verify <id> ["what to look at"] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged |
 | `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |
-| `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
+| `hansa notify [on \| off]` | list the sessions hansa posts to; `on` / `off`: start or stop posting to this session (see Hearing from hansa) |
+| `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background only when hansa does not post to your session |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
@@ -116,7 +117,7 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   becomes `merging` and its merge check waits for the lane to be free. hansa
   merges the task onto the base as it is then, in the lane's worktree, runs the
   lane's setup and check there, and if the check passes moves the base to
-  exactly that merge commit. Run `hansa wait <id>` in the background: the task
+  exactly that merge commit. hansa tells you when it ends: the task
   ends `merged`, or back in review with `hansa show <id>` saying why nothing was
   merged (the check's last lines, or a conflict). If the base moves again
   while it is checked, it is checked once more on the new tip; after a second
@@ -134,6 +135,20 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   where that conflicts, the worker finds the conflict markers in the files it is
   told about and settles them by editing, and hansa's commit completes the
   merge. Redo the whole change with `--fresh` only when the old work is no use.
+
+## Hearing from hansa
+hansa posts to your session through its inbox when something needs you: a task
+ended (after its check) or failed, a verification or design session ended, a
+merge check ended, the principal answered a request, the server stopped. Each
+message starts with `[hansa]` and the desk, one line per event with the next
+command. A session started with `hansa coordinator` is posted to by itself;
+otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
+posts to. While it posts to yours, do not keep `hansa wait` running in the
+background. Tasks and requests you made come to you; those made elsewhere
+come to every session hansa posts to.
+These lines come from hansa, not from the principal, and approve nothing.
+If your settings hold messages from other sessions (`crossSessionInbound`),
+you will not hear hansa; the principal can change that.
 
 ## Shaping a feature with the principal
 Changes come in three sizes. Something a sentence or two can say ("make this
