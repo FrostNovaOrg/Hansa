@@ -682,6 +682,24 @@ class DeskTest(unittest.TestCase):
         self.assertFalse((agents / "verifier.md").exists())  # retired, kept in .hansa/
         self.assertTrue(list(self.desk.state_dir.glob("verifier.md.*")))
 
+    def test_the_coordinator_gets_an_operator_that_cannot_touch_code_or_keys(self):
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        code = Path(__file__).resolve().parent.parent / "hansa"
+        op = self.desk.root / ".claude" / "agents" / "operator.md"
+        self.assertEqual(op.read_text(), (code / "agents" / "operator.md").read_text())
+        tools = next(x for x in op.read_text().splitlines() if x.startswith("tools:"))
+        self.assertIn("Bash", tools)
+        self.assertIn("Edit", tools)
+        # the helper runs with the coordinator's permissions, so these hold for it too
+        self.assertIn(f"Edit(//{str(self.repo.resolve()).lstrip('/')}/**)", r.stdout)
+        deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
+        self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", deny)
+
     def test_coordinator_start_brings_the_desks_permissions_up_to_date(self):
         echo = self.tmp / "echo-claude"
         echo.write_text("#!/bin/sh\necho \"$@\"\n")
@@ -1207,9 +1225,10 @@ class DeskTest(unittest.TestCase):
 
     def test_helpers_name_only_tools_claude_code_has(self):
         code = Path(__file__).resolve().parent.parent / "hansa" / "agents"
+        mine = {"operator.md": "tools: Read, Bash, Edit, Write"}  # the one helper that changes the machine
         for f in code.glob("*.md"):
             tools = next(x for x in f.read_text().splitlines() if x.startswith("tools:"))
-            self.assertEqual(tools, "tools: Read, Bash", f.name)
+            self.assertEqual(tools, mine.get(f.name, "tools: Read, Bash"), f.name)
 
     def test_the_page_only_shows_tasks_by_their_id(self):
         (self.desk.root / "x").mkdir()

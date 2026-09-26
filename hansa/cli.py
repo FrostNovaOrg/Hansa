@@ -14,7 +14,7 @@ from .desk import Desk, default_lane, default_settings, json_text, now, read_jso
 from .run import VERIFY_TASK, Dispatcher, check_provider, git, keys_in_change, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
-HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer
+HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by hansa verify and the reviewer
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
