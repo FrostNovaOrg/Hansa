@@ -14,8 +14,9 @@ from pathlib import Path
 from . import account, build, cost, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
-                  conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder, provider_env,
-                  read_try, server_up, stop, try_srt_at_start, write_try)
+                  conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
+                  markers_in_change, markers_text, provider_env, read_try, server_up, stop, try_srt_at_start,
+                  write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -233,6 +234,13 @@ def _mergeable(desk: Desk, a):
         raise SystemExit(f"hansa: the change in {a.id} holds the key of {', '.join(leaked)}; nothing was merged, "
                          f"and no flag overrides this. Redo it from the base without the key: hansa retry {a.id} --fresh "
                          f"\"...\", and tell the principal with hansa ask: they may want to change that key.")
+    markers = markers_in_change(repo, m["base"], m["head"])
+    if markers:
+        if markers != m.get("markers"):
+            desk.update(a.id, markers=markers)
+        raise SystemExit(f"hansa: the change in {a.id} holds git's conflict markers ({markers_text(markers)}); nothing "
+                         f"was merged, and no flag overrides this. Next: hansa retry {a.id} --update \"settle the "
+                         f"markers in {', '.join(markers)}\"")
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. Wait for it: hansa wait {v['task']}")

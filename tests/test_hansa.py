@@ -114,7 +114,7 @@ if os.environ.get("FAKE_LEAVE_CHILD"):  # something it started and left running,
     c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     open(os.environ["FAKE_LEAVE_CHILD"], "w").write(str(c.pid))
 if os.environ.get("FAKE_WRITE"):
-    open("notes.txt", "w").write(os.environ["FAKE_WRITE"] + "\n")
+    open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git folder with a hook of its own
     import shutil
     common = subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
@@ -698,6 +698,58 @@ class DeskTest(unittest.TestCase):
         m = self.desk.meta(t2)
         self.assertEqual((m["state"], m.get("merge_check"), self.git_out("rev-parse", "main")), ("done", None, tip))
 
+    def merge_check_left_running(self, seconds):
+        """Two lanes' tasks, the first merged, and the second's merge check (a check that counts its runs in
+        runs.txt and takes `seconds`) started by a server that is then gone."""
+        runs = self.tmp / "runs.txt"
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = f"echo run >> {runs}; sleep {seconds}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("merge", t1)
+        self.hansa("merge", t2)
+        end = time.time() + 20
+        while not runs.exists() and time.time() < end:
+            d.tick()
+            time.sleep(0.05)
+        self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "running")
+        return d.merge_procs[t2], t2, runs
+
+    def test_a_merge_check_still_running_is_taken_over_by_the_next_server(self):
+        proc, t2, runs = self.merge_check_left_running(2)
+        reaper = threading.Thread(target=proc.wait)  # as init does for a check whose server is gone
+        reaper.start()
+        self.addCleanup(reaper.join)
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(self.desk.meta(t2)["state"], "merging")  # left to run, not started again
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])
+        self.assertEqual(runs.read_text(), "run\n")
+
+    def test_a_merge_check_that_ended_while_no_server_ran_is_finished_by_the_next(self):
+        proc, t2, runs = self.merge_check_left_running(0)
+        proc.wait()  # it wrote its exit code with no server there
+        m = self.settle_merge(Dispatcher(self.desk), t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])
+        self.assertEqual(runs.read_text(), "run\n")
+
+    def test_a_merge_check_marked_starting_but_never_started_is_started_again(self):
+        runs = self.tmp / "runs.txt"
+        d, t1, t2 = self.two_lanes(check=f"echo run >> {runs}")
+        runs.unlink()  # the two tasks' own checks
+        self.hansa("merge", t1)
+        self.hansa("merge", t2)
+        mc = self.desk.meta(t2)["merge_check"]  # a server stopped between marking it starting and starting it
+        self.desk.update(t2, merge_check={**mc, "phase": "starting", "launch": f"hansa-merge-{t2}-{uuid.uuid4().hex[:8]}",
+                                          "started": time.time()})
+        m = self.settle_merge(Dispatcher(self.desk), t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        self.assertEqual(runs.read_text(), "run\n")
+        self.assertEqual(len(self.events("merge_check_started")), 1)
+
     def test_a_conflict_lists_its_files_and_lines(self):
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
@@ -746,6 +798,44 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(self.git_out("rev-list", "--parents", "-n", "1", m["head"]).split()), 3)  # the merge
         self.assertIn(f"{t3} merged into main", self.hansa("merge", t3))
         self.assertEqual((self.repo / "hello.txt").read_text(), f"hello from {t3}\n")
+
+    def test_conflict_markers_a_worker_leaves_are_shown_and_never_merged(self):
+        d = Dispatcher(self.desk)
+        t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
+        for t in (t1, t2):
+            self.settle(d, t)
+        self.hansa("merge", t1)
+        s = self.desk.settings()  # the worker writes another file and leaves the conflict in hello.txt as it is
+        s["lanes"]["a"]["env"] = {"FAKE_HELLO": "other.txt"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("retry", t2, "--update", "keep the newer greeting")
+        t3 = self.desk.meta(t2)["replaced_by"]
+        m = self.settle(d, t3)
+        self.assertEqual((m["state"], m["markers"]), ("done", {"hello.txt": [1, 3, 5]}), m)
+        shown = views.show_text(self.desk, t3)
+        self.assertIn("CONFLICT MARKERS IN THE CHANGE", shown)
+        self.assertIn("hello.txt lines 1, 3, 5", shown)
+        self.assertIn(f"next: hansa retry {t3} --update \"settle the markers in hello.txt\"", shown)
+        self.assertIn("holds conflict markers in hello.txt: cannot be merged", views.status_text(views.status(self.desk)))
+        tip = self.git_out("rev-parse", "main")
+        for flags in ([], ["--despite-check"], ["--recheck"]):  # no flag overrides it
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "merge", t3, *flags])
+            said = str(e.exception.code)
+            self.assertIn("holds git's conflict markers (hello.txt lines 1, 3, 5); nothing was merged", said)
+            self.assertIn(f"hansa retry {t3} --update \"settle the markers in hello.txt\"", said)
+        self.assertEqual((self.desk.meta(t3)["state"], self.git_out("rev-parse", "main")), ("done", tip))
+
+    def test_a_markdown_heading_underline_is_not_a_conflict_marker(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": "Notes\n=======\n\nplain text", "FAKE_WRITE_FILE": "notes.md"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Write notes.md")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["markers"]), ("done", {}), m)
+        self.assertNotIn("CONFLICT MARKERS", views.show_text(self.desk, tid))
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual((self.repo / "notes.md").read_text(), "Notes\n=======\n\nplain text\n")
 
     def test_retry_options_may_come_before_or_after_the_note(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -2436,6 +2526,42 @@ class DeskTest(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_the_page_shows_merge_checks_with_what_they_wait_for(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        t3 = self.desk.new_task("Add b.txt again", lane="b")
+        self.settle(d, t3)
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = "sleep 30"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("merge", t1)
+        self.hansa("merge", t2)
+        self.hansa("merge", t3)
+        end = time.time() + 20
+        while (self.desk.meta(t2).get("merge_check") or {}).get("phase") != "running" and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.addCleanup(lambda: (self.hansa("cancel", t2), d.tick()))
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        tok = self.desk.web_token()
+        try:
+            with urllib.request.urlopen(f"{base}/api/status?t={tok}") as r:
+                merging = {m["id"]: m for m in json.load(r)["merging"]}
+            with urllib.request.urlopen(f"{base}/?t={tok}") as r:
+                page = r.read().decode()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual((merging[t2]["phase"], merging[t2]["minutes"], merging[t2]["lane"]), ("running", 0, "b"))
+        self.assertEqual((merging[t3]["phase"], merging[t3]["busy_with"]), ("queued", t2))
+        self.assertIn(f"waits for lane b, busy with {t2}", merging[t3]["where"])  # what hansa status says
+        # shown with the tasks waiting for review, in both languages, as hansa status puts it
+        self.assertIn("st.review.length || (st.merging || []).length ? section(T.review", page)
+        self.assertIn("`merge check running for ${n} min`", page)
+        self.assertIn("`merge check queued: waits for lane ${lane}, busy with ${id}`", page)
+        self.assertIn("`合并验收已跑了 ${n} 分钟`", page)
+        self.assertIn("合并验收在排队：等线 ${lane} 空出来", page)
 
     def test_web_needs_token_and_header(self):
         httpd = start_web(self.desk, "127.0.0.1", 0)
