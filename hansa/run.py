@@ -910,16 +910,20 @@ def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     m = desk.meta(tid)
     for t in [*m.get("sandbox_tmp", []), *([m["worker_tmp"]] if m.get("worker_tmp") else [])]:
         shutil.rmtree(t, ignore_errors=True)
-    desk.update(tid, sandbox_tmp=[], worker_tmp="")
+    gone = {t: not os.path.lexists(t) for t in [m.get("worker_tmp")] if t}
+    desk.change(tid, lambda x: {"sandbox_tmp": [], "worker_tmp": "", "worker_tmps": [
+        {**r, "removed": gone[r["path"]]} if r.get("path") in gone else r for r in x.get("worker_tmps") or []]})
 
 
 def make_worker_tmp(desk: Desk, tid: str) -> str:
     """A temporary folder for one worker run, its alone (mode 700), recorded as the task's worker_tmp so
-    remove_sandbox_tmp removes it however the run ends. Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
+    remove_sandbox_tmp removes it however the run ends, and in worker_tmps, which outlives the run: each run's
+    path, and whether it was removed (hansa show says). Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
     per-user folder (the worker's TMPDIR) and its sockets in it, so its path is kept short: under /tmp,
     not the server's TMPDIR (a long path under /var/folders on macOS)."""
     tmp = tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=WORKER_TMP_ROOT)
-    desk.update(tid, worker_tmp=tmp)
+    desk.change(tid, lambda x: {"worker_tmp": tmp,
+                                "worker_tmps": [*(x.get("worker_tmps") or []), {"path": tmp, "removed": None}]})
     return tmp
 
 
@@ -1891,15 +1895,18 @@ def lane_occupied(m: dict) -> bool:
 
 
 def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
-    """A verification belongs to the task it checks, and ends with it. by: the session whose hansa cancel closed
-    it, which hears nothing of it."""
+    """A verification belongs to the task it checks: one still queued or running is stopped with it. One that has
+    ended keeps its state and verdict, with why as a plain note (closed), not an error. by: the session whose
+    hansa cancel closed it, which hears nothing of it."""
     if not m.get("verify"):
         return
     v = desk.meta(m["verify"])
-    if v["state"] in ("queued", "done"):
+    if v["state"] == "queued":
         desk.update(v["id"], state="cancelled", error=why, cancel_by=by)
     elif v["state"] == "running":  # hansa serve stops it within seconds
         desk.update(v["id"], cancel=True, cancel_by=by)
+    else:
+        desk.update(v["id"], closed=why)
 
 
 TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc", ".org")

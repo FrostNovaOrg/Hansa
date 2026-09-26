@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import build
+
 LINUX = sys.platform.startswith("linux")
 PATH_OPTIONS = ("--desk", "--repo")  # made full paths before switching: the account starts elsewhere
 DUBIOUS = re.compile(r"dubious ownership in repository at '([^']+)'")
@@ -112,6 +114,7 @@ def _as(account: str, args: list, desk_root: Path) -> tuple:
     env = dict(os.environ)
     here = str(Path(__file__).resolve().parent.parent)  # this hansa, whatever the account's PATH holds
     env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["HANSA_BUILD"] = build()  # which code this is, as hansa --version says it (git may refuse the account)
     return [runuser, "-u", account, "--", sys.executable, "-m", "hansa", *args], env, "/"
 
 
