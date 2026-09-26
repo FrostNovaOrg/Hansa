@@ -101,7 +101,9 @@ def switch_args(argv: list, desk_root: Path) -> list:
 
 def _as(account: str, args: list, desk_root: Path) -> tuple:
     """What runs `hansa ARGS` as the account, with the same environment (runuser sets HOME, USER and
-    LOGNAME for it), and the folder to run it in: the current one, unless the account cannot enter it."""
+    LOGNAME for it), and the folder to run it in: `/`, as notify.spawn does. `-m` puts the current folder
+    first on Python's path, so from a folder holding another checkout of hansa the account would run that
+    one; switch_args has made the path options full paths already."""
     runuser = runuser_bin()
     if not runuser:
         raise SystemExit(f"hansa: this desk belongs to the account {account}, and hansa runs its commands as that "
@@ -110,8 +112,7 @@ def _as(account: str, args: list, desk_root: Path) -> tuple:
     env = dict(os.environ)
     here = str(Path(__file__).resolve().parent.parent)  # this hansa, whatever the account's PATH holds
     env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    cwd = os.getcwd() if can_enter(Path.cwd(), account) else str(desk_root)
-    return [runuser, "-u", account, "--", sys.executable, "-m", "hansa", *args], env, cwd
+    return [runuser, "-u", account, "--", sys.executable, "-m", "hansa", *args], env, "/"
 
 
 def switch(account: str, argv: list, desk_root: Path) -> None:
