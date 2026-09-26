@@ -402,6 +402,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(merge_check_text(desk, m))
     elif m["state"] in ("done", "merged"):
         out += merge_result_lines(m)
+    if m["state"] == "merged" and m.get("unverified"):
+        out.append(f"note: {m['unverified']}")
     if m["state"] == "running" and m.get("phase") == "starting":
         out.append("so far: hansa is preparing it; the worker starts in a moment")
     elif m["state"] == "running" and m.get("phase") != "checking":

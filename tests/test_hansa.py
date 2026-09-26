@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hansa import account, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa: E402
-from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
+from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
+                       waiting_reason)
 from hansa.web import start_web  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 
@@ -170,6 +171,7 @@ if os.environ.get("FAKE_SAY_KEY"):  # an endpoint's error that repeats the key
 hello = os.environ.get("FAKE_HELLO", "hello.txt")
 if os.environ.get("FAKE_SEE") and os.path.exists(hello):  # what the file held when the worker started
     open(os.environ["FAKE_SEE"], "w").write(open(hello).read())
+os.makedirs(os.path.dirname(hello) or ".", exist_ok=True)
 open(hello, "w").write("hello from " + os.environ.get("HANSA_TASK", "?") + "\n")
 if os.environ.get("FAKE_WRITE_BINARY"):
     open("blob.bin", "wb").write(b"\x00\x01PK" + os.environ["FAKE_WRITE_BINARY"].encode() + b"\x00\xff")
@@ -728,16 +730,16 @@ class DeskTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
                               text=True).stdout.strip()
 
-    def two_lanes(self, check=""):
+    def two_lanes(self, check="", names=("a.txt", "b.txt")):
         """Lanes a and b on the one repository, each worker writing a file of its own (a.txt, b.txt), and one
         finished task on each, both made from the same base."""
         s = self.desk.settings()
         s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
-        s["lanes"]["a"].update(env={"FAKE_HELLO": "a.txt"}, check=check)
-        s["lanes"]["b"].update(env={"FAKE_HELLO": "b.txt"}, check=check)
+        s["lanes"]["a"].update(env={"FAKE_HELLO": names[0]}, check=check)
+        s["lanes"]["b"].update(env={"FAKE_HELLO": names[1]}, check=check)
         self.assertEqual(self.desk.save_settings(s), [])
         d = Dispatcher(self.desk)
-        t1, t2 = self.desk.new_task("Add a.txt", lane="a"), self.desk.new_task("Add b.txt", lane="b")
+        t1, t2 = self.desk.new_task(f"Add {names[0]}", lane="a"), self.desk.new_task(f"Add {names[1]}", lane="b")
         for t in (t1, t2):
             m = self.settle(d, t)
             self.assertEqual((m["state"], (m.get("check") or {"ok": True})["ok"]), ("done", True), m)
@@ -3743,6 +3745,42 @@ class DeskTest(unittest.TestCase):
         out = self.hansa("merge", t7)
         self.assertIn(f"{t7} merged into main", out)
         self.assertNotIn("note:", out)  # only text: nothing to verify
+
+    def test_a_merge_through_a_merge_check_says_when_nothing_verified_it(self):
+        d, t1, t2 = self.two_lanes(check="true", names=("a.py", "b.py"))
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_VERDICT"] = "holds"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", t1)
+        self.assertEqual(self.settle(d, self.desk.meta(t1)["verify"])["verdict"], "holds")
+        out = self.hansa("merge", t1, "--recheck")  # verified: nothing to say
+        self.assertIn(f"{t1} is not merged yet", out)
+        self.assertNotIn("note:", out)
+        self.assertEqual(self.settle_merge(d, t1)["state"], "merged")
+        out = self.hansa("merge", t2)  # main moved: a merge check, and nothing verified it
+        self.assertIn(f"{t2} is not merged yet: main has", out)
+        self.assertIn(f"note: nothing verified this change: {t2} changed b.py, and no verification of it holds", out)
+        self.assertIn("this is a note, not a stop", out)
+        self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
+        heard = {x["key"][1]: x["line"] for x in notify.items_for(self.desk, self.events("task_merged"),
+                                                                   {"key": "k", "session": None})}
+        self.assertNotIn("note:", heard[t1])
+        self.assertIn(f"after its merge check passed: Add b.py · note: nothing verified this change: {t2} changed "
+                      f"b.py", heard[t2])
+        self.assertNotIn("note:", views.show_text(self.desk, t1))
+        self.assertIn(f"note: nothing verified this change: {t2} changed b.py", views.show_text(self.desk, t2))
+
+    def test_what_is_text_goes_by_the_kind_of_file_not_its_folder(self):
+        for p in ("guide.md", "docs/guide.md", "notes.txt", "doc/index.rst", "README", "LICENSE", "sub/COPYING",
+                  "LICENSE-COMMERCIAL.md"):
+            self.assertTrue(text_only(p), p)
+        for p in ("docs/conf.py", "doc/app.js", "a.py", "README.py", "docs/Makefile"):
+            self.assertFalse(text_only(p), p)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_HELLO": "docs/conf.py"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.settle(Dispatcher(self.desk), self.desk.new_task("Add docs/conf.py"))["id"]
+        self.assertIn(f"note: nothing verified this change: {tid} changed docs/conf.py", self.hansa("merge", tid))
 
     def test_design_session_opens_for_the_principal_and_comes_back_for_review(self):
         try:

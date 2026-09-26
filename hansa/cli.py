@@ -17,7 +17,7 @@ from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now,
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, markers_in_change, markers_text, provider_env, read_try, server_up, stop,
-                  try_file, try_srt_at_start, waiting_reason, write_try)
+                  try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -205,7 +205,8 @@ def cmd_merge(a):
             print(f"{a.id} is not merged yet: hansa runs the lane's check again. It merges {a.id} onto {base} as it is "
                   f"now in lane {m['lane']}'s worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check "
                   f"there, and merges exactly that if the check passes. It runs when lane {m['lane']} is free. "
-                  f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)")
+                  f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
+                  + _unverified_later(desk, m))
             return
         # the base has commits the task's branch does not: the two together were never checked
         unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
@@ -219,7 +220,7 @@ def cmd_merge(a):
                   f"worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges "
                   f"exactly that if the check passes. "
                   f"It runs when lane {m['lane']} is free. {_wait_for(desk, a.id)} "
-                  f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)")
+                  f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)" + _unverified_later(desk, m))
             return
         try:
             git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
@@ -231,48 +232,24 @@ def cmd_merge(a):
             except RuntimeError:
                 pass
             raise SystemExit(desk.redact(conflict_advice(a.id, base, places, str(e)[:300])))
-        desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
+        note = unverified_note(desk, m)  # before its verification is closed
+        desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+                    unverified=note or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
     desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
                                                      f"since it was made)" if unchecked else ""))
-    note = unverified_note(desk, m, v)
     if note:
-        print(note)
+        print(f"note: {note}. It is merged: this is a note, not a stop")
 
 
-TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc", ".org")
-TEXT_NAMES = ("LICENSE", "LICENCE", "README", "CHANGELOG", "NOTICE", "AUTHORS", "COPYING", "CONTRIBUTING")
-
-
-def text_only(path: str) -> bool:
-    """A file of text or documentation, which a verification has nothing to run in."""
-    p = Path(path)
-    return (p.suffix.lower() in TEXT_SUFFIXES or p.stem.upper() in TEXT_NAMES
-            or any(x in ("doc", "docs") for x in p.parts[:-1]))
-
-
-def unverified_note(desk: Desk, m: dict, v) -> str:
-    """For a merge: the line saying that nothing verified a change beyond text and documentation; '' when its
-    verification held, or it changed only text. v: its verification (views.verification)."""
-    code = [f for f in m.get("files") or [] if not text_only(f)]
-    if not code or (v and v["verdict"] == "holds"):
-        return ""
-    what = f"{m['id']} changed {', '.join(code[:3])}" + (f" and {len(code) - 3} more" if len(code) > 3 else "")
-    try:
-        pm = desk.meta(m["parent"]) if m.get("parent") else None
-    except SystemExit:
-        pm = None
-    pv = views.verification(desk, pm) if pm else None
-    if pv and pv["verdict"] == "holds":
-        return (f"note: {what}, and no verification of {m['id']} held; {pv['task']} verified {pm['id']}, the attempt "
-                f"it retries, not this one. It is merged: this is a note, not a stop")
-    return (f"note: nothing verified this change: {what}, and "
-            + (f"neither it nor {pm['id']}, the attempt it retries, has a verification that holds" if pm
-               else "no verification of it holds")
-            + ". It is merged: this is a note, not a stop")
+def _unverified_later(desk: Desk, m: dict) -> str:
+    """For a merge that waits for its merge check: the line saying that nothing verified the change, or ''."""
+    note = unverified_note(desk, m)
+    return (f"\nnote: {note}. The merge check runs the lane's check, not a verification; if it passes, {m['id']} is "
+            f"merged all the same: this is a note, not a stop") if note else ""
 
 
 def _mergeable(desk: Desk, a):

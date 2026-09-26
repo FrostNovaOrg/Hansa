@@ -229,7 +229,9 @@ def _item(desk: Desk, e: dict):
             line = (f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}: "
                     f"{m.get('title', '')} · next: {_next_step(desk, tid)}")
         elif kind == "task_merged":
-            key, line = ("merge", tid), f"{tid} merged into {e.get('into')} after its merge check passed: {m.get('title', '')}"
+            key, line = ("merge", tid), (f"{tid} merged into {e.get('into')} after its merge check passed: "
+                                         f"{m.get('title', '')}"
+                                         + (f" · note: {m['unverified']}" if m.get("unverified") else ""))
         else:
             key, line = ("task", tid), task_line(desk, m)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
