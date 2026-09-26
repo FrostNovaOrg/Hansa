@@ -2835,11 +2835,13 @@ class DeskTest(unittest.TestCase):
         bin_.mkdir(exist_ok=True)
         (bin_ / "runuser").write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
                                       f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                                      f"open({str(log)!r} + '.cwd', 'a').write(os.getcwd() + '\\n')\n"
                                       "os.execvp(sys.argv[4], sys.argv[4:])\n")
         (bin_ / "runuser").chmod(0o755)
         path = unittest.mock.patch.dict(os.environ, {"PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}"})
         path.start()
         self.addCleanup(path.stop)
+        self.addCleanup(os.chdir, os.getcwd())  # hansa goes to / before it becomes runuser
         ran = []
 
         def execve(prog, args, env):
@@ -2892,6 +2894,32 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "add", "A third one"])  # hansa not run as root
         self.assertEqual(len(log.read_text().splitlines()), n)  # none of these switched
         self.assertEqual([m["id"] for m in self.desk.tasks()], ["t0001", "t0002", "t0003", "t0004"])
+
+    def test_the_accounts_hansa_starts_from_the_root_folder_with_the_callers_relative_paths_made_full(self):
+        log, ran = self.stand_in_runuser()
+        here = os.getcwd()
+        caller = self.tmp / "caller"
+        (caller / "hansa").mkdir(parents=True)  # another checkout of hansa where root runs the command
+        (caller / "hansa" / "__init__.py").write_text("")
+        (caller / "hansa" / "__main__.py").write_text("raise SystemExit('the other checkout ran')\n")
+        (caller / "task.md").write_text("Make the badge bigger\n")
+        os.symlink(self.desk.root, caller / "desk")
+        os.chdir(caller)
+        self.addCleanup(os.chdir, here)
+        self.as_root()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as done:
+            main(["--desk", "desk", "add", "--file", "task.md", "--lane", "a"])
+        self.assertEqual(done.exception.code, 0)  # this checkout's hansa, not the one in the caller's folder
+        args = json.loads(log.read_text().splitlines()[-1])
+        self.assertIn(f"--desk={Path.cwd() / 'desk'}", args)  # the caller's relative paths, made full
+        self.assertIn("--file=-", args)  # root read the relative file from the caller's folder
+        self.assertEqual((self.desk.tasks_dir / "t0001" / "task.md").read_text(), "Make the badge bigger\n")
+        os.chdir(self.desk.root)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as done:
+            main(["--desk", ".", "status"])  # hansa replaces itself with runuser here
+        self.assertEqual(done.exception.code, 0, ran[-1].stderr)
+        self.assertIn(f"--desk={self.desk.root}", json.loads(log.read_text().splitlines()[-1]))
+        self.assertEqual(Path(str(log) + ".cwd").read_text().splitlines(), ["/", "/"])
 
     def test_without_runuser_hansa_says_what_it_needs(self):
         self.as_root()
