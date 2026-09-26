@@ -630,6 +630,33 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
         self.assertEqual(len(list(self.desk.state_dir.glob("coordinator-settings.json.*"))), 1)  # the old one, kept once
 
+    def test_workers_see_neither_the_desks_card_nor_the_users_own_setup(self):
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project,local")  # not the user's own
+        self.assertIn("--strict-mcp-config", argv)  # no MCP servers but hansa's
+        skipped = json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"]
+        self.assertIn(str(self.desk.root / "CLAUDE.md"), skipped)  # the desk's card is the coordinator's
+        self.assertNotIn(str(Path(m["worktree"]) / "CLAUDE.md"), skipped)  # the checkout's own stays
+
+    def test_the_provider_check_runs_the_way_workers_do(self):
+        from hansa import run
+        seen = {}
+
+        def answer(argv, **kwargs):
+            seen["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK",
+                                                                     "modelUsage": {"claude-x": {}}}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertIn("--strict-mcp-config", seen["argv"])
+        self.assertIn(str(self.desk.root / "CLAUDE.md"),
+                      json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["claudeMdExcludes"])
+
     def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "test -f hello.txt && echo checked"
@@ -838,6 +865,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("Bash(git commit:*)", argv)  # the principal is there: the session commits each step itself
         self.assertIn("Bash(echo checked:*)", argv)  # and may run the lane's check, one rule per command in it
         self.assertIn("No browser is set up", argv[argv.index("--append-system-prompt") + 1])
+        self.assertIn("--strict-mcp-config", argv)  # a design session sees no more of the account than a worker
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "merge", tid])
         self.assertTrue((self.repo / "badge.txt").exists())

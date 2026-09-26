@@ -40,6 +40,8 @@ once for each lane's design worktree, in the first design session.
 - Workers change files in their worktree and report. They do not commit:
   hansa commits each task's changes on its own branch, and merges only what the
   coordinator merges.
+- Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
+  and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not
   enough, fix the card or the output.
 

@@ -279,6 +279,17 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
     return env
 
 
+def isolated(cwd) -> list:
+    """What keeps a Claude Code run hansa starts to its checkout and hansa's own instructions: no settings,
+    plugins, hooks or CLAUDE.md of the user it runs as, no MCP servers but those hansa gives it, and no
+    CLAUDE.md from the folders above the checkout (the desk's card, the coordinator's, among them)."""
+    above = []
+    for d in dict.fromkeys([*Path(cwd).parents, *Path(cwd).resolve().parents]):
+        above += [str(d / "CLAUDE.md"), str(d / "CLAUDE.local.md"), str(d / ".claude" / "CLAUDE.md")]
+    return ["--setting-sources", "project,local", "--strict-mcp-config",
+            "--settings", json.dumps({"claudeMdExcludes": above})]
+
+
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
     are left out: hansa does the committing, and read-only git needs no rule."""
@@ -457,6 +468,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         cfg, extra = browser_for(desk, tid, s["browser"])
         argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
         argv += ["--mcp-config", str(cfg)]
+    argv += isolated(wt)
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir)]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *(VERIFY_ALLOW if verifying else [])]
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
@@ -509,6 +521,7 @@ def design_command(desk: Desk, tid: str):
         extra.append(f"Bash({lane['preview']}:*)")
     if lane.get("check"):  # it is told to keep the checks passing, so it may run them
         extra += command_rules(lane["check"])
+    argv += isolated(wt)
     argv += ["--append-system-prompt", system,
              "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW]
@@ -1052,6 +1065,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
     argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"]]
+    argv += isolated(tmp)
     t0 = time.time()
     stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))
     kind = ""
