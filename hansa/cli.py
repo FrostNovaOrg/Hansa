@@ -19,7 +19,7 @@ from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now,
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, proc_start, provider_env, pulse,
-                  read_try, server_up, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
+                  quiet_text, read_try, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -670,9 +670,13 @@ def hold_server_lock(desk: Desk):
     """One hansa serve per desk: it holds this lock while it runs. None when another server holds it."""
     desk.state_dir.mkdir(exist_ok=True)
     f = open(desk.state_dir / "serve.lock", "a")  # not emptied before it is held: it names the server holding it
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    for _ in range(40):  # asking whether a server runs holds it shared for a moment (run.lock_held): not a server
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
         f.close()
         return None
     f.truncate(0)
@@ -955,6 +959,27 @@ def _lane_value(field: str, values: list):
     return values[0] if values else ""
 
 
+SIBLING_FIELDS = ("network", "write", "env", "max_turns", "timeout_min")  # what a lane's tasks can reach and how long
+
+
+def _differs_from_siblings(name: str, ln: dict, lanes: dict) -> list:
+    """How a new lane differs from the lanes already on its repository, one line per field; nothing is copied."""
+    others = {n: x for n, x in lanes.items() if n != name and x.get("repo") and str(Path(x["repo"]).resolve()) == ln["repo"]}
+    blank = {"write": [], **default_lane(ln["repo"], "main")}  # what a field left out of settings means
+    lines = []
+    for f in SIBLING_FIELDS:
+        mine = ln.get(f, blank[f])
+        theirs = {}
+        for n, x in sorted(others.items()):
+            v = x.get(f, blank[f])
+            if v != mine and not (f in LANE_LISTS and set(v) == set(mine)):
+                theirs.setdefault(_shown(v), []).append(n)
+        if theirs:
+            lines.append(f"{f}: {name} has {_shown(mine)}; " + "; ".join(
+                f"{', '.join(ns)} {'has' if len(ns) == 1 else 'have'} {v}" for v, ns in theirs.items()))
+    return lines
+
+
 def cmd_lane(a):
     desk = Desk.find(a.desk)
     if not a.action:
@@ -1001,6 +1026,12 @@ def cmd_lane(a):
                 print(f"Lane {a.name} has no check, so its tasks will be merged untested: hansa merge checks nothing "
                       f"before it merges them, not even when {base} has moved since a task was made. Set one with: "
                       f"hansa lane set {a.name} check \"<the command that runs the tests>\"")
+            differs = _differs_from_siblings(a.name, ln, s["lanes"])
+            if differs:
+                print(desk.redact(f"Lane {a.name} differs from the other lanes on {repo}; nothing was copied from "
+                                  f"them (change it with hansa lane set {a.name} FIELD ...):\n"
+                                  + "\n".join(f"  {x}" for x in differs)))
+                print(f"try it: hansa lane try {a.name}")
             return
         if a.name not in s["lanes"]:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
@@ -1078,9 +1109,14 @@ def _lane_try(desk: Desk, a) -> None:
                                  + (f"{notify.wait_step(desk, holder['id'], True)}; then hansa lane try {a.name}"
                                     if notify.hears_of(desk, holder["id"]) else
                                     f"hansa wait {holder['id']}, then hansa lane try {a.name}"))
-            if not server_up(desk):
+            st = server_state(desk)
+            if st["state"] == "gone":
                 raise SystemExit("hansa: hansa serve is not running, and a try runs through it (with its environment, "
                                  "as tasks do); nothing was run. Start it, then try again")
+            if st["state"] == "stuck":
+                raise SystemExit(f"hansa: hansa serve (pid {st['pid']}) is busy or stuck: no round finished for "
+                                 f"{quiet_text(st['quiet'])}, and a try runs through it; nothing was run. See hansa "
+                                 f"explain server, then try again")
             t = {"id": uuid.uuid4().hex[:12], "phase": "queued", "asked": now()}
             write_try(desk, a.name, t)
             desk.event("lane_try_queued", lane=a.name)
@@ -1094,20 +1130,25 @@ def _lane_try(desk: Desk, a) -> None:
             raise SystemExit(f"hansa: the try of lane {a.name} was replaced by another; see hansa lane try {a.name}")
         if now_t.get("phase") == "done":
             break
-        if server_up(desk):
+        st = server_state(desk)  # stuck runs no rounds, so it neither starts nor finishes the try
+        if st["state"] not in ("gone", "stuck"):
             gone = None
         elif gone is None:
             gone = time.time()
         elif time.time() - gone > 60:
+            why = ("stopped" if st["state"] == "gone" else
+                   f"(pid {st['pid']}) is busy or stuck, with no round finished for {quiet_text(st['quiet'])},")
+            again = "Start hansa serve" if st["state"] == "gone" else "Once its rounds come again (hansa explain server)"
             with desk.lock():  # a server that comes back now starts it under this lock, or finds it gone
                 last = read_try(desk, a.name)
                 if last.get("id") == t["id"] and last.get("phase") == "queued":  # never started: it would hold the lane
                     try_file(desk, a.name).unlink(missing_ok=True)
                     desk.event("lane_try_withdrawn", lane=a.name)
-                    raise SystemExit(f"hansa: hansa serve stopped before the try started, so it was withdrawn and "
-                                     f"lane {a.name} is free again; nothing was run. Start hansa serve, then "
+                    raise SystemExit(f"hansa: hansa serve {why} before the try started, so it was withdrawn and "
+                                     f"lane {a.name} is free again; nothing was run. {again}, then "
                                      f"hansa lane try {a.name}")
-            raise SystemExit(f"hansa: hansa serve stopped before the try ended. Once it runs again, "
+            raise SystemExit(f"hansa: hansa serve {why} before the try ended. Once "
+                             + ("it runs" if st["state"] == "gone" else "its rounds come") + " again, "
                              f"hansa lane try {a.name} waits for this try's result")
         time.sleep(a.every)
     print(desk.redact(views.try_text(a.name, now_t)))

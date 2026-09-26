@@ -9,6 +9,7 @@ worker ends. Nothing here needs the worker to know about hansa.
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import re
@@ -2259,6 +2260,11 @@ def alive(pid, start: str = "") -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
+    return same_start(pid, start)
+
+
+def same_start(pid, start: str) -> bool:
+    """Whether a process still has the start saved for it; True when either cannot be read."""
     if any(c.isspace() for c in start):  # ps's start text, saved before hansa read it with sysctl
         start = ""
     seen = proc_start(pid) if start else ""
@@ -2631,12 +2637,32 @@ def server_holder(desk: Desk) -> tuple:
         return None, ""
 
 
+def lock_held(desk: Desk):
+    """Whether a hansa serve holds serve.lock, asked of the lock itself (a non-blocking shared try): whatever
+    process its number now names, only a live server holds it. None when the lock cannot be asked."""
+    try:
+        f = open(desk.state_dir / "serve.lock", "r")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    with f:  # closing it lets the try go at once
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        return False
+
+
 def _exists(pid, start: str) -> bool:
-    """alive(), but a process of another account (not ours to signal) counts as there."""
+    """alive(), but a process of another account (not ours to signal) counts as there while its start, where it
+    can be read (/proc on Linux, for any process), is the one serve.lock names."""
     try:
         os.kill(pid, 0)
     except PermissionError:
-        return True
+        return same_start(pid, start)
     except OSError:
         return False
     return alive(pid, start)
@@ -2664,15 +2690,20 @@ def pulse(desk: Desk, every: float = 5.0) -> None:
 
 
 def server_state(desk: Desk) -> dict:
-    """One rule for whether hansa serve runs. gone: the process serve.lock names is no longer alive, or it
-    names none. up: alive, and it finished a round in the last ROUND_QUIET seconds. busy: alive, quiet for
+    """One rule for whether hansa serve runs. gone: no hansa serve holds serve.lock (lock_held), whatever
+    process the number in it names now; where the lock cannot be asked, the process it names is gone or is
+    another one started since, or it names none. up: alive, and it finished a round in the last ROUND_QUIET seconds. busy: alive, quiet for
     longer (a round waiting on a worker to stop, say). stuck: alive, quiet for STUCK_AFTER seconds or more.
     quiet: seconds since its last round; answers: whether its process still wrote its pulse lately (a
     process stopped with Ctrl-Z, say, does not)."""
     pid, start = server_holder(desk)
-    if not pid or not _exists(pid, start):
-        return {"state": "gone", "pid": None, "quiet": None, "answers": False}
     quiet = max(0, int(time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0)))
+    held = lock_held(desk)
+    if held is None:  # the lock cannot be asked: the process it names, and when that one started
+        held = bool(pid) and _exists(pid, start) and (bool(start) or quiet < ROUND_QUIET)  # a number alone:
+        # written by a server before the start was, so its rounds say whether it runs, as they did then
+    if not held:
+        return {"state": "gone", "pid": None, "quiet": None, "answers": False}
     pulse = read_json(desk.state_dir / "pulse", {}) or {}
     answers = pulse.get("pid") == pid and time.time() - (pulse.get("at") or 0) < ROUND_QUIET
     return {"state": "up" if quiet < ROUND_QUIET else "busy" if quiet < STUCK_AFTER else "stuck",
@@ -2684,14 +2715,26 @@ def server_up(desk: Desk) -> bool:
     return server_state(desk)["state"] != "gone"
 
 
+def quiet_text(seconds: int) -> str:
+    mins = seconds // 60
+    return f"{mins} minute{'s' if mins != 1 else ''}" if mins else f"{seconds} seconds"
+
+
+def not_looking(desk: Desk) -> str:
+    """Why hansa serve will not look at the desk within seconds, in a clause; '' when it will (up or busy)."""
+    st = server_state(desk)
+    return ("`hansa serve` is not running" if st["state"] == "gone" else
+            f"`hansa serve` is busy or stuck: no round finished for {quiet_text(st['quiet'])}"
+            if st["state"] == "stuck" else "")
+
+
 def server_text(st: dict) -> str:
     """What server_state says, in words, for hansa status and hansa explain server."""
     if st["state"] == "gone":
         return "server NOT running: start it with `hansa serve` (see hansa explain server)"
     if st["state"] == "up":
         return "server up"
-    mins = st["quiet"] // 60
-    quiet = f"{mins} minute{'s' if mins != 1 else ''}" if mins else f"{st['quiet']} seconds"
+    quiet = quiet_text(st["quiet"])
     return (f"server up (pid {st['pid']}) but busy: no round finished for {quiet}" if st["state"] == "busy" else
             f"hansa serve (pid {st['pid']}) has not finished a round for {quiet}: busy or stuck"
             + ("" if st["answers"] else "; its process does not answer either (stopped with Ctrl-Z?)")
@@ -2705,8 +2748,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  and x.get("lane") == m.get("lane")]
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
-                else "opens when `hansa serve` next looks (within seconds)" if server_up(desk)
-                else "opens once `hansa serve` runs; `hansa serve` is not running")
+                else "opens when `hansa serve` next looks (within seconds)" if not not_looking(desk)
+                else f"opens once `hansa serve` gets through its rounds; {not_looking(desk)}")
     if desk.paused():
         return "dispatch is paused"
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
@@ -2724,8 +2767,9 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  for p in s["lanes"][ln]["providers"]}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
-            return (f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)"
-                    if server_up(desk) else f"ready for lane {ln} on {ready[0]}, but `hansa serve` is not running")
+            why_not = not_looking(desk)
+            return (f"ready for lane {ln} on {ready[0]}, but {why_not}" if why_not else
+                    f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)")
         why.append(f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})")
     return "; ".join(why) if why else "waiting for a free slot"
 
