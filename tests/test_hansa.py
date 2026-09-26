@@ -44,6 +44,11 @@ if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
                       "result": "API Error: 401 authentication_error", "session_id": "s-key", "num_turns": 1}))
     sys.exit(1)
+if compat and os.environ.get("FAKE_NOLOGIN_ON_COMPAT"):
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": None,
+                      "terminal_reason": "api_error", "num_turns": 1,
+                      "result": "Not logged in · Please run /login"}))
+    sys.exit(1)
 if compat and os.environ.get("FAKE_QUOTA_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
                       "result": "API Error: 429 rate_limit_error", "session_id": "s-quota", "num_turns": 1}))
@@ -562,6 +567,47 @@ class DeskTest(unittest.TestCase):
         self.assertIn("saving a new key", provider_problem(self.desk, self.desk.settings(), "mimo"))
         self.desk.write_key("mimo", "sk-right")
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
+
+    def test_not_logged_in_rests_provider_until_a_check_answers(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo", "claude"]
+        s["lanes"]["a"]["env"] = {"FAKE_NOLOGIN_ON_COMPAT": "1"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
+        self.assertEqual(m["attempts"][0]["error"], "not logged in (Please run /login)")
+        prob = provider_problem(self.desk, self.desk.settings(), "mimo")
+        self.assertIn("not logged in (Please run /login)", prob)
+        self.assertIn("hansa check mimo", prob)
+        self.assertNotIn("saving a new key", prob)
+        self.assertIn("hansa check mimo", views.explain_text(self.desk, "provider", "mimo"))
+
+        def answer(argv, **kwargs):  # logged in now
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            self.assertTrue(run.check_provider(self.desk, "mimo")["ok"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
+
+    def test_the_provider_check_says_not_logged_in(self):
+        from hansa import run
+
+        def answer(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, json.dumps({
+                "type": "result", "subtype": "success", "is_error": True, "api_error_status": None,
+                "terminal_reason": "api_error", "num_turns": 1, "result": "Not logged in · Please run /login"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            r = run.check_provider(self.desk, "claude")
+        self.assertEqual((r["ok"], r["detail"]), (False, "not logged in (Please run /login)"))
+        prob = provider_problem(self.desk, self.desk.settings(), "claude")
+        self.assertTrue(prob.startswith("not logged in (Please run /login); log in with"), prob)
+        shown = {p["name"]: p["problem"] for p in views.status(self.desk)["providers"]}
+        self.assertEqual(shown["claude"], prob)
+        self.assertIn("hansa check claude", prob)
+        self.assertEqual(run.unusable_reason({"is_error": True, "result": "Invalid API key · Please run /login"}, "")[0],
+                         "key")
 
     def test_wait_returns_when_a_task_ends(self):
         tid = self.desk.new_task("Add hello.txt")
