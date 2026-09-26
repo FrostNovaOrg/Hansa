@@ -76,7 +76,6 @@ def _text(args) -> str:
         except UnicodeDecodeError:
             raise SystemExit(f"hansa: {args.file} is not UTF-8 text; nothing was changed")
     return " ".join(args.text)
-    return " ".join(args.text)
 
 
 def cmd_init(a):
@@ -497,12 +496,15 @@ def cmd_check(a):
 def hold_server_lock(desk: Desk):
     """One hansa serve per desk: it holds this lock while it runs. None when another server holds it."""
     desk.state_dir.mkdir(exist_ok=True)
-    f = open(desk.state_dir / "serve.lock", "w")
+    f = open(desk.state_dir / "serve.lock", "a")  # not emptied before it is held: it names the server holding it
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
         return None
+    f.truncate(0)
+    f.write(str(os.getpid()))  # what hansa never stops when it stops what a task left running (run.sweep)
+    f.flush()
     return f
 
 

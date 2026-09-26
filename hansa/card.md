@@ -255,6 +255,9 @@ here; work that needs code changed or a browser goes to a worker.
   replaces it with [key of <provider>]. If a change itself holds a key, `hansa show`
   says so and hansa never merges it: redo the work with `hansa retry <id> --fresh`
   and tell the principal with `hansa ask`.
+- When a task ends (after its check), hansa stops every process it left running (a dev
+  server, a watcher), found by HANSA_TASK=<id> in their environment; `hansa show` lists them.
+  Limit: a process that cleared its environment is not found.
 - Workers do not commit: when one ends, hansa commits its changes on its branch as
   one commit named after the task. A verification's scratch changes are set
   aside, never committed.
