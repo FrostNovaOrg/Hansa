@@ -480,8 +480,8 @@ def is_local(host: str) -> bool:
 
 def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
     """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
-    any command, but files changed only in the worktree and never git's history, no reading of keys and
-    logins, no network but the lane's list, and no keys in the environment. It never falls back to
+    any command, but files changed only in the worktree (and the lane's write list) and never git's
+    history, no reading of keys and logins, no network but the lane's list, and no keys in the environment. It never falls back to
     running unsandboxed."""
     home = Path.home()
     deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
@@ -490,12 +490,15 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> d
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True  # a worker may run a local server and reach it
+    fs = {"denyRead": deny, "denyWrite": git_write_deny(wt)}
+    if lane.get("write"):  # a build or test tool's cache folder; denyRead and denyWrite still win within it
+        fs["allowWrite"] = full_paths(lane["write"])
     return {"sandbox": {
         "enabled": True,
         "failIfUnavailable": True,
         "autoAllowBashIfSandboxed": True,
         "allowUnsandboxedCommands": False,
-        "filesystem": {"denyRead": deny, "denyWrite": git_write_deny(wt)},
+        "filesystem": fs,
         "network": network,
         "credentials": {"envVars": [{"name": v, "mode": "deny"} for v in KEY_VARS]},
     }}

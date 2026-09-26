@@ -34,6 +34,7 @@ RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
 LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
 MAX_HOSTS = 50
+MAX_WRITE = 20
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
@@ -101,8 +102,9 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def validate(s: dict) -> list:
-    """Every problem with a settings object, in words; empty means valid."""
+def validate(s: dict, root=None) -> list:
+    """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
+    which no lane's write list may reach into."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
@@ -156,8 +158,8 @@ def validate(s: dict) -> list:
         if not isinstance(ln, dict):
             p.append(f"{at}: must be an object")
             continue
-        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "env", "check", "preview", "setup", "max_turns",
-                           "timeout_min", "note"}
+        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "preview", "setup",
+                           "max_turns", "timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -177,6 +179,7 @@ def validate(s: dict) -> list:
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
                      "*.pypi.org or localhost:3000")
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root)]
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -254,6 +257,33 @@ def is_host(h) -> bool:
     return bool(m) and (m["port"] is None or 0 < int(m["port"]) < 65536)
 
 
+def _overlaps(a: str, b: str) -> bool:
+    """Whether one of two full paths is the other or inside it."""
+    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
+
+
+def write_problems(paths, repo=None, root=None) -> list:
+    """What is wrong with a lane's write list: the folders its workers may write besides the worktree."""
+    if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
+            not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
+        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
+    fenced = []  # (path, reason): each as given and with links resolved
+    if root:
+        fenced += [(str(r), "it is the desk's, which holds the keys and hansa's state")
+                   for r in {os.path.normpath(root), os.path.realpath(root)}]
+    if isinstance(repo, str) and repo.startswith("/"):
+        git = os.path.join(repo, ".git")
+        fenced += [(g, "it is the repository's .git folder, whose history hansa keeps")
+                   for g in {os.path.normpath(git), os.path.realpath(git)}]
+    p = []
+    for x in paths:
+        for f, why in fenced:
+            if any(_overlaps(v, f) for v in (os.path.normpath(x), os.path.realpath(x))):
+                p.append(f"write cannot include {x}: {why}")
+                break
+    return p
+
+
 def is_git_rule(rule: str) -> bool:
     """Whether an allowed-command rule runs git anywhere in it: also behind env, sudo, a variable,
     a path or a shell's -c."""
@@ -308,7 +338,7 @@ class Desk:
             if rev is not None and rev != self.settings_rev():
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
-            problems = validate(new)
+            problems = validate(new, self.root)
             if problems:
                 return problems
             old = self.settings()
@@ -544,4 +574,4 @@ def public_settings(desk: Desk) -> dict:
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
-    return {"settings": s, "keys": keys, "problems": validate(s), "rev": rev}
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev}

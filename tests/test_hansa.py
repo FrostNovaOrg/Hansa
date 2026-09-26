@@ -971,6 +971,66 @@ class DeskTest(unittest.TestCase):
         for hosts in ([], ["registry.npmjs.org"], ["localhost.example.org"], ["127.0.0.2"], ["*.localhost"]):
             self.assertFalse(local(hosts), hosts)
 
+    def test_a_lanes_write_list_is_checked(self):
+        s = self.desk.settings()
+        cache = self.tmp / "m2"
+        s["lanes"]["a"]["write"] = [str(cache), "/opt/cache/npm"]
+        self.assertEqual(validate(s, self.desk.root), [])
+        for bad in (["m2"], ["~/.m2"], [str(cache), 3], "/opt/cache", [f"/opt/c{i}" for i in range(21)]):
+            s["lanes"]["a"]["write"] = bad
+            self.assertEqual(validate(s, self.desk.root),
+                             ["lane a: write must be a list of up to 20 full paths starting with /, such as /Users/me/.m2"])
+        # the desk (as given, resolved, inside it or around it) and the repository's .git
+        for bad in (self.tmp / "desk", self.tmp / "desk" / "secrets", self.desk.root / ".hansa" / "runs", self.tmp,
+                    self.tmp / "x" / ".." / "desk"):
+            s["lanes"]["a"]["write"] = [str(bad)]
+            self.assertEqual(validate(s, self.desk.root), [f"lane a: write cannot include {bad}: it is the desk's, "
+                                                           "which holds the keys and hansa's state"], bad)
+        for bad in (self.repo / ".git", self.repo / ".git" / "hooks", self.repo.resolve() / ".git" / "refs"):
+            s["lanes"]["a"]["write"] = [str(bad)]
+            self.assertEqual(validate(s, self.desk.root), [f"lane a: write cannot include {bad}: it is the "
+                                                           "repository's .git folder, whose history hansa keeps"])
+        s["lanes"]["a"]["write"] = [str(self.repo / ".github")]  # a neighbour of .git is fine
+        self.assertEqual(validate(s, self.desk.root), [])
+        before = self.desk.settings_path.read_text()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(self.desk.secrets_dir)])
+        self.assertIn("it is the desk's", str(e.exception.code))
+        self.assertEqual(self.desk.settings_path.read_text(), before)
+
+    def test_a_lanes_write_list_reaches_the_sandbox(self):
+        from hansa import run
+        p = self.desk.settings()["providers"]["claude"]
+        box = run.sandbox_settings(self.desk, {"network": []}, "claude", p, self.repo)["sandbox"]
+        self.assertNotIn("allowWrite", box["filesystem"])  # the worktree and the temporary folder only
+        cache = self.tmp / "m2"
+        box = run.sandbox_settings(self.desk, {"write": [str(cache), "/opt/cache"]}, "claude", p, self.repo)["sandbox"]
+        self.assertEqual(box["filesystem"]["allowWrite"][0], str(cache))
+        self.assertIn(str(cache.resolve()), box["filesystem"]["allowWrite"])  # links resolved too, like denyRead
+        self.assertIn("/opt/cache", box["filesystem"]["allowWrite"])
+        self.assertIn(str(self.desk.secrets_dir), box["filesystem"]["denyRead"])  # the denials stay as they were
+        self.assertIn(str(self.repo.resolve() / ".git" / "refs"), box["filesystem"]["denyWrite"])
+
+    def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
+        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change
+        self.assertEqual(self.events("lane_write_changed"), [])
+        out = self.hansa("lane", "set", "a", "write", "/opt/m2")
+        self.assertIn('write: [] -> ["/opt/m2"]', out)
+        self.assertIn("Tell the principal", out)
+        self.assertEqual(len(self.events("lane_write_changed")), 1)
+        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write", "/opt/m2"))
+        self.hansa("lane", "set", "a", "write", "/opt/m2", "/opt/npm")
+        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write", "/opt/npm", "/opt/m2"))
+        self.assertEqual(len(self.events("lane_write_changed")), 2)
+        self.assertIn("  folders a worker may also write (a build or test tool's cache): /opt/npm, /opt/m2\n",
+                      views.explain_text(self.desk, "lane", "a"))
+        self.assertIn("Tell the principal", self.hansa("lane", "set", "a", "write"))
+        self.assertEqual([(e["lane"], e["old"], e["new"]) for e in self.events("lane_write_changed")],
+                         [("a", [], ["/opt/m2"]), ("a", ["/opt/m2"], ["/opt/m2", "/opt/npm"]),
+                          ("a", ["/opt/npm", "/opt/m2"], [])])
+        self.assertIn("folders a worker may also write (a build or test tool's cache): none",
+                      views.explain_text(self.desk, "lane", "a"))
+
     def test_design_sessions_and_provider_checks_run_outside_the_sandbox(self):
         from hansa import run
         tid = self.desk.new_task("Make the badge bigger")
