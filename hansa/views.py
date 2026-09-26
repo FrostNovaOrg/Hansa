@@ -161,6 +161,7 @@ def status(desk: Desk) -> dict:
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
+        "heard": notify.hears(desk),  # whether the session asking is one of them
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -238,7 +239,8 @@ def status_text(st: dict) -> str:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
     if st.get("merging"):
-        out.append("merging (each merges by itself if its check passes on the base as it is now; hansa wait <id>):")
+        out.append("merging (each merges by itself if its check passes on the base as it is now; "
+                   + ("hansa tells this session when each ends):" if st.get("heard") else "hansa wait <id>):"))
         out += [f"  {m['id']} {m['lane']}: {m['title']}\n      {m['where']}" for m in st["merging"]]
     if st["review"]:
         out.append("waiting for review (hansa show <id>):")
@@ -290,7 +292,29 @@ def background_note(m: dict) -> str:
             "its report may be incomplete: read the changes before merging")
 
 
-def show_text(desk: Desk, tid: str) -> str:
+TEXT_LINES = 8  # the first lines of a task's text that hansa show gives; --full gives it all
+REPORT_LINES = 60
+
+
+def task_text_lines(desk: Desk, m: dict, full: bool = False) -> list:
+    """The task's text as hansa read it when it was queued (tasks/ID/task.md), for hansa show: the first lines,
+    or all of it."""
+    f = desk.tasks_dir / m["id"] / "task.md"
+    lines = f.read_text(encoding="utf-8").strip().splitlines() if f.exists() else []
+    if not lines:
+        return []
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
+    shown = lines if full else lines[:TEXT_LINES]
+    out = [f"text (as hansa read it when it was queued{', ' + when if when else ''}; the worker is given this):"]
+    out += ["  " + x for x in shown]
+    if len(lines) > len(shown):
+        out.append(f"  ({len(lines) - len(shown)} more lines: hansa show {m['id']} --full)")
+    return out
+
+
+def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
+    """hansa show. full: the whole text and report. heard: whether the session it is for hears from hansa
+    (default: the session this command runs in)."""
     m = desk.meta(tid)
     m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
@@ -308,7 +332,7 @@ def show_text(desk: Desk, tid: str) -> str:
         meaning = ("a design session: the principal shapes this feature with it directly, on the real code; "
                    + ("it is open now" if m["state"] == "running" and m.get("phase") != "checking"
                       else "it comes back for review when they end it" if m["state"] == "queued" else meaning))
-    out = [head, f"title: {m['title']}", f"meaning: {meaning}"]
+    out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     if m.get("error"):
         out.append(f"error: {m['error']}")
     if m.get("machine_problem") and m["state"] == "failed":
@@ -319,9 +343,10 @@ def show_text(desk: Desk, tid: str) -> str:
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
     if report:
         lines = report.splitlines()
-        out += ["report:"] + ["  " + x for x in lines[:60]]
-        if len(lines) > 60:
-            out.append(f"  ... {len(lines) - 60} more lines; the whole report is {d / 'result.md'}")
+        shown = lines if full else lines[:REPORT_LINES]
+        out += ["report:"] + ["  " + x for x in shown]
+        if len(lines) > len(shown):
+            out.append(f"  ... {len(lines) - len(shown)} more lines: hansa show {tid} --full")
     if background_note(m):
         out.append(background_note(m))
     if m.get("replaced_by"):
@@ -406,7 +431,8 @@ def show_text(desk: Desk, tid: str) -> str:
     if v and v["verdict"] == "does not hold" and m["state"] == "done":
         nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
     if v and v["state"] in ("queued", "running") and m["state"] == "done":
-        nxt["done"] = f"wait for the verification: hansa wait {v['task']} (hansa merge {tid} is held until it ends)"
+        nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, v['task'], heard)} "
+                       f"(hansa merge {tid} is held until it ends)")
     mr = m.get("merge_check_result") or {}
     if mr and not mr.get("ok") and m["state"] == "done" and machine_hint(mr):
         nxt["done"] = (f"{recheck_step(mr, tid)} (runs the check "
@@ -414,8 +440,8 @@ def show_text(desk: Desk, tid: str) -> str:
     elif mr and not mr.get("ok") and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --update \"make it work with what the base has now: ...\" · "
                        f"hansa merge {tid} again (it checks the merge again) · hansa merge {tid} --despite-check")
-    nxt["merging"] = (f"hansa wait {tid}: it merges by itself if the check passes, and comes back for review if not "
-                      f"· hansa cancel {tid} stops it")
+    nxt["merging"] = (f"{notify.wait_step(desk, tid, heard)}: it merges by itself if the check passes, and comes "
+                      f"back for review if not · hansa cancel {tid} stops it")
     if m.get("markers") and m["state"] == "done":
         nxt["done"] = f"hansa retry {tid} --update \"settle the markers in {', '.join(m['markers'])}\""
     if m.get("leaked") and m["state"] == "done":
@@ -604,13 +630,35 @@ def cost_text(rep: dict, by: str = "day") -> str:
     return "\n".join(out)
 
 
-def diff_text(desk: Desk, tid: str, stat_only: bool = False) -> str:
+def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool = False) -> str:
+    """hansa diff: a task's changes against its base, limited to these paths when given. new: only what this
+    attempt added on top of the attempt it continues from (hansa retry), without the base merged into it."""
     from .run import GitFileChanged, wgit
     m = desk.meta(tid)
     if not m.get("head") or not m.get("worktree"):
         return f"{tid} has no changes recorded yet (state: {m['state']})"
-    args = ["diff", "--stat" if stat_only else "--patch", m["base"], m["head"]]
+    wt = Path(m["worktree"])
+    since, head = m["base"], ""
     try:  # the worktree's .git is checked first; the task working there now fails for it when it ends
-        return desk.redact(wgit(desk, Path(m["worktree"]), *args)) or "(no changes)"
+        if new:
+            if not m.get("start_from") or m.get("kind") == "verify":
+                return (f"hansa: {tid} did not continue from an earlier attempt, so all of it is new: "
+                        f"hansa diff {tid}" + (" --stat" if stat_only else ""))
+            since = m["start_from"]
+            head = f"what {tid} added on top of {m.get('parent') or 'the earlier attempt'}'s last commit ({since[:10]})"
+            if m.get("update"):  # the base's tip was merged in when it started: from that merge, when it was clean
+                rows = [x.split() for x in wgit(desk, wt, "rev-list", "--first-parent", "--parents",
+                                                f"{since}..{m['head']}").splitlines()]
+                merge = next((x[0] for x in rows if len(x) > 2 and x[1] == since), "")
+                if merge and not m.get("update_conflicts"):
+                    since = merge
+                    head += f", without the base merged into it at {merge[:10]}"
+                else:
+                    head += ("; the base was merged into it with conflicts the worker settled, so what the base "
+                             "gained is in it too")
+        args = ["diff", "--stat" if stat_only else "--patch", since, m["head"]] + (["--", *paths] if paths else [])
+        out = desk.redact(wgit(desk, wt, *args))
     except GitFileChanged as e:
         return f"hansa: {e}; the diff is not shown"
+    out = out or (f"(no changes in {', '.join(paths)})" if paths else "(no changes)")
+    return f"{head}:\n{out}" if head else out

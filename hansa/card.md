@@ -23,9 +23,9 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | command | what it does |
 |---|---|
 | `hansa status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, today's usage |
-| `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
-| `hansa show <id>` | report, changed files, refused commands, usage, and what to do next |
-| `hansa diff <id> [--stat]` | the task branch against its base |
+| `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
+| `hansa show <id> [--full]` | the task's text as hansa read it, report, changed files, refused commands, usage, and what to do next; `--full`: the whole text and report |
+| `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
 | `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
