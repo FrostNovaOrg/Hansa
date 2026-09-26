@@ -211,8 +211,12 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
         if str(st.get("reason", "")).startswith("not logged in"):
-            return (f"{st['reason']}; log in with `CLAUDE_CONFIG_DIR={config_home(desk, name, p)} claude`, "
-                    f"then `hansa check {name}` brings it back")
+            if p["kind"] == "compatible":  # no login of its own: the saved key did not arrive
+                return f"{st['reason']}; saving a new key brings it back, or `hansa check {name}` once it arrives"
+            # start Claude Code exactly as the worker does: on macOS a login made with
+            # CLAUDE_CONFIG_DIR set, even to ~/.claude, may land in another keychain entry
+            login = f"CLAUDE_CONFIG_DIR={p['config_dir']} claude" if p.get("config_dir") else "claude"
+            return f"{st['reason']}; log in with `{login}`, then `hansa check {name}` brings it back"
         return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
     return ""
 
