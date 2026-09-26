@@ -50,7 +50,10 @@ once for each lane's design worktree, in the first design session.
   may run other commands the principal's work needs, such as installing
   software a lane needs or setting up a tool. Claude Code asks the principal
   before each one unless they have allowed it, and the coordinator says in
-  plain words what the command does and why. Two things stay closed by design:
+  plain words what the command does and why. It has three helpers: `scout`
+  and `reviewer` only read; `operator` does one hands-on job on the machine
+  (installing software, setting up a tool) with the coordinator's rights, each
+  command with the principal's permission. Two things stay closed by design:
   reading `secrets/` (the keys) and editing code in the lanes' repositories;
   code changes go through workers, so each gets a branch, the lane's check and
   a merge. Its whole interface is `hansa/card.md`, copied into the desk as
