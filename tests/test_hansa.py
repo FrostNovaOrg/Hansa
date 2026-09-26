@@ -1,4 +1,4 @@
-"""Tests for bh with a stand-in for claude, so no model is called."""
+"""Tests for hansa with a stand-in for claude, so no model is called."""
 import contextlib
 import io
 import json
@@ -17,11 +17,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bh import cost, views  # noqa: E402
-from bh.cli import init_desk, main  # noqa: E402
-from bh.desk import Desk, public_settings, validate  # noqa: E402
-from bh.run import Dispatcher, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
-from bh.web import start_web  # noqa: E402
+from hansa import cost, views  # noqa: E402
+from hansa.cli import init_desk, main  # noqa: E402
+from hansa.desk import Desk, public_settings, validate  # noqa: E402
+from hansa.run import Dispatcher, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
+from hansa.web import start_web  # noqa: E402
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
@@ -74,7 +74,7 @@ if "single word OK" in prompt:
 if os.environ.get("FAKE_SAY_KEY"):  # an endpoint's error that repeats the key
     print("endpoint said: bad token " + os.environ.get("ANTHROPIC_AUTH_TOKEN", ""), file=sys.stderr, flush=True)
     time.sleep(float(os.environ["FAKE_SAY_KEY"]))
-open("hello.txt", "w").write("hello from " + os.environ.get("BH_TASK", "?") + "\n")
+open("hello.txt", "w").write("hello from " + os.environ.get("HANSA_TASK", "?") + "\n")
 if os.environ.get("FAKE_WRITE_BINARY"):
     open("blob.bin", "wb").write(b"\x00\x01PK" + os.environ["FAKE_WRITE_BINARY"].encode() + b"\x00\xff")
 if os.environ.get("FAKE_LEAVE_CHILD"):  # something it started and left running, in its process group
@@ -110,7 +110,7 @@ class DeskTest(unittest.TestCase):
         fake = self.tmp / "claude"
         fake.write_text(FAKE)
         fake.chmod(0o755)
-        os.environ["BH_CLAUDE"] = str(fake)
+        os.environ["HANSA_CLAUDE"] = str(fake)
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
 
     def settle(self, d, tid, timeout=20):
@@ -127,26 +127,26 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "done", m)
         self.assertEqual(m["files"], ["hello.txt"])
-        self.assertGreaterEqual(m["commits"], 1)  # left uncommitted by the worker, committed by bh
+        self.assertGreaterEqual(m["commits"], 1)  # left uncommitted by the worker, committed by hansa
         self.assertEqual(m["denials"], ["Bash: env JAVA_HOME=/x mvn test"])
         self.assertIn("hello.txt", views.show_text(self.desk, tid))
         self.assertEqual(main(["--desk", str(self.desk.root), "merge", tid]), 0)
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
         self.assertTrue((self.repo / "hello.txt").exists())
 
-    def test_bh_commits_for_the_worker_and_keeps_git_rules_from_it(self):
+    def test_hansa_commits_for_the_worker_and_keeps_git_rules_from_it(self):
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
-        s["lanes"]["a"]["allow"] = ["Bash(git commit:*)", "Bash(pnpm test:*)"]  # saved before bh took over git
+        s["lanes"]["a"]["allow"] = ["Bash(git commit:*)", "Bash(pnpm test:*)"]  # saved before hansa took over git
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
         self.desk.settings_path.write_text(json.dumps(s))
-        self.assertTrue(any("git is handled by bh" in p for p in validate(s)))  # the page refuses new ones
+        self.assertTrue(any("git is handled by hansa" in p for p in validate(s)))  # the page refuses new ones
         tid = self.desk.new_task("Add hello.txt", title="Add a greeting")
         m = self.settle(Dispatcher(self.desk), tid)
         argv = json.loads(seen.read_text().splitlines()[-1])
         self.assertNotIn("Bash(git commit:*)", argv)
         self.assertIn("Bash(pnpm test:*)", argv)
-        self.assertIn("bh commits", argv[argv.index("--append-system-prompt") + 1])
+        self.assertIn("hansa commits", argv[argv.index("--append-system-prompt") + 1])
         msg = subprocess.run(["git", "log", "-1", "--format=%s", m["head"]], cwd=self.repo,
                              capture_output=True, text=True).stdout.strip()
         self.assertEqual(msg, f"{tid}: Add a greeting")
@@ -206,7 +206,7 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", tid])
         self.assertFalse((self.repo / "notes.txt").exists())
 
-    def test_what_a_worker_prints_stays_out_of_the_task_folder_until_bh_removes_keys(self):
+    def test_what_a_worker_prints_stays_out_of_the_task_folder_until_hansa_removes_keys(self):
         key = "sk-test-printed-0321"
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
@@ -238,7 +238,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["commits"], m["files"]), ("failed", 0, []), m)
 
     def test_a_worker_started_just_before_the_server_stopped_is_taken_over(self):
-        token = "bh-launch-test-5b9f"
+        token = "hansa-launch-test-5b9f"
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
         self.addCleanup(lambda: orphan.poll() is None and orphan.kill())
         tid = self.desk.new_task("Add hello.txt")
@@ -256,7 +256,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         self.desk.update(tid, state="running", phase="checking", lane="a", provider="claude", started=time.time(),
-                         pid=None, launch="bh-check-t0001-gone", worktree=str(self.repo), check_command=f"touch {marker}")
+                         pid=None, launch="hansa-check-t0001-gone", worktree=str(self.repo), check_command=f"touch {marker}")
         raw = self.desk.raw_dir(tid)
         (raw / "check.exit").write_text("0\n")
         (raw / "check.log").write_text("all passed\n")
@@ -279,7 +279,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(later, views.show_text(self.desk, tid))
 
     def test_a_key_that_only_a_merge_commit_brings_is_found(self):
-        from bh.run import keys_in_change
+        from hansa.run import keys_in_change
         key = "sk-test-in-merge-0987"
         self.desk.write_key("mimo", key)
         g = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.repo,
@@ -312,7 +312,7 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_what_a_worker_leaves_running_ends_with_it(self):
-        from bh.run import alive
+        from hansa.run import alive
         pidfile = self.tmp / "child.pid"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_LEAVE_CHILD": str(pidfile)}
@@ -327,39 +327,39 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(alive(child))
 
     def test_git_behind_a_wrapper_is_still_git(self):
-        from bh.run import lane_allow
+        from hansa.run import lane_allow
         s = self.desk.settings()
         s["lanes"]["a"]["allow"] = ["Bash(env git commit:*)", "Bash(GIT_DIR=x git log:*)", "Bash(command git push:*)",
                                     "Bash(/usr/bin/git show:*)", "Bash(sudo -u deploy git log:*)",
                                     'Bash(bash -c "git commit -am x":*)', "Bash(pnpm test:*)", "Bash(gitleaks detect:*)"]
-        self.assertEqual(sum("git is handled by bh" in p for p in validate(s)), 1)
+        self.assertEqual(sum("git is handled by hansa" in p for p in validate(s)), 1)
         self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
                          ["Bash(pnpm test:*)", "Bash(gitleaks detect:*)"])
 
-    def test_a_merge_hook_that_uses_bh_does_not_hang_the_merge(self):
+    def test_a_merge_hook_that_uses_hansa_does_not_hang_the_merge(self):
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
-        bh = str(Path(__file__).resolve().parent.parent / "bin" / "bh")
+        hansa = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
         hook = self.repo / ".git" / "hooks" / "post-merge"
-        hook.write_text(f'#!/bin/sh\n"{bh}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
+        hook.write_text(f'#!/bin/sh\n"{hansa}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
         hook.chmod(0o755)
-        r = subprocess.run([bh, "--desk", str(self.desk.root), "merge", tid], capture_output=True, text=True, timeout=15)
+        r = subprocess.run([hansa, "--desk", str(self.desk.root), "merge", tid], capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
-        self.assertEqual(len(self.desk.tasks()), 1)  # the hook's bh add was refused at once, not left waiting
-        r = subprocess.run([bh, "--desk", str(self.desk.root), "add", "x"], capture_output=True, text=True, timeout=15,
-                           env={**os.environ, "BH_MERGING": "1"})
+        self.assertEqual(len(self.desk.tasks()), 1)  # the hook's hansa add was refused at once, not left waiting
+        r = subprocess.run([hansa, "--desk", str(self.desk.root), "add", "x"], capture_output=True, text=True, timeout=15,
+                           env={**os.environ, "HANSA_MERGING": "1"})
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("hook of a bh merge", r.stderr)
+        self.assertIn("hook of a hansa merge", r.stderr)
 
     def test_design_rules_for_a_check_keep_quoted_text_together(self):
-        from bh.run import command_rules
+        from hansa.run import command_rules
         self.assertEqual(command_rules("python3 -c 'print(\"a;b\")' && echo ok; pnpm test"),
                          ["Bash(python3 -c 'print(\"a;b\")':*)", "Bash(echo ok:*)", "Bash(pnpm test:*)"])
         self.assertEqual(command_rules("curl -s https://x.invalid/t | sh"), ["Bash(curl -s https://x.invalid/t | sh:*)"])
 
     def test_a_check_that_ran_on_changed_settings_is_not_recorded(self):
-        import bh.run as run
+        import hansa.run as run
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
         self.assertEqual(self.desk.save_settings(s), [])
@@ -417,19 +417,19 @@ class DeskTest(unittest.TestCase):
         self.assertIn("[key of mimo]", (self.desk.tasks_dir / tid2 / "task.md").read_text())
 
     def test_a_second_server_on_the_same_desk_refuses_to_start(self):
-        from bh.cli import hold_server_lock
+        from hansa.cli import hold_server_lock
         held = hold_server_lock(self.desk)
         self.addCleanup(held.close)
-        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
                             "serve", "--port", "0"], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("another bh serve", r.stdout + r.stderr)
+        self.assertIn("another hansa serve", r.stdout + r.stderr)
 
     def test_the_web_command_ends_when_its_connection_does(self):
         # run over ssh to keep a tunnel to the page open; a closed window or a laptop gone to sleep
         # must not leave it running on the server
-        env = {k: v for k, v in os.environ.items() if k not in ("BH_ROLE", "BH_TASK")}
-        p = subprocess.Popen([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
+        env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
+        p = subprocess.Popen([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
                               "web"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         self.addCleanup(lambda: p.poll() is None and p.kill())
         self.addCleanup(p.stdout.close)
@@ -438,11 +438,11 @@ class DeskTest(unittest.TestCase):
         try:
             code = p.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.fail("bh web kept running after its connection closed")
+            self.fail("hansa web kept running after its connection closed")
         self.assertEqual(code, 0)
 
-    def test_a_task_cancelled_while_bh_prepares_it_never_runs(self):
-        import bh.run as run
+    def test_a_task_cancelled_while_hansa_prepares_it_never_runs(self):
+        import hansa.run as run
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
@@ -466,8 +466,8 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
 
-    def test_bh_only_stops_the_process_it_started_and_all_of_its_group(self):
-        from bh.run import alive, proc_start, stop
+    def test_hansa_only_stops_the_process_it_started_and_all_of_its_group(self):
+        from hansa.run import alive, proc_start, stop
         leader = subprocess.Popen([sys.executable, "-c",
             "import subprocess, sys, time\n"
             "c = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
@@ -511,7 +511,7 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
         stashes = subprocess.run(["git", "stash", "list"], cwd=m["worktree"], capture_output=True, text=True).stdout
-        self.assertIn("bh: what the lane's setup changed", stashes)
+        self.assertIn("hansa: what the lane's setup changed", stashes)
         self.assertIn("set aside", (self.desk.tasks_dir / tid / "setup.log").read_text())
 
     def test_a_failing_setup_fails_the_task_with_its_output_and_never_holds_up_the_server(self):
@@ -522,7 +522,7 @@ class DeskTest(unittest.TestCase):
         d = Dispatcher(self.desk)
         t0 = time.time()
         d.tick()
-        self.assertLess(time.time() - t0, 1.5)  # the setup runs in the worker's own process, not in bh serve
+        self.assertLess(time.time() - t0, 1.5)  # the setup runs in the worker's own process, not in hansa serve
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "failed", m)
         self.assertIn("setup command failed (exit 3)", m["error"])
@@ -593,23 +593,42 @@ class DeskTest(unittest.TestCase):
         (self.desk.root / "CLAUDE.md").write_text("an older card\n")
         (self.desk.root / ".claude" / "agents").mkdir(parents=True)
         (self.desk.root / ".claude" / "agents" / "verifier.md").write_text("a retired helper\n")
-        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
                             "coordinator", "--permission-mode", "dontAsk"],
-                           capture_output=True, text=True, env={**os.environ, "BH_CLAUDE": str(echo)})
+                           capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--permission-mode dontAsk", r.stdout)
         repo = self.repo.resolve()
         self.assertIn(f"--add-dir {repo}", r.stdout)
         self.assertIn(f"Edit(//{str(repo).lstrip('/')}/**)", r.stdout)
         self.assertIn("Agent(general-purpose) Agent(Explore)", r.stdout)  # Claude Code's own helpers are off
-        code = Path(__file__).resolve().parent.parent / "bh"
+        code = Path(__file__).resolve().parent.parent / "hansa"
         self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (code / "card.md").read_text())
         agents = self.desk.root / ".claude" / "agents"
         for name in ("scout.md", "reviewer.md"):  # the desk's helpers come along
             self.assertEqual((agents / name).read_text(), (code / "agents" / name).read_text())
         self.assertIn("effort: medium", (agents / "scout.md").read_text())
-        self.assertFalse((agents / "verifier.md").exists())  # retired, kept in .bh/
+        self.assertFalse((agents / "verifier.md").exists())  # retired, kept in .hansa/
         self.assertTrue(list(self.desk.state_dir.glob("verifier.md.*")))
+
+    def test_coordinator_start_brings_the_desks_permissions_up_to_date(self):
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        mine = self.desk.root / ".claude" / "settings.json"
+        mine.write_text(json.dumps({"permissions": {"allow": ["Bash(bh:*)"], "deny": ["Read(//x/.bh/**)"]},
+                                    "env": {"KEEP": "1"}}))
+        start = [str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root), "coordinator"]
+        for _ in range(2):  # the second start finds nothing to change
+            r = subprocess.run(start, capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+        s = json.loads(mine.read_text())
+        root = str(self.desk.root).lstrip("/")
+        self.assertIn("Bash(hansa:*)", s["permissions"]["allow"])
+        self.assertNotIn("Bash(bh:*)", s["permissions"]["allow"])
+        self.assertIn(f"Read(//{root}/.hansa/**)", s["permissions"]["deny"])
+        self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
+        self.assertEqual(len(list(self.desk.state_dir.glob("coordinator-settings.json.*"))), 1)  # the old one, kept once
 
     def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
         s = self.desk.settings()
@@ -737,7 +756,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "does not hold", "FAKE_SHOW_ARGV": str(seen)}
         s["lanes"]["a"]["check"] = "exit 1"  # a verification is never merged, so its branch is not checked
         self.assertEqual(self.desk.save_settings(s), [])
-        self.assertIn(f"then bh verify {tid} (code or tests) or bh merge {tid}", views.show_text(self.desk, tid))
+        self.assertIn(f"then hansa verify {tid} (code or tests) or hansa merge {tid}", views.show_text(self.desk, tid))
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "verify", tid, "the file's contents"])
         vid = self.desk.meta(tid)["verify"]
@@ -745,7 +764,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((v["kind"], v["parent"], v["start_from"]), ("verify", tid, self.desk.meta(tid)["head"]))
         with self.assertRaises(SystemExit):  # not while the verification runs
             main(["--desk", str(self.desk.root), "merge", tid])
-        self.assertIn(f"next: wait for the verification: bh wait {vid}", views.show_text(self.desk, tid))
+        self.assertIn(f"next: wait for the verification: hansa wait {vid}", views.show_text(self.desk, tid))
         v = self.settle(d, vid)
         self.assertEqual((v["state"], v["verdict"], v.get("check")), ("done", "does not hold", None))
         self.assertEqual((v["commits"], v["files"]), (0, []))  # its scratch changes are set aside, not committed
@@ -798,7 +817,7 @@ class DeskTest(unittest.TestCase):
         st = views.status(self.desk)
         self.assertIn(f"attach -t design-{tid}", st["design"][0]["join"])
         self.assertEqual(st["running"], [])  # it does not take the lane's worker slot
-        self.assertIn(f"design-{tid}", [a for a in st["asks"] if a["by"] == "bh"][0]["text"])
+        self.assertIn(f"design-{tid}", [a for a in st["asks"] if a["by"] == "hansa"][0]["text"])
         work = self.desk.new_task("Add hello.txt", lane="a")
         self.assertEqual(self.settle(d, work)["state"], "done")  # the lane kept working meanwhile
         m = self.settle(d, tid)
@@ -808,7 +827,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("installing", (self.desk.tasks_dir / tid / "setup.log").read_text())  # set up before it opened
         shown = views.show_text(self.desk, tid)
         self.assertIn("Hand-in: the badge is bigger", shown)
-        self.assertEqual([a for a in self.desk.asks() if a["by"] == "bh" and not a["closed"]], [])
+        self.assertEqual([a for a in self.desk.asks() if a["by"] == "hansa" and not a["closed"]], [])
         runs = [json.loads(x) for x in seen.read_text().splitlines()]
         self.assertEqual(sum("-p" in a for a in runs), 1)  # the worker's; the design session is interactive
         argv = next(a for a in runs if "-p" not in a)
@@ -854,7 +873,7 @@ class DeskTest(unittest.TestCase):
         init = {"jsonrpc": "2.0", "id": 0, "method": "initialize",
                 "params": {"capabilities": {"roots": {"listChanged": True}}, "clientInfo": {"name": "claude-code"}}}
         call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "browser_take_screenshot"}}
-        relay = Path(__file__).resolve().parent.parent / "bh" / "relay.py"
+        relay = Path(__file__).resolve().parent.parent / "hansa" / "relay.py"
         out = subprocess.run([sys.executable, str(relay), str(folder), f"{sys.executable} {fake}"],
                              input="".join(json.dumps(m) + "\n" for m in (init, call)),
                              capture_output=True, text=True, timeout=30)
@@ -924,7 +943,7 @@ class DeskTest(unittest.TestCase):
         rep = cost.report(self.desk, 1)
         self.assertEqual(rep["by"]["seat"]["coordinator"]["tokens"], 110)
         self.assertEqual(rep["by"]["seat"]["helper:scout"]["tokens"], 110)
-        later = cost.report(self.desk, 1, since=time.time() + 60)  # bh cost --since: nothing after "now"
+        later = cost.report(self.desk, 1, since=time.time() + 60)  # hansa cost --since: nothing after "now"
         self.assertEqual((later["total"]["tokens"], later["window"][:6]), (0, "since "))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -963,7 +982,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((self.desk.settings()["concurrency"], self.desk.settings().get("cool_minutes", 30)), (3, 30))
 
     def test_a_check_that_ran_on_a_replaced_key_is_not_recorded(self):
-        import bh.run as run
+        import hansa.run as run
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
         self.assertEqual(self.desk.save_settings(s), [])
@@ -988,14 +1007,14 @@ class DeskTest(unittest.TestCase):
         s["coordinator"]["audits_cost"] = True
         self.assertEqual(self.desk.save_settings(s), [])
         self.assertIn("cost audit on", views.status_text(views.status(self.desk)))
-        self.assertIn("cost audit on", (Path(__file__).resolve().parent.parent / "bh" / "card.md").read_text())
+        self.assertIn("cost audit on", (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text())
 
     def test_a_design_session_waiting_for_a_stopped_server_says_so(self):
         self.desk.new_task("Shape the badge", kind="design", lane="a")
-        self.assertIn("`bh serve` is not running", views.status(self.desk)["queued"][0]["waiting"])
+        self.assertIn("`hansa serve` is not running", views.status(self.desk)["queued"][0]["waiting"])
 
     def test_helpers_name_only_tools_claude_code_has(self):
-        code = Path(__file__).resolve().parent.parent / "bh" / "agents"
+        code = Path(__file__).resolve().parent.parent / "hansa" / "agents"
         for f in code.glob("*.md"):
             tools = next(x for x in f.read_text().splitlines() if x.startswith("tools:"))
             self.assertEqual(tools, "tools: Read, Bash", f.name)
@@ -1028,7 +1047,7 @@ class DeskTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(req)
             self.assertEqual(e.exception.code, 403)
-            req.add_header("X-BH", "1")
+            req.add_header("X-Hansa", "1")
             with urllib.request.urlopen(req) as r:
                 self.assertTrue(json.load(r)["ok"])
             self.assertTrue(self.desk.paused())

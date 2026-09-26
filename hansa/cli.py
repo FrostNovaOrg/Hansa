@@ -1,4 +1,4 @@
-"""The `bh` command. Every subcommand is a thin wrapper over desk, run, views and cost."""
+"""The `hansa` command. Every subcommand is a thin wrapper over desk, run, views and cost."""
 from __future__ import annotations
 
 import argparse
@@ -10,12 +10,12 @@ import time
 from pathlib import Path
 
 from . import build, cost, views
-from .desk import Desk, default_lane, default_settings, now, write_json
+from .desk import Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import VERIFY_TASK, Dispatcher, check_provider, git, keys_in_change, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer
-RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by bh verify and the reviewer
+RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by hansa verify and the reviewer
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
 BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
@@ -24,7 +24,7 @@ BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-s
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> Desk:
     desk = Desk(root)
     if desk.settings_path.exists():
-        raise SystemExit(f"bh: {desk.root} already has a desk")
+        raise SystemExit(f"hansa: {desk.root} already has a desk")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir):
         d.mkdir(parents=True, exist_ok=True)
     desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
@@ -37,16 +37,18 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         (desk.lanes_dir / lane / "brief.md").write_text("", encoding="utf-8")
     write_json(desk.settings_path, s)
     (desk.root / "CLAUDE.md").write_text(CARD.read_text(encoding="utf-8"), encoding="utf-8")
-    r = str(desk.root).lstrip("/")
-    guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.bh/**", f"//{r}/events.jsonl"]
-    perms = {"permissions": {
-        "allow": ["Bash(bh:*)", f"Edit(//{r}/lanes/**)"],  # an Edit rule covers every file-editing tool
-        "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.bh/**)"]
-                + [f"Edit({g})" for g in guarded]}}
     (desk.root / ".claude").mkdir(exist_ok=True)
-    write_json(desk.root / ".claude" / "settings.json", perms)
+    write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
     return desk
+
+
+def permissions(desk: Desk) -> dict:
+    """The coordinator's Claude Code permission rules in the desk."""
+    r = str(desk.root).lstrip("/")
+    guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl"]
+    return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/lanes/**)"],  # an Edit rule covers every file-editing tool
+            "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]}
 
 
 def _text(args) -> str:
@@ -58,22 +60,22 @@ def _text(args) -> str:
 def cmd_init(a):
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
-    print("next: start `bh serve` there, open the page with `bh web`, add keys and lanes, then `bh add`.")
+    print("next: start `hansa serve` there, open the page with `hansa web`, add keys and lanes, then `hansa add`.")
 
 
 def cmd_add(a):
     desk = Desk.find(a.desk)
     s = desk.settings()
     if a.browser and not s.get("browser"):
-        raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
+        raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None)
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until the principal adds it")
     if a.model:
         print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
-              f" their own model. Which provider runs it follows the lane's order: bh explain lane {a.lane or 'L'}")
-    print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "") + f". Follow it with: bh show {tid}")
+              f" their own model. Which provider runs it follows the lane's order: hansa explain lane {a.lane or 'L'}")
+    print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "") + f". Follow it with: hansa show {tid}")
 
 
 def cmd_design(a):
@@ -81,18 +83,18 @@ def cmd_design(a):
     s = desk.settings()
     lane = a.lane or (next(iter(s["lanes"])) if len(s["lanes"]) == 1 else "")
     if lane not in s["lanes"]:
-        raise SystemExit("bh: say which lane the design session is for: --lane L" if not lane
-                         else f"bh: there is no lane {lane}")
+        raise SystemExit("hansa: say which lane the design session is for: --lane L" if not lane
+                         else f"hansa: there is no lane {lane}")
     with desk.lock():
         open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
                  and m["state"] in ("queued", "running")]
         if open_:
-            raise SystemExit(f"bh: lane {lane} already has design session {open_[0]} open; one at a time per lane "
-                             f"(bh show {open_[0]})")
+            raise SystemExit(f"hansa: lane {lane} already has design session {open_[0]} open; one at a time per lane "
+                             f"(hansa show {open_[0]})")
         tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "",
                             browser=bool(s.get("browser")) or None)
-    print(f"{tid} queued: bh opens the design session in seconds and asks the principal to join it. "
-          f"It comes back for review when they are done: bh wait {tid}")
+    print(f"{tid} queued: hansa opens the design session in seconds and asks the principal to join it. "
+          f"It comes back for review when they are done: hansa wait {tid}")
 
 
 def cmd_status(a):
@@ -111,19 +113,19 @@ def cmd_diff(a):
 def cmd_merge(a):
     desk = Desk.find(a.desk)
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
-    # The repository's merge hooks run inside it: bh serve waits for them, and a bh command in a hook
-    # that would change the desk stops at once (BH_MERGING) instead of waiting for this merge forever.
+    # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
+    # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
     with desk.lock():
         m, v, chk, repo, base = _mergeable(desk, a)
         try:
-            git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"BH_MERGING": "1"})
+            git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
         except RuntimeError as e:
             try:
                 git("merge", "--abort", cwd=repo)
             except RuntimeError:
                 pass
-            raise SystemExit(f"bh: {a.id} conflicts with {base} ({e}); nothing was merged. "
-                             f"Try: bh retry {a.id} --fresh \"<same change on the current base>\"")
+            raise SystemExit(f"hansa: {a.id} conflicts with {base} ({e}); nothing was merged. "
+                             f"Try: hansa retry {a.id} --fresh \"<same change on the current base>\"")
         desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
         _close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold")
@@ -135,38 +137,38 @@ def _mergeable(desk: Desk, a):
     """Everything that must hold before a merge; says why not and exits when something does not."""
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
-        raise SystemExit(f"bh: {a.id} is a verification of {m.get('parent')}; it is never merged. "
+        raise SystemExit(f"hansa: {a.id} is a verification of {m.get('parent')}; it is never merged. "
                          f"Read it, then merge or send back {m.get('parent')}")
     if m["state"] != "done":
-        raise SystemExit(f"bh: only a finished task can be merged; {a.id} is {m['state']}")
+        raise SystemExit(f"hansa: only a finished task can be merged; {a.id} is {m['state']}")
     lane = desk.settings()["lanes"].get(m["lane"])
     if not lane:
-        raise SystemExit(f"bh: lane {m['lane']} is no longer in settings")
+        raise SystemExit(f"hansa: lane {m['lane']} is no longer in settings")
     repo, base = lane["repo"], lane.get("base", "main")
     leaked = keys_in_change(desk, repo, m["base"], m["head"]) or m.get("leaked")  # a key saved since counts too
     if leaked:
         if leaked != m.get("leaked"):
             desk.update(a.id, leaked=leaked)
-        raise SystemExit(f"bh: the change in {a.id} holds the key of {', '.join(leaked)}; nothing was merged, "
-                         f"and no flag overrides this. Redo it from the base without the key: bh retry {a.id} --fresh "
-                         f"\"...\", and tell the principal with bh ask: they may want to change that key.")
+        raise SystemExit(f"hansa: the change in {a.id} holds the key of {', '.join(leaked)}; nothing was merged, "
+                         f"and no flag overrides this. Redo it from the base without the key: hansa retry {a.id} --fresh "
+                         f"\"...\", and tell the principal with hansa ask: they may want to change that key.")
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
-        raise SystemExit(f"bh: {v['task']} is still verifying {a.id}; nothing was merged. Wait for it: bh wait {v['task']}")
+        raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. Wait for it: hansa wait {v['task']}")
     if v and v["verdict"] == "does not hold" and not a.despite_check:
-        raise SystemExit(f"bh: the verification {v['task']} found that {a.id} does not hold; nothing was merged. "
-                         f"bh show {v['task']} says what it ran. Send it back with bh retry {a.id} \"...\", "
-                         f"or merge anyway: bh merge {a.id} --despite-check")
+        raise SystemExit(f"hansa: the verification {v['task']} found that {a.id} does not hold; nothing was merged. "
+                         f"hansa show {v['task']} says what it ran. Send it back with hansa retry {a.id} \"...\", "
+                         f"or merge anyway: hansa merge {a.id} --despite-check")
     chk = m.get("check")
     if chk and not chk["ok"] and not a.despite_check:
-        raise SystemExit(f"bh: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
-                         f"nothing was merged. bh show {a.id} has the output. "
-                         f"To merge it anyway: bh merge {a.id} --despite-check")
+        raise SystemExit(f"hansa: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
+                         f"nothing was merged. hansa show {a.id} has the output. "
+                         f"To merge it anyway: hansa merge {a.id} --despite-check")
     current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     if current != base:
-        raise SystemExit(f"bh: the checkout at {repo} is on {current}, not {base}; the principal needs to switch it back")
+        raise SystemExit(f"hansa: the checkout at {repo} is on {current}, not {base}; the principal needs to switch it back")
     if git("status", "--porcelain", "--untracked-files=no", cwd=repo):
-        raise SystemExit(f"bh: the checkout at {repo} has uncommitted changes; nothing was merged")
+        raise SystemExit(f"hansa: the checkout at {repo} has uncommitted changes; nothing was merged")
     return m, v, chk, repo, base
 
 
@@ -179,12 +181,12 @@ def cmd_retry(a):
 def _retry(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
-        raise SystemExit(f"bh: {a.id} is a verification; send back the task it checked: bh retry {m.get('parent')} \"...\"")
+        raise SystemExit(f"hansa: {a.id} is a verification; send back the task it checked: hansa retry {m.get('parent')} \"...\"")
     if m["state"] in ("queued", "running"):
-        raise SystemExit(f"bh: {a.id} is {m['state']}; a follow-up is for a task that has ended. Wait for it "
-                         f"(bh wait {a.id}), or cancel it first (bh cancel {a.id})")
+        raise SystemExit(f"hansa: {a.id} is {m['state']}; a follow-up is for a task that has ended. Wait for it "
+                         f"(hansa wait {a.id}), or cancel it first (hansa cancel {a.id})")
     if m["state"] == "replaced":
-        raise SystemExit(f"bh: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
+        raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
     note = " ".join(a.note).strip()
     text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
@@ -192,7 +194,7 @@ def _retry(desk: Desk, a) -> None:
     if report.exists() and report.read_text(encoding="utf-8").strip():
         text += "\nThe previous attempt's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
     if a.browser and not desk.settings().get("browser"):
-        raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
+        raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
             "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser")}
     if not a.fresh and m.get("head"):
@@ -211,12 +213,12 @@ def cmd_cancel(a):
         m = desk.meta(a.id)
         if m["state"] == "queued":
             desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now())
-        elif m["state"] == "running":  # bh serve stops it; stopping it here as well is only quicker
+        elif m["state"] == "running":  # hansa serve stops it; stopping it here as well is only quicker
             m = desk.update(a.id, cancel=True)
         elif m["state"] == "done":
             desk.update(a.id, state="cancelled", error="closed without merging")
         else:
-            raise SystemExit(f"bh: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be "
+            raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be "
                              f"cancelled")
         _close_verification(desk, m, f"closed: {a.id} was cancelled")
     if m["state"] == "running":
@@ -234,15 +236,15 @@ def cmd_verify(a):
 def _verify(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
-        raise SystemExit(f"bh: {a.id} is itself a verification; verify the task it checks ({m.get('parent')})")
+        raise SystemExit(f"hansa: {a.id} is itself a verification; verify the task it checks ({m.get('parent')})")
     if m["state"] != "done" or not m.get("commits"):
-        raise SystemExit(f"bh: only a finished task with changes can be verified; {a.id} is {m['state']}"
+        raise SystemExit(f"hansa: only a finished task with changes can be verified; {a.id} is {m['state']}"
                          + ("" if m.get("commits") else ", with nothing to merge"))
     if a.browser and not desk.settings().get("browser"):
-        raise SystemExit("bh: this desk has no browser set up (the principal sets one on the page); nothing was queued")
+        raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
-        raise SystemExit(f"bh: {v['task']} is already verifying {a.id}")
+        raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
     d = desk.tasks_dir / a.id
     task = (d / "task.md").read_text(encoding="utf-8").strip()
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
@@ -257,7 +259,7 @@ def _verify(desk: Desk, a) -> None:
         _close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
     desk.update(a.id, verify=vid)
     print(f"{vid} queued: a worker will run {a.id}'s change to see whether it holds. "
-          f"Follow it with: bh wait {vid}; the verdict shows in bh show {a.id}")
+          f"Follow it with: hansa wait {vid}; the verdict shows in hansa show {a.id}")
 
 
 def _close_verification(desk: Desk, m: dict, why: str) -> None:
@@ -267,17 +269,17 @@ def _close_verification(desk: Desk, m: dict, why: str) -> None:
         return
     if v["state"] in ("queued", "done"):
         desk.update(v["task"], state="cancelled", error=why)
-    elif v["state"] == "running":  # bh serve stops it within seconds
+    elif v["state"] == "running":  # hansa serve stops it within seconds
         desk.update(v["task"], cancel=True)
 
 
 def cmd_pause(a):
-    Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("BH_ROLE", "cli"))
-    print("paused: no new tasks start until `bh resume`; running tasks finish")
+    Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
+    print("paused: no new tasks start until `hansa resume`; running tasks finish")
 
 
 def cmd_resume(a):
-    Desk.find(a.desk).resume(by=os.environ.get("BH_ROLE", "cli"))
+    Desk.find(a.desk).resume(by=os.environ.get("HANSA_ROLE", "cli"))
     print("resumed")
 
 
@@ -293,7 +295,7 @@ def cmd_wait(a):
         print("nothing is queued or running and no request to the principal is open: nothing to wait for")
         return
     if not views.status(desk)["server_up"]:
-        print("note: bh serve is not running, so no task will start or finish until it is")
+        print("note: hansa serve is not running, so no task will start or finish until it is")
     end = time.time() + a.timeout * 60
     while True:
         ended = [desk.meta(t) for t in watch if not live(t)]
@@ -302,7 +304,7 @@ def cmd_wait(a):
             break
         time.sleep(a.every)
     for m in ended:
-        print(f"{m['id']} {m['state']}: {m['title']}  (bh show {m['id']})")
+        print(f"{m['id']} {m['state']}: {m['title']}  (hansa show {m['id']})")
     for x in answered:
         print(f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
     still = [desk.meta(t) for t in watch if live(t)]
@@ -313,12 +315,12 @@ def cmd_wait(a):
         print(f"{m['id']} {m['state']}" + (f" {mins} min, so far: {views.progress_text(desk, m)}"
                                            if m["state"] == "running" else ""))
     if still:
-        print("bh wait again to keep waiting. Some providers take minutes per reply; a task is stuck"
+        print("hansa wait again to keep waiting. Some providers take minutes per reply; a task is stuck"
               " only when nothing has happened for a long while.")
 
 
 def cmd_ask(a):
-    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("BH_ROLE", "cli"))
+    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
     print(f"ask #{n} is on the principal's page")
 
 
@@ -338,7 +340,7 @@ def _since(text: str) -> float:
         now = time.localtime()
         ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, t.tm_hour, t.tm_min, 0, 0, 0, -1))
         return ts - 86400 if ts > time.time() else ts
-    raise SystemExit("bh: --since takes HH:MM (today) or YYYY-MM-DD HH:MM")
+    raise SystemExit("hansa: --since takes HH:MM (today) or YYYY-MM-DD HH:MM")
 
 
 def cmd_cost(a):
@@ -359,7 +361,7 @@ def cmd_check(a):
 
 
 def hold_server_lock(desk: Desk):
-    """One bh serve per desk: it holds this lock while it runs. None when another server holds it."""
+    """One hansa serve per desk: it holds this lock while it runs. None when another server holds it."""
     desk.state_dir.mkdir(exist_ok=True)
     f = open(desk.state_dir / "serve.lock", "w")
     try:
@@ -375,27 +377,27 @@ def cmd_serve(a):
     desk = Desk.find(a.desk)
     held = hold_server_lock(desk)  # kept open while this server runs
     if not held:
-        raise SystemExit(f"bh: another bh serve is already running on {desk.root}; one per desk, so no task is "
+        raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
     start_web(desk, a.host, a.port)
     d = Dispatcher(desk)
     desk.event("server_started", port=a.port)
-    print(f"bh serve: desk {desk.root}; web page on {a.host}:{a.port} (run `bh web` for the address)", flush=True)
+    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{a.port} (run `hansa web` for the address)", flush=True)
     try:
         while True:
             try:
                 d.tick()
             except Exception as e:  # noqa: BLE001 - keep serving; the error is on record
                 desk.event("server_error", error=str(e)[:300])
-                print(f"bh serve: {e}", file=sys.stderr, flush=True)
+                print(f"hansa serve: {e}", file=sys.stderr, flush=True)
             time.sleep(a.every)
     except KeyboardInterrupt:
         desk.event("server_stopped")
 
 
 def cmd_web(a):
-    if os.environ.get("BH_ROLE") or os.environ.get("BH_TASK"):
-        raise SystemExit("bh: the web page is for the principal; agents use the other commands")
+    if os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK"):
+        raise SystemExit("hansa: the web page is for the principal; agents use the other commands")
     desk = Desk.find(a.desk)
     print(f"Open http://127.0.0.1:{a.port}/?t={desk.web_token()}", flush=True)
     print("Keep this window open while you use the page; close it or press Ctrl+C when you are done.", flush=True)
@@ -418,8 +420,8 @@ def cmd_coordinator(a):
     env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
     env.update({k: v for k, v in provider_env(desk, co["provider"], p).items() if k not in ("PATH", "TERM")})
     env["PATH"] = str(Path(__file__).resolve().parent.parent / "bin") + os.pathsep + os.environ.get("PATH", "")
-    env["BH_ROLE"] = "coordinator"
-    env["BH_DESK"] = str(desk.root)
+    env["HANSA_ROLE"] = "coordinator"
+    env["HANSA_DESK"] = str(desk.root)
     # the lanes' checkouts are readable for planning and review; workers do the editing
     repos = sorted({ln["repo"] for ln in s["lanes"].values()})
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
@@ -428,9 +430,13 @@ def cmd_coordinator(a):
     argv += ["--model", co.get("model") or p["model"]]
     if co.get("effort"):
         argv += ["--effort", co["effort"]]
-    _bring(desk, CARD, desk.root / "CLAUDE.md", "card_refreshed")
+    _bring(desk, CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md", "card_refreshed")
     for f in sorted(HELPERS.glob("*.md")):
-        _bring(desk, f, desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
+        _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
+    mine = desk.root / ".claude" / "settings.json"  # hansa keeps its rules current there; the rest is left as it is
+    s = read_json(mine, {})
+    s = {**s, "permissions": permissions(desk)} if isinstance(s, dict) else {"permissions": permissions(desk)}
+    _bring(desk, json_text(s), mine, "permissions_refreshed", keep_as="coordinator-settings.json")
     for name in RETIRED_HELPERS:
         old = desk.root / ".claude" / "agents" / name
         if old.is_file():
@@ -441,14 +447,13 @@ def cmd_coordinator(a):
     os.execvpe(argv[0], argv + a.rest, env)
 
 
-def _bring(desk: Desk, src: Path, dst: Path, event: str) -> None:
-    """Put bh's current copy of a file into the desk (bh was upgraded), keeping the old one in .bh/."""
-    new = src.read_text(encoding="utf-8")
+def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> None:
+    """Put hansa's current version of a file into the desk (hansa was upgraded), keeping the old one in .hansa/."""
     if dst.is_file() and dst.read_text(encoding="utf-8") == new:
         return
     if dst.is_file():
         desk.state_dir.mkdir(exist_ok=True)
-        (desk.state_dir / f"{dst.name}.{int(time.time())}").write_text(dst.read_text(encoding="utf-8"), encoding="utf-8")
+        (desk.state_dir / f"{keep_as or dst.name}.{int(time.time())}").write_text(dst.read_text(encoding="utf-8"), encoding="utf-8")
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(new, encoding="utf-8")
     desk.event(event, file=dst.name)
@@ -471,15 +476,15 @@ def _split_claude_args(argv: list):
 class _Version(argparse.Action):
     """--version, worked out only when asked (it may ask git which commit this is)."""
     def __call__(self, parser, namespace, values, option_string=None):
-        print(f"bh {build()}")
+        print(f"hansa {build()}")
         parser.exit()
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="bh", description="A file-based desk for a team of Claude Code agents. "
-                                 "`bh help` prints the agent card.")
-    ap.add_argument("--version", action=_Version, nargs=0, help="show which bh this is and exit")
-    ap.add_argument("--desk", help="desk directory (default: the desk containing the current directory, or BH_DESK)")
+    ap = argparse.ArgumentParser(prog="hansa", description="A file-based desk for a team of Claude Code agents. "
+                                 "`hansa help` prints the agent card.")
+    ap.add_argument("--version", action=_Version, nargs=0, help="show which hansa this is and exit")
+    ap.add_argument("--desk", help="desk directory (default: the desk containing the current directory, or HANSA_DESK)")
     sub = ap.add_subparsers(dest="cmd", metavar="command")
 
     def add(name, fn, help_):

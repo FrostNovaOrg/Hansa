@@ -1,4 +1,4 @@
-"""bh: a small, file-based desk for a team of Claude Code agents.
+"""hansa: a small, file-based desk for a team of Claude Code agents.
 
 One directory (the desk) holds the settings, the keys, the tasks and an
 append-only event log. The CLI, the web page and the agents all read the
@@ -14,7 +14,7 @@ __version__ = "0.5.0a1"
 
 @functools.lru_cache(maxsize=1)
 def build() -> str:
-    """This version and which code it is: bh/BUILD when an install wrote one, else the git commit."""
+    """This version and which code it is: hansa/BUILD when an install wrote one, else the git commit."""
     here = Path(__file__).resolve().parent
     try:
         return f"{__version__} {(here / 'BUILD').read_text(encoding='utf-8').strip()}".strip()

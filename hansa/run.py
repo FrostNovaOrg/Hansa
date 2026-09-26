@@ -3,8 +3,8 @@ keep the queue moving.
 
 A worker is `claude -p` in the lane's git worktree, on a branch of its own
 (task/<id>). The prompt goes in on stdin; the JSON result lands in
-.bh/runs/<id>/run.json, and bh publishes it into tasks/<id>/ without keys when the
-worker ends. Nothing here needs the worker to know about bh.
+.hansa/runs/<id>/run.json, and hansa publishes it into tasks/<id>/ without keys when the
+worker ends. Nothing here needs the worker to know about hansa.
 """
 from __future__ import annotations
 
@@ -29,19 +29,19 @@ QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
-SETUP_FAILED = re.compile(r"^bh: the lane's setup command failed \(exit (\d+)\)$", re.M)
+SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)\)$", re.M)
 # The lane's setup command runs first in the worker's own process, then the worker replaces it:
-# bh serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
+# hansa serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
 # What it changes in the repository (a lock file, say) is set aside, so it is not part of the task;
 # <log>.done says it got that far (a setup stopped midway leaves its changes uncommitted).
-# sh -c SETUP_SCRIPT bh-setup <setup> <log> <error file> <worker command...>
+# sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <worker command...>
 SETUP_SCRIPT = ("env " + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
   rc=$?
-  [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "bh: what the lane's failed setup changed" >>"$2" 2>&1
-  echo "bh: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
+  [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
+  echo "hansa: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
 if [ -n "$(git status --porcelain)" ]; then
-  git stash push --include-untracked -q -m "bh: what the lane's setup changed" >>"$2" 2>&1
-  echo "bh: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
+  git stash push --include-untracked -q -m "hansa: what the lane's setup changed" >>"$2" 2>&1
+  echo "hansa: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
 fi
 : > "$2.done"
 shift 3; exec "$@"
@@ -51,11 +51,11 @@ KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key 
 # says nothing about other tasks, so the provider does not rest; the task moves on.
 REFUSED_STOPS = {"content_filter", "refusal"}
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
-GIT_ID = {"GIT_AUTHOR_NAME": "bh", "GIT_AUTHOR_EMAIL": "bh@localhost",
-          "GIT_COMMITTER_NAME": "bh", "GIT_COMMITTER_EMAIL": "bh@localhost"}
+GIT_ID = {"GIT_AUTHOR_NAME": "hansa", "GIT_AUTHOR_EMAIL": "hansa@localhost",
+          "GIT_COMMITTER_NAME": "hansa", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
 PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in this directory,
 on branch task/{tid}, which was made for this task.
-- Do not commit: when you end, bh commits everything you changed here. To look at your
+- Do not commit: when you end, hansa commits everything you changed here. To look at your
   work, git status, git diff, git log and git show are allowed.
 - Do not push, do not switch branches, do not touch other directories.
 - To search, run read-only commands such as grep -rn, find and sed -n on paths in this
@@ -68,7 +68,7 @@ on branch task/{tid}, which was made for this task.
 
 VERIFY_PROTOCOL = """You are a worker in lane {lane}, checking another worker's finished task. You are
 on branch task/{tid}, a copy of that task's branch made for this check; nothing here is merged.
-- Change files as your checks need (undo code, add a throwaway test), but do not commit; bh sets
+- Change files as your checks need (undo code, add a throwaway test), but do not commit; hansa sets
   your changes aside when you end. For undoing, `git checkout <commit> -- <path>` and
   `git restore` are allowed here.
 - Do not push, do not switch branches, do not touch other directories.
@@ -125,7 +125,7 @@ You work only in this directory, on branch task/{tid}, which was made for this s
 - When the principal says it is done: bring in the latest {base} (git merge {base}) and settle any
   conflict here, run the checks, commit, stop the app if you started it, then write your hand-in
   report as one message (what changed, how it was checked, anything left) and ask the principal
-  to type /exit. bh then hands the work to the coordinator, who checks it and merges it.
+  to type /exit. hansa then hands the work to the coordinator, who checks it and merges it.
 """
 DESIGN_START = """The coordinator's brief for this session:
 
@@ -152,15 +152,15 @@ STOPPED_NOTE = "(Stopped at the ceiling before it wrote its report. Its notes al
 
 
 def claude_bin() -> str:
-    for c in (os.environ.get("BH_CLAUDE"), shutil.which("claude"),
+    for c in (os.environ.get("HANSA_CLAUDE"), shutil.which("claude"),
               os.path.expanduser("~/.local/bin/claude")):
         if c and os.access(c, os.X_OK):
             return c
-    raise RuntimeError("claude was not found; install Claude Code or set BH_CLAUDE")
+    raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
 
 
 def tmux_bin() -> str:
-    for c in (os.environ.get("BH_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+    for c in (os.environ.get("HANSA_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("tmux was not found; a design session runs in tmux so the principal can join it")
@@ -169,7 +169,7 @@ def tmux_bin() -> str:
 def tmux_socket(desk: Desk) -> str:
     """One tmux server per desk, so session names never meet another desk's."""
     import hashlib
-    return "bh-" + hashlib.sha1(str(desk.root).encode()).hexdigest()[:6]
+    return "hansa-" + hashlib.sha1(str(desk.root).encode()).hexdigest()[:6]
 
 
 def join_command(m: dict) -> str:
@@ -248,7 +248,7 @@ def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
 
 def progress_of(desk: Desk, m: dict) -> dict:
     """How far a running worker has got: model replies so far, minutes since it last did
-    anything, and the last thing it wrote. bh records turns and tokens only at the end."""
+    anything, and the last thing it wrote. hansa records turns and tokens only at the end."""
     p = desk.settings()["providers"].get(m.get("provider") or "")
     texts, replies, last, _ = _record(config_home(desk, m["provider"], p), m.get("session_id", "")) if p else ([], 0, None, {})
     return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last else None,
@@ -281,7 +281,7 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
-    are left out: bh does the committing, and read-only git needs no rule."""
+    are left out: hansa does the committing, and read-only git needs no rule."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
     return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not is_git_rule(r)]
 
@@ -320,11 +320,11 @@ def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
 
 
 def publish(desk: Desk, tid: str, *names: str) -> None:
-    """Move what a task's processes wrote from .bh/runs/<id>/ into its folder, keys removed."""
+    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
         for name in names:
-            src = raw / name if (raw / name).exists() else d / name  # in d: started before bh kept them apart
+            src = raw / name if (raw / name).exists() else d / name  # in d: started before hansa kept them apart
             if src.exists():
                 (d / name).write_text(desk.redact(src.read_text(encoding="utf-8", errors="replace")),
                                       encoding="utf-8")
@@ -337,7 +337,7 @@ def publish(desk: Desk, tid: str, *names: str) -> None:
 
 
 def pids_with_arg(token: str) -> list:
-    """Processes whose command line holds this word: bh puts one on each process it starts, so a
+    """Processes whose command line holds this word: hansa puts one on each process it starts, so a
     restarted server can find one whose number it never recorded."""
     if not token:
         return []
@@ -357,7 +357,7 @@ def pids_with_arg(token: str) -> list:
 
 
 def leader(pids: list):
-    """The one of these that leads its own process group, as each process bh starts does."""
+    """The one of these that leads its own process group, as each process hansa starts does."""
     for p in pids:
         try:
             if os.getpgid(p) == p:
@@ -378,7 +378,7 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
         wt.parent.mkdir(parents=True, exist_ok=True)
         git("worktree", "add", "--detach", str(wt), start, cwd=repo)
     if git("status", "--porcelain", cwd=wt):
-        git("stash", "push", "--include-untracked", "-m", f"bh: left over before {tid}", cwd=wt)
+        git("stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}", cwd=wt)
     branch = f"task/{tid}"
     if git("branch", "--list", branch, cwd=wt):
         # an earlier try of this task: keep its commits under another name
@@ -393,12 +393,12 @@ def with_setup(argv: list, lane: dict, raw: Path) -> list:
     if not lane.get("setup"):
         return argv
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
-    return ["/bin/sh", "-c", SETUP_SCRIPT, "bh-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
+    return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
             *argv]
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
-    """A task cancelled while bh prepared it ends there, and its worker never starts."""
+    """A task cancelled while hansa prepared it ends there, and its worker never starts."""
     m = desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled before it started",
                                     "finished": now()} if x.get("cancel") else None)
     if m:
@@ -430,7 +430,7 @@ def browser_for(desk: Desk, tid: str, command: str):
 
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
-    cancelled while bh prepared it."""
+    cancelled while hansa prepared it."""
     meta = desk.transition(tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname,
                            started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False,
                            cancel=False)
@@ -459,9 +459,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         argv += ["--mcp-config", str(cfg)]
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir)]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "BH_TASK": tid,
-           "GIT_AUTHOR_NAME": f"bh worker {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
-           "GIT_COMMITTER_NAME": f"bh worker {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
+           "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
+           "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
     with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
         if cancelled_before_start(desk, tid):
@@ -482,7 +482,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
 
 def design_command(desk: Desk, tid: str):
     """The interactive Claude Code run for a design session: (argv, env, directory).
-    Built inside the session's own terminal (bh.session), so no key is on a command line."""
+    Built inside the session's own terminal (hansa.session), so no key is on a command line."""
     s, meta = desk.settings(), desk.meta(tid)
     lane_name = meta["lane"]
     lane, pname = s["lanes"][lane_name], meta["provider"]
@@ -512,10 +512,10 @@ def design_command(desk: Desk, tid: str):
     argv += ["--append-system-prompt", system,
              "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW]
-    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "BH_TASK": tid,
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
-           "GIT_AUTHOR_NAME": f"bh design {lane_name}", "GIT_AUTHOR_EMAIL": "bh@localhost",
-           "GIT_COMMITTER_NAME": f"bh design {lane_name}", "GIT_COMMITTER_EMAIL": "bh@localhost"}
+           "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
+           "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     return with_setup(argv, lane, desk.raw_dir(tid)), env, wt
 
 
@@ -550,7 +550,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
     subprocess.run([tmux, "-L", sock, "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(wt),
-                    sys.executable, "-m", "bh.session", str(desk.root), tid],
+                    sys.executable, "-m", "hansa.session", str(desk.root), tid],
                    env=env, check=True, capture_output=True, timeout=30)
     r = subprocess.run([tmux, "-L", sock, "display-message", "-p", "-t", name, "#{pane_pid}"],
                        capture_output=True, text=True, timeout=30)
@@ -561,7 +561,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
                        f"then asks about background work, press Enter: the first choice stops it). The first "
                        f"session in a new folder asks whether you trust it: choose \"Yes, I trust this folder\" "
                        f"(the default, No, ends the session). "
-                       f"Its screenshots show under {tid} on this page.", by="bh")
+                       f"Its screenshots show under {tid} on this page.", by="hansa")
     desk.update(tid, ask=ask)
     desk.event("design_started", task=tid, lane=lane_name, provider=pname, model=model)
 
@@ -575,7 +575,7 @@ def end_design(desk: Desk, meta: dict) -> None:
         except (RuntimeError, OSError, subprocess.SubprocessError):
             pass
     if meta.get("ask") and any(a["id"] == meta["ask"] and not a["closed"] for a in desk.asks()):
-        desk.close_ask(meta["ask"], "the design session ended", by="bh")
+        desk.close_ask(meta["ask"], "the design session ended", by="hansa")
 
 
 def usage_of(run: dict) -> dict:
@@ -672,7 +672,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             raise RuntimeError("the task never got a worktree")
         if git("status", "--porcelain", cwd=wt) and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
-                git("stash", "push", "--include-untracked", "-m", f"bh: {tid} scratch changes", cwd=wt)
+                git("stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes", cwd=wt)
             else:
                 git("add", "-A", cwd=wt)
                 git("commit", "-q", "--no-verify", "-m", f"{tid}: {meta.get('title') or 'work'}"[:100], cwd=wt)
@@ -694,7 +694,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state, error = "cancelled", "cancelled"
     elif setup:
         state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
-                                  f"started; bh show {tid} has the setup's last lines")
+                                  f"started; hansa show {tid} has the setup's last lines")
     elif designing:
         lines = err.strip().splitlines()
         state, error = ("done", "") if report or not lines else ("failed", f"the design session did not start: {lines[-1][:200]}")
@@ -739,14 +739,14 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
 
 
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
-    """Run the lane's check command in the worktree, as bh, after the worker is done; None when
+    """Run the lane's check command in the worktree, as hansa, after the worker is done; None when
     the task was cancelled first. The exit code goes to a file, so a restarted server can still
     read it."""
     raw = desk.raw_dir(tid)
     (raw / "check.exit").unlink(missing_ok=True)
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-    env.update({**lane.get("env", {}), "BH_TASK": tid, "TERM": "dumb"})
-    token = f"bh-check-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
+    env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb"})
+    token = f"hansa-check-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
     with desk.lock():  # a cancel lands before this (no check) or after it (the check is stopped)
         m = desk.change(tid, lambda x: None if x.get("cancel") else
                         {"launch": token, "check_started": now(), "check_command": lane["check"]})
@@ -826,7 +826,7 @@ def _state(pid) -> str:
 
 
 def has_ended(proc) -> bool:
-    """Whether bh's child has ended, found without reaping it: until it is reaped, its number,
+    """Whether hansa's child has ended, found without reaping it: until it is reaped, its number,
     and so its process group's, cannot pass to another process."""
     if proc.returncode is not None:
         return True
@@ -856,7 +856,7 @@ def group_running(pgid) -> bool:
 
 
 def stop(pid, start: str = "", proc=None) -> None:
-    """Stop the process group bh started, politely and then for good, until nothing in it runs,
+    """Stop the process group hansa started, politely and then for good, until nothing in it runs,
     also when its leader has ended already. proc: the Popen, when this process started the
     leader; it is reaped only at the end, so the group's number cannot pass to another process
     meanwhile. Without it, a number that now belongs to another process is left alone."""
@@ -995,7 +995,7 @@ class Dispatcher:
 
 
 def server_up(desk: Desk) -> bool:
-    """Whether bh serve has looked at the desk in the last half minute."""
+    """Whether hansa serve has looked at the desk in the last half minute."""
     return time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0) < 30
 
 
@@ -1006,8 +1006,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  and x.get("lane") == m.get("lane")]
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
-                else "opens when `bh serve` next looks (within seconds)" if server_up(desk)
-                else "opens once `bh serve` runs; `bh serve` is not running")
+                else "opens when `hansa serve` next looks (within seconds)" if server_up(desk)
+                else "opens once `hansa serve` runs; `hansa serve` is not running")
     if desk.paused():
         return "dispatch is paused"
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
@@ -1025,8 +1025,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  for p in s["lanes"][ln]["providers"]}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
-            return (f"ready for lane {ln} on {ready[0]}; starts when `bh serve` next looks (within seconds)"
-                    if server_up(desk) else f"ready for lane {ln} on {ready[0]}, but `bh serve` is not running")
+            return (f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)"
+                    if server_up(desk) else f"ready for lane {ln} on {ready[0]}, but `hansa serve` is not running")
         why.append(f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})")
     return "; ".join(why) if why else "waiting for a free slot"
 

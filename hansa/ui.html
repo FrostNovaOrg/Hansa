@@ -81,7 +81,7 @@ const T = ZH ? {
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
-  events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 bh web 给的地址打开",
+  events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
   noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并"
 } : {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
@@ -98,8 +98,8 @@ const T = ZH ? {
   general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a quota error (min)", coordinator:"Coordinator",
   auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
-  allow:"Commands workers may run (one rule per line; Bash(pnpm test:*) means any command starting with pnpm test; anything else is refused and listed on the task. No need for git or read-only commands such as ls: workers can already use them, and bh commits for them)",
-  laneCheck:"Check command: bh runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", verifyCol:"Verified by running", v_holds:"holds", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)", progressFmt:(n, idle) => idle == null ? "no reply from the model yet" : `${n} replies, active ${idle} min ago`,
+  allow:"Commands workers may run (one rule per line; Bash(pnpm test:*) means any command starting with pnpm test; anything else is refused and listed on the task. No need for git or read-only commands such as ls: workers can already use them, and hansa commits for them)",
+  laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", verifyCol:"Verified by running", v_holds:"holds", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)", progressFmt:(n, idle) => idle == null ? "no reply from the model yet" : `${n} replies, active ${idle} min ago`,
   browserCmd:"Browser tool command (the coordinator can give single tasks a browser; blank = none)",
   design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
   designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it (blank = none)",
@@ -113,7 +113,7 @@ const T = ZH ? {
   costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill.",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
-  events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by bh web",
+  events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
   noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged"
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
@@ -136,7 +136,7 @@ const table = (head, rows) => h("div", {class:"scroll"}, h("table", {}, h("tr", 
 const fmt = n => (n || 0).toLocaleString();
 const when = ts => ts ? new Date(ts * 1000).toLocaleString() : "";
 async function api(path, body) {
-  const opt = body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json", "X-BH":"1"}, body:JSON.stringify(body)};
+  const opt = body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json", "X-Hansa":"1"}, body:JSON.stringify(body)};
   const r = await fetch(path, opt);
   if (r.status === 403) throw new Error(T.forbidden);
   return r.json();

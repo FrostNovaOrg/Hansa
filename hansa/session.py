@@ -1,7 +1,7 @@
-"""Run one design session in the current terminal. bh starts it inside tmux, where the
+"""Run one design session in the current terminal. hansa starts it inside tmux, where the
 principal joins it:
 
-    python3 -m bh.session <desk> <task>
+    python3 -m hansa.session <desk> <task>
 
 The command and its environment are built here, in the session's own process, so a
 provider's key never appears on a command line.
@@ -20,7 +20,7 @@ def main() -> int:
         argv, env, cwd = design_command(desk, tid)
         os.chdir(cwd)
         os.execvpe(argv[0], argv, env)
-    except Exception:  # noqa: BLE001 - whatever stops the start is kept for bh show
+    except Exception:  # noqa: BLE001 - whatever stops the start is kept for hansa show
         (desk.raw_dir(tid) / "run.err").write_text(traceback.format_exc(), encoding="utf-8")
     return 1
 

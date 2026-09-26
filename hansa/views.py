@@ -1,4 +1,4 @@
-"""Views: the facts behind `bh status`, `bh show`, `bh explain` and the web page.
+"""Views: the facts behind `hansa status`, `hansa show`, `hansa explain` and the web page.
 Each view returns plain data; the *_text helpers turn it into short lines."""
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from .run import join_command, progress_of, provider_problem, server_up, waiting
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
-    "running": "a worker is on it, or bh is running the lane's check on its work",
-    "done": "the worker finished; waiting for your review (bh show / bh merge / bh retry)",
-    "failed": "the run ended with an error; bh show says why",
+    "running": "a worker is on it, or hansa is running the lane's check on its work",
+    "done": "the worker finished; waiting for your review (hansa show / hansa merge / hansa retry)",
+    "failed": "the run ended with an error; hansa show says why",
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
     "replaced": "a follow-up task took its place",
@@ -44,7 +44,7 @@ def _progress_line(p: dict) -> str:
 
 def progress_text(desk: Desk, m: dict) -> str:
     """How far a running task's worker has got, in words."""
-    return ("checking now" if m.get("phase") == "checking" else "bh is preparing it" if m.get("phase") == "starting"
+    return ("checking now" if m.get("phase") == "checking" else "hansa is preparing it" if m.get("phase") == "starting"
             else _progress_line(progress_of(desk, m)))
 
 
@@ -108,16 +108,16 @@ def status(desk: Desk) -> dict:
 def status_text(st: dict) -> str:
     out = [f"desk {st['desk']}",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
-           "server up" if st["server_up"] else "server NOT running: start it with `bh serve` (see bh explain server)"]
+           "server up" if st["server_up"] else "server NOT running: start it with `hansa serve` (see hansa explain server)"]
     out += ["cost audit on"] if st.get("audits_cost") else []
-    out = [" · ".join(out + [f"bh {st['build']}", time.strftime("now %H:%M")])]
+    out = [" · ".join(out + [f"hansa {st['build']}", time.strftime("now %H:%M")])]
     out.append("lanes:")
     for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or 'free'}")
     if st["running"]:
         out.append("running:")
-        out += [f"  {m['id']} {m['lane']} " + ("worker done, bh is running the lane's check" if m["checking"]
-                                               else "bh is preparing it" if m.get("starting")
+        out += [f"  {m['id']} {m['lane']} " + ("worker done, hansa is running the lane's check" if m["checking"]
+                                               else "hansa is preparing it" if m.get("starting")
                                                else f"on {m['provider']} ({m['model']})")
                 + (" with a browser" if m["browser"] else "") + f", {m['minutes']} min: {m['title']}"
                 + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
@@ -125,14 +125,14 @@ def status_text(st: dict) -> str:
     if st.get("design"):
         out.append("design sessions (the principal works in them directly; each comes back for review when they end it):")
         out += [f"  {m['id']} lane {m['lane']}, {m['minutes']} min: {m['title']}"
-                + ("\n      ended; bh is running the lane's check" if m["checking"] else
+                + ("\n      ended; hansa is running the lane's check" if m["checking"] else
                    f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["design"]]
     if st["queued"]:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
     if st["review"]:
-        out.append("waiting for review (bh show <id>):")
+        out.append("waiting for review (hansa show <id>):")
         out += [f"  {m['id']} {m['lane']}: {m['title']} [{m['stat'] or 'no changes'}"
                 + {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]]
                 + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
@@ -150,7 +150,7 @@ def status_text(st: dict) -> str:
         out += [f"  #{a['id']}: {a['text'][:100]}" for a in st["asks"]]
     t = st["today"]
     out.append(f"today: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
-               f" (worth ${t['worker_usd']:.2f}; bh cost for everything)")
+               f" (worth ${t['worker_usd']:.2f}; hansa cost for everything)")
     return "\n".join(out)
 
 
@@ -190,7 +190,7 @@ def show_text(desk: Desk, tid: str) -> str:
                       and not m.get("commits") else ""))
         out += ["  " + f for f in m.get("files", [])[:30]]
     if m.get("leaked"):
-        out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so bh will not merge it")
+        out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so hansa will not merge it")
     if m.get("setup_exit") is not None and (d / "setup.log").exists():
         tail = (d / "setup.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
         out += [f"setup (the lane's command that installs dependencies) failed with exit {m['setup_exit']}; "
@@ -207,13 +207,13 @@ def show_text(desk: Desk, tid: str) -> str:
     chk = m.get("check")
     if chk:
         how = "passed" if chk["ok"] else "FAILED" + (f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})")
-        out.append(f"check (run by bh, not the worker): {how} in {chk['seconds']} s: {chk['command']}")
+        out.append(f"check (run by hansa, not the worker): {how} in {chk['seconds']} s: {chk['command']}")
         if not chk["ok"]:
             out += ["  " + x[:200] for x in chk["tail"]]
     elif m.get("phase") == "checking":
         out.append(f"check: running now: {m.get('check_command', '')}")
     if m["state"] == "running" and m.get("phase") == "starting":
-        out.append("so far: bh is preparing it; the worker starts in a moment")
+        out.append("so far: hansa is preparing it; the worker starts in a moment")
     elif m["state"] == "running" and m.get("phase") != "checking":
         out.append(f"so far: {_progress_line(progress_of(desk, m))} (turns and tokens are recorded when it ends)")
         if m.get("kind") == "design":
@@ -221,32 +221,32 @@ def show_text(desk: Desk, tid: str) -> str:
     v = verification(desk, m)
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"
-                   + ("" if v["state"] in ("queued", "running") else f"; bh show {v['task']} says what it ran"))
+                   + ("" if v["state"] in ("queued", "running") else f"; hansa show {v['task']} says what it ran"))
     if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
         out.append(f"verdict: {m.get('verdict') or 'none given'}")
     for model, u in (m.get("usage") or {}).items():
         out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
                    f" · cache write {u['cache_write']:,}")
-    review = (f"bh merge {tid}" if v and v["verdict"] == "holds"
-              else f"bh diff {tid} --stat, then bh verify {tid} (code or tests) or bh merge {tid} (text only)")
-    nxt = {"done": f"bh retry {tid} \"what to change\" · bh cancel {tid} to close it" if not m.get("commits")
-           else f"{review} · bh retry {tid} \"what to change\"" if not chk or chk["ok"]
-           else f"bh retry {tid} \"make the check pass: ...\" · bh diff {tid} · bh merge {tid} --despite-check",
-           "failed": (f"read its notes, then split the task or make it clearer (bh add ...); do not re-run it unchanged"
+    review = (f"hansa merge {tid}" if v and v["verdict"] == "holds"
+              else f"hansa diff {tid} --stat, then hansa verify {tid} (code or tests) or hansa merge {tid} (text only)")
+    nxt = {"done": f"hansa retry {tid} \"what to change\" · hansa cancel {tid} to close it" if not m.get("commits")
+           else f"{review} · hansa retry {tid} \"what to change\"" if not chk or chk["ok"]
+           else f"hansa retry {tid} \"make the check pass: ...\" · hansa diff {tid} · hansa merge {tid} --despite-check",
+           "failed": (f"read its notes, then split the task or make it clearer (hansa add ...); do not re-run it unchanged"
                       if str(m.get("error", "")).startswith("stopped at the ceiling")
-                      else f"bh retry {tid} \"what to change\" (or --fresh to start over)"),
-           "queued": "bh status shows what it is waiting for", "running": f"bh cancel {tid} to stop it"}
+                      else f"hansa retry {tid} \"what to change\" (or --fresh to start over)"),
+           "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
     if v and v["verdict"] == "does not hold" and m["state"] == "done":
-        nxt["done"] = f"bh retry {tid} \"fix what {v['task']} found: ...\" · bh merge {tid} --despite-check"
+        nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
     if v and v["state"] in ("queued", "running") and m["state"] == "done":
-        nxt["done"] = f"wait for the verification: bh wait {v['task']} (bh merge {tid} is held until it ends)"
+        nxt["done"] = f"wait for the verification: hansa wait {v['task']} (hansa merge {tid} is held until it ends)"
     if m.get("leaked") and m["state"] == "done":
-        nxt["done"] = (f"bh retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
-                       f"bh ask (they may want to change that key) · bh cancel {tid}")
+        nxt["done"] = (f"hansa retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
+                       f"hansa ask (they may want to change that key) · hansa cancel {tid}")
     if verifying:
         nxt = {"done": f"read the report above, then merge or send back {m.get('parent')}",
-               "failed": f"bh verify {m.get('parent')} to try again", "running": f"bh cancel {tid} to stop it",
-               "queued": "bh status shows what it is waiting for"}
+               "failed": f"hansa verify {m.get('parent')} to try again", "running": f"hansa cancel {tid} to stop it",
+               "queued": "hansa status shows what it is waiting for"}
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
     return "\n".join(out)
@@ -261,22 +261,22 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         wt = desk.worktrees_dir / name
         brief = desk.lanes_dir / name / "brief.md"
         return "\n".join([
-            f"lane {name} (set by the principal on the web page; ask with bh ask to change it)",
+            f"lane {name} (set by the principal on the web page; ask with hansa ask to change it)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
             f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
             " (check included); set high, so reaching it means something went wrong",
-            "  check after each task: " + (f"{ln['check']} (bh runs it in the worktree after the worker ends;"
-                                            " bh merge refuses a failed check)" if ln.get("check") else "none"),
-            "  setup before each task: " + (f"{ln['setup']} (bh runs it in the worktree before the worker starts;"
+            "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends;"
+                                            " hansa merge refuses a failed check)" if ln.get("check") else "none"),
+            "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts;"
                                              " what it changes in the repository is set aside; if it fails, the"
-                                             " task fails and bh show has its last lines)" if ln.get("setup")
+                                             " task fails and hansa show has its last lines)" if ln.get("setup")
                                              else "none"),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
-            "  what a worker may use (anything else is refused and shows up in bh show):",
+            "  what a worker may use (anything else is refused and shows up in hansa show):",
             "    Read, Edit and Write inside the lane's worktree only, and read-only commands there"
-            " such as ls, grep, find, sed -n, git status, git diff and git log; bh commits its changes",
-            *["    " + r + (" (ignored: bh handles git)" if is_git_rule(r) else "")
+            " such as ls, grep, find, sed -n, git status, git diff and git log; hansa commits its changes",
+            *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             " you may edit this file)"])
@@ -299,11 +299,11 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
     if what == "states":
         return "\n".join(f"{k:<10} {v}" for k, v in STATES.items())
     if what == "server":
-        return ("`bh serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
+        return ("`hansa serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
                 "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
                 "desk: a second one refuses to start.")
     return "\n".join([
-        "What you can look up: bh explain lane <name> | provider <name> | task <id> | states | server",
+        "What you can look up: hansa explain lane <name> | provider <name> | task <id> | states | server",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",

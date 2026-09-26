@@ -10,8 +10,8 @@ Layout (everything under one directory):
     events.jsonl         append-only record of everything that happened
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
-    .bh/                 runtime state: provider cooling, heartbeat, web token, and runs/<id>/
-                         (what a task's processes write, until bh publishes it without keys)
+    .hansa/                 runtime state: provider cooling, heartbeat, web token, and runs/<id>/
+                         (what a task's processes write, until hansa publishes it without keys)
 """
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
-MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "BH_TASK")
+MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
 
 # Bash commands every lane may run: none. File tools are added per run, scoped to the
 # lane's worktree; Claude Code already lets a worker run read-only commands there (ls,
-# grep, git status, git diff, git log); and bh commits a worker's changes itself. A lane
+# grep, git status, git diff, git log); and hansa commits a worker's changes itself. A lane
 # lists only its own tools, such as its tests.
 DEFAULT_ALLOW: list = []
 
@@ -48,7 +48,7 @@ def default_settings() -> dict:
         "concurrency": 1,
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
-        # Design sessions, which the principal works in directly (`bh design`). Blank provider
+        # Design sessions, which the principal works in directly (`hansa design`). Blank provider
         # or model: the coordinator's.
         "design": {"provider": "", "model": "", "effort": ""},
         "providers": {
@@ -56,7 +56,7 @@ def default_settings() -> dict:
         },
         "lanes": {},
         # The command that starts a browser tool (an MCP server on stdio). The coordinator
-        # gives it to one task at a time with `bh add --browser`. Empty: no browser.
+        # gives it to one task at a time with `hansa add --browser`. Empty: no browser.
         "browser": "",
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
@@ -76,9 +76,13 @@ def now() -> float:
     return round(time.time(), 3)
 
 
+def json_text(data) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
 def write_json(path: Path, data) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")  # writers never share one
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json_text(data), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -160,8 +164,8 @@ def validate(s: dict) -> list:
         if not isinstance(allow, list) or not all(isinstance(r, str) and RULE.match(r) for r in allow):
             p.append(f"{at}: allow must be a list of rules such as Bash(pnpm test:*)")
         elif any(is_git_rule(r) for r in allow):
-            p.append(f"{at}: git is handled by bh (workers can already look at status, diffs and history, "
-                     "and bh commits for them); remove the rules that run git")
+            p.append(f"{at}: git is handled by hansa (workers can already look at status, diffs and history, "
+                     "and hansa commits for them); remove the rules that run git")
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -228,7 +232,7 @@ def key_problem(k: str) -> str:
         return "this looks like a masked key (with * or ...); copy the full key"
     if k.lower().startswith("bearer"):
         return "leave out the word Bearer; paste only the key"
-    if len(k) < 8:  # bh looks for keys in what agents write; one this short would match ordinary text
+    if len(k) < 8:  # hansa looks for keys in what agents write; one this short would match ordinary text
         return "this is too short to be a key; paste the whole key"
     return ""
 
@@ -248,7 +252,7 @@ class Desk:
         self.tasks_dir = self.root / "tasks"
         self.lanes_dir = self.root / "lanes"
         self.worktrees_dir = self.root / "worktrees"
-        self.state_dir = self.root / ".bh"
+        self.state_dir = self.root / ".hansa"
         self.events_path = self.root / "events.jsonl"
         self.asks_path = self.root / "asks.json"
         self.paused_path = self.root / "PAUSED"
@@ -258,13 +262,13 @@ class Desk:
 
     @classmethod
     def find(cls, explicit: str | None = None) -> "Desk":
-        if explicit or os.environ.get("BH_DESK"):
-            return cls(explicit or os.environ["BH_DESK"])
+        if explicit or os.environ.get("HANSA_DESK"):
+            return cls(explicit or os.environ["HANSA_DESK"])
         here = Path.cwd().resolve()
         for d in (here, *here.parents):
             if (d / "settings.json").is_file() and (d / "tasks").is_dir():
                 return cls(d)
-        raise SystemExit("bh: no desk here. Run inside a desk, pass --desk DIR, or set BH_DESK.")
+        raise SystemExit("hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.")
 
     # -- settings ---------------------------------------------------------
     def settings(self) -> dict:
@@ -334,7 +338,7 @@ class Desk:
     PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json")
 
     def scrub(self, key: str, provider: str) -> None:
-        """Take a newly saved key out of what bh has already written down (text that was not a key
+        """Take a newly saved key out of what hansa has already written down (text that was not a key
         when it was written): the task folders and the requests. The event log only ever grows, so
         it keeps it."""
         tasks = self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []
@@ -349,8 +353,8 @@ class Desk:
                     else f.write_text(text, encoding="utf-8")
 
     def raw_dir(self, tid: str) -> Path:
-        """Where a task's processes write before bh removes keys from what they wrote: under
-        .bh/, which no agent may read. bh publishes it into the task's folder when they end."""
+        """Where a task's processes write before hansa removes keys from what they wrote: under
+        .hansa/, which no agent may read. hansa publishes it into the task's folder when they end."""
         d = self.state_dir / "runs" / tid
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -389,8 +393,8 @@ class Desk:
         """The desk lock: one holder at a time across processes and threads; a holder may take it again."""
         with self._mutex:
             if not self._held:
-                if os.environ.get("BH_MERGING"):  # waiting would never end: the merge running the hook holds it
-                    raise SystemExit("bh: this runs in a git hook of a bh merge, which holds the desk until the merge "
+                if os.environ.get("HANSA_MERGING"):  # waiting would never end: the merge running the hook holds it
+                    raise SystemExit("hansa: this runs in a git hook of a hansa merge, which holds the desk until the merge "
                                      "ends; commands that change the desk cannot run here")
                 self.state_dir.mkdir(exist_ok=True)
                 self._lock_file = open(self.state_dir / "lock", "w")
@@ -443,7 +447,7 @@ class Desk:
     def meta(self, tid: str) -> dict:
         m = read_json(self.tasks_dir / tid / "meta.json")
         if not isinstance(m, dict):
-            raise SystemExit(f"bh: no task {tid}")
+            raise SystemExit(f"hansa: no task {tid}")
         return m
 
     def update(self, tid: str, **fields) -> dict:

@@ -1,7 +1,7 @@
 """The principal's web page: status, settings (including keys) and cost.
 
 It only reads and writes the desk's files and never calls a model. It listens on
-127.0.0.1; open it through an SSH tunnel with the address `bh web` prints. The
+127.0.0.1; open it through an SSH tunnel with the address `hansa web` prints. The
 token in that address becomes a cookie; changes also need a header that only
 this page sends, so another site cannot submit them.
 """
@@ -59,7 +59,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
     token = desk.web_token()
 
     class Page(http.server.BaseHTTPRequestHandler):
-        server_version = "bh"
+        server_version = "hansa"
 
         def log_message(self, *args):
             pass
@@ -69,7 +69,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if q.get("t", [""])[0] == token:
                 return True
             c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-            return bool(c.get("bh_t")) and c["bh_t"].value == token
+            return bool(c.get("hansa_t")) and c["hansa_t"].value == token
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", cookie: bool = False):
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
@@ -78,13 +78,13 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             if cookie:
-                self.send_header("Set-Cookie", f"bh_t={token}; HttpOnly; SameSite=Strict; Path=/")
+                self.send_header("Set-Cookie", f"hansa_t={token}; HttpOnly; SameSite=Strict; Path=/")
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self):
             if not self._authed():
-                return self._send(403, b"Open the address that `bh web` prints.", "text/plain; charset=utf-8")
+                return self._send(403, b"Open the address that `hansa web` prints.", "text/plain; charset=utf-8")
             url = urllib.parse.urlparse(self.path)
             q = urllib.parse.parse_qs(url.query)
             if url.path == "/":
@@ -115,7 +115,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             return self._send(404, {"error": "not found"})
 
         def do_POST(self):
-            if not self._authed() or self.headers.get("X-BH") != "1":
+            if not self._authed() or self.headers.get("X-Hansa") != "1":
                 return self._send(403, {"error": "forbidden"})
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -141,5 +141,5 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(400, {"ok": False, "problems": [str(e)]})
 
     httpd = http.server.ThreadingHTTPServer((host, port), Page)
-    threading.Thread(target=httpd.serve_forever, daemon=True, name="bh-web").start()
+    threading.Thread(target=httpd.serve_forever, daemon=True, name="hansa-web").start()
     return httpd
