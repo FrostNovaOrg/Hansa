@@ -7,12 +7,15 @@ from pathlib import Path
 
 from . import build, cost
 from .desk import Desk, is_git_rule, read_json
-from .run import SRT_MISSING, join_command, progress_of, provider_problem, server_up, srt_needed, waiting_reason
+from .run import (SRT_MISSING, join_command, lane_occupied, progress_of, provider_problem, server_up, srt_needed,
+                  waiting_reason)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
     "running": "a worker is on it, or hansa is running the lane's check on its work",
     "done": "the worker finished; waiting for your review (hansa show / hansa merge / hansa retry)",
+    "merging": ("hansa merge is checking it together with what the base gained since it was made: merged onto the "
+                "base as it is now, with the lane's check run there; it merges if that passes"),
     "failed": "the run ended with an error; hansa show says why",
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
@@ -52,6 +55,39 @@ def _mins(since) -> int:
     return int((time.time() - (since or time.time())) // 60)
 
 
+def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
+    """Where a merging task's merge check is, in one line."""
+    mc = m.get("merge_check") or {}
+    lane = m.get("lane")
+    base = desk.settings()["lanes"].get(lane, {}).get("base") or "main"
+    again = f" (again: {base} moved while it was checked)" if mc.get("moves") else ""
+    if mc.get("phase") in ("starting", "running"):
+        return (f"merge check running for {_mins(mc.get('started'))} min{again}: {m['id']} merged onto {base} at "
+                f"{mc.get('onto', '')[:10]}, then " + ("the lane's setup and " if mc.get("setup") else "")
+                + f"check: {mc.get('command', '')}")
+    other = [x["id"] for x in (tasks if tasks is not None else desk.tasks())
+             if x.get("lane") == lane and lane_occupied(x) and x["id"] != m["id"]]
+    return (f"merge check queued{again}: " + (f"waits for lane {lane}, busy with {other[0]}" if other
+                                              else "starts when `hansa serve` next looks (within seconds)"
+                                              if server_up(desk) else "`hansa serve` is not running"))
+
+
+def merge_result_lines(m: dict) -> list:
+    """What the last merge check found, for hansa show."""
+    r = m.get("merge_check_result")
+    if not r:
+        return []
+    if r.get("conflict"):
+        return ["merge check: nothing was merged; " + r["conflict"].removeprefix("hansa: ")]
+    where = f"hansa merged it onto the base at {r.get('onto', '')[:10]}"
+    if r.get("ok"):
+        return [f"merge check: passed in {r.get('seconds', 0)} s ({where}): {r.get('command', '')}"]
+    how = f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})"
+    return ([f"merge check ({where} and ran the lane's check there): {how}"
+             + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
+            + ["  " + x[:200] for x in r.get("tail", [])])
+
+
 def _midnight() -> float:
     t = time.localtime()
     return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
@@ -63,7 +99,8 @@ def status(desk: Desk) -> dict:
     pst = desk.provider_state()
     designing = [m for m in tasks if m["state"] == "running" and m.get("kind") == "design"]
     running = [m for m in tasks if m["state"] == "running" and m.get("kind") != "design"]
-    busy = {m.get("lane") for m in running}
+    merging = [m for m in tasks if m["state"] == "merging"]
+    busy = {m.get("lane") for m in tasks if lane_occupied(m)}
     hb = read_json(desk.state_dir / "heartbeat", 0) or 0
     today = [m for m in tasks if (m.get("finished") or 0) >= _midnight()]
     rows = cost.worker_rows(desk, _midnight())
@@ -77,7 +114,7 @@ def status(desk: Desk) -> dict:
         "srt_missing": SRT_MISSING if srt_needed(s) else "",
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
-                   "task": next((m["id"] for m in running if m.get("lane") == n), None)}
+                   "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None)}
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "problem": provider_problem(desk, s, n), "check": pst.get(n, {}).get("check")}
@@ -93,9 +130,15 @@ def status(desk: Desk) -> dict:
                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
+        "merging": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"),
+                     "phase": (m.get("merge_check") or {}).get("phase", "queued"),
+                     "where": merge_check_text(desk, m, tasks)} for m in merging],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
                     "commits": m.get("commits", 0), "denied": len(m.get("denials", [])), "leaked": m.get("leaked", []),
-                    "check": None if not m.get("check") else m["check"]["ok"], "verify": verification(desk, m)}
+                    "check": None if not m.get("check") else m["check"]["ok"], "verify": verification(desk, m),
+                    "merge_check": (m.get("merge_check_result") or {}).get("ok"),
+                    "merge_note": (m.get("merge_check_result") or {}).get("note")
+                    or f"exit {(m.get('merge_check_result') or {}).get('exit')}"}
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
@@ -133,10 +176,15 @@ def status_text(st: dict) -> str:
     if st["queued"]:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
+    if st.get("merging"):
+        out.append("merging (each merges by itself if its check passes on the base as it is now; hansa wait <id>):")
+        out += [f"  {m['id']} {m['lane']}: {m['title']}\n      {m['where']}" for m in st["merging"]]
     if st["review"]:
         out.append("waiting for review (hansa show <id>):")
         out += [f"  {m['id']} {m['lane']}: {m['title']} [{m['stat'] or 'no changes'}"
                 + {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]]
+                + (f"; merge check FAILED ({m['merge_note']}), nothing merged"
+                   if m.get("merge_check") is False else "")
                 + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
                 + (f"; {m['denied']} command(s) refused" if m["denied"] else "")
                 + (f"; holds the key of {', '.join(m['leaked'])}: cannot be merged" if m.get("leaked") else "")
@@ -214,6 +262,15 @@ def show_text(desk: Desk, tid: str) -> str:
             out += ["  " + x[:200] for x in chk["tail"]]
     elif m.get("phase") == "checking":
         out.append(f"check: running now: {m.get('check_command', '')}")
+    elif m["state"] == "done" and m.get("commits") and not verifying:
+        ln = desk.settings()["lanes"].get(m.get("lane"))
+        if ln is not None and not ln.get("check"):
+            out.append(f"check: none. Lane {m['lane']} has no check, so this task will be merged untested; set one "
+                       f"with: hansa lane set {m['lane']} check \"<the command that runs the tests>\"")
+    if m["state"] == "merging":
+        out.append(merge_check_text(desk, m))
+    elif m["state"] in ("done", "merged"):
+        out += merge_result_lines(m)
     if m["state"] == "running" and m.get("phase") == "starting":
         out.append("so far: hansa is preparing it; the worker starts in a moment")
     elif m["state"] == "running" and m.get("phase") != "checking":
@@ -242,6 +299,12 @@ def show_text(desk: Desk, tid: str) -> str:
         nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
     if v and v["state"] in ("queued", "running") and m["state"] == "done":
         nxt["done"] = f"wait for the verification: hansa wait {v['task']} (hansa merge {tid} is held until it ends)"
+    mr = m.get("merge_check_result") or {}
+    if mr and not mr.get("ok") and m["state"] == "done":
+        nxt["done"] = (f"hansa retry {tid} --update \"make it work with what the base has now: ...\" · "
+                       f"hansa merge {tid} again (it checks the merge again) · hansa merge {tid} --despite-check")
+    nxt["merging"] = (f"hansa wait {tid}: it merges by itself if the check passes, and comes back for review if not "
+                      f"· hansa cancel {tid} stops it")
     if m.get("leaked") and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
                        f"hansa ask (they may want to change that key) · hansa cancel {tid}")
@@ -270,7 +333,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " (check included); set high, so reaching it means something went wrong",
             "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends,"
                                             " in the lane's sandbox;"
-                                            " hansa merge refuses a failed check)" if ln.get("check") else "none"),
+                                            " hansa merge refuses a failed check; when the base has moved since a task"
+                                            " was made, hansa merge runs it on the two merged together first)"
+                                            if ln.get("check") else "none, so its tasks are merged untested"),
             "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts,"
                                              " in the lane's sandbox, so one that downloads needs its registry on"
                                              " the network list;"

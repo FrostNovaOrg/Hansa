@@ -15,7 +15,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    what the worker says.
 4. Meanwhile run `hansa wait` in the background (the Bash tool's background option);
    it returns, and you are told, when a task finishes or fails.
-5. You review and merge, or send it back with what to change.
+5. You review and merge, or send it back with what to change. If the base moved
+   meanwhile, hansa checks the merge before it lands (see Merging).
 
 ## Commands
 | command | what it does |
@@ -24,16 +25,16 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `hansa show <id>` | report, changed files, refused commands, usage, and what to do next |
 | `hansa diff <id> [--stat]` | the task branch against its base |
-| `hansa merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded) |
-| `hansa retry <id> "<what to change>" [--fresh]` | queue a follow-up on top of that attempt (`--fresh`: start from base); the follow-up replaces it |
+| `hansa merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below) |
+| `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `hansa verify <id> ["what to look at"] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged |
-| `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging |
+| `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
-| `hansa lane add L --repo PATH [--base B] [--providers P1,P2]` | a new lane on a git checkout; the base branch defaults to the checkout's current one |
+| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
 | `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
@@ -97,6 +98,30 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   "does not hold" unless you say `--despite-check`.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and
   also have the `reviewer` helper read the change.
+
+## Merging
+- When the lane's base has not moved since the task was made, or the lane has
+  no check, `hansa merge` merges at once. A lane without a check has its tasks
+  merged untested: give it one with `hansa lane set L check "<command>"`.
+- When the base has moved (another task was merged meanwhile, say) and the lane
+  has a check, the two together were never checked, and two changes that each
+  pass can fail together. Then `hansa merge` does not merge at once: the task
+  becomes `merging` and its merge check waits for the lane to be free. hansa
+  merges the task onto the base as it is then, in the lane's worktree, runs the
+  lane's setup and check there, and if the check passes moves the base to
+  exactly that merge commit. Run `hansa wait <id>` in the background: the task
+  ends `merged`, or back in review with `hansa show <id>` saying why nothing was
+  merged (the check's last lines, or a conflict). If the base moves again
+  while it is checked, it is checked once more on the new tip; after a second
+  move it stops and says so. `hansa cancel <id>` stops a merge check and puts
+  the task back in review. `--despite-check` merges at once without it
+  (recorded).
+- A conflict lists each conflicting file and the lines where the two sides
+  meet. Settle it with `hansa retry <id> --update "<how to settle it>"`: the
+  follow-up continues from the task's branch with the current base merged in;
+  where that conflicts, the worker finds the conflict markers in the files it is
+  told about and settles them by editing, and hansa's commit completes the
+  merge. Redo the whole change with `--fresh` only when the old work is no use.
 
 ## Shaping a feature with the principal
 Changes come in three sizes. Something a sentence or two can say ("make this
