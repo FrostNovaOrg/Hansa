@@ -15,6 +15,7 @@ import unittest
 import unittest.mock
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -287,7 +288,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["commits"], m["files"]), ("failed", 0, []), m)
 
     def test_a_worker_started_just_before_the_server_stopped_is_taken_over(self):
-        token = "hansa-launch-test-5b9f"
+        token = f"hansa-launch-test-{uuid.uuid4().hex[:8]}"  # another suite running meanwhile has its own
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
         self.addCleanup(lambda: orphan.poll() is None and orphan.kill())
         tid = self.desk.new_task("Add hello.txt")
@@ -794,6 +795,29 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(ctypes, "CDLL", return_value=object()):  # a libc without sysctl
             self.assertIsNone(run._sysctl(1, 14, 1, p.pid))
 
+    def test_a_process_list_that_grows_between_the_two_sysctl_calls_is_asked_for_again(self):
+        import ctypes
+        import errno
+        from hansa import run
+        listed = [b"ab", b"abcdefgh"]  # between the two calls, more processes started than the slack has room for
+
+        def sysctl(name, n, buf, sizep, new, newlen):
+            size = sizep._obj
+            if buf is None:
+                size.value = len(listed[0])
+                return 0
+            if len(listed) > 1:
+                listed.pop(0)
+            if size.value < len(listed[0]):
+                ctypes.set_errno(errno.ENOMEM)
+                return -1
+            ctypes.memmove(buf, listed[0], len(listed[0]))
+            size.value = len(listed[0])
+            return 0
+        libc = type("libc", (), {"sysctl": staticmethod(sysctl)})()
+        with unittest.mock.patch.object(ctypes, "CDLL", return_value=libc):
+            self.assertEqual(run._sysctl(1, 14, 0, slack=2), b"abcdefgh")
+
     def test_the_lane_setup_runs_before_every_task_without_provider_keys(self):
         trace = self.tmp / "setup-trace.txt"
         s = self.desk.settings()
@@ -995,21 +1019,26 @@ class DeskTest(unittest.TestCase):
 
     def test_wait_returns_when_a_task_ends(self):
         tid = self.desk.new_task("Add hello.txt")
-        d, stop = Dispatcher(self.desk), threading.Event()
+        d, stop, broke = Dispatcher(self.desk), threading.Event(), []
 
-        def ticker():
-            while not stop.is_set():
-                d.tick()
-                time.sleep(0.1)
+        def ticker():  # what stops it is raised here, not left to show as a task that never finished
+            try:
+                while not stop.is_set():
+                    d.tick()
+                    time.sleep(0.1)
+            except BaseException as e:  # noqa: BLE001
+                broke.append(e)
         th = threading.Thread(target=ticker)
         th.start()
         out = io.StringIO()
         try:
             with contextlib.redirect_stdout(out):
-                main(["--desk", str(self.desk.root), "wait", "--timeout", "0.5", "--every", "0.1"])
+                main(["--desk", str(self.desk.root), "wait", "--timeout", "2", "--every", "0.1"])
         finally:
             stop.set()
             th.join()
+        if broke:
+            raise broke[0]
         self.assertIn(f"{tid} done", out.getvalue())
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -1875,6 +1904,20 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", tid])
         self.assertTrue((self.repo / "badge.txt").exists())
         self.assertEqual({r["task"]: r["seat"] for r in cost.worker_rows(self.desk, 0)}, {tid: "design", work: "worker"})
+
+    def test_a_design_session_tmux_did_not_open_fails_without_asking_the_principal(self):
+        fake = self.tmp / "tmux"  # like tmux that cannot make its socket: it says so, exits 0, and opens nothing
+        fake.write_text("#!/bin/sh\necho 'error creating /tmp/tmux-501/hansa-x (Operation not permitted)' >&2\nexit 0\n")
+        fake.chmod(0o755)
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TMUX": str(fake)}), contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "design", "Make the week badge bigger", "--lane", "a"])
+            Dispatcher(self.desk).tick()
+        m = self.desk.meta("t0001")
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("tmux did not open the design session; it printed: error creating /tmp/tmux-501/hansa-x "
+                      "(Operation not permitted)", m["error"])
+        self.assertEqual([a for a in self.desk.asks() if a["by"] == "hansa"], [])
+        self.assertEqual(views.status(self.desk)["design"], [])
 
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
         s = self.desk.settings()

@@ -8,6 +8,7 @@ worker ends. Nothing here needs the worker to know about hansa.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -691,14 +692,17 @@ def _sysctl(*mib: int, slack: int = 0):
     try:
         libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         name = (ctypes.c_int * len(mib))(*mib)
-        size = ctypes.c_size_t(0)
-        if libc.sysctl(name, len(mib), None, ctypes.byref(size), None, 0) != 0:
-            return None
-        size.value += slack  # room for a list that grows between the two calls
-        buf = ctypes.create_string_buffer(size.value)
-        if libc.sysctl(name, len(mib), buf, ctypes.byref(size), None, 0) != 0:
-            return None
-        return buf.raw[:size.value]
+        for _ in range(5):  # on a busy machine the list can outgrow the slack between the two calls: ask again
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(name, len(mib), None, ctypes.byref(size), None, 0) != 0:
+                return None
+            size.value += slack  # room for a list that grows between the two calls
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(name, len(mib), buf, ctypes.byref(size), None, 0) == 0:
+                return buf.raw[:size.value]
+            if ctypes.get_errno() != errno.ENOMEM:
+                return None
+        return None
     except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError):
         return None
 
@@ -1079,12 +1083,15 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         return
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
-    subprocess.run([tmux, "-L", sock, "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(wt),
-                    sys.executable, "-m", "hansa.session", str(desk.root), tid],
-                   env=env, check=True, capture_output=True, timeout=30)
-    r = subprocess.run([tmux, "-L", sock, "display-message", "-p", "-t", name, "#{pane_pid}"],
-                       capture_output=True, text=True, timeout=30)
-    pid = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None  # None: over already
+    # -P prints the pane's process id once the session exists: tmux may exit 0 without making it
+    # (when it cannot create its socket, say), and a session that ends at once still printed it
+    r = subprocess.run([tmux, "-L", sock, "new-session", "-d", "-P", "-F", "#{pane_pid}", "-s", name,
+                        "-x", "200", "-y", "50", "-c", str(wt), sys.executable, "-m", "hansa.session", str(desk.root), tid],
+                       env=env, capture_output=True, text=True, timeout=30)
+    if r.returncode or not r.stdout.strip().isdigit():
+        said = " ".join((r.stdout + r.stderr).split())[:300] or "nothing"
+        raise RuntimeError(f"tmux did not open the design session; it printed: {said}")
+    pid = int(r.stdout.strip())
     meta = desk.update(tid, phase="", pid=pid, pid_start=proc_start(pid))
     ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
                        f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit (if it "
