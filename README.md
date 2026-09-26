@@ -22,8 +22,10 @@ ssh -L 8765:127.0.0.1:8765 HOST /path/to/bin/hansa --desk /path/to/desk web
 ```
 It prints an address with a token; open it in the browser and keep the
 terminal open. On the page: add providers (a Claude Code login, or any
-endpoint that speaks the Anthropic API, with its key), lanes, allowed
-commands, prices. Then start the coordinator with `hansa coordinator`.
+endpoint that speaks the Anthropic API, with its key), models, effort
+defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
+up the lanes, their allowed commands and how many tasks run at once with
+`hansa lane` and `hansa concurrency`.
 
 The first time Claude Code opens in a new desk, it asks whether you trust the
 folder: choose yes. Claude Code ignores the allowed commands of a folder it does
@@ -31,12 +33,16 @@ not trust, and the coordinator could not run `hansa`. The same question comes up
 once for each lane's design worktree, in the first design session.
 
 ## Who changes what
-- The principal, on the page: providers, models, endpoints, keys, effort,
-  each lane's provider order, allowed commands, environment, check and setup
-  commands, prices, concurrency, whether the coordinator audits cost.
-- The coordinator, with `hansa`: tasks, each lane's standing instructions
-  (`lanes/<lane>/brief.md`), pause and resume. Its whole interface is
-  `hansa/card.md`, copied into the desk as `CLAUDE.md`.
+- The principal, on the page: providers, models, endpoints, keys, effort
+  defaults, the models of the coordinator and of design sessions, prices,
+  whether the coordinator audits cost. The page also shows what goes on.
+- The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
+  provider order, allowed commands, environment, check, preview and setup
+  commands, limits) and how many tasks run at once (`hansa concurrency`);
+  each lane's standing instructions (`lanes/<lane>/brief.md`); pause and resume.
+  Setup, check and preview run outside the worker, so each change to them is
+  recorded and the coordinator tells the principal about it. Its whole
+  interface is `hansa/card.md`, copied into the desk as `CLAUDE.md`.
 - Workers change files in their worktree and report. They do not commit:
   hansa commits each task's changes on its own branch, and merges only what the
   coordinator merges.

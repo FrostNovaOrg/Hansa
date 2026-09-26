@@ -1154,6 +1154,85 @@ class DeskTest(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def hansa(self, *args) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), *args])
+        return out.getvalue()
+
+    def events(self, kind):
+        return [e for e in map(json.loads, self.desk.events_path.read_text().splitlines()) if e.get("event") == kind]
+
+    def test_the_coordinator_adds_sets_and_removes_lanes(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "dev", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=other)
+        self.assertIn("lane b added", self.hansa("lane", "add", "b", "--repo", str(other)))
+        b = self.desk.settings()["lanes"]["b"]
+        self.assertEqual((b["repo"], b["base"], b["providers"]), (str(other.resolve()), "dev", ["claude"]))
+        self.assertTrue((self.desk.lanes_dir / "b" / "brief.md").is_file())
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(other)])
+        listed = self.hansa("lane")
+        self.assertIn(f"a  {self.repo.resolve()}  base main  providers claude", listed)
+        self.assertIn("b  ", listed)
+
+        out = self.hansa("lane", "set", "b", "allow", "Bash(pnpm test:*)", "Bash(pnpm lint)")
+        self.assertIn('allow: [] -> ["Bash(pnpm test:*)", "Bash(pnpm lint)"]', out)
+        self.hansa("lane", "set", "b", "env", "NODE_ENV=test", "TZ=UTC")
+        self.hansa("lane", "set", "b", "max_turns", "50")
+        self.hansa("lane", "set", "b", "note", "the shop front")
+        b = self.desk.settings()["lanes"]["b"]
+        self.assertEqual(b["allow"], ["Bash(pnpm test:*)", "Bash(pnpm lint)"])
+        self.assertEqual(b["env"], {"NODE_ENV": "test", "TZ": "UTC"})
+        self.assertEqual((b["max_turns"], b["note"]), (50, "the shop front"))
+        self.hansa("lane", "set", "b", "allow")
+        self.assertEqual(self.desk.settings()["lanes"]["b"]["allow"], [])
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "lane", "set", "b", "max_turns", "many"])
+        self.assertTrue(self.events("settings_saved"))
+        self.assertTrue(all(e["by"] == "coordinator" for e in self.events("settings_saved")))
+
+        tid = self.desk.new_task("Something for b", lane="b")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "b"])
+        self.assertIn(tid, str(e.exception.code))
+        self.assertIn("b", self.desk.settings()["lanes"])
+        self.desk.update(tid, state="cancelled")
+        self.hansa("lane", "remove", "b")
+        self.assertNotIn("b", self.desk.settings()["lanes"])
+
+    def test_a_refused_lane_change_changes_nothing(self):
+        before = self.desk.settings_path.read_text()
+        saved = len(self.events("settings_saved"))
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "providers", "claude", "nosuch"])
+        self.assertNotEqual(e.exception.code, 0)
+        self.assertIn("lane a: unknown provider nosuch", str(e.exception.code))
+        self.assertEqual(self.desk.settings_path.read_text(), before)
+        self.assertEqual(len(self.events("settings_saved")), saved)
+
+    def test_a_setup_change_is_recorded_for_the_principal(self):
+        out = self.hansa("lane", "set", "a", "setup", "pnpm install --frozen-lockfile")
+        self.assertIn('setup: "" -> "pnpm install --frozen-lockfile"', out)
+        self.assertIn("Tell the principal, in the conversation", out)
+        [ev] = self.events("lane_command_changed")
+        self.assertEqual((ev["lane"], ev["field"], ev["old"], ev["new"]),
+                         ("a", "setup", "", "pnpm install --frozen-lockfile"))
+        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "note", "x"))
+        self.assertEqual(len(self.events("lane_command_changed")), 1)
+
+    def test_concurrency(self):
+        self.assertIn("concurrency: 1 ", self.hansa("concurrency"))
+        self.assertIn("concurrency: 1 -> 3", self.hansa("concurrency", "3"))
+        self.assertEqual(self.desk.settings()["concurrency"], 3)
+        self.assertEqual(self.events("settings_saved")[-1]["by"], "coordinator")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "concurrency", "9"])
+        self.assertIn("from 1 to 8", str(e.exception.code))
+        self.assertEqual(self.desk.settings()["concurrency"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

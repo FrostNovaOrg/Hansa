@@ -32,6 +32,11 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
+| `hansa lane` | one line per lane: name, repository, base branch, provider order |
+| `hansa lane add L --repo PATH [--base B] [--providers P1,P2]` | a new lane on a git checkout; the base branch defaults to the checkout's current one |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
+| `hansa lane remove L` | remove a lane; refused while one of its tasks is queued or running |
+| `hansa concurrency [N]` | show, or set, how many tasks run at once |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
 | `hansa ask "<request>"` | put a request on the principal's page |
 | `hansa help` | this card |
@@ -44,7 +49,8 @@ look at). Keep one task to one goal, say what done looks like and what to report
 and size it so one worker can finish it in one go; split anything bigger. Ask
 only for what the goal needs: each extra demand (a close-up screenshot of every
 finding, say) costs turns. If the lane lacks a command the check needs,
-`hansa explain lane L` shows what is allowed; ask the principal to add it.
+`hansa explain lane L` shows what is allowed; add it with
+`hansa lane set L allow ...`, giving the whole new list.
 If a task has to look at web pages, add `--browser`: that task's worker, and no
 other, gets a browser with no saved logins. It reads page text directly; charts,
 images and drawings it can only see in screenshots, which hansa keeps with the task.
@@ -58,11 +64,12 @@ queue it after that merge.
 `hansa show <id>` gives the worker's report plus facts hansa recorded itself: changed
 files, commits, the lane's check result, commands the lane refused, tokens. A
 refused command means the worker could not do something; decide whether the
-task needs it (then ask) or should be rewritten. A failed check shows its last
+task needs it (then add it with `hansa lane set L allow ...`) or should be rewritten. A failed check shows its last
 lines; send the task back with `hansa retry`, or, if the failure is not the
 task's doing, merge with `--despite-check` and say why. If the lane's setup
 command failed, the worker never started: `hansa show` has the setup's last lines;
-ask the principal to fix the command, then `hansa retry` the task.
+fix the command with `hansa lane set L setup "<command>"` (and tell the principal,
+as below), then `hansa retry` the task.
 
 ## Checking before you merge
 The lane's check runs on every task that changed something. What else a task
@@ -117,12 +124,20 @@ that needs code changed, commands run or a browser goes to a worker.
   edit `lanes/<lane>/brief.md` and use your helpers. Anything else (other
   commands, editing code, running tests) is refused without asking: code
   changes and checks are the workers' and the lane check's job.
+- Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
+  (which lanes there are, each one's provider order, allowed commands,
+  environment, check, the command that starts the app for design sessions
+  (preview), the one that installs dependencies before each task (setup), and
+  its limits of turns and minutes) and how many tasks run at once. hansa checks
+  each change as it checks the principal's; a change it refuses changes nothing.
+- A lane's setup, check and preview run outside the worker: hansa runs them
+  itself, and the lane's allowed commands do not hold them back. So each change
+  to them is recorded, and you tell the principal in the conversation what you
+  changed and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
-  defaults, each lane's provider order, allowed commands, environment, check,
-  the command that starts the app for design sessions (preview) and the one that installs
-  dependencies before each task (setup), the model for design sessions, prices, how
-  many tasks run at once. Ask with `hansa ask`; do not edit
-  `settings.json`. Keys live in `secrets/`, which you cannot read, by design.
+  defaults, the models of the coordinator and of design sessions, prices and the
+  cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in
+  `secrets/`, which you cannot read, by design.
 
 ## Facts you can rely on
 - A provider that reports it is out of quota rests for a while and the task

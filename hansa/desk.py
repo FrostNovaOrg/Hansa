@@ -2,7 +2,7 @@
 
 Layout (everything under one directory):
 
-    settings.json        the principal's settings (edited on the web page)
+    settings.json        settings: the principal's on the web page, the lanes the coordinator's (hansa lane)
     secrets/<name>.key   provider keys; written by the page, never shown
     lanes/<lane>/brief.md  standing instructions sent to every worker in a lane
     tasks/<id>/          task.md, meta.json, result.md, and what its processes wrote, keys removed
