@@ -783,14 +783,42 @@ def cmd_coordinator(a):
     hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
         f"{shlex.quote(str(desk.root))} status")}]}]}
+    own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
-        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": permissions(desk),
-                                                                        "hooks": hooks})]
+        rules = permissions(desk)
+        rules["deny"] += own
+        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": rules, "hooks": hooks})]
     else:
-        argv += ["--settings", json.dumps({"hooks": hooks})]
+        argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks})]
     argv += _notified(desk, rest, clear)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + rest, env)
+
+
+# Files Claude Code keeps directly in its folder, denied even before it has written them
+OWN_FILES = (".credentials.json", ".claude.json", "settings.json", "settings.local.json", "CLAUDE.md")
+
+
+def own_folder_rules(env: dict) -> list:
+    """Deny rules for the Claude Code folder the coordinator's session runs from (CLAUDE_CONFIG_DIR, or ~/.claude
+    and ~/.claude.json): the login and the machine owner's files. Not its projects/, where the session keeps its
+    memory. hansa's rules rely on two forms only: an exact path, and DIR/** for everything under DIR at any depth,
+    names starting with a dot too (.hansa/**); so the files directly in the folder are named one by one, those
+    there now and those Claude Code writes there, and no rule reaches into another subfolder."""
+    given = env.get("CLAUDE_CONFIG_DIR")
+    home = env.get("HOME") or os.path.expanduser("~")
+    folder = os.path.abspath(os.path.expanduser(given) if given else os.path.join(home, ".claude"))
+    paths = []
+    for top in dict.fromkeys([folder, os.path.realpath(folder)]):  # a link's target too
+        try:
+            names = [e.name for e in os.scandir(top) if not e.is_dir()]
+        except OSError:
+            names = []
+        paths += [os.path.join(top, n) for n in sorted({*OWN_FILES, *names})] + [os.path.join(top, "sessions", "**")]
+    if not given:
+        dot = os.path.join(os.path.abspath(home), ".claude.json")
+        paths += [dot, os.path.realpath(dot)]
+    return [f"{tool}(//{p.lstrip('/')})" for p in dict.fromkeys(paths) for tool in ("Read", "Edit")]
 
 
 def _clear_daily(rest: list) -> tuple:

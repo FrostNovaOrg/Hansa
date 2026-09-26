@@ -633,7 +633,8 @@ def _deliver(sock: str, text: str, sess: dict, me: dict) -> bool:
 # hansa coordinator --clear-daily 04-09 (or hansa notify on --clear-daily 04-09): once a day, in that window of
 # hours, the follower types /clear into the session's tmux pane, only when the session is idle, nobody is typing
 # and the input box is empty. An Enter that lands on a dialog picks an option, and /clear after someone's
-# half-written line would send it: so anything it cannot read counts as busy.
+# half-written line would send it: so anything it cannot read counts as busy. A session started inside today's
+# window has just been told what to do by its principal: it is not cleared again that day.
 CLEAR_EVERY = 60  # seconds between checks in the window (HANSA_CLEAR_EVERY)
 CLEAR_QUIET = 300  # no post to the session for this long before a clear (HANSA_CLEAR_QUIET)
 KEYS_QUIET = 90  # no key pressed in a terminal on the pane's tmux session for this long
@@ -684,6 +685,26 @@ def _parent(pid: int) -> int:
                                   timeout=10).stdout.strip() or 0)
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
+
+
+def started_at(pid: int):
+    """When the session's process started, in seconds since the epoch; None when it cannot be read.
+    HANSA_CLEAR_STARTED stands in for it (tests)."""
+    given = os.environ.get("HANSA_CLEAR_STARTED")
+    if given:
+        try:
+            return float(given)
+        except ValueError:
+            return None
+    s = proc_start(pid)
+    try:
+        if ":" in s:  # Linux: the boot's id, then clock ticks from boot to the start
+            btime = next(int(x.split()[1]) for x in Path("/proc/stat").read_text().splitlines()
+                         if x.startswith("btime "))
+            return btime + int(s.rsplit(":", 1)[1]) / os.sysconf("SC_CLK_TCK")
+        return float(s) if s else None  # macOS: seconds since the epoch
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
 
 
 def clear_pane(pid: int) -> tuple:
@@ -757,7 +778,22 @@ class DailyClear:
             pane, why = clear_pane(pid)
             self.rec = {"window": window, "pane": pane, "off": why or None}
             _say(f"daily clear {window}: " + (f"off: {why}" if why else f"on, through tmux pane {pane}"))
+            if not why:
+                self.new_today(time.time())
         self.next, self.idle_since, self.inside, self.sid = 0.0, None, None, ""
+
+    def new_today(self, t: float) -> None:
+        """A session this follower has no record of the day for, started inside today's window after it opened:
+        its principal has just told it what to do, so today counts as done. Unknown start: the clear goes on."""
+        inside, day, _ = in_window(self.window, t)
+        began = started_at(self.pid)
+        if not inside or began is None:
+            return
+        opened = time.mktime(time.strptime(f"{day} {parse_window(self.window)[0]:02d}", "%Y-%m-%d %H"))
+        if opened <= began <= t:
+            self.rec.update(day=day, state="new", at=began)
+            _say(f"daily clear {self.window}: the session started at {time.strftime('%H:%M', time.localtime(began))}, "
+                 "inside today's window; next clear tomorrow")
 
     def hold(self, why: str) -> None:
         self.rec.update(held=why, held_at=now())
@@ -889,6 +925,8 @@ def clear_text(c, t: float = 0) -> str:
     held = f"held: {mine['held']}" if mine.get("held") else ""
     if mine.get("state") == "cleared":
         today = f"cleared at {hm}"
+    elif mine.get("state") == "new":
+        today = f"started {hm}, inside today's window; next clear tomorrow"
     elif mine.get("state") == "left":
         today = (("hansa tried to type /clear" if mine.get("step") == "typing" else "/clear typed")
                  + f" at {hm}, but then {mine.get('left') or 'the input box could not be read'}"
