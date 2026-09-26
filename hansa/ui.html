@@ -74,7 +74,7 @@ const T = ZH ? {
   design:"设计会话（你直接在里面跟它改一件功能，结束后交回协调席核对、合并）", join:"接进去的命令（在这台机器上运行）", shots:"截图（最新在前）",
   designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看（空＝没有）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
-  providersList:"用哪几家（按顺序）", briefNote:"每条线的常驻说明由协调席写在 lanes/线名/brief.md。",
+  providersList:"用哪几家（按顺序）", briefNote:"每条线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条线，在对话里跟协调席说。",
   concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
   laneCommands:"最近改过的线上命令和网络（这些命令由 hansa 自己跑，不在执行层的沙箱里；最新在前，最多 20 条）", field:"哪一项", change:"原来 -> 现在", at:"时间",
@@ -84,6 +84,7 @@ const T = ZH ? {
   today:"今天", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
+  coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
@@ -109,7 +110,7 @@ const T = ZH ? {
   design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
   designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it (blank = none)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
-  providersList:"Providers, in order", briefNote:"The coordinator writes each lane's standing instructions in lanes/<lane>/brief.md.",
+  providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
   laneCommands:"Recent changes to lane commands and networks (hansa runs these commands itself, outside the workers' sandbox; newest first, at most 20)", field:"Field", change:"old -> new", at:"When",
@@ -347,6 +348,7 @@ async function loadCost() {
         h("strong", {}, `${T.total}: ${fmt(r.total.tokens)} ${T.tokens} · $${r.total.usd.toFixed(2)} ${T.listValue}`),
         h("button", {onclick: exportCsv}, T.export)),
       h("p", {class:"muted"}, T.costNote),
+      r.coordinator_uncounted ? h("p", {class:"warn"}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted) : null,
       r.unpriced_models.length ? h("p", {class:"warn"}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice) : null),
     section(T.cost, ["seat", "day", "model", "lane", "provider", "task"].map(block)));
   const sel = $("#tab-cost select");

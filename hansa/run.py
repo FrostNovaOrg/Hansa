@@ -22,6 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import account
 from .desk import HOME_SECRETS, Desk, claude_home, is_git_rule, now, read_json, write_json
 
 # Only the wording providers use for "out of quota", so a task that is itself
@@ -33,6 +34,11 @@ AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[1
 AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
+MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+              "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
+# Every variable provider_env sets for the provider itself; the rest of its environment is the caller's
+PROVIDER_VARS = ("CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", *MODEL_VARS)
 SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)\)$", re.M)
 # The lane's setup command runs first in the worker's own process, then the worker replaces it:
 # hansa serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
@@ -191,15 +197,25 @@ def tmux_socket(desk: Desk) -> str:
     return "hansa-" + hashlib.sha1(str(desk.root).encode()).hexdigest()[:6]
 
 
+def tmux_socket_path(sock: str) -> str:
+    """The full path of the socket tmux makes for `-L sock`: in $TMUX_TMPDIR or /tmp, under tmux-<uid>."""
+    return os.path.join(os.environ.get("TMUX_TMPDIR") or "/tmp", f"tmux-{os.getuid()}", sock)
+
+
 def join_command(m: dict) -> str:
+    """By the socket's full path, so root, as a principal on a server usually is, can join a session
+    the desk's account runs: tmux admits its owner and root."""
     sock, name = m.get("tmux") or ["", ""]
-    return f"tmux -u -L {sock} attach -t {name}"
+    return f"tmux -u -S {tmux_socket_path(sock)} attach -t {name}"
 
 
 def git(*args, cwd, env=None) -> str:
     e = {**os.environ, **GIT_ID, **(env or {})}
     r = subprocess.run(["git", *args], cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
     if r.returncode:
+        refused = account.git_refusal(r.stderr or "", cwd)
+        if refused:
+            raise RuntimeError(refused)
         raise RuntimeError(f"git {' '.join(args[:2])} failed: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout.strip()
 
@@ -233,7 +249,12 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             # start Claude Code exactly as the worker does: on macOS a login made with
             # CLAUDE_CONFIG_DIR set, even to ~/.claude, may land in another keychain entry
             login = f"CLAUDE_CONFIG_DIR={shlex.quote(p['config_dir'])} claude" if p.get("config_dir") else "claude"
-            return f"{st['reason']}; log in with `{login}`, then `hansa check {name}` brings it back"
+            how = f"`{login}`"
+            if account.LINUX and account.uid() != 0:  # a principal on a server usually works as root
+                who = account.name_of(account.uid())
+                as_root = f"env {login}" if p.get("config_dir") else login
+                how += f" as {who} (from root: `runuser -u {who} -- {as_root}`)"
+            return f"{st['reason']}; log in with {how}, then `hansa check {name}` brings it back"
         return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
     return ""
 
@@ -297,8 +318,7 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
             "ANTHROPIC_AUTH_TOKEN": desk.read_key(name),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         })
-        for v in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"):
+        for v in MODEL_VARS:
             env[v] = p["model"]
     return env
 

@@ -5,12 +5,13 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
-from . import build, cost, views
-from .desk import Desk, default_lane, default_settings, json_text, now, read_json, write_json
+from . import account, build, cost, views
+from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import VERIFY_TASK, Dispatcher, check_provider, git, keys_in_change, provider_env, stop
 
 CARD = Path(__file__).with_name("card.md")
@@ -31,6 +32,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     s = default_settings()
     if repo:
         repo = str(Path(repo).resolve())
+        theirs = account.foreign_repo(repo)
+        if theirs:
+            raise SystemExit(f"hansa: {theirs}; no desk was made")
         base = base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
         s["lanes"][lane] = default_lane(repo, base)
         (desk.lanes_dir / lane).mkdir(exist_ok=True)
@@ -46,22 +50,58 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
 def permissions(desk: Desk) -> dict:
     """The coordinator's Claude Code permission rules in the desk."""
     r = str(desk.root).lstrip("/")
-    guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl"]
-    return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/lanes/**)"],  # an Edit rule covers every file-editing tool
+    # lane briefs change through `hansa lane brief`: on a server the coordinator's own tools run as root
+    guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl",
+               f"//{r}/lanes/**"]
+    return {"allow": ["Bash(hansa:*)"],  # an Edit rule covers every file-editing tool
             "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]}
 
 
 def _text(args) -> str:
+    if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
+        return sys.stdin.read()
     if getattr(args, "file", None):
         return Path(args.file).read_text(encoding="utf-8")
     return " ".join(args.text)
 
 
 def cmd_init(a):
+    if a.user:
+        _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
     print("next: start `hansa serve` there, open the page with `hansa web` and add providers and keys; "
           "the coordinator adds lanes with `hansa lane add` and queues work with `hansa add`.")
+
+
+def _init_for(a) -> None:
+    """hansa init DIR --user ACCOUNT: make DIR, give it to the account, and run the rest of init as it.
+    Returns only when hansa already runs as that account."""
+    if not account.LINUX:
+        raise SystemExit("hansa: --user is for a Linux server, where root gives the desk to an account of its own")
+    try:
+        pw = account.pwd.getpwnam(a.user)
+    except KeyError:
+        raise SystemExit(f"hansa: there is no account {a.user}; make it first: useradd --system --create-home {a.user}")
+    if account.uid() == pw.pw_uid:
+        return
+    if account.uid() != 0:
+        raise SystemExit(f"hansa: only root can give a desk to the account {a.user}")
+    # not resolved and nothing followed: the account may have put a link there, and root would give its target away
+    root = Path(os.path.abspath(a.dir))
+    refuse = f"hansa: {root} must be a new or an empty folder for the desk; nothing was changed"
+    if root.is_symlink():
+        raise SystemExit(refuse)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(root)
+    except FileExistsError:
+        if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
+            raise SystemExit(refuse)
+    os.chown(root, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
+    argv = ["init", str(root), "--lane", a.lane] + (["--repo", a.repo] if a.repo else []) \
+        + (["--base", a.base] if a.base else [])
+    account.switch(a.user, argv, root)
 
 
 def cmd_add(a):
@@ -414,38 +454,80 @@ def cmd_web(a):
 def cmd_coordinator(a):
     """Start the coordinator's interactive session in the desk, on the coordinator provider."""
     desk = Desk.find(a.desk)
-    s = desk.settings()
-    co = s["coordinator"]
-    p = s["providers"][co["provider"]]
-    from .run import claude_bin
+    theirs = account.desk_account(desk.root)
+    if theirs:
+        # root on the account's desk: the account may have put links where hansa expects files, so root
+        # neither reads nor writes there. The account's hansa does the desk's part and says how to start
+        r = account.run(theirs, ["coordinator-desk", "--by", str(account.uid())], desk.root,
+                        capture_output=True, text=True)
+        if r.returncode:
+            sys.stderr.write(r.stderr)
+            raise SystemExit(r.returncode)
+        plan = json.loads(r.stdout)
+    else:
+        plan = coordinator_desk(desk, account.uid())
+    from .run import PROVIDER_VARS, claude_bin
+    # the plan may be the account's to write, and it goes on root's command line and into root's environment
+    model, effort = plan.get("model"), plan.get("effort") or ""
+    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._:/\[\]][A-Za-z0-9._:/\[\]-]*", model):
+        raise SystemExit(f"hansa: the coordinator's model {model!r} is not a model name "
+                         "(letters, digits and ._:-/[], not starting with -)")
+    if effort not in EFFORTS:
+        raise SystemExit(f"hansa: the coordinator's effort {effort!r} is not one of {', '.join(EFFORTS[1:])}")
     env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
-    env.update({k: v for k, v in provider_env(desk, co["provider"], p).items() if k not in ("PATH", "TERM")})
+    # only the variables provider_env sets for the provider, by name: others (HOME, PATH, and CLAUDE_*
+    # ones that change how Claude Code runs commands) are not the desk owner's to set for root
+    given = plan.get("env") if isinstance(plan.get("env"), dict) else {}
+    env.update({k: given[k] for k in PROVIDER_VARS if isinstance(given.get(k), str)})
+    if theirs:  # the provider's Claude Code folder is the account's: root's own, as root would start Claude Code
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        if os.environ.get("CLAUDE_CONFIG_DIR"):
+            env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
     env["PATH"] = str(Path(__file__).resolve().parent.parent / "bin") + os.pathsep + os.environ.get("PATH", "")
     env["HANSA_ROLE"] = "coordinator"
     env["HANSA_DESK"] = str(desk.root)
     # the lanes' checkouts are readable for planning and review; workers do the editing
-    repos = sorted({ln["repo"] for ln in s["lanes"].values()})
+    repos = [r for r in plan["repos"] if os.path.isabs(r)]
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
     argv = [claude_bin()] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit, *no_builtin]
-    argv += ["--model", co.get("model") or p["model"]]
-    if co.get("effort"):
-        argv += ["--effort", co["effort"]]
+    argv += ["--model", model]
+    if effort:
+        argv += ["--effort", effort]
+    if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
+        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": permissions(desk)})]
+    os.chdir(desk.root)
+    os.execvpe(argv[0], argv + a.rest, env)
+
+
+def coordinator_desk(desk: Desk, by: int) -> dict:
+    """The coordinator's part in the desk, done as the desk's owner: the card, the helpers and the
+    permissions brought up to date, old helpers retired, and who runs the coordinator recorded. Returns
+    what starting it needs from the desk: the lanes' checkouts, model, effort and the provider's environment."""
+    s = desk.settings()
+    co = s["coordinator"]
+    p = s["providers"][co["provider"]]
     _bring(desk, CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md", "card_refreshed")
     for f in sorted(HELPERS.glob("*.md")):
         _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
     mine = desk.root / ".claude" / "settings.json"  # hansa keeps its rules current there; the rest is left as it is
-    s = read_json(mine, {})
-    s = {**s, "permissions": permissions(desk)} if isinstance(s, dict) else {"permissions": permissions(desk)}
-    _bring(desk, json_text(s), mine, "permissions_refreshed", keep_as="coordinator-settings.json")
+    cs = read_json(mine, {})
+    cs = {**cs, "permissions": permissions(desk)} if isinstance(cs, dict) else {"permissions": permissions(desk)}
+    _bring(desk, json_text(cs), mine, "permissions_refreshed", keep_as="coordinator-settings.json")
     for name in RETIRED_HELPERS:
         old = desk.root / ".claude" / "agents" / name
         if old.is_file():
             desk.state_dir.mkdir(exist_ok=True)
             old.rename(desk.state_dir / f"{name}.{int(time.time())}")
             desk.event("helper_retired", file=name)
-    os.chdir(desk.root)
-    os.execvpe(argv[0], argv + a.rest, env)
+    desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
+    write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": now()})
+    return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
+            "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p)}
+
+
+def cmd_coordinator_desk(a):
+    print(json.dumps(coordinator_desk(Desk.find(a.desk), a.by)))
 
 
 def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> None:
@@ -515,6 +597,9 @@ def cmd_lane(a):
             if a.name in s["lanes"]:
                 raise SystemExit(f"hansa: there is already a lane {a.name}; change it with hansa lane set {a.name} ...")
             repo = str(Path(a.repo).resolve())
+            theirs = account.foreign_repo(repo)
+            if theirs:
+                raise SystemExit(f"hansa: {theirs}; nothing was changed")
             try:
                 base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
             except (RuntimeError, OSError) as e:
@@ -532,6 +617,19 @@ def cmd_lane(a):
             return
         if a.name not in s["lanes"]:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
+        if a.action == "brief":  # through hansa only: on a server the coordinator's own tools run as root
+            brief = desk.lanes_dir / a.name / "brief.md"
+            if not a.text and not a.file:
+                old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
+                print(old if old.strip() else f"lane {a.name} has no standing instructions")
+                return
+            text = _text(a)
+            brief.parent.mkdir(parents=True, exist_ok=True)
+            brief.write_text(text, encoding="utf-8")
+            desk.event("lane_brief_changed", lane=a.name, new=text)
+            print(f"lane {a.name}: standing instructions replaced ({len(text)} characters); "
+                  f"every worker in the lane gets them from its next task on")
+            return
         if a.action == "remove":
             tasks = [m for m in desk.tasks() if m.get("lane") == a.name]
             busy = [m["id"] for m in tasks if m["state"] in ("queued", "running")]
@@ -602,6 +700,22 @@ class _Version(argparse.Action):
         parser.exit()
 
 
+def _as_desk_account(a, argv: list) -> None:
+    """As root on a Linux desk that belongs to another account, run this command again as that account
+    (hansa/account.py). Returns when hansa already runs as whoever it should."""
+    try:
+        desk = Desk.find(a.desk)
+    except SystemExit:  # no desk: the command says so itself
+        return
+    theirs = account.desk_account(desk.root) if desk.root.is_dir() else ""
+    if not theirs:
+        return
+    if getattr(a, "file", None):  # root reads it (the account may not be able to) and hands the text over
+        text = _text(a)
+        raise SystemExit(account.run(theirs, argv, desk.root, input=text, text=True).returncode)
+    account.switch(theirs, argv, desk.root)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="hansa", description="A file-based desk for a team of Claude Code agents. "
                                  "`hansa help` prints the agent card.")
@@ -619,9 +733,10 @@ def main(argv=None):
     p.add_argument("--repo", help="git checkout the first lane works on")
     p.add_argument("--lane", default="a")
     p.add_argument("--base", help="base branch (default: the checkout's current branch)")
+    p.add_argument("--user", help="as root on a Linux server: the account the desk belongs to and hansa runs as")
     p = add("add", cmd_add, "queue a task")
     p.add_argument("text", nargs="*")
-    p.add_argument("--file")
+    p.add_argument("--file", help="a file with the text; - reads it from standard input")
     p.add_argument("--lane")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--model")
@@ -630,7 +745,7 @@ def main(argv=None):
     p.add_argument("--browser", action="store_true", help="give this one task a browser (read pages, take screenshots)")
     p = add("design", cmd_design, "open a session the principal joins to shape one feature on the real code")
     p.add_argument("text", nargs="*")
-    p.add_argument("--file")
+    p.add_argument("--file", help="a file with the text; - reads it from standard input")
     p.add_argument("--lane")
     p.add_argument("--title")
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
@@ -669,7 +784,7 @@ def main(argv=None):
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server"])
     p.add_argument("name", nargs="?")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
-    lane = p.add_subparsers(dest="action", metavar="add | set | remove")
+    lane = p.add_subparsers(dest="action", metavar="add | set | brief | remove")
     q = lane.add_parser("add", help="a new lane on a git checkout")
     q.add_argument("name")
     q.add_argument("--repo", required=True, help="the git checkout the lane works on")
@@ -682,6 +797,10 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("field", choices=LANE_FIELDS)
     q.add_argument("values", nargs="*", metavar="value")
+    q = lane.add_parser("brief", help="print a lane's standing instructions, or replace them with TEXT or --file")
+    q.add_argument("name")
+    q.add_argument("text", nargs="*")
+    q.add_argument("--file", help="a file with the new instructions; - reads them from standard input")
     q = lane.add_parser("remove", help="remove a lane with no task queued, running or waiting for review")
     q.add_argument("name")
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
@@ -703,6 +822,9 @@ def main(argv=None):
     add("coordinator", cmd_coordinator, "start the coordinator session in this desk; "
         "anything after the word coordinator is passed to claude as is")
     add("help", cmd_help, "print the agent card")
+    p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
+    p.set_defaults(fn=cmd_coordinator_desk)
+    p.add_argument("--by", type=int, required=True)
 
     argv, rest = _split_claude_args(sys.argv[1:] if argv is None else list(argv))
     a = ap.parse_args(argv)
@@ -712,5 +834,7 @@ def main(argv=None):
         return 0
     if a.cmd == "add" and not a.text and not a.file:
         ap.error("add needs the task text or --file")
+    if a.cmd not in ("coordinator", "init"):
+        _as_desk_account(a, argv)
     a.fn(a)
     return 0

@@ -289,7 +289,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
-            " you may edit this file)"])
+            f" read and change them with hansa lane brief {name})"])
     if what == "provider":
         p = s["providers"].get(name)
         if not p:
@@ -318,7 +318,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
-        "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs and "
+        "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
         "pause/resume."])
 
 
@@ -332,6 +332,8 @@ def cost_text(rep: dict, by: str = "day") -> str:
         out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")
     if rep["unpriced_models"]:
         out.append("no price yet for: " + ", ".join(rep["unpriced_models"]) + " (the principal sets prices on the page)")
+    if rep.get("coordinator_uncounted"):
+        out.append(rep["coordinator_uncounted"])
     out.append(rep["note"])
     return "\n".join(out)
 

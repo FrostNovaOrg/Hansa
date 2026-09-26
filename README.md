@@ -36,14 +36,38 @@ folder: choose yes. Claude Code ignores the allowed commands of a folder it does
 not trust, and the coordinator could not run `hansa`. The same question comes up
 once for each lane's design worktree, in the first design session.
 
+## On a Linux server
+There the coordinator runs as root, so it can install software and set up the
+machine, but workers do not: Claude Code's sandbox cannot start as root. The
+desk, the lanes' repositories and the provider logins belong to an ordinary
+account instead, and everything hansa starts runs as that account.
+```sh
+useradd --system --create-home hansa                   # the account
+bin/hansa init /path/to/desk --user hansa              # a desk that is the account's
+chown -R hansa /path/to/checkout                       # and each lane's repository
+```
+Install Claude Code where the account can run it (not only under root's home),
+and log each subscription provider in as the account: `runuser -u hansa -- claude`
+(with `env CLAUDE_CONFIG_DIR=...` before `claude` when the provider has a
+config_dir). Then run `hansa serve` in the desk; started from root, it and every
+other `hansa` command switch to the account by themselves (that needs `runuser`,
+from util-linux). Run `hansa coordinator` as root: it stays root, uses root's own
+Claude Code login and folder (the first time, log in inside the session), and
+writes nothing in the desk as root: hansa does the coordinator's part there as
+the account. Its own usage then is not in `hansa cost`,
+because Claude Code keeps root's records where the account cannot read them. A
+design session runs under the account's tmux; root joins it with the command the
+page gives.
+
 ## Who changes what
 - The principal, on the page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices,
   whether the coordinator audits cost. The page also shows what goes on.
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
-  provider order, allowed commands, environment, check, preview and setup
-  commands, limits) and how many tasks run at once (`hansa concurrency`);
-  each lane's standing instructions (`lanes/<lane>/brief.md`); pause and resume.
+  provider order, allowed commands, network and write lists, environment,
+  check, preview and setup commands, limits) and how many tasks run at once (`hansa concurrency`);
+  each lane's standing instructions (`hansa lane brief`, kept in
+  `lanes/<lane>/brief.md`); pause and resume.
   Setup, check and preview run outside the worker, so each change to them is
   recorded and the coordinator tells the principal about it. It is not a
   worker: it runs on this machine outside any sandbox, and besides `hansa` it
@@ -60,7 +84,8 @@ once for each lane's design worktree, in the first design session.
   `CLAUDE.md`.
 - Workers (task and verification workers) change files in their worktree and
   report, inside Claude Code's sandbox, which the operating system enforces: any
-  command, but files changed only in the worktree (and its temporary folder), no
+  command, but files changed only in the worktree (and its temporary folder and
+  the lane's write list, `hansa lane set L write ...`), no
   reading of the desk's keys or of common credential files, no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
