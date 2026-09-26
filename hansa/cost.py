@@ -21,7 +21,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from .desk import Desk
+from . import account
+from .desk import Desk, read_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
 
@@ -164,6 +165,18 @@ def _ts(text) -> float:
         return 0.0
 
 
+def coordinator_uncounted(desk: Desk) -> str:
+    """Why the coordinator's own usage is not in the report, when it runs as another user than hansa
+    (root, on a server, while the desk is an account's): Claude Code keeps that user's session records
+    private to it. '' when it is counted."""
+    who = read_json(desk.state_dir / "coordinator.json", {}) or {}
+    if not isinstance(who, dict) or who.get("uid") is None or who["uid"] == account.uid():
+        return ""
+    return (f"The coordinator's own usage and its helpers' are not counted: the coordinator runs as "
+            f"{who.get('user') or 'another user'}, and Claude Code keeps its session records private to that user, "
+            f"where hansa, running as {account.name_of(account.uid())}, cannot read them.")
+
+
 def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
               else f"last {days} day(s)")
@@ -187,4 +200,6 @@ def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     return {"days": days, "window": window, "rows": rows, "by": by,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
+            "coordinator_uncounted": coordinator_uncounted(desk),
+            "coordinator_user": (read_json(desk.state_dir / "coordinator.json", {}) or {}).get("user", ""),
             "note": "Dollars use the principal's price table (a Claude model without an entry uses Claude Code's list price). Subscriptions are paid by the month: this is what the tokens are worth, not a bill."}

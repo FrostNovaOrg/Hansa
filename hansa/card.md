@@ -35,6 +35,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2]` | a new lane on a git checkout; the base branch defaults to the checkout's current one |
 | `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
+| `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
@@ -136,8 +137,9 @@ what you need back. Claude Code's general-purpose helpers are switched off
 here; work that needs code changed or a browser goes to a worker.
 
 ## What you change, and what only the principal changes
-- Yours: tasks and their options; each lane's standing instructions in
-  `lanes/<lane>/brief.md` (sent to every worker in that lane); pause/resume.
+- Yours: tasks and their options; each lane's standing instructions (sent to
+  every worker in that lane), which you read and change only with
+  `hansa lane brief L`, never by editing `lanes/<lane>/brief.md`; pause/resume.
   You are not a worker: you run on this machine, outside any sandbox, so you
   can help a principal who knows little about computers. Besides `hansa`, run
   other commands when the principal's work needs them, for example to install
@@ -150,6 +152,12 @@ here; work that needs code changed or a browser goes to a worker.
   code in the lanes' repositories. Code changes go through workers, so each
   one gets a branch, the lane's check and a merge. You need not run a lane's
   tests yourself; its check does that.
+- On a server the desk may belong to an ordinary account while you run as root.
+  Then `hansa` commands run as that account by themselves; you stay root, so
+  change the desk only through `hansa`, never with your own tools. Git
+  refuses to work for root in the account's repositories: read them through
+  `hansa diff` and `hansa show`, or with `runuser -u ACCOUNT -- git -C REPO ...`,
+  never by telling git to trust them.
 - Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
   (which lanes there are, each one's provider order, allowed commands,
   environment, check, the command that starts the app for design sessions

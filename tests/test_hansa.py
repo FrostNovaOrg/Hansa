@@ -18,10 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hansa import cost, views  # noqa: E402
+from hansa import account, cost, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, public_settings, validate  # noqa: E402
-from hansa.run import Dispatcher, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
+from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
 from hansa.web import start_web  # noqa: E402
 
 FAKE = r'''#!/usr/bin/env python3
@@ -789,6 +789,266 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"Read(//{root}/.hansa/**)", s["permissions"]["deny"])
         self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
         self.assertEqual(len(list(self.desk.state_dir.glob("coordinator-settings.json.*"))), 1)  # the old one, kept once
+
+    # -- a Linux server: the desk belongs to an account, the coordinator is root ---------------------
+    # Tests cannot run as root, so the lookups that decide it are replaced: hansa "runs as root" on
+    # "Linux", and the desk's owner is the test's own user, which stands for the account.
+
+    def as_root(self, desk_owner=None, linux=True):
+        me = os.getuid()
+        for p in (unittest.mock.patch.object(account, "LINUX", linux),
+                  unittest.mock.patch.object(account, "uid", lambda: 0),
+                  unittest.mock.patch.object(account, "owner", lambda path: me if desk_owner is None else desk_owner)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def stand_in_runuser(self):
+        """A runuser on PATH that records its arguments and runs the command (as the same user, here).
+        hansa replaces itself with it; here the test runs it and ends the command instead."""
+        log, bin_ = self.tmp / "runuser.jsonl", self.tmp / "sbin"
+        bin_.mkdir(exist_ok=True)
+        (bin_ / "runuser").write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
+                                      f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                                      "os.execvp(sys.argv[4], sys.argv[4:])\n")
+        (bin_ / "runuser").chmod(0o755)
+        path = unittest.mock.patch.dict(os.environ, {"PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}"})
+        path.start()
+        self.addCleanup(path.stop)
+        ran = []
+
+        def execve(prog, args, env):
+            ran.append(subprocess.run(args, env=env, capture_output=True, text=True))
+            raise SystemExit(ran[-1].returncode)
+        p = unittest.mock.patch.object(account.os, "execve", side_effect=execve)
+        p.start()
+        self.addCleanup(p.stop)
+        return log, ran
+
+    def test_as_root_on_an_accounts_linux_desk_commands_run_as_the_account(self):
+        log, ran = self.stand_in_runuser()
+        brief = self.tmp / "brief.md"
+        brief.write_text("-Make the badge bigger\n")
+        here = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, here)
+        self.as_root()
+        real_run, fed = subprocess.run, []
+
+        def gone_first(cmd, **kw):  # the account cannot read the file: only root's copy of the text counts
+            brief.unlink()
+            fed.append(kw.get("input"))
+            return real_run(cmd, **kw)
+        with unittest.mock.patch.object(account.subprocess, "run", side_effect=gone_first), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as done:
+                main(["--desk", "desk", "add", "--file", str(brief), "--lane", "a"])
+        self.assertEqual(done.exception.code, 0)  # the account's hansa's exit code
+        me = account.name_of(os.getuid())
+        args = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(args[:6], ["-u", me, "--", sys.executable, "-m", "hansa"])
+        self.assertIn(f"--desk={self.desk.root}", args)  # a full path: the account starts elsewhere
+        self.assertIn("--file=-", args)  # the text comes on standard input, not where every user sees it
+        self.assertFalse([x for x in args if "Make the badge" in x or "file-text" in x or x == str(brief)])
+        self.assertEqual(fed, ["-Make the badge bigger\n"])
+        self.assertEqual((self.desk.tasks_dir / "t0001" / "task.md").read_text(), "-Make the badge bigger\n")
+        self.assertEqual(self.desk.meta("t0001")["lane"], "a")
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", "repo"])
+        self.assertIn(f"--repo={self.repo.resolve()}", json.loads(log.read_text().splitlines()[-1]))
+        self.assertIn("lane b added", ran[-1].stdout)
+        n = len(log.read_text().splitlines())
+        for owner, linux in ((0, True), (os.getuid(), False)):  # root's own desk; any desk off Linux
+            with unittest.mock.patch.object(account, "owner", lambda path: owner), \
+                    unittest.mock.patch.object(account, "LINUX", linux), contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "add", "Another one"])
+        with unittest.mock.patch.object(account, "uid", os.getuid), contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "add", "A third one"])  # hansa not run as root
+        self.assertEqual(len(log.read_text().splitlines()), n)  # none of these switched
+        self.assertEqual([m["id"] for m in self.desk.tasks()], ["t0001", "t0002", "t0003", "t0004"])
+
+    def test_without_runuser_hansa_says_what_it_needs(self):
+        self.as_root()
+        with unittest.mock.patch.object(account, "runuser_bin", lambda: ""):
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "status"])
+        self.assertIn("needs runuser", str(e.exception.code))
+
+    def coordinator_as_root(self, env):
+        """Start the coordinator in this process as "root", catching the claude it would become."""
+        started = {}
+        with unittest.mock.patch.object(account.os, "execve", side_effect=AssertionError("it switched")), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv, env=e)), \
+                unittest.mock.patch("os.chown", side_effect=AssertionError("root changed an owner")), \
+                unittest.mock.patch.dict(os.environ, env), unittest.mock.patch("os.chdir"):
+            main(["--desk", str(self.desk.root), "coordinator"])
+        return started
+
+    def test_the_coordinator_stays_root_leaves_the_desk_to_the_account_and_uses_roots_claude_folder(self):
+        self.as_root()
+        log, _ = self.stand_in_runuser()
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "account-claude")
+        self.assertEqual(self.desk.save_settings(s), [])
+        (self.desk.root / "CLAUDE.md").write_text("an old card\n")
+        root_wrote = AssertionError("root did the desk's part itself")
+        with unittest.mock.patch("hansa.cli.coordinator_desk", side_effect=root_wrote), \
+                unittest.mock.patch("hansa.cli._bring", side_effect=root_wrote):
+            started = self.coordinator_as_root({"CLAUDE_CONFIG_DIR": str(self.tmp / "root-claude")})
+        self.assertEqual(started["env"]["CLAUDE_CONFIG_DIR"], str(self.tmp / "root-claude"))  # root's, not the account's
+        args = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(args[:2] + args[-3:], ["-u", account.name_of(os.getuid()), "coordinator-desk", "--by", "0"])
+        # the account's hansa did the desk's part: the card, the helpers, the permissions, the record, the events
+        self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (Path(__file__).resolve().parent.parent / "hansa" /
+                                                                       "card.md").read_text())
+        self.assertTrue((self.desk.root / ".claude" / "agents" / "operator.md").is_file())
+        self.assertIn("permissions", json.loads((self.desk.root / ".claude" / "settings.json").read_text()))
+        self.assertEqual(json.loads((self.desk.state_dir / "coordinator.json").read_text())["uid"], 0)
+        self.assertIn("card_refreshed", self.desk.events_path.read_text())
+        self.assertIn("--add-dir", started["argv"])
+        self.assertIn(str(self.repo.resolve()), started["argv"])
+        # not the desk's project settings, whose hooks the account could write: root's, and hansa's rules
+        i = started["argv"].index("--setting-sources")
+        self.assertEqual(started["argv"][i + 1], "user")
+        rules = json.loads(started["argv"][started["argv"].index("--settings") + 1])["permissions"]
+        self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", rules["deny"])
+        without = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+        with unittest.mock.patch.dict(os.environ, without, clear=True):
+            started = self.coordinator_as_root({})
+        self.assertNotIn("CLAUDE_CONFIG_DIR", started["env"])  # root's ~/.claude, as root starts Claude Code
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x.invalid"}
+        s["coordinator"]["provider"] = "mimo"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        started = self.coordinator_as_root({"CLAUDE_CONFIG_DIR": str(self.tmp / "root-claude")})
+        self.assertEqual(started["env"]["CLAUDE_CONFIG_DIR"], str(self.tmp / "root-claude"))
+        self.assertEqual((started["env"]["ANTHROPIC_BASE_URL"], started["env"]["ANTHROPIC_AUTH_TOKEN"]),
+                         ("https://x.invalid", "sk-mimo-12345678"))  # the provider's endpoint and key, as before
+
+    def test_root_takes_only_the_providers_variables_and_a_sound_model_and_effort_from_the_accounts_plan(self):
+        self.as_root()
+
+        def plan_says(**over):  # what the account's hansa prints, which the account controls
+            plan = {"repos": [str(self.repo.resolve()), "relative"], "model": "opus", "effort": "high",
+                    "env": {"ANTHROPIC_BASE_URL": "https://x.invalid", "CLAUDE_CODE_MAX_RETRIES": "3",
+                            "CLAUDE_CONFIG_DIR": "/account/claude", "CLAUDE_CODE_SHELL_PREFIX": "/tmp/evil",
+                            "CLAUDE_CODE_SHELL": "/tmp/evil", "HOME": "/account"}}
+            done = subprocess.CompletedProcess([], 0, json.dumps({**plan, **over}), "")
+            return unittest.mock.patch.object(account, "run", lambda *x, **k: done)
+        without = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "ANTHROPIC_"))}
+        with plan_says(), unittest.mock.patch.dict(os.environ, without, clear=True):
+            started = self.coordinator_as_root({})
+        env = started["env"]
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["CLAUDE_CODE_MAX_RETRIES"]), ("https://x.invalid", "3"))
+        for dropped in ("CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_SHELL", "CLAUDE_CONFIG_DIR"):
+            self.assertNotIn(dropped, env)
+        self.assertNotEqual(env.get("HOME"), "/account")
+        self.assertNotIn("relative", started["argv"])
+        self.assertEqual(started["argv"][started["argv"].index("--model") + 1], "opus")
+        for bad, says in (({"model": "--dangerously-skip-permissions"}, "not a model name"),
+                          ({"model": "opus x"}, "not a model name"), ({"model": ""}, "not a model name"),
+                          ({"effort": "--yolo"}, "is not one of")):
+            with plan_says(**bad), self.assertRaises(SystemExit) as e:
+                self.coordinator_as_root({})  # it would record the claude it became; it stops before
+            self.assertIn(says, str(e.exception.code))
+        with plan_says(model="claude-opus-4-5[1m]", effort=""):
+            argv = self.coordinator_as_root({})["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-5[1m]")
+        self.assertNotIn("--effort", argv)
+
+    def test_init_for_an_account_refuses_a_link_or_a_folder_with_things_in_it(self):
+        self.as_root()
+        log, ran = self.stand_in_runuser()
+        me = account.name_of(os.getuid())
+        target = self.tmp / "system-dir"
+        target.mkdir()
+        (self.tmp / "planted").symlink_to(target)
+        full = self.tmp / "full"
+        full.mkdir()
+        (full / "x").write_text("")
+        given = []
+        with unittest.mock.patch("os.chown", lambda *a, **kw: given.append((a, kw))):
+            for d in ("planted", "full"):
+                with self.assertRaises(SystemExit) as e:
+                    main(["init", str(self.tmp / d), "--user", me])
+                self.assertIn("must be a new or an empty folder", str(e.exception.code))
+            self.assertEqual(given, [])  # nothing was given away
+            self.assertFalse(log.exists())
+            with self.assertRaises(SystemExit) as done:
+                main(["init", str(self.tmp / "new-desk"), "--user", me])
+        self.assertEqual(done.exception.code, 0, ran[-1].stderr)
+        self.assertEqual(given[0][0][0], self.tmp / "new-desk")
+        self.assertEqual(given[0][1], {"follow_symlinks": False})
+        self.assertIn("init", json.loads(log.read_text().splitlines()[-1]))  # the rest ran as the account
+        self.assertTrue((self.tmp / "new-desk" / "settings.json").is_file())
+
+    def test_lane_brief_prints_and_replaces_the_standing_instructions(self):
+        def run(*args, stdin=""):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), unittest.mock.patch("sys.stdin", io.StringIO(stdin)):
+                main(["--desk", str(self.desk.root), "lane", "brief", *args])
+            return out.getvalue()
+        self.assertIn("no standing instructions", run("a"))
+        self.assertIn("replaced", run("a", "Run", "the", "linter", "first."))
+        self.assertEqual(run("a"), "Run the linter first.\n")
+        run("a", "--file", "-", stdin="Line one\nLine two\n")  # from standard input, as root hands it over
+        self.assertEqual((self.desk.lanes_dir / "a" / "brief.md").read_text(), "Line one\nLine two\n")
+        changed = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                   if e.get("event") == "lane_brief_changed"]
+        self.assertEqual([(e["lane"], e["new"]) for e in changed],
+                         [("a", "Run the linter first."), ("a", "Line one\nLine two\n")])
+        with self.assertRaises(SystemExit):
+            run("nope", "x")
+        perms = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]
+        self.assertIn(f"Edit(//{str(self.desk.root).lstrip('/')}/lanes/**)", perms["deny"])  # one way to change them
+
+    def test_cost_says_the_coordinators_usage_is_not_counted_when_it_runs_as_another_user(self):
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        start = [str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root), "coordinator"]
+        r = subprocess.run(start, capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(cost.report(self.desk)["coordinator_uncounted"], "")  # the same user: counted
+        with unittest.mock.patch.object(account, "uid", lambda: 0):  # now "root" starts it
+            self.coordinator_as_root({})
+        rep = cost.report(self.desk)
+        self.assertIn("not counted", rep["coordinator_uncounted"])
+        self.assertIn("runs as root", rep["coordinator_uncounted"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "cost"])
+        self.assertIn("coordinator's own usage and its helpers' are not counted", out.getvalue())
+
+    def test_a_lane_repository_must_belong_to_the_user_hansa_runs_as(self):
+        with unittest.mock.patch.object(account, "owner", lambda path: 4242):
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(self.repo)])
+            self.assertIn("git refuses", str(e.exception.code))
+            self.assertIn(f"chown -R {account.name_of(os.getuid())} {self.repo.resolve()}", str(e.exception.code))
+            told = account.git_refusal(f"fatal: detected dubious ownership in repository at '{self.repo}'", self.repo)
+            self.assertIn("chown -R", told)  # a task git refuses fails with this, not git's text
+        self.assertNotIn("b", self.desk.settings()["lanes"])
+
+    def test_join_a_design_session_by_its_sockets_full_path(self):
+        m = {"tmux": ["hansa-abc123", "design-t0001"]}
+        with unittest.mock.patch.dict(os.environ, {"TMUX_TMPDIR": str(self.tmp)}):
+            self.assertEqual(join_command(m), f"tmux -u -S {self.tmp}/tmux-{os.getuid()}/hansa-abc123 attach -t design-t0001")
+        with unittest.mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "TMUX_TMPDIR"}, clear=True):
+            self.assertEqual(join_command(m), f"tmux -u -S /tmp/tmux-{os.getuid()}/hansa-abc123 attach -t design-t0001")
+
+    def test_login_advice_on_a_linux_server_gives_the_form_to_run_from_root(self):
+        self.desk.set_provider_state("claude", cool_until=time.time() + 60, reason="not logged in (Please run /login)")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = "/home/hansa/.claude"
+        me = account.name_of(os.getuid())
+        with unittest.mock.patch.object(account, "LINUX", True):
+            prob = provider_problem(self.desk, s, "claude")
+            self.assertIn(f"from root: `runuser -u {me} -- env CLAUDE_CONFIG_DIR=/home/hansa/.claude claude`", prob)
+            s["providers"]["claude"]["config_dir"] = ""
+            self.assertIn(f"from root: `runuser -u {me} -- claude`", provider_problem(self.desk, s, "claude"))
+        with unittest.mock.patch.object(account, "LINUX", False):
+            self.assertNotIn("runuser", provider_problem(self.desk, s, "claude"))  # not on macOS
 
     def test_workers_see_neither_the_desks_card_nor_the_users_own_setup(self):
         seen = self.tmp / "argv.jsonl"
