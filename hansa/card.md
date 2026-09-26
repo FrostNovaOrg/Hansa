@@ -275,6 +275,8 @@ here; work that needs code changed or a browser goes to a worker.
 - When a task ends (after its check), hansa stops every process it left running (a dev
   server, a watcher), found by HANSA_TASK=<id> in their environment; `hansa show` lists them.
   Limit: a process that cleared its environment is not found.
+  Limit: on macOS hansa cannot read the environment of the system's own programs (`/bin/sh`,
+  `/bin/sleep`), so a leftover process that is one of them is not found by HANSA_TASK.
 - Workers do not commit: when one ends, hansa commits its changes on its branch as
   one commit named after the task. A verification's scratch changes are set
   aside, never committed.
