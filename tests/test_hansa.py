@@ -30,8 +30,28 @@ from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa:
 from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
 from hansa.web import start_web  # noqa: E402
 
+# What Claude Code writes when a worker starts work in the background: the tool result's text and the row's
+# toolUseResult, used to pair background launches with completion notices.
+BG_SHAPES = r'''
+def BG_BASH(bid):
+    return ("Command running in background with ID: " + bid + ". Output is being written to: /tmp/x/" + bid
+            + ".output", {"stdout": "", "stderr": "", "interrupted": False, "isImage": False,
+                          "noOutputExpected": False, "backgroundTaskId": bid})
+def BG_AGENT(aid, what):
+    return ("Async agent launched successfully. (This tool result is internal metadata — never quote or paste "
+            "any part of it, including the agentId below, into a user-facing reply.)\nagentId: " + aid
+            + " (internal ID - do not mention to user. Use SendMessage with to: '" + aid + "' to continue this agent.)",
+            {"status": "async_launched", "agentId": aid, "description": what, "prompt": "Do it"})
+def BG_NOTICE(bid, what):
+    return ("<task-notification>\n<task-id>" + bid + "</task-id>\n<tool-use-id>toolu_" + bid + "</tool-use-id>\n"
+            "<status>completed</status>\n<summary>Agent \"" + what + "\" completed</summary>\n"
+            "<result>done</result>\n</task-notification>")
+'''
+exec(BG_SHAPES)
+
 FAKE = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
+''' + BG_SHAPES + r'''
 prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
 if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
     if os.environ.get("FAKE_SHOW_ARGV"):
@@ -84,15 +104,14 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
         use = {"type": "tool_use", "id": "u2", "name": "Bash" if cmd else "Agent", "input": {
             "description": "Run the full test suite" if cmd else "Review the badge change", "run_in_background": True,
             **({"command": "python3 -m unittest"} if cmd else {"prompt": "Review it", "subagent_type": "general-purpose"})}}
-        said = ("Command running in background with ID: bk3j9x. Output is being written to: /tmp/x/bk3j9x.output" if cmd
-                else "Async agent launched successfully.\nagentId: a7f2c1 (use it to follow up)")
+        said, result = BG_BASH("bk3j9x") if cmd else BG_AGENT("a7f2c1", "Review the badge change")
         rows += [{"type": "assistant", "message": {"id": "a2b", "content": [use]}},
                  {"type": "user", "message": {"role": "user", "content": [
-                     {"type": "tool_result", "tool_use_id": "u2", "content": [{"type": "text", "text": said}]}]}}]
+                     {"type": "tool_result", "tool_use_id": "u2", "content": [{"type": "text", "text": said}]}]},
+                  "toolUseResult": result}]
         if kind.endswith("-noticed"):
             rows += [{"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
-                "role": "user", "content": "<task-notification>\n<task-id>" + ("bk3j9x" if cmd else "a7f2c1")
-                + "</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}]
+                "role": "user", "content": BG_NOTICE("bk3j9x", "") if cmd else BG_NOTICE("a7f2c1", "")}}]
     rows.append(say("a3", report))
     late = kind == "late"
     if late:
@@ -3158,6 +3177,44 @@ class DeskTest(unittest.TestCase):
                 tid = self.desk.tasks()[-1]["id"]
                 self.assertNotIn("background work was still running", views.show_text(self.desk, tid))
                 self.assertNotIn("background work", notify.task_line(self.desk, self.desk.meta(tid)))
+
+    def test_background_agents_with_notices_are_not_listed_as_still_running(self):
+        # Four background agents each have a "completed" notice; a test run has none.
+        from hansa import run
+        home = self.tmp / "t0061-home"
+        rec = home / "projects" / "-work" / "s61.jsonl"
+        rec.parent.mkdir(parents=True)
+        agents = [("aaeaa54cef8eb6489", "Review the catalog schema"), ("a1b2c3d4e5f60718", "Review the checkout flow"),
+                  ("a9f8e7d6c5b4a392", "Review the receipt text"), ("a0c1e2a3b4c5d6e7", "Read the page texts")]
+        rows, notices = [], []
+        for i, (aid, what) in enumerate(agents):
+            said, result = BG_AGENT(aid, what)
+            rows += [{"type": "assistant", "message": {"id": f"m{i}", "content": [
+                         {"type": "tool_use", "id": f"toolu_{i}", "name": "Agent", "input": {
+                             "description": what, "prompt": "Do it", "subagent_type": "general-purpose"}}]}},
+                     {"type": "user", "toolUseResult": result, "message": {"role": "user", "content": [
+                         {"type": "tool_result", "tool_use_id": f"toolu_{i}",
+                          "content": [{"type": "text", "text": said}]}]}}]
+            notices.append(BG_NOTICE(aid, what))
+        command = "python3 -m unittest tests.test_hansa 2>&1 | tail -15"
+        said, result = BG_BASH("b2w1815is")
+        rows += [{"type": "assistant", "message": {"id": "mb", "content": [
+                     {"type": "tool_use", "id": "toolu_b", "name": "Bash", "input": {
+                         "command": command, "run_in_background": True}}]}},
+                 {"type": "user", "toolUseResult": result, "message": {"role": "user", "content": [
+                     {"type": "tool_result", "tool_use_id": "toolu_b", "content": said}]}}]
+        for n in notices:  # each notice is written twice: queued, then as the user row that opens the turn
+            rows += [{"type": "queue-operation", "operation": "enqueue", "sessionId": "s61", "content": n},
+                     {"type": "user", "message": {"role": "user", "content": n}}]
+        rows.append({"type": "assistant", "message": {"id": "mz", "content": [
+            {"type": "text", "text": "I'm waiting for the full test suite to finish before I write the report."}]}})
+        rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.assertEqual(run.background_left(home, "s61"), [command])
+        # Without the structured ids, the text is read: still only the test run
+        for r in rows:
+            r.pop("toolUseResult", None)
+        rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.assertEqual(run.background_left(home, "s61"), [command])
 
     def test_verify_runs_the_change_and_holds_the_merge(self):
         seen = self.tmp / "argv.jsonl"

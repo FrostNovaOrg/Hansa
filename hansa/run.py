@@ -489,7 +489,10 @@ def _strings(x):
             yield from _strings(v)
 
 
-BACKGROUND_ID = re.compile(r"(?:running in background with ID|agentId|agent_id|task_id)\W{0,3}([A-Za-z0-9_-]+)", re.I)
+# Only when a result row carries no id in structured form: the id comes right after the colon. An agent's
+# result also says "the agentId below", which is not an id.
+BASH_ID = re.compile(r"running in background with ID:\s*([A-Za-z0-9_-]+)", re.I)
+AGENT_ID = re.compile(r"\bagentId:\s*([A-Za-z0-9_-]+)")
 NOTICE = re.compile(r"<task-notification>(.*?)(?:</task-notification>|$)", re.S)
 NOTICE_ID = re.compile(r"<task-id>\s*([A-Za-z0-9_-]+)\s*</task-id>")
 NOTICE_STATUS = re.compile(r"<status>\s*([^<]*?)\s*</status>")
@@ -516,16 +519,22 @@ def background_left(home: Path, sid: str) -> list:
             elif c.get("type") == "tool_result" and c.get("tool_use_id") in calls:
                 name, given = calls[c["tool_use_id"]]
                 said = "\n".join(_strings(c.get("content")))
+                result = d.get("toolUseResult") if isinstance(d.get("toolUseResult"), dict) else {}
+                bid = None
                 if name == "Bash" and given.get("run_in_background"):
-                    found = re.search(r"running in background with ID\W{0,3}([A-Za-z0-9_-]+)", said, re.I)
-                elif name in ("Agent", "Task") and (given.get("run_in_background")
-                                                     or re.search(r"async|background", said, re.I)):
-                    found = BACKGROUND_ID.search(said)
-                else:
-                    found = None
-                if found:
+                    bid = result.get("backgroundTaskId")
+                    if not bid and "backgroundTaskId" not in result:
+                        found = BASH_ID.search(said)
+                        bid = found and found.group(1)
+                elif name in ("Agent", "Task"):
+                    if result.get("agentId") or result.get("status"):
+                        bid = result.get("status") == "async_launched" and result.get("agentId")
+                    elif given.get("run_in_background") or re.search(r"async|background", said, re.I):
+                        found = AGENT_ID.search(said)
+                        bid = found and found.group(1)
+                if bid:
                     what = given.get("description") or given.get("command") or given.get("prompt") or name
-                    started[found.group(1)] = " ".join(str(what).split())[:100]
+                    started[str(bid)] = " ".join(str(what).split())[:100]
         for s in _strings(d):
             for n in NOTICE.findall(s) if "<task-notification>" in s else []:
                 tid = NOTICE_ID.search(n)
