@@ -261,7 +261,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         wt = desk.worktrees_dir / name
         brief = desk.lanes_dir / name / "brief.md"
         return "\n".join([
-            f"lane {name} (set by the principal on the web page; ask with hansa ask to change it)",
+            f"lane {name} (set by the coordinator with hansa lane set, not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
             f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
@@ -307,8 +307,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
-        "Settings, keys, prices and allowed commands belong to the principal (web page). "
-        "You change tasks, lane briefs and pause/resume."])
+        "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
+        "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs and "
+        "pause/resume."])
 
 
 def cost_text(rep: dict, by: str = "day") -> str:

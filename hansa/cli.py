@@ -60,7 +60,8 @@ def _text(args) -> str:
 def cmd_init(a):
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
-    print("next: start `hansa serve` there, open the page with `hansa web`, add keys and lanes, then `hansa add`.")
+    print("next: start `hansa serve` there, open the page with `hansa web` and add providers and keys; "
+          "the coordinator adds lanes with `hansa lane add` and queues work with `hansa add`.")
 
 
 def cmd_add(a):
@@ -71,7 +72,7 @@ def cmd_add(a):
     tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None)
     if a.lane and a.lane not in s["lanes"]:
-        print(f"note: there is no lane {a.lane} yet; the task waits until the principal adds it")
+        print(f"note: there is no lane {a.lane} yet; the task waits until it is added: hansa lane add {a.lane} --repo PATH")
     if a.model:
         print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
               f" their own model. Which provider runs it follows the lane's order: hansa explain lane {a.lane or 'L'}")
@@ -459,6 +460,118 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
     desk.event(event, file=dst.name)
 
 
+LANE_LISTS = ("providers", "allow")
+LANE_NUMBERS = ("max_turns", "timeout_min")
+LANE_FIELDS = ("base", "providers", "allow", "env", "check", "preview", "setup", "max_turns", "timeout_min", "note")
+OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not under the worker's allowed commands
+
+
+def _shown(v) -> str:
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _save(desk: Desk, new: dict) -> None:
+    """Save the coordinator's change, checked as the page's are; on problems print them and change nothing."""
+    problems = desk.save_settings(new, by="coordinator")
+    if problems:
+        raise SystemExit("hansa: nothing was changed:\n" + "\n".join(f"  {x}" for x in problems))
+
+
+def _lane_value(field: str, values: list):
+    if field in LANE_LISTS:
+        return [x for v in values for x in (v.split(",") if field == "providers" else [v]) if x]
+    if field == "env":
+        env = {}
+        for v in values:
+            k, eq, val = v.partition("=")
+            if not eq:
+                raise SystemExit(f"hansa: env takes NAME=VALUE pairs; {v!r} has no '='. Nothing was changed")
+            env[k] = val
+        return env
+    if len(values) > 1:
+        raise SystemExit(f"hansa: {field} takes one value; quote it if it has spaces. Nothing was changed")
+    if field in LANE_NUMBERS:
+        try:
+            return int(values[0])
+        except (IndexError, ValueError):
+            raise SystemExit(f"hansa: {field} takes one whole number. Nothing was changed")
+    if field == "base" and not "".join(values).strip():
+        raise SystemExit("hansa: base takes the name of a branch. Nothing was changed")
+    return values[0] if values else ""
+
+
+def cmd_lane(a):
+    desk = Desk.find(a.desk)
+    if not a.action:
+        lanes = desk.settings()["lanes"]
+        for name, ln in sorted(lanes.items()):
+            print(f"{name}  {ln['repo']}  base {ln.get('base', 'main')}  providers {' > '.join(ln['providers'])}")
+        print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane L")
+        return
+    with desk.lock():  # the settings read here are the settings changed here
+        s = desk.settings()
+        new = json.loads(json.dumps(s))
+        if a.action == "add":
+            if a.name in s["lanes"]:
+                raise SystemExit(f"hansa: there is already a lane {a.name}; change it with hansa lane set {a.name} ...")
+            repo = str(Path(a.repo).resolve())
+            try:
+                base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+            except (RuntimeError, OSError) as e:
+                raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
+            providers = [x for x in (a.providers or "").split(",") if x] or None
+            new["lanes"][a.name] = default_lane(repo, base, providers)
+            _save(desk, new)
+            (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
+            brief = desk.lanes_dir / a.name / "brief.md"
+            if not brief.exists():
+                brief.write_text("", encoding="utf-8")
+            ln = new["lanes"][a.name]
+            print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
+                  f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes")
+            return
+        if a.name not in s["lanes"]:
+            raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
+        if a.action == "remove":
+            tasks = [m for m in desk.tasks() if m.get("lane") == a.name]
+            busy = [m["id"] for m in tasks if m["state"] in ("queued", "running")]
+            if busy:
+                raise SystemExit(f"hansa: lane {a.name} still has {', '.join(busy)} queued or running; nothing was "
+                                 f"changed. Wait for them (hansa wait) or cancel them first")
+            # merging a finished task needs its lane's repo and base
+            review = [m["id"] for m in tasks if m["state"] == "done" and m.get("kind") != "verify"]
+            if review:
+                raise SystemExit(f"hansa: lane {a.name} still has {', '.join(review)} finished and waiting for review; "
+                                 f"nothing was changed. Merging needs the lane: clear them first with hansa merge "
+                                 f"or hansa cancel")
+            del new["lanes"][a.name]
+            _save(desk, new)
+            print(f"lane {a.name} removed; its brief stays in {desk.lanes_dir / a.name}")
+            return
+        value = _lane_value(a.field, a.values)
+        old = s["lanes"][a.name].get(a.field, "")
+        new["lanes"][a.name][a.field] = value
+        _save(desk, new)
+    print(f"lane {a.name} {a.field}: {_shown(old)} -> {_shown(value)}")
+    if a.field in OUTSIDE_WORKER and old != value:
+        desk.event("lane_command_changed", lane=a.name, field=a.field, old=old, new=value)
+        print(f"The lane's {a.field} runs outside the worker, so this change is recorded. Tell the principal, in "
+              f"the conversation, what you changed and why.")
+
+
+def cmd_concurrency(a):
+    desk = Desk.find(a.desk)
+    if a.n is None:
+        print(f"concurrency: {desk.settings()['concurrency']} task(s) at once")
+        return
+    with desk.lock():
+        new = desk.settings()
+        old = new["concurrency"]
+        new["concurrency"] = a.n
+        _save(desk, new)
+    print(f"concurrency: {old} -> {a.n}")
+
+
 def cmd_help(a):
     print(CARD.read_text(encoding="utf-8"))
 
@@ -546,6 +659,24 @@ def main(argv=None):
     p = add("explain", cmd_explain, "what a setting or state means: lane NAME | provider NAME | task ID | states | server")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server"])
     p.add_argument("name", nargs="?")
+    p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
+    lane = p.add_subparsers(dest="action", metavar="add | set | remove")
+    q = lane.add_parser("add", help="a new lane on a git checkout")
+    q.add_argument("name")
+    q.add_argument("--repo", required=True, help="the git checkout the lane works on")
+    q.add_argument("--base", help="base branch (default: the checkout's current branch)")
+    q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
+    q = lane.add_parser("set", help="change one field of a lane", description=(
+        "providers and allow take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
+        "timeout_min take one whole number"))
+    q.add_argument("name")
+    q.add_argument("field", choices=LANE_FIELDS)
+    q.add_argument("values", nargs="*", metavar="value")
+    q = lane.add_parser("remove", help="remove a lane with no task queued, running or waiting for review")
+    q.add_argument("name")
+    p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
+    p.add_argument("n", nargs="?", type=int)
     p = add("cost", cmd_cost, "tokens and what they are worth")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--since", help="HH:MM today, or YYYY-MM-DD HH:MM: count from then instead of --days")
