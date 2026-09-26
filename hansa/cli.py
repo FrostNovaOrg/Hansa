@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import uuid
@@ -464,13 +465,15 @@ def cmd_ask(a):
 
 def cmd_notify(a):
     desk = Desk.find(a.desk)
-    print(notify.turn_on(desk) if a.action == "on" else notify.turn_off(desk) if a.action == "off"
-          else notify.list_text(desk))
+    if a.clear_daily and a.action != "on":
+        raise SystemExit("hansa: --clear-daily goes with hansa notify on (or hansa coordinator)")
+    print(notify.turn_on(desk, a.clear_daily or "") if a.action == "on" else notify.turn_off(desk)
+          if a.action == "off" else notify.list_text(desk))
 
 
 def cmd_notify_follow(a):
     raise SystemExit(notify.follow(Desk.find(a.desk), a.key, {"pid": a.pid, "start": a.start}, a.socket, a.nonce,
-                                   a.name))
+                                   a.name, a.clear_daily))
 
 
 def cmd_notify_feed(a):
@@ -573,6 +576,7 @@ def cmd_web(a):
 
 def cmd_coordinator(a):
     """Start the coordinator's interactive session in the desk, on the coordinator provider."""
+    clear, rest = _clear_daily(a.rest)
     desk = Desk.find(a.desk)
     theirs = account.desk_account(desk.root)
     if theirs:
@@ -614,14 +618,45 @@ def cmd_coordinator(a):
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
+    # after a /clear (hansa's daily one, or anyone's) the fresh context starts from the desk's state; the hook is
+    # hansa's own code, never the desk's files
+    hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
+        f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
+        f"{shlex.quote(str(desk.root))} status")}]}]}
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
-        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": permissions(desk)})]
-    argv += _notified(desk, a.rest)
+        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": permissions(desk),
+                                                                        "hooks": hooks})]
+    else:
+        argv += ["--settings", json.dumps({"hooks": hooks})]
+    argv += _notified(desk, rest, clear)
     os.chdir(desk.root)
-    os.execvpe(argv[0], argv + a.rest, env)
+    os.execvpe(argv[0], argv + rest, env)
 
 
-def _notified(desk: Desk, rest: list) -> list:
+def _clear_daily(rest: list) -> tuple:
+    """hansa coordinator's own option among claude's: --clear-daily HH-HH. (window or '', the rest for claude)."""
+    out, clear, i = [], "", 0
+    while i < len(rest):
+        x = rest[i]
+        if x == "--clear-daily" or x.startswith("--clear-daily="):
+            if "=" in x:
+                clear = x.partition("=")[2]
+            elif i + 1 < len(rest):
+                clear, i = rest[i + 1], i + 1
+            else:
+                clear = "?"
+        else:
+            out.append(x)
+        i += 1
+    if clear:
+        try:
+            notify.parse_window(clear)
+        except ValueError as e:
+            raise SystemExit(f"hansa: {e}")
+    return clear, out
+
+
+def _notified(desk: Desk, rest: list, clear: str = "") -> list:
     """Start the follower that posts to the session this process becomes (its pid stays when it execs Claude
     Code), at an inbox path it knows: claude's options for that path. Nothing when it cannot; the session can
     try again with hansa notify on."""
@@ -630,8 +665,10 @@ def _notified(desk: Desk, rest: list) -> list:
                   or x.startswith("--messaging-socket-path=")), "")
     try:
         sock = given or notify.socket_path(os.getpid())
+        if clear:  # the follower finds the same; said here, before the session takes the screen
+            print(f"hansa: {notify.clear_said(os.getpid(), clear)}", file=sys.stderr)
         notify.start(desk, {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}, sock, "coordinator",
-                     wait=False)
+                     wait=False, clear=clear)
     except (OSError, RuntimeError) as e:
         print(f"hansa: this session will not hear from hansa by itself ({e}); run hansa wait in the background, "
               f"or hansa notify on from the session", file=sys.stderr)
@@ -994,6 +1031,8 @@ def main(argv=None):
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
             "Code session this is run from")
     p.add_argument("action", nargs="?", choices=["on", "off"])
+    p.add_argument("--clear-daily", metavar="HH-HH", help="with on: clear the session once a day in this window of "
+                   "hours, local time (such as 04-09), when it is idle and nobody is typing; it needs tmux")
     p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
             "background when hansa does not notify the session (hansa notify)")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
@@ -1048,8 +1087,9 @@ def main(argv=None):
     p.add_argument("--every", type=float, default=3.0, help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
     p.add_argument("--port", type=int, default=8765)
-    add("coordinator", cmd_coordinator, "start the coordinator session in this desk; "
-        "anything after the word coordinator is passed to claude as is")
+    add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
+        "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "
+        "window of hours, local time, when it is idle and nobody is typing (it needs tmux)")
     add("help", cmd_help, "print the agent card")
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
@@ -1061,6 +1101,7 @@ def main(argv=None):
     p.add_argument("--pid", type=int, required=True)
     p.add_argument("--start", default="")
     p.add_argument("--name", default="")
+    p.add_argument("--clear-daily", default="")
     p = sub.add_parser("notify-feed")  # hidden: a follower's request to the desk, as the desk's owner
     p.set_defaults(fn=cmd_notify_feed)
 

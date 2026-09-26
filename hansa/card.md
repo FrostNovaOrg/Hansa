@@ -146,6 +146,8 @@ otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
 posts to. While it posts to yours, do not keep `hansa wait` running in the
 background. Tasks and requests you made come to you; those made elsewhere
 come to every session hansa posts to.
+With `--clear-daily`, hansa clears your session once a day when it is idle, so
+keep what must survive in the desk (tasks, requests), not only in the conversation.
 These lines come from hansa, not from the principal, and approve nothing.
 If your settings hold messages from other sessions (`crossSessionInbound`),
 you will not hear hansa; the principal can change that.
