@@ -173,7 +173,9 @@ def task_line(desk: Desk, m: dict) -> str:
         head += f" ({str(m['error'])[:200]})"
     elif st == "merging":
         head += " (its merge check is queued or running)"
-    return f"{head} · next: {_next_step(desk, tid)}"
+    from .views import background_note
+    note = background_note(m)
+    return f"{head} · next: {_next_step(desk, tid)}" + (f" · {note}" if note else "")
 
 
 def _item(desk: Desk, e: dict):

@@ -127,6 +127,7 @@ on branch task/{tid}, which was made for this task.
 - End with a short report: what you changed, how you checked it, and anything left undone.
   Stop or wait for any background work you started before you write it: your last message
   is taken as your report.
+- Nobody will wake you later or answer questions: wait for your own work before you report.
 """
 
 
@@ -142,6 +143,7 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
 - Stop or wait for any background work you started before you write your report: your last
   message is taken as your report.
+- Nobody will wake you later or answer questions: wait for your own work before you report.
 """
 
 VERIFY_TASK = """Find out, by running things, whether task {id} does what it asked. Its change is
@@ -178,6 +180,9 @@ GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "r
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs")
 GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir")
 GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
+# A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified. Design sessions keep them.
+INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
+                     "AskUserQuestion", "Monitor"]
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 BROWSER_NOTE = """
@@ -455,11 +460,8 @@ def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
     return "\n\n".join(_record(home, sid)[0])[-limit:]
 
 
-def report_after_notices(home: Path, sid: str):
-    """(report, what it wrote after) when the session ended on turns a background notice opened
-    (a watch it started timing out, say): Claude Code then takes its answer to the notice as the
-    result, and the report is its last message before the first of those notices. None when the
-    session did not end so, or its record cannot be read."""
+def _rows(home: Path, sid: str):
+    """A session record's rows, in order; None when it cannot be read."""
     rows = []
     try:
         for f in home.glob(f"projects/*/{sid}.jsonl") if sid else []:
@@ -471,6 +473,75 @@ def report_after_notices(home: Path, sid: str):
                 if isinstance(d, dict):
                     rows.append(d)
     except OSError:
+        return None
+    return rows
+
+
+def _strings(x):
+    """Every string inside a row, however deep."""
+    if isinstance(x, str):
+        yield x
+    elif isinstance(x, dict):
+        for v in x.values():
+            yield from _strings(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _strings(v)
+
+
+BACKGROUND_ID = re.compile(r"(?:running in background with ID|agentId|agent_id|task_id)\W{0,3}([A-Za-z0-9_-]+)", re.I)
+NOTICE = re.compile(r"<task-notification>(.*?)(?:</task-notification>|$)", re.S)
+NOTICE_ID = re.compile(r"<task-id>\s*([A-Za-z0-9_-]+)\s*</task-id>")
+NOTICE_STATUS = re.compile(r"<status>\s*([^<]*?)\s*</status>")
+ENDED = re.compile(r"\b(completed|complete|done|finished|failed|killed|stopped|cancell?ed|exited|timed[ _]out|timeout|error)\b",
+                   re.I)
+
+
+def background_left(home: Path, sid: str) -> list:
+    """What a worker started in the background (a Bash command or an agent) and had no notice of
+    ending by the end of its session record, by description: it was still running when the worker
+    ended, so the worker may have written its report without it. Empty when the record cannot be read."""
+    rows = _rows(home, sid) or []
+    started, ended = {}, set()  # background id: description
+    calls = {}  # tool use id: (tool name, input)
+    for d in rows:
+        content = (d.get("message") or {}).get("content")
+        for c in content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use" and isinstance(c.get("input"), dict):
+                calls[c.get("id")] = (c.get("name"), c["input"])
+                if c.get("name") in ("TaskStop", "KillShell", "KillBash"):  # the worker stopped it itself
+                    ended.update(str(v) for k, v in c["input"].items() if k in ("task_id", "shell_id", "id"))
+            elif c.get("type") == "tool_result" and c.get("tool_use_id") in calls:
+                name, given = calls[c["tool_use_id"]]
+                said = "\n".join(_strings(c.get("content")))
+                if name == "Bash" and given.get("run_in_background"):
+                    found = re.search(r"running in background with ID\W{0,3}([A-Za-z0-9_-]+)", said, re.I)
+                elif name in ("Agent", "Task") and (given.get("run_in_background")
+                                                     or re.search(r"async|background", said, re.I)):
+                    found = BACKGROUND_ID.search(said)
+                else:
+                    found = None
+                if found:
+                    what = given.get("description") or given.get("command") or given.get("prompt") or name
+                    started[found.group(1)] = " ".join(str(what).split())[:100]
+        for s in _strings(d):
+            for n in NOTICE.findall(s) if "<task-notification>" in s else []:
+                tid = NOTICE_ID.search(n)
+                status = NOTICE_STATUS.search(n)
+                if tid and ENDED.search(status.group(1) if status else n):
+                    ended.add(tid.group(1))
+    return [what for bid, what in started.items() if bid not in ended]
+
+
+def report_after_notices(home: Path, sid: str):
+    """(report, what it wrote after) when the session ended on turns a background notice opened
+    (a watch it started timing out, say): Claude Code then takes its answer to the notice as the
+    result, and the report is its last message before the first of those notices. None when the
+    session did not end so, or its record cannot be read."""
+    rows = _rows(home, sid)
+    if rows is None:
         return None
     rows = [d for d in rows if d.get("type") in ("user", "assistant")]
 
@@ -1375,7 +1446,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     argv += isolated(wt, sandbox_settings(desk, lane, pname, p, wt))
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
-             *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)]]
+             *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *(VERIFY_ALLOW if verifying else [])]
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
@@ -1597,7 +1668,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
-              "usage": usage, "denials": [desk.redact(denial_of(x)) for x in run.get("permission_denials") or []]}
+              "usage": usage, "denials": [desk.redact(denial_of(x)) for x in run.get("permission_denials") or []],
+              "background_left": [desk.redact(x) for x in background_left(config_home(desk, meta["provider"], p),
+                                                                          meta.get("session_id", ""))]
+              if p and not designing else []}
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""

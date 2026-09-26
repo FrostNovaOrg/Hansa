@@ -282,6 +282,14 @@ def markers_of(desk: Desk, m: dict) -> dict:
         return {}
 
 
+def background_note(m: dict) -> str:
+    """The line for a worker that ended while background work it started still ran; empty otherwise."""
+    if not m.get("background_left"):
+        return ""
+    return (f"the worker ended while its background work was still running ({'; '.join(m['background_left'])}); "
+            "its report may be incomplete: read the changes before merging")
+
+
 def show_text(desk: Desk, tid: str) -> str:
     m = desk.meta(tid)
     m["markers"] = markers_of(desk, m)
@@ -314,6 +322,8 @@ def show_text(desk: Desk, tid: str) -> str:
         out += ["report:"] + ["  " + x for x in lines[:60]]
         if len(lines) > 60:
             out.append(f"  ... {len(lines) - 60} more lines; the whole report is {d / 'result.md'}")
+    if background_note(m):
+        out.append(background_note(m))
     if m.get("replaced_by"):
         out.append(f"replaced by: {m['replaced_by']}")
     if m.get("files") is not None and m.get("state") != "queued":
