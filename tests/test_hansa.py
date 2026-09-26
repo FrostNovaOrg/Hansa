@@ -556,6 +556,59 @@ class DeskTest(unittest.TestCase):
         self.assertIn("Tell the principal", out)
         self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")), ["check", "setup"])
 
+    def test_lane_try_runs_the_setup_and_check_once_and_leaves_the_worktree_clean(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "setup", "echo set up for the try; echo left > left.txt")
+        out = self.hansa("lane", "set", "a", "check", "echo checked badly; exit 3")
+        self.assertTrue(out.rstrip().endswith("hansa lane try a"), out)
+        d, stop_serving = Dispatcher(self.desk), threading.Event()
+
+        def serve():  # hansa serve, which runs the try
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        d.tick()
+        server = threading.Thread(target=serve)
+        server.start()
+        said = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(said), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "try", "a", "--every", "0.05"])
+        finally:
+            stop_serving.set()
+            server.join()
+        said = said.getvalue()
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("set up for the try", said)
+        self.assertIn("checked badly", said)
+        self.assertIn("exit 3", said)
+        self.assertIn("exit 0", said)  # the setup's
+        setup, check = self.srt_calls()
+        self.assertEqual((setup["argv"][-1], check["argv"][-1]),
+                         ("echo set up for the try; echo left > left.txt", "echo checked badly; exit 3"))
+        wt = self.desk.worktrees_dir / "a"
+        self.assertEqual(Path(check["cwd"]).resolve(), wt.resolve())
+        self.assertEqual(self.git_out("status", "--porcelain", "--ignored", cwd=wt), "")
+        self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), self.git_out("rev-parse", "main"))
+        self.assertFalse(Path(setup["tmpdir"]).exists() or Path(check["tmpdir"]).exists())
+        tried = self.events("lane_tried")
+        self.assertEqual([(e["ok"], e["setup"]["exit"], e["check"]["exit"]) for e in tried], [(False, 0, 3)])
+        self.assertEqual(run.tried_lanes(self.desk), set())
+        m = self.settle(d, self.desk.new_task("Add hello.txt"))  # the next task runs there as before
+        self.assertEqual((m["state"], m["files"], m["check"]["exit"]), ("done", ["hello.txt"], 3), m)
+
+    def test_lane_try_on_a_busy_lane_runs_nothing_and_names_the_task(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked")
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", lane="a")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "try", "a"])
+        self.assertIn(f"lane a is busy with {tid}", str(e.exception.code))
+        self.assertIn("nothing was run", str(e.exception.code))
+        self.assertEqual(self.srt_calls(), [])
+        self.assertFalse(run.try_file(self.desk, "a").exists())
+
     def test_a_merge_check_can_be_cancelled_queued_or_running(self):
         d, t1, t2 = self.two_lanes(check="test -f README.md")
         self.hansa("merge", t1)
@@ -1506,6 +1559,32 @@ class DeskTest(unittest.TestCase):
         deny = run.git_write_deny(wt)
         self.assertIn(str(wt / ".git"), deny)
         self.assertIn(str(wt.resolve() / ".git"), deny)  # with links resolved too (/var is /private/var on macOS)
+
+    def test_the_git_paths_the_sandbox_keeps_are_made_when_missing(self):
+        # on Linux the sandbox puts a device nobody can open where a listed path is missing, and git fails on it
+        from hansa import run
+        packed = self.repo / ".git" / "packed-refs"
+        self.assertFalse(packed.exists())  # a repository made with git init has none until refs are packed
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(packed.read_text(), "")
+        wt = Path(m["worktree"])
+        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt))
+        for f in run.GIT_OWN_DENY:
+            self.assertTrue((own / f).exists(), f)
+        self.assertTrue((own / "logs").is_dir())
+        self.assertEqual(self.git_out("status", "--porcelain", cwd=wt), "")  # git_out fails if git does
+        self.assertEqual(self.git_out("log", "--format=%H", cwd=wt).splitlines()[0], m["head"])
+        self.assertEqual(self.git_out("status", "--porcelain"), "")
+
+        sh("git", "pack-refs", "--all", cwd=self.repo)  # a repository whose packed-refs holds refs keeps them
+        held = packed.read_text()
+        self.assertIn("refs/heads/main", held)
+        lane = self.desk.settings()["lanes"]["a"]
+        pname = lane["providers"][0]
+        run.lane_sandbox(self.desk, lane, pname, self.desk.settings()["providers"][pname], wt)
+        self.assertEqual(packed.read_text(), held)
+        self.assertIn("init", self.git_out("log", "--oneline", "main"))
 
     def test_a_worktree_whose_git_file_was_redirected_gets_no_git_and_is_put_right(self):
         marker = self.tmp / "hook-ran"
