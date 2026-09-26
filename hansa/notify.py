@@ -457,9 +457,9 @@ def missed_head(m) -> str:
     """The first line of what a follower posts about what an ended one missed: whose it was, and since when."""
     if not isinstance(m, dict):
         return "what changed while no session heard from hansa, as it is now:"
-    who = f"session {m.get('pid')}" + (f" ({m['name']})" if m.get("name") else "")
+    whose = "session " + who(m.get("pid"), m.get("name") or "")
     at = time.strftime("%H:%M", time.localtime(m["at"])) if m.get("at") else "?"
-    how = f"{who} ended at {at}" if m.get("session_ended") else f"hansa stopped posting to {who} at {at}"
+    how = f"{whose} ended at {at}" if m.get("session_ended") else f"hansa stopped posting to {whose} at {at}"
     return f"{how}; since then, for its tasks and requests:"
 
 
@@ -1061,7 +1061,7 @@ def list_text(desk: Desk) -> str:
     out = [f"hansa notifies {len(rows)} session(s) of desk {desk.root} through their inbox:"]
     for r in rows:
         lp = r.get("last_post") or {}
-        out.append(f"  {r.get('name') or 'session'} · pid {(r.get('session') or {}).get('pid')} · since "
+        out.append(f"  {who((r.get('session') or {}).get('pid'), r.get('name') or '')} · since "
                    f"{when(r.get('since'))} · last post: " + (f"{when(lp.get('at'))} {lp.get('text', '')}" if lp
                                                                else "none yet"))
         if clear_text(r.get("clear")):
@@ -1069,6 +1069,11 @@ def list_text(desk: Desk) -> str:
     return "\n".join(out)
 
 
+def who(pid, name: str = "") -> str:
+    """A session as hansa names it everywhere: its pid, and its name once Claude Code has given it one."""
+    return f"pid {pid}" + (f" ({name})" if name else "")
+
+
 def names(desk: Desk) -> list:
     """The sessions hansa notifies, for hansa status."""
-    return [f"{r.get('name') or 'session'} (pid {(r.get('session') or {}).get('pid')})" for r in live_records(desk)]
+    return [who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in live_records(desk)]
