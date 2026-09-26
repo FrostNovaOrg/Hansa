@@ -463,6 +463,10 @@ class DeskTest(unittest.TestCase):
                            (["grep", "--no-ind", "demo"], "outside the lane's repository"),
                            (["diff", "/etc/hosts", "README.md"], "/etc/hosts is refused"),
                            (["diff", "README.md", "../x"], "outside the lane's repository"),
+                           (["blame", "--contents", "/etc/hosts", "README.md"], "--contents is refused"),
+                           (["blame", "--cont=/etc/hosts", "README.md"], "outside the lane's repository"),
+                           (["log", "--show-signature"], "--show-signature is refused"),
+                           (["show", "--show-sig", "HEAD"], "it would run gpg"),
                            (["-c", "core.pager=x", "log"], "-c before the git command is refused"),
                            (["--exec-path=x", "log"], "refused"), (["-C", str(self.tmp), "log"], "refused"),
                            ([], "name a")):
@@ -497,6 +501,26 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
         self.assertEqual([w for w, p in made.items() if p.exists()], [])
         self.assertIn("+changed", self.hansa_git("a", "diff")[1])  # git's own diff, not the configured program's
+
+    def test_hansa_git_runs_no_gpg_for_a_signed_commit(self):
+        made = self.tmp / "gpg-ran"
+        script = self.tmp / "gpg.sh"
+        script.write_text(f"#!/bin/sh\ntouch '{made}'\n")
+        script.chmod(0o755)
+        sh("git", "config", "gpg.program", str(script), cwd=self.repo)
+        sh("git", "config", "log.showSignature", "true", cwd=self.repo)
+        tree, head = self.git_out("rev-parse", "HEAD^{tree}"), self.git_out("rev-parse", "HEAD")
+        commit = (f"tree {tree}\nparent {head}\n"
+                  "author A <a@example.com> 1700000000 +0000\ncommitter A <a@example.com> 1700000000 +0000\n"
+                  "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEE\n -----END PGP SIGNATURE-----\n\nsigned\n")
+        signed = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=self.repo, input=commit,
+                                capture_output=True, text=True, check=True).stdout.strip()
+        sh("git", "update-ref", "refs/heads/signed", signed, cwd=self.repo)
+        for args in (["log", "-1", "signed"], ["log", "--format=%s", "signed"], ["show", "signed"]):
+            code, out, _ = self.hansa_git("a", *args)
+            self.assertEqual(code, 0, args)
+            self.assertIn("signed", out)
+        self.assertFalse(made.exists())
 
     def test_hansa_git_runs_as_the_desks_account_with_its_arguments_as_they_are(self):
         log, ran = self.stand_in_runuser()

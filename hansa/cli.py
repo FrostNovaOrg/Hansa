@@ -199,6 +199,10 @@ GIT_LIST_FLAGS = {  # what branch and tag take when they only list; the rest cre
 GIT_NO_PROGRAMS = {"diff": ("--no-ext-diff", "--no-textconv"), "show": ("--no-ext-diff", "--no-textconv"),
                    "log": ("--no-ext-diff", "--no-textconv"), "blame": ("--no-textconv",),
                    "grep": ("--no-textconv",)}
+# options that read outside the repository or run gpg, by the shortest start git takes for them, and where
+GIT_REFUSED_PREFIX = (("--no-index", "--no-i", ("diff", "grep"), "it reads files outside the lane's repository"),
+                      ("--contents", "--con", ("blame",), "it reads a file outside the lane's repository"),
+                      ("--show-signature", "--show-s", ("log", "show"), "it would run gpg"))
 GIT_LIST_VALUES = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
 
 
@@ -223,8 +227,9 @@ def git_refused(args: list) -> str:
                 name.startswith("-O") or (cmd == "grep" and "O" in name)
                 or (name.startswith("-o") and cmd in ("diff", "log", "show"))):
             return f"{x} is refused: it would write a file or run a program"
-        if cmd in ("diff", "grep") and len(name) > 5 and "--no-index".startswith(name):
-            return f"{x} is refused: it reads files outside the lane's repository"
+        for full, shortest, cmds, why in GIT_REFUSED_PREFIX:
+            if cmd in cmds and name.startswith(shortest) and full.startswith(name):
+                return f"{x} is refused: {why}"
     if cmd == "diff":  # a path outside the repository makes git diff compare any two files, as --no-index does
         for x in args[1:]:
             if not x.startswith("-") and (x.startswith(("/", "~")) or ".." in x.split("/")):
@@ -274,10 +279,11 @@ def cmd_git(a):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_PAGER="cat", PAGER="cat", GIT_EDITOR="false", EDITOR="false", VISUAL="false",
                GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="false", SSH_ASKPASS="false")
-    # the repository's own config may still name programs to run: an fsmonitor, diff.external, textconv drivers
+    # the repository's own config may still name programs to run: an fsmonitor, diff.external, textconv drivers,
+    # gpg for signatures; a filter driver it names still runs, as the desk's account
     args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *args[1:]]
-    r = subprocess.run(["git", "--no-pager", "-c", "core.fsmonitor=false", *args], cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True, errors="replace")
+    r = subprocess.run(["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", *args],
+                       cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
     sys.stderr.write(desk.redact(r.stderr))
     if r.returncode:
@@ -1164,6 +1170,9 @@ def main(argv=None):
                                                       "earlier attempt's last commit")
     p = add("git", cmd_git, "run a git command that reads (log, show, diff, grep ...) in a lane's repository, or "
             "with --worktree in its worktree, as the desk's account")
+    p.description += (". It refuses git commands and options that write, run a program named on the command line, or "
+                      "read outside the repository. It runs as the desk's account, so a program the repository's own "
+                      "settings name (a filter driver, say) runs as that account, not as root")
     p.add_argument("--worktree", action="store_true", help="the lane's worktree instead of its repository")
     p.add_argument("lane")
     p.add_argument("args", nargs=argparse.REMAINDER, metavar="git-args")
