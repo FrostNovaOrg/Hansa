@@ -398,11 +398,13 @@ def cmd_web(a):
         raise SystemExit("bh: the web page is for the principal; agents use the other commands")
     desk = Desk.find(a.desk)
     print(f"Open http://127.0.0.1:{a.port}/?t={desk.web_token()}", flush=True)
-    print("Keep this window open while you use the page; press Ctrl+C to close it.", flush=True)
+    print("Keep this window open while you use the page; close it or press Ctrl+C when you are done.", flush=True)
+    # This holds an ssh tunnel to the page open. Its input ends when the connection does (a closed
+    # window, a laptop gone to sleep), and then it ends too instead of staying on the server.
     try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
+        while os.read(0, 4096):
+            pass
+    except (KeyboardInterrupt, OSError):
         pass
 
 

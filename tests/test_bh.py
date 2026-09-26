@@ -425,6 +425,22 @@ class DeskTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("another bh serve", r.stdout + r.stderr)
 
+    def test_the_web_command_ends_when_its_connection_does(self):
+        # run over ssh to keep a tunnel to the page open; a closed window or a laptop gone to sleep
+        # must not leave it running on the server
+        env = {k: v for k, v in os.environ.items() if k not in ("BH_ROLE", "BH_TASK")}
+        p = subprocess.Popen([str(Path(__file__).resolve().parent.parent / "bin" / "bh"), "--desk", str(self.desk.root),
+                              "web"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        self.addCleanup(p.stdout.close)
+        self.assertIn("/?t=", p.stdout.readline().decode())
+        p.stdin.close()  # what sshd does when the connection closes
+        try:
+            code = p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.fail("bh web kept running after its connection closed")
+        self.assertEqual(code, 0)
+
     def test_a_task_cancelled_while_bh_prepares_it_never_runs(self):
         import bh.run as run
         seen = self.tmp / "argv.jsonl"
