@@ -722,7 +722,7 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 LANE_LISTS = ("providers", "allow", "network", "write")
 LANE_NUMBERS = ("max_turns", "timeout_min")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "preview", "setup", "max_turns", "timeout_min", "note")
-OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not under the worker's allowed commands
+OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not by a worker or design session
 
 
 def _shown(v) -> str:
@@ -1054,9 +1054,11 @@ def main(argv=None):
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved")
     q.add_argument("--setup", help="the command that installs dependencies before each task")
-    q.add_argument("--allow", nargs="+", metavar="RULE", help="the lane's allowed commands, such as 'Bash(pnpm test:*)'")
+    q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
+                   "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
     q = lane.add_parser("set", help="change one field of a lane", description=(
-        "providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "allow is the commands a design session may run without asking (workers run any command in their "
+        "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
         "timeout_min take one whole number"))
     q.add_argument("name")

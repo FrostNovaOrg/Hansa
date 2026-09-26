@@ -53,17 +53,18 @@ Say what to change, where, and how the worker can check it (a command, a file to
 look at). Keep one task to one goal, say what done looks like and what to report,
 and size it so one worker can finish it in one go; split anything bigger. Ask
 only for what the goal needs: each extra demand (a close-up screenshot of every
-finding, say) costs turns. If the lane lacks a command the check needs,
-`hansa explain lane L` shows what is allowed; add it with
-`hansa lane set L allow ...`, giving the whole new list.
+finding, say) costs turns. A worker needs no allowed commands: it may run any
+command inside its sandbox. What a check needs from outside it is a host on the
+lane's network list or a folder on its write list (`hansa explain lane L` shows both).
 If a task has to look at web pages, add `--browser`: that task's worker, and no
 other, gets a browser with no saved logins. It reads page text directly; charts,
 images and drawings it can only see in screenshots, which hansa keeps with the task.
 The page must be reachable from this machine. If the principal has not set up a
 browser, hansa says so and queues nothing.
 Workers run in Claude Code's sandbox, which the operating system enforces. Inside
-it a worker may run any command, but it changes files only in its worktree (and
-its temporary folder and the lane's write list), cannot read the desk's keys and
+it a worker may run any command, but it changes files only in its worktree, its
+own temporary folder (made for each run and removed when it ends) and the lane's
+write list; it cannot read the desk's keys and
 state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
@@ -78,9 +79,11 @@ queue it after that merge.
 
 ## Reading the result
 `hansa show <id>` gives the worker's report plus facts hansa recorded itself: changed
-files, commits, the lane's check result, commands the lane refused, tokens. A
-refused command means the worker could not do something; decide whether the
-task needs it (then add it with `hansa lane set L allow ...`) or should be rewritten.
+files, commits, the lane's check result, calls the worker had no permission for
+(with the reason Claude Code gave, when it is known), tokens. Such a call means the
+worker could not do something: git history is hansa's, and the desk's keys and
+state stay closed; decide whether the task should be rewritten. A lane's allowed
+commands do not change what a worker may do; they matter only to design sessions.
 A command the worker says was refused, or a network call that failed, is usually
 the sandbox doing its job: fix it in the task (ask for less, or leave the
 download to the setup) or in the lane, never by switching the sandbox off. A failed check shows its last
@@ -216,13 +219,13 @@ here; work that needs code changed or a browser goes to a worker.
   `hansa diff` and `hansa show`, or with `runuser -u ACCOUNT -- git -C REPO ...`,
   never by telling git to trust them.
 - Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
-  (which lanes there are, each one's provider order, allowed commands,
-  environment, check, the command that starts the app for design sessions
+  (which lanes there are, each one's provider order, allowed commands (for
+  design sessions only), environment, check, the command that starts the app for design sessions
   (preview), the one that installs dependencies before each task (setup), and
   its limits of turns and minutes) and how many tasks run at once. hansa checks
   each change as it checks the principal's; a change it refuses changes nothing.
 - A lane's setup, check and preview run outside the worker: hansa runs them
-  itself, and the lane's allowed commands do not hold them back. The setup and
+  itself, not a worker's or a design session's rules. The setup and
   check run in the lane's sandbox (its network and write lists apply); the
   preview does not. So each change to them is recorded, and you tell the
   principal in the conversation what you changed and why.

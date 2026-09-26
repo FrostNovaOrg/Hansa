@@ -341,10 +341,13 @@ def show_text(desk: Desk, tid: str) -> str:
         out += [f"setup (the lane's command that installs dependencies) failed with exit {m['setup_exit']}; "
                 "its last lines:"] + ["  " + plain(x) for x in tail]
     if m.get("denials"):
-        out.append(f"refused by the lane's allowed commands ({len(m['denials'])}):")
-        for x in m["denials"][:8]:
+        out.append(f"calls the worker had no permission for ({len(m['denials'])}):")
+        reasons = m.get("denial_reasons") or []
+        for i, x in enumerate(m["denials"][:8]):
             first, *more = x.splitlines() or [""]
-            out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else ""))
+            why = reasons[i] if i < len(reasons) else ""
+            out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else "")
+                       + (f"; Claude Code said: {plain(why)[:200]}" if why else ""))
     if m.get("left_running"):
         out.append(f"left running, stopped by hansa when the task ended ({len(m['left_running'])}):")
         out += [f"  pid {x['pid']}: {x['command']}" for x in m["left_running"]]
@@ -465,16 +468,16 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",
-            "    any command, but it changes files only in the lane's worktree (and its temporary folder and the"
-            " folders listed below);"
+            "    any command inside the sandbox, but it changes files only in the lane's worktree, its own"
+            " temporary folder (made for each run and removed when it ends) and the folders listed below;"
             " it cannot read the desk's keys and state or common credential files (.ssh, .aws, .netrc and the"
             " like); it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
             " reset, branch and the like), which commits its changes",
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "  folders a worker may also write (a build or test tool's cache): "
             + (", ".join(ln.get("write", [])) or "none"),
-            "  allowed commands (a worker in the sandbox needs none; a design session runs outside the sandbox"
-            " and may run these plus its own git add, commit and merge):"
+            "  allowed commands (for design sessions only, which run outside the sandbox and may run these plus"
+            " their own git add, commit and merge; workers run any command in theirs):"
             + ("" if ln.get("allow") else " none"),
             *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
