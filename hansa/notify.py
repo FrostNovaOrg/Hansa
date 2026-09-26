@@ -706,7 +706,8 @@ def idle_reading(pid: int) -> tuple:
 
 class DailyClear:
     """A follower's daily /clear of its session. Its record (rec) goes into the register, for hansa notify:
-    window, pane, off (why it cannot be done), day, state (cleared / unconfirmed / left), at, held (the last reason)."""
+    window, pane, off (why it cannot be done), day, state (cleared / unconfirmed / left), at, held (the last reason),
+    left (what hansa met when it typed /clear and left it)."""
 
     def __init__(self, window: str, pid: int, rec=None):
         self.window, self.pid = window, pid
@@ -738,7 +739,7 @@ class DailyClear:
             self.idle_since = None
             return
         if self.rec.get("day") != day:
-            self.rec.update(day=day, state=None, at=None, held=None, held_at=None)
+            self.rec.update(day=day, state=None, at=None, held=None, held_at=None, left=None)
         if self.rec.get("state"):  # done today
             return
         why = self.why_not(t, last_post, pending)
@@ -780,6 +781,12 @@ class DailyClear:
             return "there are words in the input box"
         return ""
 
+    def left(self, what: str) -> None:
+        """/clear was typed, or may have been, and what became of it is not known: nothing more is typed today."""
+        self.rec.update(state="left", at=now(), held=None, left=what)
+        _say(f"daily clear: typed /clear, but then {what}; no Enter, nothing taken back, and no other try today: "
+             "/clear may be left in the box")
+
     def clear(self) -> None:
         """Type /clear; press Enter only when the box then reads exactly that and the session is still idle."""
         pane = self.rec["pane"]
@@ -792,23 +799,18 @@ class DailyClear:
                 if box is not None:
                     break
             if box is None:  # what hansa typed may be there still; not typed again today
-                self.rec.update(state="left", at=now(), held=None)
-                _say("daily clear: typed /clear, but then the input box could not be read; no Enter, nothing taken "
-                     "back, and no other try today: /clear may be left in the box")
-                return
+                return self.left("the input box could not be read")
             ok, said = idle_reading(self.pid)
             if box.rstrip(" ") != "/clear" or not ok:
-                back = box.rstrip(" ").endswith("/clear")
-                if back:  # take back what hansa typed; whatever else is there stays as it was
-                    tmux("send-keys", "-t", pane, *["BSpace"] * 6)
+                if not box.rstrip(" ").endswith("/clear"):  # where its /clear went is not known: left as it is
+                    return self.left(f"the box read {box!r}")
+                tmux("send-keys", "-t", pane, *["BSpace"] * 6)  # take it back; whatever else is there stays
                 self.hold(f"after /clear was typed the box read {box!r} and the session "
-                          f"{'was idle' if ok else 'was not idle: ' + said}; no Enter"
-                          + ("; the /clear was taken back" if back else ""))
+                          f"{'was idle' if ok else 'was not idle: ' + said}; no Enter; the /clear was taken back")
                 return
             tmux("send-keys", "-t", pane, "Enter")
         except RuntimeError as e:
-            self.hold(f"tmux failed while typing ({e})")
-            return
+            return self.left(f"tmux failed ({e})")
         end, sid = time.time() + CLEARED_WAIT, ""
         while time.time() < end:
             time.sleep(0.5)
@@ -843,7 +845,8 @@ def clear_text(c, t: float = 0) -> str:
     if mine.get("state") == "cleared":
         today = f"cleared at {hm}"
     elif mine.get("state") == "left":
-        today = f"/clear typed at {hm}, but the box could not be read after it: /clear may be left in the box"
+        today = (f"/clear typed at {hm}, but then {mine.get('left') or 'the input box could not be read'}: "
+                 "/clear may be left in the box")
     elif mine.get("state"):
         today = f"Enter pressed at {hm}, but no new session was seen"
     elif inside:

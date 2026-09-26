@@ -538,7 +538,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "pane. Off by default; it needs the session to run in tmux. It types only when claude agents --json "
             "shows the session idle on two readings a minute apart, hansa posted nothing to it for 5 minutes, no "
             "key was pressed in a terminal on that tmux session for 90 s, and the input box is empty; it presses "
-            "Enter only when the box then reads exactly /clear, and otherwise takes its /clear back. Anything it "
+            "Enter only when the box then reads exactly /clear. Otherwise it sends six backspaces only when the "
+            "box ends in /clear, and tries again later; when the box cannot be read, holds something else, or "
+            "tmux fails, it leaves the box as it is and counts today as tried. Anything it "
             "cannot read counts as busy. A session started with hansa coordinator then reads hansa status by "
             "itself. hansa notify shows the window and today's state; the follower's log has each reason it held.",
             "  now: " + (", ".join(who) if who else "no session")])
