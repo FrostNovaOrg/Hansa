@@ -582,7 +582,9 @@ class DeskTest(unittest.TestCase):
         prob = provider_problem(self.desk, self.desk.settings(), "mimo")
         self.assertIn("not logged in (Please run /login)", prob)
         self.assertIn("hansa check mimo", prob)
-        self.assertNotIn("saving a new key", prob)
+        self.assertIn("saving a new key", prob)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", prob)
+        self.assertNotIn("log in", prob)
         self.assertIn("hansa check mimo", views.explain_text(self.desk, "provider", "mimo"))
 
         def answer(argv, **kwargs):  # logged in now
@@ -605,6 +607,14 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(prob.startswith("not logged in (Please run /login); log in with"), prob)
         shown = {p["name"]: p["problem"] for p in views.status(self.desk)["providers"]}
         self.assertEqual(shown["claude"], prob)
+        self.assertIn("hansa check claude", prob)
+        self.assertIn("log in with `claude`", prob)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", prob)
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.desk.root / "claude-home")
+        self.assertEqual(self.desk.save_settings(s), [])
+        prob = provider_problem(self.desk, self.desk.settings(), "claude")
+        self.assertIn(f"CLAUDE_CONFIG_DIR={self.desk.root / 'claude-home'} claude", prob)
         self.assertIn("hansa check claude", prob)
         self.assertEqual(run.unusable_reason({"is_error": True, "result": "Invalid API key · Please run /login"}, "")[0],
                          "key")
