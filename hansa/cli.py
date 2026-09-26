@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, build, cost, views
+from . import account, build, cost, notify, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
@@ -114,7 +114,8 @@ def cmd_add(a):
     if a.browser and not s.get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
-                        title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None)
+                        title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None,
+                        **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until it is added: hansa lane add {a.lane} --repo PATH")
     if a.model:
@@ -137,7 +138,7 @@ def cmd_design(a):
             raise SystemExit(f"hansa: lane {lane} already has design session {open_[0]} open; one at a time per lane "
                              f"(hansa show {open_[0]})")
         tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "",
-                            browser=bool(s.get("browser")) or None)
+                            browser=bool(s.get("browser")) or None, **notify.recorded(notify.session_here()))
     print(f"{tid} queued: hansa opens the design session in seconds and asks the principal to join it. "
           f"It comes back for review when they are done: hansa wait {tid}")
 
@@ -165,13 +166,14 @@ def cmd_merge(a):
                          "it; choose one. Nothing was merged")
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
+        sess = notify.recorded(notify.session_here())  # the session that hears how a merge check ends
         tip = git("rev-parse", base, cwd=repo)
         if a.recheck:
             if not lane.get("check"):
                 raise SystemExit(f"hansa: lane {m['lane']} has no check to run again; nothing was merged")
             by = os.environ.get("HANSA_ROLE", "cli")
             desk.update(a.id, state="merging", merge_check_result=None,
-                        merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by})
+                        merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by}, **sess)
             desk.event("check_rerun_queued", task=a.id, onto=tip, by=by)
             print(f"{a.id} is not merged yet: hansa runs the lane's check again. It merges {a.id} onto {base} as it is "
                   f"now in lane {m['lane']}'s worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check "
@@ -182,7 +184,7 @@ def cmd_merge(a):
         unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
         if unchecked and not a.despite_check:
             desk.update(a.id, state="merging", merge_check={"phase": "queued", "queued": now(), "moves": 0},
-                        merge_check_result=None)
+                        merge_check_result=None, **sess)
             behind = git("rev-list", "--count", f"{m['head']}..{tip}", cwd=repo)
             desk.event("merge_check_queued", task=a.id, onto=tip)
             print(f"{a.id} is not merged yet: {base} has {behind} commit(s) that {a.id}'s branch does not, so the two "
@@ -301,7 +303,8 @@ def _retry(desk: Desk, a) -> None:
     if a.browser and not desk.settings().get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
-            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser")}
+            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser"),
+            **notify.recorded(notify.session_here())}
     base = (desk.settings()["lanes"].get(m.get("lane")) or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
         opts.update(start_from=m["head"], update=True)
@@ -376,15 +379,16 @@ def _verify(desk: Desk, a) -> None:
     task = (d / "task.md").read_text(encoding="utf-8").strip()
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
     note = " ".join(a.note).strip()
+    sess = notify.session_here()
     text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12])
             + (f"\nLook in particular at: {note}\n" if note else "")
             + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
     vid = desk.new_task(text, kind="verify", parent=a.id, lane=m.get("lane", ""), effort=a.effort or "",
                         start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
-                        browser=a.browser or m.get("browser"))
+                        browser=a.browser or m.get("browser"), **notify.recorded(sess))
     if v:
         close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
-    desk.update(a.id, verify=vid)
+    desk.update(a.id, verify=vid, **notify.recorded(sess))
     print(f"{vid} queued: a worker will run {a.id}'s change to see whether it holds. "
           f"Follow it with: hansa wait {vid}; the verdict shows in hansa show {a.id}")
 
@@ -442,8 +446,24 @@ def cmd_wait(a):
 
 
 def cmd_ask(a):
-    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
+    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
+                                  session=notify.session_here())
     print(f"ask #{n} is on the principal's page")
+
+
+def cmd_notify(a):
+    desk = Desk.find(a.desk)
+    print(notify.turn_on(desk) if a.action == "on" else notify.turn_off(desk) if a.action == "off"
+          else notify.list_text(desk))
+
+
+def cmd_notify_follow(a):
+    raise SystemExit(notify.follow(Desk.find(a.desk), a.key, {"pid": a.pid, "start": a.start}, a.socket, a.nonce,
+                                   a.name))
+
+
+def cmd_notify_feed(a):
+    notify.cmd_feed(Desk.find(a.desk))
 
 
 def cmd_explain(a):
@@ -585,8 +605,27 @@ def cmd_coordinator(a):
         argv += ["--effort", effort]
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": permissions(desk)})]
+    argv += _notified(desk, a.rest)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + a.rest, env)
+
+
+def _notified(desk: Desk, rest: list) -> list:
+    """Start the follower that posts to the session this process becomes (its pid stays when it execs Claude
+    Code), at an inbox path it knows: claude's options for that path. Nothing when it cannot; the session can
+    try again with hansa notify on."""
+    given = next((rest[i + 1] if x == "--messaging-socket-path" and i + 1 < len(rest) else x.partition("=")[2]
+                  for i, x in enumerate(rest) if x == "--messaging-socket-path"
+                  or x.startswith("--messaging-socket-path=")), "")
+    try:
+        sock = given or notify.socket_path(os.getpid())
+        notify.start(desk, {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}, sock, "coordinator",
+                     wait=False)
+    except (OSError, RuntimeError) as e:
+        print(f"hansa: this session will not hear from hansa by itself ({e}); run hansa wait in the background, "
+              f"or hansa notify on from the session", file=sys.stderr)
+        return []
+    return [] if given else ["--messaging-socket-path", sock]
 
 
 def coordinator_desk(desk: Desk, by: int) -> dict:
@@ -933,14 +972,19 @@ def main(argv=None):
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")
     add("resume", cmd_resume, "let new tasks start again")
-    p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the background")
+    p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
+            "Code session this is run from")
+    p.add_argument("action", nargs="?", choices=["on", "off"])
+    p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
+            "background when hansa does not notify the session (hansa notify)")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
     p = add("ask", cmd_ask, "put a request on the principal's page")
     p.add_argument("text", nargs="+")
-    p = add("explain", cmd_explain, "what a setting or state means: lane NAME | provider NAME | task ID | states | server")
-    p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server"])
+    p = add("explain", cmd_explain, "what a setting or state means: lane NAME | provider NAME | task ID | states | server "
+            "| notify")
+    p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server", "notify"])
     p.add_argument("name", nargs="?")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
     lane = p.add_subparsers(dest="action", metavar="add | set | brief | remove | try")
@@ -991,6 +1035,15 @@ def main(argv=None):
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--by", type=int, required=True)
+    p = sub.add_parser("notify-follow")  # hidden: a follower (hansa/notify.py), started detached
+    p.set_defaults(fn=cmd_notify_follow)
+    for opt in ("--key", "--socket", "--nonce"):
+        p.add_argument(opt, required=True)
+    p.add_argument("--pid", type=int, required=True)
+    p.add_argument("--start", default="")
+    p.add_argument("--name", default="")
+    p = sub.add_parser("notify-feed")  # hidden: a follower's request to the desk, as the desk's owner
+    p.set_defaults(fn=cmd_notify_feed)
 
     argv, rest = _split_claude_args(sys.argv[1:] if argv is None else list(argv))
     a, extra = ap.parse_known_args(argv)
@@ -1005,7 +1058,8 @@ def main(argv=None):
         return 0
     if a.cmd == "add" and not a.text and not a.file:
         ap.error("add needs the task text or --file")
-    if a.cmd not in ("coordinator", "init"):
+    # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow"):
         _as_desk_account(a, argv)
     a.fn(a)
     return 0

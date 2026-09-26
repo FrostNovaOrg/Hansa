@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import stat
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hansa import account, cost, views  # noqa: E402
+from hansa import account, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, public_settings, validate  # noqa: E402
 from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
@@ -181,6 +182,12 @@ class DeskTest(unittest.TestCase):
         path = unittest.mock.patch.dict(os.environ, {"PATH": f"{self.tmp / 'bin'}{os.pathsep}{os.environ['PATH']}"})
         path.start()
         self.addCleanup(path.stop)
+        # not the Claude Code session the tests may run in: a stand-in (self.session) plays one where needed,
+        # and what hansa would post to an inbox is caught in a file (self.posts)
+        for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "HANSA_TASK"):
+            os.environ.pop(k, None)
+        os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
+                          HANSA_NOTIFY_GATHER="0.5")
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
 
     def srt_calls(self, tries=False) -> list:
@@ -1413,6 +1420,190 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "wait"])
         self.assertIn("nothing to wait for", out.getvalue())
 
+    # -- hansa posts to a coordinator's session (hansa/notify.py) ------------------------------------------
+    def session(self):
+        """A stand-in for a Claude Code session: a process that runs until it is stopped, and its inbox path."""
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p, str(self.tmp / f"inbox-{p.pid}.sock")
+
+    def in_session(self, p, sock):
+        """Commands run from that session, as its Bash tool runs them."""
+        return unittest.mock.patch.dict(os.environ, {"CLAUDE_PID": str(p.pid), "CLAUDE_CODE_MESSAGING_SOCKET": sock})
+
+    def hansa_out(self, *args) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), *args])
+        return out.getvalue()
+
+    def posts(self, sock) -> list:
+        """What hansa posted to this inbox, each message's text."""
+        f = self.tmp / "posted.jsonl"
+        rows = [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+        for r in rows:  # each is one line of JSON, as the inbox takes it
+            self.assertTrue(r["line"].endswith("\n") and r["line"].count("\n") == 1, r["line"])
+        return [json.loads(r["line"])["message"]["content"] for r in rows if r["socket"] == sock]
+
+    def soon(self, what, timeout=20):
+        end = time.time() + timeout
+        while time.time() < end:
+            got = what()
+            if got:
+                return got
+            time.sleep(0.1)
+        self.fail(f"not within {timeout} s: {what()!r}")
+
+    def test_a_task_that_ends_after_its_check_is_posted_once_to_its_session(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "true"
+        self.assertEqual(self.desk.save_settings(s), [])
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.assertIn("now posts to this session", self.hansa_out("notify", "on"))
+            self.hansa_out("add", "Add hello.txt")
+        self.assertEqual(self.desk.meta("t0001")["session"]["pid"], p.pid)
+        m = self.settle(Dispatcher(self.desk), "t0001")
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True))
+        first = self.soon(lambda: self.posts(sock))
+        time.sleep(1.5)  # nothing more comes: not when the worker ended, before the check
+        self.assertEqual(self.posts(sock), first)
+        self.assertEqual(len(first), 1, first)
+        self.assertTrue(first[0].startswith(f"[hansa] desk {self.desk.root}\n"), first[0])
+        self.assertIn("- t0001 done: Add hello.txt (check passed) · next: hansa show t0001 · hansa diff t0001 --stat, "
+                      "then hansa verify t0001", first[0])
+        self.assertIn(f"since {time.strftime('%m-%d')}", self.hansa_out("notify"))
+        self.assertIn("last post: ", self.hansa_out("notify"))
+        self.assertIn("t0001 done", self.hansa_out("notify"))
+        self.assertIn(f"hansa posts to: session (pid {p.pid})", self.hansa_out("status"))
+
+    def test_two_sessions_each_hear_their_own_tasks_and_both_hear_one_from_a_shell(self):
+        (a, sa), (b, sb) = self.session(), self.session()
+        for p, sock in ((a, sa), (b, sb)):
+            with self.in_session(p, sock):
+                self.hansa_out("notify", "on")
+        with self.in_session(a, sa):
+            self.hansa_out("add", "Task of a")
+        with self.in_session(b, sb):
+            self.hansa_out("add", "Task of b")
+        self.hansa_out("add", "Task from a shell")  # no session: nobody's own
+        d = Dispatcher(self.desk)
+        for tid in ("t0001", "t0002", "t0003"):
+            self.settle(d, tid)
+        heard_a = self.soon(lambda: "t0003 done" in "".join(self.posts(sa)) and "t0001 done" in "".join(self.posts(sa))
+                            and "".join(self.posts(sa)))
+        heard_b = self.soon(lambda: "t0003 done" in "".join(self.posts(sb)) and "t0002 done" in "".join(self.posts(sb))
+                            and "".join(self.posts(sb)))
+        time.sleep(1)
+        self.assertNotIn("t0002", "".join(self.posts(sa)), heard_a)
+        self.assertNotIn("t0001", "".join(self.posts(sb)), heard_b)
+        self.assertEqual(sorted(r["session"]["pid"] for r in notify.live_records(self.desk)), sorted([a.pid, b.pid]))
+        self.assertIn("hansa notifies 2 session(s)", self.hansa_out("notify"))
+
+    def test_a_follower_ends_with_its_session_and_the_next_one_first_says_what_was_missed(self):
+        a, sa = self.session()
+        with self.in_session(a, sa):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        a.kill()
+        a.wait()
+        self.soon(lambda: all(r.get("ended") for r in notify.records(self.desk)))  # it ended with the session
+        self.assertIsNone(notify.running(self.desk, notify.key_of({"pid": a.pid, "start": notify.proc_start(a.pid)})))
+        self.assertEqual(notify.live_records(self.desk), [])
+        self.hansa_out("add", "Added while nobody listened")
+        self.assertEqual(self.settle(Dispatcher(self.desk), "t0001")["state"], "done")
+        with self.in_session(a, sa):
+            self.assertIn("does not notify this session", self.hansa_out("notify", "off"))
+        b, sb = self.session()
+        with self.in_session(b, sb):
+            self.hansa_out("notify", "on")
+        first = self.soon(lambda: self.posts(sb))
+        self.assertEqual(len(first), 1, first)
+        self.assertIn("what changed meanwhile, as it is now", first[0])
+        self.assertIn("- t0001 done: Added while nobody listened", first[0])
+        self.hansa_out("add", "Added after")  # then it carries on from the end of the log
+        self.settle(Dispatcher(self.desk), "t0002")
+        later = self.soon(lambda: self.posts(sb)[1:])
+        self.assertIn("- t0002 done: Added after", later[0])
+        self.assertNotIn("t0001", later[0])
+        self.assertEqual(self.posts(sa), [])
+
+    def test_notify_on_twice_from_one_session_starts_one_follower(self):
+        with self.assertRaises(SystemExit) as e:  # not from a Claude Code session: it says why, starts nothing
+            main(["--desk", str(self.desk.root), "notify", "on"])
+        self.assertIn("not run from one", str(e.exception.code))
+        p, sock = self.session()
+        hansa = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        env = {**os.environ, "CLAUDE_PID": str(p.pid), "CLAUDE_CODE_MESSAGING_SOCKET": sock}
+        # it returns at once: the follower keeps none of the caller's files, so its output pipe closes
+        r = subprocess.run([hansa, "--desk", str(self.desk.root), "notify", "on"], capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("now posts to this session", r.stdout)
+        with self.in_session(p, sock):
+            self.assertIn("already notifies this session", self.hansa_out("notify", "on"))
+        live = self.soon(lambda: notify.live_records(self.desk))
+        self.assertEqual([x["session"]["pid"] for x in live], [p.pid])
+        follower = notify.running(self.desk, live[0]["key"])
+        with self.in_session(p, sock):
+            self.assertIn("no longer posts", self.hansa_out("notify", "off"))
+            self.assertIn("does not notify this session", self.hansa_out("notify", "off"))
+        self.assertFalse(notify.alive(follower["pid"], follower["start"]))
+        self.assertEqual(notify.live_records(self.desk), [])
+        self.assertIn("notifies no session", self.hansa_out("notify"))
+
+    def test_a_request_answered_on_the_page_reaches_the_session_that_asked_with_the_answer(self):
+        (a, sa), (b, sb) = self.session(), self.session()
+        for p, sock in ((a, sa), (b, sb)):
+            with self.in_session(p, sock):
+                self.hansa_out("notify", "on")
+        with self.in_session(a, sa):
+            self.hansa_out("ask", "May the docs lane use the npm registry?")
+        self.assertEqual(self.desk.asks()[0]["session"]["pid"], a.pid)
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/ask/close?t="
+                                         f"{self.desk.web_token()}", method="POST", headers={"X-Hansa": "1"},
+                                         data=json.dumps({"id": 1, "answer": "Yes; its key is sk-mimo-12345678"}).encode())
+            with urllib.request.urlopen(req) as r:
+                self.assertTrue(json.load(r)["ok"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        heard = self.soon(lambda: self.posts(sa))
+        self.assertIn("- request #1 answered: Yes; its key is [key of mimo] (you asked: May the docs lane use the npm "
+                      "registry?)", heard[0])
+        self.assertNotIn("sk-mimo-12345678", heard[0])
+        time.sleep(1)
+        self.assertEqual(self.posts(sb), [])
+
+    def test_a_post_reaches_a_real_inbox(self):
+        path = str(self.tmp / "inbox.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(srv.close)
+        try:
+            srv.bind(path)
+        except OSError as e:
+            self.skipTest(f"cannot make a Unix socket here ({e}; a sandbox refuses to)")
+        srv.listen(1)
+        srv.settimeout(10)
+        os.environ.pop("HANSA_NOTIFY_CAPTURE")
+        notify.post(path, "[hansa] desk /d\n- t0001 done")
+        conn, _ = srv.accept()
+        with conn:
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        self.assertEqual(json.loads(data), {"type": "user", "message": {"role": "user",
+                                                                        "content": "[hansa] desk /d\n- t0001 done"}})
+        with self.assertRaises(OSError):  # no inbox there (yet): the follower tries again for a minute
+            notify.post(str(self.tmp / "none.sock"), "x")
+
     def test_coordinator_passes_its_options_to_claude(self):
         echo = self.tmp / "echo-claude"
         echo.write_text("#!/bin/sh\necho \"$@\"\n")
@@ -1474,6 +1665,27 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"Read(//{root}/.hansa/**)", s["permissions"]["deny"])
         self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
         self.assertEqual(len(list(self.desk.state_dir.glob("coordinator-settings.json.*"))), 1)  # the old one, kept once
+
+    def test_the_coordinator_session_gets_a_follower_at_an_inbox_path_hansa_chose(self):
+        echo = self.tmp / "echo-claude"  # the session: its pid (hansa's own, which it became) and its options
+        echo.write_text("#!/bin/sh\necho \"$$ $@\"\nsleep 2\n")
+        echo.chmod(0o755)
+        start = [str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root), "coordinator"]
+        r = subprocess.run(start, capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)},
+                           timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pid, *argv = r.stdout.split()
+        sock = argv[argv.index("--messaging-socket-path") + 1]
+        self.assertLess(len(sock.encode()), 104)
+        self.assertEqual(Path(sock).name, f"c{pid}.sock")
+        self.assertEqual(stat.S_IMODE(os.stat(Path(sock).parent).st_mode), 0o700)  # only this account opens it
+        rec = self.soon(lambda: [x for x in notify.records(self.desk) if x["session"]["pid"] == int(pid)])
+        self.assertEqual((rec[0]["socket"], rec[0]["name"]), (sock, "coordinator"))
+        self.soon(lambda: all(x.get("ended") for x in notify.records(self.desk)))  # it ended with the session
+        r = subprocess.run(start + ["--messaging-socket-path", str(self.tmp / "mine.sock")], capture_output=True,
+                           text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)}, timeout=30)
+        self.assertEqual(r.stdout.split().count("--messaging-socket-path"), 1)  # the path given is the one followed
+        self.soon(lambda: [x for x in notify.records(self.desk) if x["socket"] == str(self.tmp / "mine.sock")])
 
     # -- a Linux server: the desk belongs to an account, the coordinator is root ---------------------
     # Tests cannot run as root, so the lookups that decide it are replaced: hansa "runs as root" on
@@ -1565,9 +1777,26 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(account.os, "execve", side_effect=AssertionError("it switched")), \
                 unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv, env=e)), \
                 unittest.mock.patch("os.chown", side_effect=AssertionError("root changed an owner")), \
-                unittest.mock.patch.dict(os.environ, env), unittest.mock.patch("os.chdir"):
+                unittest.mock.patch.dict(os.environ, env), unittest.mock.patch("os.chdir"), \
+                unittest.mock.patch("hansa.notify.start", lambda *x, **k: started.update(follower=x)):
             main(["--desk", str(self.desk.root), "coordinator"])
         return started
+
+    def test_roots_follower_reads_the_desk_through_the_account_and_keeps_its_own_files_at_home(self):
+        self.as_root()
+        log, _ = self.stand_in_runuser()
+        started = self.coordinator_as_root({})
+        _, sess, sock, name = started["follower"]
+        self.assertEqual((sess["pid"], name), (os.getpid(), "coordinator"))  # root's session, which this process becomes
+        self.assertEqual(started["argv"][started["argv"].index("--messaging-socket-path") + 1], sock)
+        with unittest.mock.patch.object(notify.Path, "home", lambda: self.tmp / "root-home"):
+            self.assertTrue(str(notify.private_dir(self.desk)).startswith(str(self.tmp / "root-home")))
+        ask = notify.source(self.desk)
+        me = {"key": notify.key_of(sess), "session": sess, "socket": sock, "uid": 0}
+        self.assertEqual(ask({"op": "start", "me": me})["summary"], [])
+        self.assertIn("notify-feed", json.loads(log.read_text().splitlines()[-1]))  # the account's hansa did it
+        self.assertEqual([x["key"] for x in notify.live_records(self.desk)], [me["key"]])
+        self.assertEqual(ask({"op": "feed", "me": me, "pos": 0, "done": 0})["items"], [])
 
     def test_the_coordinator_stays_root_leaves_the_desk_to_the_account_and_uses_roots_claude_folder(self):
         self.as_root()

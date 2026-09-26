@@ -572,12 +572,13 @@ class Desk:
     def asks(self) -> list:
         return read_json(self.asks_path, []) or []
 
-    def add_ask(self, text: str, by: str = "") -> int:
+    def add_ask(self, text: str, by: str = "", session: dict | None = None) -> int:
+        """session: the Claude Code session that asked, which hears the answer (hansa/notify.py)."""
         with self.lock():
             asks = self.asks()
             n = max((a["id"] for a in asks), default=0) + 1
             asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
-                         "answer": ""})
+                         "answer": "", **({"session": session} if session else {})})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)
         return n

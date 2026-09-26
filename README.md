@@ -34,6 +34,11 @@ defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes, their allowed commands and how many tasks run at once with
 `hansa lane` and `hansa concurrency`.
 
+hansa tells the coordinator's session when a task ends or you answer a request,
+through the session's inbox (`hansa notify` shows which sessions it posts to).
+If your Claude Code settings hold messages from other sessions
+(`crossSessionInbound`), the coordinator does not hear it; only you can change that.
+
 The first time Claude Code opens in a new desk, it asks whether you trust the
 folder: choose yes. Claude Code ignores the allowed commands of a folder it does
 not trust, and the coordinator could not run `hansa`. The same question comes up
