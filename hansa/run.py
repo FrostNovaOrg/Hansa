@@ -117,6 +117,8 @@ PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in th
 on branch task/{tid}, which was made for this task.
 - Do not commit: when you end, hansa commits everything you changed here. To look at your
   work, git status, git diff, git log and git show are allowed.
+- If git status lists untracked .bashrc, .gitconfig, .vscode, .mcp.json, .claude/ and the like that
+  you did not make: they are the sandbox's placeholders, never committed; leave them and do not report them.
 - Do not push, do not switch branches, do not touch other directories.
 - To search, run read-only commands such as grep -rn, find and sed -n on paths in this
   directory; they are allowed here.
@@ -133,6 +135,8 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - Change files as your checks need (undo code, add a throwaway test), but do not commit; hansa sets
   your changes aside when you end. For undoing, `git checkout <commit> -- <path>` and
   `git restore` are allowed here.
+- If git status lists untracked .bashrc, .gitconfig, .vscode, .mcp.json, .claude/ and the like that
+  nobody made: they are the sandbox's placeholders, never committed; leave them and do not report them.
 - Do not push, do not switch branches, do not touch other directories.
 - To search, run read-only commands such as grep -rn, find and sed -n on paths in this directory.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
@@ -315,6 +319,11 @@ def try_srt_at_start(desk: Desk) -> dict:
     return srt_record(desk)
 
 
+def srt_when(rec: dict) -> str:
+    """When hansa serve tried srt, as month-day hour:minute; '' when the record has no time."""
+    return time.strftime("%m-%d %H:%M", time.localtime(rec["at"])) if rec.get("at") else ""
+
+
 def srt_needed(s: dict) -> bool:
     """Whether some lane has a setup or check command, which run in srt."""
     return any(ln.get("setup") or ln.get("check") for ln in s["lanes"].values())
@@ -332,10 +341,10 @@ def srt_problem(desk: Desk, s: dict) -> str:
             + SRT_MISSING)
     if rec.get("ran"):
         return ""
-    when = time.strftime("%m-%d %H:%M", time.localtime(rec.get("at") or 0))
+    when = f", {srt_when(rec)}" if srt_when(rec) else ""
     if not rec.get("found"):
-        return f"srt MISSING (as hansa serve saw it, {when}): {SRT_MISSING}"
-    return (f"srt CANNOT RUN (as hansa serve saw it, {when}): it is at {rec.get('path')}, but a sandboxed `true` "
+        return f"srt MISSING (as hansa serve saw it{when}): {SRT_MISSING}"
+    return (f"srt CANNOT RUN (as hansa serve saw it{when}): it is at {rec.get('path')}, but a sandboxed `true` "
             f"failed: {rec.get('said')}. Setups and checks do not run until this is fixed (hansa explain server)")
 
 
@@ -714,6 +723,24 @@ def wgit(desk: Desk, wt: Path, *args) -> str:
     return git(*args, cwd=wt)
 
 
+def sandbox_leftovers(desk: Desk, wt: Path) -> list:
+    """Untracked files a worker's sandbox left under .claude/ in the worktree: its .cc-writes and the empty
+    placeholders for what it protects. Nobody's work, so never committed."""
+    out = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", "--", ".claude")
+    return [f for f in out.split("\0") if f and (Path(f).name == ".cc-writes" or (wt / f).is_file()
+                                                  and not (wt / f).is_symlink() and (wt / f).stat().st_size == 0)]
+
+
+def commit_work(desk: Desk, wt: Path, message: str) -> None:
+    """Commit everything changed in the worktree but what a sandbox left there; nothing when that is all."""
+    left = sandbox_leftovers(desk, wt)  # untracked until the add
+    wgit(desk, wt, "add", "-A")
+    if left:
+        wgit(desk, wt, "rm", "-q", "--cached", "--", *left)
+    if wgit(desk, wt, "diff", "--cached", "--name-only"):
+        wgit(desk, wt, "commit", "-q", "--no-verify", "-m", message)
+
+
 def is_local(host: str) -> bool:
     return host.lower().split(":")[0] in LOCAL_HOSTS
 
@@ -866,6 +893,11 @@ def markers_in_change(cwd, base: str, head: str) -> dict:
         if found:
             out[f] = found
     return out
+
+
+MARKERS_ON_PURPOSE = ("If those lines are there on purpose (a test fixture, say), mark the files with "
+                      "conflict-marker-size in the base's .gitattributes (`path/to/fixture.txt "
+                      "conflict-marker-size=100`), which git's check honours, and merge again.")
 
 
 def markers_text(markers: dict) -> str:
@@ -1445,8 +1477,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
-                wgit(desk, wt, "add", "-A")
-                wgit(desk, wt, "commit", "-q", "--no-verify", "-m", f"{tid}: {meta.get('title') or 'work'}"[:100])
+                commit_work(desk, wt, f"{tid}: {meta.get('title') or 'work'}"[:100])
         head = wgit(desk, wt, "rev-parse", "HEAD")
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
                       files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),

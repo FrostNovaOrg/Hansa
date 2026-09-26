@@ -2,13 +2,14 @@
 Each view returns plain data; the *_text helpers turn it into short lines."""
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
 from . import build, cost
 from .desk import Desk, is_git_rule, read_json
-from .run import (join_command, lane_occupied, markers_text, progress_of, provider_problem, server_up, srt_needed,
-                  srt_problem, srt_record, tried_lanes, waiting_reason)
+from .run import (join_command, lane_occupied, markers_in_change, markers_text, progress_of, provider_problem,
+                  server_up, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -21,6 +22,15 @@ STATES = {
     "cancelled": "stopped or closed on request",
     "replaced": "a follow-up task took its place",
 }
+
+
+# a terminal's escape sequences (colours, cursor moves, titles), which a test runner writes into its output
+ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+
+def plain(line: str, width: int | None = 200) -> str:
+    """A last line of a setup or check as shown: without escape sequences (the stored log keeps them)."""
+    return ESCAPES.sub("", line)[:width]
 
 
 def verification(desk: Desk, m: dict):
@@ -77,6 +87,17 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
                                               if server_up(desk) else "`hansa serve` is not running"))
 
 
+def silent(r: dict) -> bool:
+    """A check or merge check that failed printing nothing, with nothing else said about why."""
+    return bool(r) and not r.get("could_not_run") and not r.get("ok") and not r.get("note") and not r.get("tail")
+
+
+def recheck_step(r: dict, tid: str) -> str:
+    """The --recheck step for a check that did not pass and may be the machine's doing."""
+    return (f"if it should have printed something, once that is fixed: hansa merge {tid} --recheck" if silent(r)
+            else f"once the machine is fixed (hansa explain server): hansa merge {tid} --recheck")
+
+
 def machine_hint(r: dict) -> str:
     """Why a check or merge check that did not pass may be the machine's doing and not the task's; '' when
     nothing says so."""
@@ -85,9 +106,9 @@ def machine_hint(r: dict) -> str:
                 "(hansa explain server)")
     if r.get("ok") or r.get("note"):  # stopped, over the time ceiling, its setup failed: said in the note
         return ""
-    if not r.get("tail"):
-        return ("nothing came out: it printed nothing at all, which usually means the command could not start, "
-                "the machine's problem rather than the task's (hansa explain server)")
+    if silent(r):
+        return ("nothing came out: it printed nothing at all, which usually means the command could not start "
+                "(hansa explain server); a check can also fail silently on purpose (a plain exit 1)")
     if r.get("exit") in (126, 127):
         return (f"exit {r['exit']} usually means a command was not found or could not start, which may be the "
                 f"machine's problem rather than the task's (hansa explain server)")
@@ -110,7 +131,7 @@ def merge_result_lines(m: dict) -> list:
     hint = machine_hint(r)
     return ([f"merge check ({where} and ran the lane's check there): {how}"
              + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
-            + ["  " + x[:200] for x in r.get("tail", [])] + (["  " + hint] if hint else []))
+            + ["  " + plain(x) for x in r.get("tail", [])] + (["  " + hint] if hint else []))
 
 
 def _midnight() -> float:
@@ -150,11 +171,13 @@ def status(desk: Desk) -> dict:
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
                      "checking": m.get("phase") == "checking", "starting": m.get("phase") == "starting",
+                     "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                      "browser": bool(m.get("browser")),
                      "progress": None if m.get("phase") in ("checking", "starting") else progress_of(desk, m)}
                     for m in running],
         "design": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "minutes": _mins(m.get("started")),
                     "join": join_command(m), "checking": m.get("phase") == "checking",
+                    "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
@@ -194,16 +217,18 @@ def status_text(st: dict) -> str:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or ('held by a try (hansa lane try)' if ln.get('trying') else 'free')}")
     if st["running"]:
         out.append("running:")
-        out += [f"  {m['id']} {m['lane']} " + ("worker done, hansa is running the lane's check" if m["checking"]
+        out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
+                                               f"{m['check_minutes']} min so far" if m["checking"]
                                                else "hansa is preparing it" if m.get("starting")
                                                else f"on {m['provider']} ({m['model']})")
-                + (" with a browser" if m["browser"] else "") + f", {m['minutes']} min: {m['title']}"
+                + (" with a browser" if m["browser"] else "")
+                + (f" ({m['minutes']} min in all)" if m["checking"] else f", {m['minutes']} min") + f": {m['title']}"
                 + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["running"]]
     if st.get("design"):
         out.append("design sessions (the principal works in them directly; each comes back for review when they end it):")
         out += [f"  {m['id']} lane {m['lane']}, {m['minutes']} min: {m['title']}"
-                + ("\n      ended; hansa is running the lane's check" if m["checking"] else
+                + (f"\n      ended; hansa is running the lane's check, {m['check_minutes']} min so far" if m["checking"] else
                    f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["design"]]
     if st["queued"]:
@@ -240,8 +265,23 @@ def status_text(st: dict) -> str:
     return "\n".join(out)
 
 
+def markers_of(desk: Desk, m: dict) -> dict:
+    """A finished task's conflict markers: as stored when it ended, or looked for now in a task that ended
+    before hansa looked for them (only what is shown; hansa merge stores what it finds)."""
+    if "markers" in m or m["state"] != "done" or not m.get("commits") or m.get("kind") == "verify":
+        return m.get("markers") or {}
+    ln = desk.settings()["lanes"].get(m.get("lane"))
+    if not ln or not m.get("base") or not m.get("head"):
+        return {}
+    try:
+        return markers_in_change(ln["repo"], m["base"], m["head"])
+    except OSError:  # the repository is not there
+        return {}
+
+
 def show_text(desk: Desk, tid: str) -> str:
     m = desk.meta(tid)
+    m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
     head = f"{tid} · {m['state']} · lane {m.get('lane') or 'any'}"
     if m.get("provider"):
@@ -286,7 +326,7 @@ def show_text(desk: Desk, tid: str) -> str:
     if m.get("setup_exit") is not None and (d / "setup.log").exists():
         tail = (d / "setup.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
         out += [f"setup (the lane's command that installs dependencies) failed with exit {m['setup_exit']}; "
-                "its last lines:"] + ["  " + x[:200] for x in tail]
+                "its last lines:"] + ["  " + plain(x) for x in tail]
     if m.get("denials"):
         out.append(f"refused by the lane's allowed commands ({len(m['denials'])}):")
         for x in m["denials"][:8]:
@@ -304,7 +344,7 @@ def show_text(desk: Desk, tid: str) -> str:
         how = "passed" if chk["ok"] else "FAILED" + (f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})")
         out.append(f"check (run by hansa, not the worker): {how} in {chk['seconds']} s: {chk['command']}")
         if not chk["ok"]:
-            out += ["  " + x[:200] for x in chk["tail"]]
+            out += ["  " + plain(x) for x in chk["tail"]]
             if machine_hint(chk):
                 out.append("  " + machine_hint(chk))
     elif m.get("phase") == "checking":
@@ -337,7 +377,7 @@ def show_text(desk: Desk, tid: str) -> str:
               else f"hansa diff {tid} --stat, then hansa verify {tid} (code or tests) or hansa merge {tid} (text only)")
     nxt = {"done": f"hansa retry {tid} \"what to change\" · hansa cancel {tid} to close it" if not m.get("commits")
            else f"{review} · hansa retry {tid} \"what to change\"" if not chk or chk["ok"]
-           else (f"once the machine is fixed (hansa explain server): hansa merge {tid} --recheck (runs the check "
+           else (f"{recheck_step(chk, tid)} (runs the check "
                  f"again and merges if it passes) · hansa retry {tid} \"make the check pass: ...\" · "
                  f"hansa merge {tid} --despite-check") if machine_hint(chk)
            else f"hansa retry {tid} \"make the check pass: ...\" · hansa diff {tid} · hansa merge {tid} --despite-check",
@@ -353,7 +393,7 @@ def show_text(desk: Desk, tid: str) -> str:
         nxt["done"] = f"wait for the verification: hansa wait {v['task']} (hansa merge {tid} is held until it ends)"
     mr = m.get("merge_check_result") or {}
     if mr and not mr.get("ok") and m["state"] == "done" and machine_hint(mr):
-        nxt["done"] = (f"once the machine is fixed (hansa explain server): hansa merge {tid} --recheck (runs the check "
+        nxt["done"] = (f"{recheck_step(mr, tid)} (runs the check "
                        f"again and merges if it passes) · hansa retry {tid} \"...\" · hansa merge {tid} --despite-check")
     elif mr and not mr.get("ok") and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --update \"make it work with what the base has now: ...\" · "
@@ -445,7 +485,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
     if what == "server":
         rec = srt_record(desk)
         seen = ("hansa serve has not tried srt yet" if not rec else
-                f"hansa serve tried srt at {time.strftime('%m-%d %H:%M', time.localtime(rec.get('at') or 0))}: "
+                "hansa serve tried srt" + (f" at {srt_when(rec)}" if srt_when(rec) else "") + ": "
                 + ("it ran" + (f" ({rec.get('path')})" if rec.get("path") else "") if rec.get("ran") else
                    f"found at {rec.get('path')}, but it could not run: {rec.get('said')}" if rec.get("found")
                    else "not found on its PATH"))
@@ -458,10 +498,12 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "each setup or check, and records what it saw; hansa status reports that record.",
             f"  now: {seen}",
             "When srt cannot run, the setup or check does not run either, and the task is not judged on it: its "
-            "check reads \"could not run\". That is the machine's problem, not the task's. srt must be on the PATH "
-            "hansa serve starts with, and so must node, since srt is a node script (an error such as `env: node: "
-            "No such file or directory`, exit 127, means node is not). Install it with `npm install -g "
-            "@anthropic-ai/sandbox-runtime`, or fix the PATH, then restart hansa serve. Then, for a task whose "
+            "check reads \"could not run\". That is the machine's problem, not the task's. Before each setup or "
+            "check, hansa looks for srt on the lane's own PATH first (a PATH set in the lane's env, else the one "
+            "hansa serve starts with), then on the PATH hansa serve starts with. node must be on the lane's PATH "
+            "too, since srt is a node script (an error such as `env: node: No such file or directory`, exit 127, "
+            "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime`, or fix the PATH "
+            "(the lane's env, or the server's, then restart hansa serve). Then, for a task whose "
             "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the lane's check "
             "again and merges if it passes; a task whose setup could not run: hansa retry ID."])
     return "\n".join([
@@ -490,7 +532,7 @@ def try_text(lane: str, t: dict) -> str:
         how = "interrupted" if x["exit"] is None else f"exit {x['exit']}"
         out.append(f"{step}: {x['command']}\n  {how}" + (f" in {x['seconds']}s" if x["seconds"] is not None else "")
                    + (", last lines:" if x["tail"] else ", no output"))
-        out += [f"    {line}" for line in x["tail"]]
+        out += [f"    {plain(line, None)}" for line in x["tail"]]
     if t.get("clean"):
         out.append("the worktree is back clean at the base's tip, as the lane's next task expects it")
     return "\n".join(out)
