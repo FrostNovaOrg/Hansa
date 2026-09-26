@@ -47,7 +47,7 @@ from pathlib import Path
 
 from . import account
 from .desk import Desk, now, read_json, write_json
-from .run import alive, claude_bin, proc_start, server_up, srt_needed, srt_record
+from .run import alive, claude_bin, proc_start, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
 MOST_LINES = 10  # past this many events in one message, the rest are counted, and hansa status has them
@@ -298,6 +298,12 @@ def _write_record(desk: Desk, key: str, rec: dict) -> None:
     write_json(register_dir(desk) / f"{key}.json", rec)
 
 
+def _server(desk: Desk) -> dict:
+    """What a follower is told of hansa serve: server_up for a follower on older code, server for this one."""
+    st = server_state(desk)
+    return {"server_up": st["state"] != "gone", "server": st}
+
+
 def handle(desk: Desk, req: dict) -> dict:
     """The desk's part of a follower's work, done as the desk's owner: start, feed, end, list."""
     op = req.get("op")
@@ -311,7 +317,7 @@ def handle(desk: Desk, req: dict) -> dict:
     if op == "start":
         if isinstance(req.get("resume"), int):  # the same follower, restarted on new code: where it was
             _write_record(desk, key, {**old, **me, "pos": req["resume"], "seen": now(), "ended": None})
-            return {"pos": req["resume"], "summary": [], "server_up": server_up(desk)}
+            return {"pos": req["resume"], "summary": [], **_server(desk)}
         end = log_end(desk)
         for r in records(desk):  # a follower killed outright has ended, however recently it was seen
             if not r.get("ended") and _proc_gone(r.get("follower")):
@@ -344,7 +350,7 @@ def handle(desk: Desk, req: dict) -> dict:
             ps = prev.get("session") or {}
             missed = {"key": prev["key"], "pid": ps.get("pid"), "name": prev.get("name") or "",
                       "at": prev.get("ended") or prev.get("seen"), "session_ended": _proc_gone(ps)}
-        return {"pos": end, "summary": summary, "missed": missed, "server_up": server_up(desk)}
+        return {"pos": end, "summary": summary, "missed": missed, **_server(desk)}
     if op == "caught_up":  # the follower posted what an ended one missed: nobody is to post it again
         k = str(req.get("of", ""))
         r = read_json(register_dir(desk) / f"{k}.json", {}) if KEY.match(k) else {}
@@ -355,7 +361,7 @@ def handle(desk: Desk, req: dict) -> dict:
         events, pos = read_log(desk, int(req.get("pos") or 0))
         items = items_for(desk, events, me)
         _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or 0), "seen": now(), "ended": None})
-        return {"pos": pos, "items": items, "server_up": server_up(desk), "srt_ran": _srt_ran(desk)}
+        return {"pos": pos, "items": items, **_server(desk), "srt_ran": _srt_ran(desk)}
     if op == "end":
         _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or old.get("pos") or 0), "seen": now(),
                                   "ended": now()})
@@ -534,9 +540,10 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         r = ask({"op": "start", "me": me, **({"resume": resume["pos"]} if resume else {})})
         pos = done = r["pos"]
         if resume:
-            was_up, told_down, told_srt = was.get("was_up"), bool(was.get("told_down")), bool(was.get("told_srt"))
+            was_up, told_down, told_srt = was.get("was_up"), float(was.get("told_down") or 0), bool(was.get("told_srt"))
+            told_stuck = float(was.get("told_stuck") or 0)
         else:
-            was_up, told_down, told_srt = r.get("server_up"), False, False
+            was_up, told_down, told_srt, told_stuck = r.get("server_up"), 0.0, False, 0.0
         _say(("restarted on hansa's new code; " if resume else "") +
              f"following desk {desk.root} for session {sess['pid']} at {sock}, from byte {pos}")
         if r.get("summary"):
@@ -561,7 +568,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             elif changed and time.time() - changed >= CODE_SETTLE:
                 _say(f"hansa's code changed on disk; restarting on it from byte {done}")
                 _restart({"pos": done, "since": me["since"], "name": me["name"], "last_post": me["last_post"],
-                          "was_up": was_up, "told_down": told_down, "told_srt": told_srt,
+                          "was_up": was_up, "told_down": told_down, "told_srt": told_srt, "told_stuck": told_stuck,
                           "clear": daily.rec if daily else None})
                 changed = 0.0
             try:
@@ -577,15 +584,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             pos, items = r["pos"], r["items"]
             if any(x["key"] == ["server"] for x in items):
                 told_down = True
-            up = r.get("server_up")
-            if was_up and not up and not told_down:  # stopped without saying so: its heartbeat went quiet
-                items.append({"key": ["server"], "line": "hansa serve is not running (it stopped without a word): "
-                                                         "no task starts or ends until it runs again · next: "
-                                                         "hansa explain server"})
-                told_down = True
-            elif up and was_up is False:
-                told_down = False
-            was_up = up
+            items, told_down, told_stuck = server_news(r, items, was_up, told_down, told_stuck)
+            was_up = r.get("server_up")
             srt = any(x["key"] == ["srt"] for x in items)
             if srt and (told_srt or r.get("srt_ran")):  # said once until srt runs again; or it runs by now
                 items = [x for x in items if x["key"] != ["srt"]]
@@ -607,6 +607,33 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         except Exception as e:  # noqa: BLE001 - the register then shows it as gone quiet, which it is
             _say(f"could not record the end: {e}")
         write_json(priv / f"{key}.state.json", {**read_json(priv / f"{key}.state.json", {}), "ended": now()})
+
+
+def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: float) -> tuple:
+    """What the follower says of hansa serve after a feed (run.server_state): not running only once its process
+    is gone; busy or stuck once its rounds stay quiet for long; and, after either, that it runs again once it
+    finishes a round after that was said. told_down, told_stuck: when that was said, 0 if not. Returns (items,
+    told_down, told_stuck)."""
+    st = r.get("server") or {"state": "up" if r.get("server_up") else "gone", "quiet": 0}
+    if any(x["key"] == ["server"] for x in items):  # hansa serve stopped, and said so
+        told_down = told_down or time.time()
+    if st["state"] == "gone":
+        if was_up and not told_down:
+            items.append({"key": ["server"], "line": "hansa serve is not running (it stopped without a word): "
+                                                     "no task starts or ends until it runs again · next: "
+                                                     "hansa explain server"})
+            told_down = time.time()
+    elif st["state"] == "stuck":
+        if not told_stuck and not told_down:
+            mins = (st.get("quiet") or 0) // 60
+            items.append({"key": ["server"], "line": f"hansa serve (pid {st.get('pid')}) has not finished a round "
+                                                     f"for {mins} minutes: busy or stuck · next: hansa explain server"})
+            told_stuck = time.time()
+    elif st["state"] == "up" and (told_down or told_stuck) \
+            and time.time() - (st.get("quiet") or 0) >= max(told_down, told_stuck):  # not the one stopping now
+        items.append({"key": ["server"], "line": "hansa serve runs again"})
+        told_down = told_stuck = 0.0
+    return items, told_down, told_stuck
 
 
 def _deliver(sock: str, text: str, sess: dict, me: dict) -> bool:

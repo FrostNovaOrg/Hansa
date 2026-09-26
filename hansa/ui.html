@@ -57,6 +57,7 @@ const T = ZH ? {
   title:"工作台", status:"状态", settings:"设置", cost:"成本",
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新活不会开始",
+  serverStuck:(pid, m) => `后台（pid ${pid}）已 ${m} 分钟没跑完一轮：在忙或卡住了`,
   lanes:"工作线", lane:"工作线", order:"用哪家（按顺序，前一家额度用完换下一家）", now:"现在", free:"空闲", trying:"试运行中", busyWith:"在做",
   running:"正在做", queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
@@ -101,6 +102,7 @@ const T = ZH ? {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
   serverUp:"server running", serverDown:"server not running: new tasks will not start",
+  serverStuck:(pid, m) => `hansa serve (pid ${pid}) has not finished a round for ${m} min: busy or stuck`,
   lanes:"Lanes", lane:"Lane", order:"Providers in order (the next takes over when one runs out)", now:"Now", free:"free", trying:"held by a try", busyWith:"on",
   running:"Running", queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
@@ -205,9 +207,11 @@ async function designBlock(m) {
 async function loadStatus() {
   const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);
   const designs = await Promise.all((st.design || []).map(designBlock));
-  $("#state").textContent = (st.paused ? T.paused + ": " + st.paused : T.dispatchOn) + " · " + (st.server_up ? T.serverUp : T.serverDown)
+  $("#state").textContent = (st.paused ? T.paused + ": " + st.paused : T.dispatchOn) + " · "
+    + (st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
+       : st.server_up ? T.serverUp : T.serverDown)
     + (st.srt_missing ? " · " + st.srt_missing : "");
-  $("#state").className = (st.paused || !st.server_up || st.srt_missing) ? "warn" : "muted";
+  $("#state").className = (st.paused || !st.server_up || (st.server && st.server.state === "stuck") || st.srt_missing) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});
   const t = st.today;
   $("#tab-status").replaceChildren(

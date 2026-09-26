@@ -9,8 +9,9 @@ from pathlib import Path
 
 from . import build, cost, notify
 from .desk import Desk, is_git_rule, read_json
-from .run import (join_command, lane_occupied, markers_in_change, markers_text, progress_of, provider_problem,
-                  server_up, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
+from .run import (ROUND_QUIET, STUCK_AFTER, join_command, lane_occupied, markers_in_change, markers_text,
+                  progress_of, provider_problem, server_state, server_text, server_up, srt_needed, srt_problem,
+                  srt_record, srt_when, tried_lanes, waiting_reason)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -150,6 +151,7 @@ def status(desk: Desk) -> dict:
     tried = tried_lanes(desk)
     busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried
     hb = read_json(desk.state_dir / "heartbeat", 0) or 0
+    server = server_state(desk)
     today = [m for m in tasks if (m.get("finished") or 0) >= _midnight()]
     rows = cost.worker_rows(desk, _midnight())
     return {
@@ -157,7 +159,8 @@ def status(desk: Desk) -> dict:
         "build": build(),
         "audits_cost": bool(s["coordinator"].get("audits_cost")),
         "paused": desk.paused(),
-        "server_up": server_up(desk),
+        "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
+        "server": server,
         "server_seconds_ago": int(time.time() - hb) if hb else None,
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
@@ -211,7 +214,7 @@ def status(desk: Desk) -> dict:
 def status_text(st: dict) -> str:
     out = [f"desk {st['desk']}",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
-           "server up" if st["server_up"] else "server NOT running: start it with `hansa serve` (see hansa explain server)"]
+           server_text(st.get("server") or {"state": "up" if st["server_up"] else "gone"})]
     out += ["cost audit on"] if st.get("audits_cost") else []
     out = [" · ".join(out + [f"hansa {st['build']}", time.strftime("now %H:%M")])]
     out += [st["srt_missing"]] if st.get("srt_missing") else []
@@ -584,6 +587,15 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "`hansa serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
             "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
             "desk: a second one refuses to start.",
+            f"  now: {server_text(server_state(desk))}",
+            f"It counts as running while the process serve.lock names is alive, and as not running once that "
+            f"process is gone. Once a round (starting and finishing tasks) it writes its heartbeat; a round can "
+            f"take a while, when a worker's processes are stopped (up to 20 s each) or what a task left is swept "
+            f"on a busy machine. Quiet for {ROUND_QUIET} s, it counts as busy, still running; quiet for "
+            f"{STUCK_AFTER // 60} minutes, hansa status and the posts to the coordinator's session say it is "
+            f"busy or stuck, with its pid. Stuck for good (a task it waits on that never ends, a terminal stopped "
+            f"with Ctrl-Z): see what it is doing, e.g. with `ps -p PID` and its terminal, before stopping it; "
+            f"stop it with Ctrl-C and start it again, and tasks running meanwhile are taken over.",
             "It runs each lane's setup and check in srt (Anthropic's sandbox runtime), with its own PATH, which can "
             "differ from the coordinator's. It tries srt (a run of `true` in a sandbox) when it starts and before "
             "each setup or check, and records what it saw; hansa status reports that record.",
@@ -608,7 +620,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "it; hansa notify lists them.",
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
             "could not start), a verification's verdict, a design session that ended, a queued merge check that "
-            "ended, a request the principal answered or closed (with the answer), hansa serve stopping, srt not "
+            "ended, a request the principal answered or closed (with the answer), hansa serve stopping or "
+            f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
             "line per event and the next command; events seconds apart come in one message.",
             "Who hears what: a task or request goes to the session that made it (hansa add, retry, verify, merge, "

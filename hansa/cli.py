@@ -18,8 +18,8 @@ from . import account, build, cost, notify, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
-                  MARKERS_ON_PURPOSE, markers_in_change, markers_text, provider_env, read_try, server_up, stop,
-                  try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
+                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, proc_start, provider_env, pulse,
+                  read_try, server_up, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -676,7 +676,8 @@ def hold_server_lock(desk: Desk):
         f.close()
         return None
     f.truncate(0)
-    f.write(str(os.getpid()))  # what hansa never stops when it stops what a task left running (run.sweep)
+    f.write(f"{os.getpid()} {proc_start(os.getpid())}")  # what hansa never stops when it stops what a task left
+    # running (run.sweep), and whose being alive says hansa serve runs (run.server_state)
     f.flush()
     return f
 
@@ -696,6 +697,8 @@ def cmd_serve(a):
         raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
                          f"server on a free port with hansa serve --port N (hansa web then finds it)")
     (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
+    beat(desk)  # its rounds count from now, not from the last server's
+    pulse(desk)
     d = Dispatcher(desk)
     desk.event("server_started", port=port)
     print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port} (run `hansa web` for the address)", flush=True)
