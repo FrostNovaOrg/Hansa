@@ -169,8 +169,11 @@ here; work that needs code changed or a browser goes to a worker.
   `/Users/me/.m2`) is the folders its workers may write besides the worktree and
   their temporary folder. Use it when a build or test tool needs its cache folder
   (Maven's `~/.m2`, npm's `~/.npm`, pip's `~/.cache/pip`, Gradle's `~/.gradle`):
-  add that tool's own folder, never the whole home folder. The desk and the
-  repository's `.git` are refused. Tell the principal what you added and why.
+  add that tool's own folder, never the whole home folder. hansa refuses a path
+  that would open what the sandbox keeps closed or what hansa runs: the home
+  folder or above it, the desk, the lane's repository, a provider's Claude Code
+  folder, credential files such as `~/.ssh`, and folders on the `PATH` or above
+  them. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in

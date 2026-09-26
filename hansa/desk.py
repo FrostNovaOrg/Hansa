@@ -35,6 +35,11 @@ LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
 MAX_HOSTS = 50
 MAX_WRITE = 20
+# Files under the home folder of the user hansa runs as that no worker command may read: logins and
+# keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
+# are added per run (run.sandbox_settings); no lane's write list may reach any of them.
+HOME_SECRETS = (".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc",
+                ".pypirc")
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
@@ -179,7 +184,7 @@ def validate(s: dict, root=None) -> list:
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
                      "*.pypi.org or localhost:3000")
-        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root)]
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs)]
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -262,23 +267,49 @@ def _overlaps(a: str, b: str) -> bool:
     return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
 
 
-def write_problems(paths, repo=None, root=None) -> list:
-    """What is wrong with a lane's write list: the folders its workers may write besides the worktree."""
+def _above(a: str, b: str) -> bool:
+    """Whether full path a is b or a folder above it."""
+    return a == b or b.startswith(a.rstrip("/") + "/")
+
+
+def claude_home(state_dir, name: str, p: dict) -> Path:
+    """Where Claude Code keeps a provider's login or settings, and its session records."""
+    if p.get("kind") == "subscription":
+        return Path(p.get("config_dir") or os.path.expanduser("~/.claude"))
+    return Path(state_dir) / f"claude-{name}"
+
+
+def write_problems(paths, repo=None, root=None, providers=None) -> list:
+    """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
+    None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
-    fenced = []  # (path, reason): each as given and with links resolved
+    home = os.path.expanduser("~")
+    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as")]
     if root:
-        fenced += [(str(r), "it is the desk's, which holds the keys and hansa's state")
-                   for r in {os.path.normpath(root), os.path.realpath(root)}]
+        fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
     if isinstance(repo, str) and repo.startswith("/"):
-        git = os.path.join(repo, ".git")
-        fenced += [(g, "it is the repository's .git folder, whose history hansa keeps")
-                   for g in {os.path.normpath(git), os.path.realpath(git)}]
+        fenced.append((os.path.join(repo, ".git"), lambda a, b: _above(b, a),  # around it: the repository's
+                       "it is the repository's .git folder, whose history hansa keeps"))
+        fenced.append((repo, _overlaps, f"it would open {repo}, the lane's repository; workers change code "
+                                        "only in their worktree"))
+    for name, pv in (providers if isinstance(providers, dict) else {}).items():
+        if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
+                and (root or pv.get("kind") == "subscription"):
+            h = str(claude_home(Path(root or "/") / ".hansa", name, pv))
+            if h.startswith("/"):  # a relative config_dir is refused above
+                fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Claude Code folder, "
+                                             "which workers may not read"))
+    fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key "
+                                                  "that workers may not read") for f in HOME_SECRETS]
+    fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
+               for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     p = []
     for x in paths:
-        for f, why in fenced:
-            if any(_overlaps(v, f) for v in (os.path.normpath(x), os.path.realpath(x))):
+        mine = {os.path.normpath(x), os.path.realpath(x)}  # each as given and with links resolved
+        for f, hit, why in fenced:
+            if any(hit(v, g) for v in mine for g in {os.path.normpath(f), os.path.realpath(f)}):
                 p.append(f"write cannot include {x}: {why}")
                 break
     return p

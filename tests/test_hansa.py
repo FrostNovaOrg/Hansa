@@ -990,13 +990,51 @@ class DeskTest(unittest.TestCase):
             s["lanes"]["a"]["write"] = [str(bad)]
             self.assertEqual(validate(s, self.desk.root), [f"lane a: write cannot include {bad}: it is the "
                                                            "repository's .git folder, whose history hansa keeps"])
-        s["lanes"]["a"]["write"] = [str(self.repo / ".github")]  # a neighbour of .git is fine
-        self.assertEqual(validate(s, self.desk.root), [])
         before = self.desk.settings_path.read_text()
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(self.desk.secrets_dir)])
         self.assertIn("it is the desk's", str(e.exception.code))
         self.assertEqual(self.desk.settings_path.read_text(), before)
+
+    def test_a_lanes_write_list_opens_nothing_the_sandbox_keeps_closed(self):
+        home, bin_ = self.tmp / "home", self.tmp / "tools" / "bin"
+        (home / ".cache").mkdir(parents=True)
+        (home / "link").symlink_to(home / ".ssh")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "cfg")
+
+        def refused(x):
+            s["lanes"]["a"]["write"] = [str(x)]
+            return validate(s, self.desk.root)
+
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(home), "PATH": f"{bin_}:relative/bin:/usr/bin"}):
+            for ok in (home / ".m2", home / ".cache" / "pip", self.tmp / "tools" / "cache"):  # a tool's cache
+                self.assertEqual(refused(ok), [], ok)
+            for x in (home, self.tmp, self.tmp.parent):  # the home folder, or above it (before the desk)
+                self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {home}, "
+                                              "the home folder of the user hansa runs as"], x)
+            for x in (self.tmp / "cfg", self.tmp / "cfg" / "projects"):  # the provider's Claude Code folder
+                self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {self.tmp / 'cfg'}, "
+                                              "provider claude's Claude Code folder, which workers may not read"])
+            for x, f in ((home / ".ssh", ".ssh"), (home / ".config", ".config/gh"), (home / ".aws" / "sso", ".aws"),
+                         (home / "link", ".ssh")):  # a login or key: inside, around, or through a link
+                self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {home / f}, "
+                                              "a login or key that workers may not read"], x)
+            for x in (bin_, self.tmp / "tools", Path("/usr")):  # a folder on the PATH, or above one
+                d = bin_ if x != Path("/usr") else "/usr/bin"
+                self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {d}, "
+                                              "a folder on the PATH hansa runs with"], x)
+            self.assertEqual(refused(bin_ / "sub"), [])  # inside a PATH folder is not above one
+            for x in (self.repo, self.repo / "src"):  # the lane's repository, or inside it
+                self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {s['lanes']['a']['repo']}, "
+                                              "the lane's repository; workers change code only in their worktree"])
+            s["providers"]["claude"]["config_dir"] = ""  # ~/.claude by default
+            self.assertIn("provider claude's Claude Code folder", refused(home / ".claude")[0])
+            before = self.desk.settings_path.read_text()
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".m2"), str(home)])
+            self.assertIn("the home folder of the user hansa runs as", str(e.exception.code))
+            self.assertEqual(self.desk.settings_path.read_text(), before)
 
     def test_a_lanes_write_list_reaches_the_sandbox(self):
         from hansa import run
