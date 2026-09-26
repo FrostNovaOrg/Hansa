@@ -8,7 +8,7 @@ from pathlib import Path
 from . import build, cost
 from .desk import Desk, is_git_rule, read_json
 from .run import (join_command, lane_occupied, markers_text, progress_of, provider_problem, server_up, srt_needed,
-                  srt_problem, srt_record, waiting_reason)
+                  srt_problem, srt_record, tried_lanes, waiting_reason)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -125,7 +125,8 @@ def status(desk: Desk) -> dict:
     designing = [m for m in tasks if m["state"] == "running" and m.get("kind") == "design"]
     running = [m for m in tasks if m["state"] == "running" and m.get("kind") != "design"]
     merging = [m for m in tasks if m["state"] == "merging"]
-    busy = {m.get("lane") for m in tasks if lane_occupied(m)}
+    tried = tried_lanes(desk)
+    busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried
     hb = read_json(desk.state_dir / "heartbeat", 0) or 0
     today = [m for m in tasks if (m.get("finished") or 0) >= _midnight()]
     rows = cost.worker_rows(desk, _midnight())
@@ -140,7 +141,8 @@ def status(desk: Desk) -> dict:
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
-                   "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None)}
+                   "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
+                   "trying": n in tried}  # a `hansa lane try` queued or running holds the lane
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "problem": provider_problem(desk, s, n), "check": pst.get(n, {}).get("check")}
@@ -189,7 +191,7 @@ def status_text(st: dict) -> str:
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out.append("lanes:")
     for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
-        out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or 'free'}")
+        out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or ('held by a try (hansa lane try)' if ln.get('trying') else 'free')}")
     if st["running"]:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + ("worker done, hansa is running the lane's check" if m["checking"]
@@ -400,7 +402,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
                                              " task fails and hansa show has its last lines)" if ln.get("setup")
                                              else "none"),
             *(["  the setup and check run in srt with the lane's sandbox: the network and write lists below"
-               " hold for them as for workers"] if ln.get("setup") or ln.get("check") else []),
+               " hold for them as for workers",
+               f"  to see that they work where tasks run, with no worker: hansa lane try {name} (after changing the"
+               " setup, check, network or write list, or moving the desk to another machine)"]
+              if ln.get("setup") or ln.get("check") else []),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",
@@ -467,6 +472,28 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
         "pause/resume."])
+
+
+def try_text(lane: str, t: dict) -> str:
+    """What `hansa lane try` prints: for the setup and the check, the exit code, the time taken, the last lines."""
+    if t.get("busy"):
+        return f"hansa: {t['note']}. Try again when it is free: hansa wait {t['busy']}, then hansa lane try {lane}"
+    if t.get("could_not_run"):  # srt did not run in the lane's sandbox: the machine's problem, not the commands'
+        return (f"lane {lane}: {t['note']}\nnothing was run: the setup and check run in srt "
+                f"(hansa explain server). Fix it, then hansa lane try {lane}")
+    out = [f"lane {lane} tried at {(t.get('onto') or '')[:10]}: " + ("ok" if t.get("ok") else "FAILED")
+           + (f" ({t['note']})" if t.get("note") else "")]
+    for step, x in t.get("steps", {}).items():
+        if not x["ran"]:
+            out.append(f"{step}: {x['command']}\n  did not run: the setup failed")
+            continue
+        how = "interrupted" if x["exit"] is None else f"exit {x['exit']}"
+        out.append(f"{step}: {x['command']}\n  {how}" + (f" in {x['seconds']}s" if x["seconds"] is not None else "")
+                   + (", last lines:" if x["tail"] else ", no output"))
+        out += [f"    {line}" for line in x["tail"]]
+    if t.get("clean"):
+        out.append("the worktree is back clean at the base's tip, as the lane's next task expects it")
+    return "\n".join(out)
 
 
 def cost_text(rep: dict, by: str = "day") -> str:

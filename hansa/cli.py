@@ -8,13 +8,15 @@ import os
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from . import account, build, cost, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
-                  conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, markers_in_change,
-                  markers_text, provider_env, stop, try_srt_at_start)
+                  conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
+                  markers_in_change, markers_text, provider_env, read_try, server_up, stop, try_srt_at_start,
+                  write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -674,6 +676,8 @@ def cmd_lane(a):
             print(f"{name}  {ln['repo']}  base {ln.get('base', 'main')}  providers {' > '.join(ln['providers'])}")
         print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane L")
         return
+    if a.action == "try":
+        return _lane_try(desk, a)
     with desk.lock():  # the settings read here are the settings changed here
         s = desk.settings()
         new = json.loads(json.dumps(s))
@@ -759,6 +763,57 @@ def cmd_lane(a):
         print(f"The folders the lane's workers may write besides the worktree changed: {_shown(old)} -> "
               f"{_shown(value)}, so this change is recorded. Tell the principal, in the conversation, what you "
               f"changed and why.")
+    ln = new["lanes"][a.name]
+    if a.field in ("setup", "check", "network", "write") and old != value and (ln.get("setup") or ln.get("check")):
+        print(f"To see that the lane's setup and check work in its sandbox before a task needs them: "
+              f"hansa lane try {a.name}")
+
+
+def _lane_try(desk: Desk, a) -> None:
+    """Have hansa serve run the lane's setup and check once, as for a task but with no worker, and wait for it."""
+    with desk.lock():  # no task starts on the lane between this look and the try being queued
+        ln = desk.settings()["lanes"].get(a.name)
+        if not ln:
+            raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
+        if not ln.get("setup") and not ln.get("check"):
+            raise SystemExit(f"hansa: lane {a.name} has no setup and no check, so there is nothing to try. Set them "
+                             f"with hansa lane set {a.name} setup|check \"<command>\"")
+        t = read_try(desk, a.name)
+        if t.get("phase") in ("queued", "running"):  # asked for before, by a command that stopped waiting
+            print(f"a try of lane {a.name} is already {t['phase']}; waiting for it", flush=True)
+        else:
+            holder = lane_holder(desk, a.name)
+            if holder:
+                raise SystemExit(f"hansa: lane {a.name} is busy with {holder['id']} ({holder['state']}: "
+                                 f"{holder['title']}); nothing was run. Try again when it is free: hansa wait "
+                                 f"{holder['id']}, then hansa lane try {a.name}")
+            if not server_up(desk):
+                raise SystemExit("hansa: hansa serve is not running, and a try runs through it (with its environment, "
+                                 "as tasks do); nothing was run. Start it, then try again")
+            t = {"id": uuid.uuid4().hex[:12], "phase": "queued", "asked": now()}
+            write_try(desk, a.name, t)
+            desk.event("lane_try_queued", lane=a.name)
+            print(f"lane {a.name}: hansa serve runs its " + " and ".join(x for x in ("setup", "check") if ln.get(x))
+                  + f" in its worktree, at {ln.get('base') or 'main'}'s tip, in its sandbox; waiting for the result",
+                  flush=True)
+    gone = None
+    while True:
+        now_t = read_try(desk, a.name)
+        if now_t.get("id") != t["id"]:
+            raise SystemExit(f"hansa: the try of lane {a.name} was replaced by another; see hansa lane try {a.name}")
+        if now_t.get("phase") == "done":
+            break
+        if server_up(desk):
+            gone = None
+        elif gone is None:
+            gone = time.time()
+        elif time.time() - gone > 60:
+            raise SystemExit(f"hansa: hansa serve stopped before the try ended. Once it runs again, "
+                             f"hansa lane try {a.name} waits for this try's result")
+        time.sleep(a.every)
+    print(desk.redact(views.try_text(a.name, now_t)))
+    if not now_t.get("ok"):
+        raise SystemExit(1)
 
 
 def cmd_concurrency(a):
@@ -885,7 +940,7 @@ def main(argv=None):
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server"])
     p.add_argument("name", nargs="?")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
-    lane = p.add_subparsers(dest="action", metavar="add | set | brief | remove")
+    lane = p.add_subparsers(dest="action", metavar="add | set | brief | remove | try")
     q = lane.add_parser("add", help="a new lane on a git checkout")
     q.add_argument("name")
     q.add_argument("--repo", required=True, help="the git checkout the lane works on")
@@ -907,6 +962,10 @@ def main(argv=None):
     q.add_argument("--file", help="a file with the new instructions; - reads them from standard input")
     q = lane.add_parser("remove", help="remove a lane with no task queued, running or waiting for review")
     q.add_argument("name")
+    q = lane.add_parser("try", help="run a lane's setup and check once in its worktree and sandbox, as for a task "
+                        "but with no worker, and print how they ended")
+    q.add_argument("name")
+    q.add_argument("--every", type=float, default=0.5, help=argparse.SUPPRESS)
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
     p.add_argument("n", nargs="?", type=int)
     p = add("cost", cmd_cost, "tokens and what they are worth")
