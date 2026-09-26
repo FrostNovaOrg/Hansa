@@ -202,6 +202,7 @@ GIT_NO_PROGRAMS = {"diff": ("--no-ext-diff", "--no-textconv"), "show": ("--no-ex
 # options that read outside the repository or run gpg, by the shortest start git takes for them, and where
 GIT_REFUSED_PREFIX = (("--no-index", "--no-i", ("diff", "grep"), "it reads files outside the lane's repository"),
                       ("--contents", "--con", ("blame",), "it reads a file outside the lane's repository"),
+                      ("--ignore-revs-file", "--ignore-revs", ("blame",), "it reads a file outside the lane's repository"),
                       ("--show-signature", "--show-s", ("log", "show"), "it would run gpg"))
 GIT_LIST_VALUES = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
 
@@ -227,6 +228,9 @@ def git_refused(args: list) -> str:
                 name.startswith("-O") or (cmd == "grep" and "O" in name)
                 or (name.startswith("-o") and cmd in ("diff", "log", "show"))):
             return f"{x} is refused: it would write a file or run a program"
+        # blame -S FILE, alone or after other flags (-wS FILE); -L, -C and -M take the rest of the word as their value
+        if cmd == "blame" and not name.startswith("--") and name.startswith("-") and "S" in re.split("[LCM]", x[1:])[0]:
+            return f"{x} is refused: it reads a file outside the lane's repository"
         for full, shortest, cmds, why in GIT_REFUSED_PREFIX:
             if cmd in cmds and name.startswith(shortest) and full.startswith(name):
                 return f"{x} is refused: {why}"
@@ -280,9 +284,11 @@ def cmd_git(a):
     env.update(GIT_PAGER="cat", PAGER="cat", GIT_EDITOR="false", EDITOR="false", VISUAL="false",
                GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="false", SSH_ASKPASS="false")
     # the repository's own config may still name programs to run: an fsmonitor, diff.external, textconv drivers,
-    # gpg for signatures; a filter driver it names still runs, as the desk's account
+    # gpg for signatures (also for a format such as %G?); a filter driver it names still runs, as the desk's account
     args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *args[1:]]
-    r = subprocess.run(["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", *args],
+    no_programs = ["-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "gpg.program=false",
+                   "-c", "gpg.ssh.program=false", "-c", "gpg.x509.program=false"]
+    r = subprocess.run(["git", "--no-pager", *no_programs, *args],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
     sys.stderr.write(desk.redact(r.stderr))

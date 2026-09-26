@@ -465,6 +465,11 @@ class DeskTest(unittest.TestCase):
                            (["diff", "README.md", "../x"], "outside the lane's repository"),
                            (["blame", "--contents", "/etc/hosts", "README.md"], "--contents is refused"),
                            (["blame", "--cont=/etc/hosts", "README.md"], "outside the lane's repository"),
+                           (["blame", "-S", "/etc/hosts", "README.md"], "-S is refused"),
+                           (["blame", "-wS/etc/hosts", "README.md"], "outside the lane's repository"),
+                           (["blame", "--ignore-revs-file", "/etc/hosts", "README.md"], "--ignore-revs-file is refused"),
+                           (["blame", "--ignore-revs-file=/etc/hosts", "README.md"], "outside the lane's repository"),
+                           (["blame", "--ignore-revs=/etc/hosts", "README.md"], "outside the lane's repository"),
                            (["log", "--show-signature"], "--show-signature is refused"),
                            (["show", "--show-sig", "HEAD"], "it would run gpg"),
                            (["-c", "core.pager=x", "log"], "-c before the git command is refused"),
@@ -480,7 +485,8 @@ class DeskTest(unittest.TestCase):
         self.assertFalse((self.tmp / "x").exists())
         for args in (["branch"], ["branch", "-a", "-v"], ["branch", "--contains", "HEAD"], ["tag"], ["tag", "-l", "v*"],
                      ["tag", "-n"], ["grep", "-c", "demo"], ["ls-files", "-o"], ["diff", "--output-indicator-new=+"],
-                     ["diff", "main..HEAD"], ["diff", "HEAD", "--", "README.md"]):
+                     ["diff", "main..HEAD"], ["diff", "HEAD", "--", "README.md"], ["blame", "-s", "-L1,1", "README.md"],
+                     ["blame", "--ignore-rev", "HEAD", "README.md"]):
             self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
         self.assertIn("hansa git a", views.explain_text(self.desk, "lane", "a"))
 
@@ -521,6 +527,28 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(code, 0, args)
             self.assertIn("signed", out)
         self.assertFalse(made.exists())
+
+    def test_hansa_git_runs_no_signature_program_for_a_format_that_asks_for_the_signature(self):
+        tree, head = self.git_out("rev-parse", "HEAD^{tree}"), self.git_out("rev-parse", "HEAD")
+        (self.tmp / "allowed").write_text("")
+        sh("git", "config", "gpg.ssh.allowedSignersFile", str(self.tmp / "allowed"), cwd=self.repo)
+        made = {}
+        for kind, key, begin in (("openpgp", "gpg.program", "PGP SIGNATURE"), ("ssh", "gpg.ssh.program", "SSH SIGNATURE"),
+                                 ("x509", "gpg.x509.program", "SIGNED MESSAGE")):
+            made[kind] = self.tmp / f"{kind}-ran"
+            script = self.tmp / f"{kind}.sh"
+            script.write_text(f"#!/bin/sh\ntouch '{made[kind]}'\n")
+            script.chmod(0o755)
+            sh("git", "config", key, str(script), cwd=self.repo)
+            commit = (f"tree {tree}\nparent {head}\n"
+                      "author A <a@example.com> 1700000000 +0000\ncommitter A <a@example.com> 1700000000 +0000\n"
+                      f"gpgsig -----BEGIN {begin}-----\n \n iQEzBAABCAAdFiEE\n -----END {begin}-----\n\nsigned\n")
+            signed = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=self.repo,
+                                    input=commit, capture_output=True, text=True, check=True).stdout.strip()
+            sh("git", "update-ref", f"refs/heads/{kind}", signed, cwd=self.repo)
+            for args in (["log", "--format=%G? %s", kind], ["show", "-s", "--format=%GS %GK", kind]):
+                self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
+        self.assertEqual([k for k, p in made.items() if p.exists()], [])
 
     def test_hansa_git_runs_as_the_desks_account_with_its_arguments_as_they_are(self):
         log, ran = self.stand_in_runuser()
