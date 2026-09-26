@@ -117,6 +117,10 @@ if os.environ.get("FAKE_LEAVE_DETACHED"):  # the same, in a session of its own: 
     c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "left-behind"], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     open(os.environ["FAKE_LEAVE_DETACHED"], "w").write(str(c.pid))
+if os.environ.get("FAKE_SANDBOX_LEFT"):  # what a sandbox on Linux leaves in the worktree: empty placeholders
+    os.makedirs(".claude", exist_ok=True)
+    for f in (".claude/.cc-writes", ".claude/settings.json"):
+        open(f, "w").close()
 if os.environ.get("FAKE_WRITE"):
     open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git folder with a hook of its own
@@ -231,6 +235,20 @@ class DeskTest(unittest.TestCase):
                              capture_output=True, text=True).stdout.strip()
         self.assertEqual(msg, f"{tid}: Add a greeting")
         self.assertIn("ignored", views.explain_text(self.desk, "lane", "a"))
+
+    def test_hansas_commit_leaves_out_the_claude_folder_a_sandbox_left(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SANDBOX_LEFT": "1", "FAKE_WRITE": "worker's own", "FAKE_WRITE_FILE": ".claude/notes.md"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["files"]), ("done", [".claude/notes.md", "hello.txt"]), m)  # what has content
+        wt = Path(m["worktree"])
+        self.assertTrue((wt / ".claude" / ".cc-writes").exists())  # left where it was, uncommitted
+        run.commit_work(self.desk, wt, "nothing but placeholders")  # with only those there, nothing to commit
+        self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), m["head"])
+        self.assertIn("sandbox's placeholders", run.PROTOCOL)
 
     def test_a_change_holding_a_stored_key_is_never_merged_and_the_key_is_never_shown(self):
         key = "sk-test-0123456789"
@@ -697,6 +715,31 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.srt_calls(), [])
         self.assertFalse(run.try_file(self.desk, "a").exists())
 
+    def test_a_lane_try_no_server_started_is_withdrawn_when_the_command_gives_up(self):
+        from types import SimpleNamespace
+        from hansa import cli, run
+        self.hansa("lane", "set", "a", "check", "echo checked")
+        clock = [1000.0]
+        fake_time = SimpleNamespace(time=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + 30))
+        for phase in ("queued", "running"):
+            ups = iter([True])  # up when the try is asked for, then gone before it starts
+            if phase == "running":  # a try that started is left to the server
+                run.write_try(self.desk, "a", {"id": "t1", "phase": "running", "asked": time.time()})
+            with unittest.mock.patch.object(cli, "server_up", lambda desk: next(ups, False)), \
+                    unittest.mock.patch.object(cli, "time", fake_time), \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "try", "a"])
+            said = str(e.exception.code)
+            if phase == "queued":
+                self.assertIn("so it was withdrawn and lane a is free again; nothing was run", said)
+                self.assertFalse(run.try_file(self.desk, "a").exists())
+                self.assertEqual(run.tried_lanes(self.desk), set())
+                self.assertEqual(len(self.events("lane_try_withdrawn")), 1)
+            else:
+                self.assertIn("waits for this try's result", said)
+                self.assertEqual(run.read_try(self.desk, "a")["phase"], "running")
+                self.assertEqual(len(self.events("lane_try_withdrawn")), 1)
+
     def test_lane_try_holds_the_lane_and_says_could_not_run_when_srt_cannot_start(self):
         from hansa import run
         ran = self.tmp / "check-ran"
@@ -871,6 +914,38 @@ class DeskTest(unittest.TestCase):
             self.assertIn(f"hansa retry {t3} --update \"settle the markers in hello.txt\"", said)
         self.assertEqual((self.desk.meta(t3)["state"], self.git_out("rev-parse", "main")), ("done", tip))
 
+    def marker_fixture_task(self) -> str:
+        s = self.desk.settings()  # a test fixture that holds marker-like lines on purpose
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": "<<<<<<< ours\nkept\n>>>>>>> theirs", "FAKE_WRITE_FILE": "fixture.txt"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add a fixture")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["markers"]), ("done", {"fixture.txt": [1, 3]}), m)
+        return tid
+
+    def test_markers_kept_on_purpose_have_a_way_out_through_gitattributes(self):
+        tid = self.marker_fixture_task()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "merge", tid])
+        self.assertIn("conflict-marker-size in the base's .gitattributes", str(e.exception.code))
+        (self.repo / ".gitattributes").write_text("fixture.txt conflict-marker-size=100\n")
+        sh("git", "add", ".gitattributes", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixtures", cwd=self.repo)
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual(self.desk.meta(tid)["markers"], {})
+
+    def test_show_looks_for_markers_in_a_task_that_ended_before_hansa_looked(self):
+        tid = self.marker_fixture_task()
+        f = self.desk.tasks_dir / tid / "meta.json"
+        m = json.loads(f.read_text())
+        del m["markers"]  # as a task that finished before the check existed
+        f.write_text(json.dumps(m))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("CONFLICT MARKERS IN THE CHANGE", shown)
+        self.assertIn("fixture.txt lines 1, 3", shown)
+        self.assertIn(f"next: hansa retry {tid} --update \"settle the markers in fixture.txt\"", shown)
+        self.assertNotIn("markers", self.desk.meta(tid))  # shown, not stored
+
     def test_a_markdown_heading_underline_is_not_a_conflict_marker(self):
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_WRITE": "Notes\n=======\n\nplain text", "FAKE_WRITE_FILE": "notes.md"}
@@ -912,6 +987,18 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             main(["--desk", str(self.desk.root), "retry", t3, "words", "--file", str(note)])  # one or the other
         self.assertEqual(self.desk.meta(t3)["state"], "done")
+
+    def test_a_file_that_is_missing_or_a_folder_is_said_in_one_line_and_nothing_changes(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        before = sorted(x["id"] for x in self.desk.tasks())
+        for path, why in ((self.tmp / "no-such.md", "does not exist"), (self.tmp, "is a folder, not a file")):
+            for argv in (["add", "--file", str(path)], ["retry", tid, "--file", str(path)]):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                    main(["--desk", str(self.desk.root), *argv])
+                self.assertEqual(str(e.exception.code), f"hansa: {path} {why}; nothing was changed")
+        self.assertEqual(sorted(x["id"] for x in self.desk.tasks()), before)
+        self.assertEqual(self.desk.meta(tid)["state"], "done")
 
     def test_design_rules_for_a_check_keep_quoted_text_together(self):
         from hansa.run import command_rules
@@ -1255,6 +1342,20 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("srt MISSING", views.status_text(st))
             self.assertTrue(st["srt"]["ran"])  # the page reads the same record
         self.assertIn("hansa serve tried srt", views.explain_text(self.desk, "server"))
+
+    def test_an_srt_record_without_a_time_shows_no_time(self):
+        from hansa.desk import write_json
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "echo checked"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.state_dir.mkdir(exist_ok=True)
+        write_json(self.desk.state_dir / "srt.json", {"found": True, "path": "/x/srt", "ran": False, "said": "boom"})
+        problem = views.status(self.desk)["srt_missing"]
+        self.assertIn("srt CANNOT RUN (as hansa serve saw it): it is at /x/srt", problem)
+        server = views.explain_text(self.desk, "server")
+        self.assertIn("now: hansa serve tried srt: found at /x/srt", server)
+        self.assertNotIn("01-01", problem + server)
+        self.assertIn("on the lane's own PATH first", server)
 
     def test_an_srt_that_is_found_but_cannot_start_runs_no_check_and_does_not_fail_the_task(self):
         ran = self.tmp / "check-ran"
@@ -2101,6 +2202,37 @@ class DeskTest(unittest.TestCase):
                       shown)
         self.assertIn(f"hansa merge {m['id']} --recheck", shown)
 
+    def test_a_check_that_fails_silently_on_purpose_is_not_called_the_machines_problem(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "exit 1"
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["check"]["ok"], m["check"]["tail"]), ("done", False, []), m)
+        shown = views.show_text(self.desk, m["id"])
+        self.assertIn("usually means the command could not start", shown)
+        self.assertIn("a check can also fail silently on purpose (a plain exit 1)", shown)
+        self.assertNotIn("machine's problem", shown)
+        self.assertIn(f"if it should have printed something, once that is fixed: hansa merge {m['id']} --recheck", shown)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "merge", m["id"]])
+        said = str(e.exception.code)
+        self.assertNotIn("machine's problem", said)
+        self.assertIn(f"if it should have printed something, once that is fixed: hansa merge {m['id']} --recheck", said)
+
+    def test_the_last_lines_shown_of_a_setup_or_check_lose_their_colour_codes(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = r"printf '\033[32m✓\033[39m passed\n\033[31mFAIL\033[0m one\n'; exit 1"
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        shown = views.show_text(self.desk, m["id"])
+        self.assertIn("  ✓ passed\n  FAIL one", shown)
+        self.assertNotIn("\x1b", shown)
+        self.assertIn("\x1b[32m", (self.desk.tasks_dir / m["id"] / "check.log").read_text())  # the log keeps them
+        said = views.try_text("a", {"ok": False, "onto": "abc", "steps": {"check": {
+            "ran": True, "command": "npm test", "exit": 1, "seconds": 2, "tail": ["\x1b[32m✓\x1b[39m one"]}}})
+        self.assertIn("    ✓ one", said)
+        self.assertNotIn("\x1b", said)
+
     def test_the_lane_check_runs_in_srt_with_the_lanes_sandbox(self):
         s = self.desk.settings()
         s["lanes"]["a"].update(check='test -f hello.txt && echo "tmp=$TMPDIR"', network=["pypi.org"])
@@ -2138,6 +2270,13 @@ class DeskTest(unittest.TestCase):
         d.procs[tid].wait()  # the old server is gone; its check still wrote the exit code
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+
+    def test_status_shows_how_long_the_check_itself_has_run(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", lane="a", phase="checking", started=time.time() - 8 * 60 - 5,
+                         check_started=time.time() - 60 - 5)
+        said = views.status_text(views.status(self.desk))
+        self.assertIn(f"{tid} a worker done, hansa is running the lane's check, 1 min so far (8 min in all): ", said)
 
     def test_a_check_cancelled_while_it_runs_leaves_no_process_behind(self):
         from hansa.run import alive, group_running

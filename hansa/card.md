@@ -210,8 +210,10 @@ here; work that needs code changed or a browser goes to a worker.
   preview does not. So each change to them is recorded, and you tell the
   principal in the conversation what you changed and why.
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
-  lane's setup and check, found on the PATH of `hansa serve` together with node
-  (srt is a node script). The server tries it when it starts and before each
+  lane's setup and check. Before each setup or check, hansa looks for it on the
+  lane's own PATH first (a PATH in the lane's env, else the server's), then on
+  the PATH of `hansa serve`; node must be on the lane's PATH too (srt is a node
+  script). The server tries it when it starts and before each
   setup or check; `hansa status` reports what the server saw. When it cannot run,
   a task's setup fails it before its worker starts, and its check reads "could
   not run" without judging the task; you may install srt.

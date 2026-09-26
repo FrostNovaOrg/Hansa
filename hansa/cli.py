@@ -15,8 +15,8 @@ from . import account, build, cost, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
-                  markers_in_change, markers_text, provider_env, read_try, server_up, stop, try_srt_at_start,
-                  write_try)
+                  MARKERS_ON_PURPOSE, markers_in_change, markers_text, provider_env, read_try, server_up, stop,
+                  try_file, try_srt_at_start, write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -65,7 +65,16 @@ def _text(args) -> str:
     if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
         return sys.stdin.read()
     if getattr(args, "file", None):
-        return Path(args.file).read_text(encoding="utf-8")
+        f = Path(args.file)
+        if not f.is_file():
+            raise SystemExit(f"hansa: {args.file} " + ("is a folder, not a file" if f.is_dir() else "does not exist")
+                             + "; nothing was changed")
+        try:
+            return f.read_text(encoding="utf-8")
+        except OSError as e:
+            raise SystemExit(f"hansa: cannot read {args.file} ({e.strerror or e}); nothing was changed")
+        except UnicodeDecodeError:
+            raise SystemExit(f"hansa: {args.file} is not UTF-8 text; nothing was changed")
     return " ".join(args.text)
 
 
@@ -235,12 +244,12 @@ def _mergeable(desk: Desk, a):
                          f"and no flag overrides this. Redo it from the base without the key: hansa retry {a.id} --fresh "
                          f"\"...\", and tell the principal with hansa ask: they may want to change that key.")
     markers = markers_in_change(repo, m["base"], m["head"])
+    if markers != (m.get("markers") or {}):  # found now, or gone since (marked in .gitattributes, say)
+        desk.update(a.id, markers=markers)
     if markers:
-        if markers != m.get("markers"):
-            desk.update(a.id, markers=markers)
         raise SystemExit(f"hansa: the change in {a.id} holds git's conflict markers ({markers_text(markers)}); nothing "
                          f"was merged, and no flag overrides this. Next: hansa retry {a.id} --update \"settle the "
-                         f"markers in {', '.join(markers)}\"")
+                         f"markers in {', '.join(markers)}\"\n{MARKERS_ON_PURPOSE}")
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. Wait for it: hansa wait {v['task']}")
@@ -258,7 +267,9 @@ def _mergeable(desk: Desk, a):
         machine = views.machine_hint(chk)
         raise SystemExit(f"hansa: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
                          f"nothing was merged. hansa show {a.id} has the output. "
-                         + (f"{machine}; once that is fixed: hansa merge {a.id} --recheck (to merge it anyway: "
+                         + (f"{machine}; " + ("if it should have printed something, once that is fixed"
+                                                if views.silent(chk) else "once that is fixed")
+                            + f": hansa merge {a.id} --recheck (to merge it anyway: "
                             f"hansa merge {a.id} --despite-check)" if machine else
                             f"To merge it anyway: hansa merge {a.id} --despite-check"))
     current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
@@ -811,6 +822,14 @@ def _lane_try(desk: Desk, a) -> None:
         elif gone is None:
             gone = time.time()
         elif time.time() - gone > 60:
+            with desk.lock():  # a server that comes back now starts it under this lock, or finds it gone
+                last = read_try(desk, a.name)
+                if last.get("id") == t["id"] and last.get("phase") == "queued":  # never started: it would hold the lane
+                    try_file(desk, a.name).unlink(missing_ok=True)
+                    desk.event("lane_try_withdrawn", lane=a.name)
+                    raise SystemExit(f"hansa: hansa serve stopped before the try started, so it was withdrawn and "
+                                     f"lane {a.name} is free again; nothing was run. Start hansa serve, then "
+                                     f"hansa lane try {a.name}")
             raise SystemExit(f"hansa: hansa serve stopped before the try ended. Once it runs again, "
                              f"hansa lane try {a.name} waits for this try's result")
         time.sleep(a.every)
