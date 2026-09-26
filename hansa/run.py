@@ -18,6 +18,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -35,16 +36,19 @@ LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itse
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)\)$", re.M)
 # The lane's setup command runs first in the worker's own process, then the worker replaces it:
-# hansa serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
+# hansa serve never waits on it, and stopping the task stops it too. It never sees a provider's key,
+# and runs in srt with the lane's sandbox (see in_srt); its temporary folder is removed when it ends.
 # What it changes in the repository (a lock file, say) is set aside, so it is not part of the task;
 # <log>.done says it got that far (a setup stopped midway leaves its changes uncommitted).
 # Its git commands run only while the worktree's .git file still holds the line git wrote for it (see
 # check_git_file); otherwise the worker does not start, and hansa's finish says what happened.
-# sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <.git line> <worker command...>
+# sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <.git line> <temporary folder> <srt> <srt settings>
+#   <worker command...>
 SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
 line=$4
-env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
+env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
   rc=$?
+  rm -rf "$5"
   ! ok || [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
   echo "hansa: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
 ok || { echo "hansa: the worktree's .git file was changed during the lane's setup; hansa ran no git there" >>"$3"; exit 96; }
@@ -52,8 +56,9 @@ if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -q -m "hansa: what the lane's setup changed" >>"$2" 2>&1
   echo "hansa: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
 fi
+rm -rf "$5"
 : > "$2.done"
-shift 4; exec "$@"
+shift 7; exec "$@"
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
@@ -176,6 +181,24 @@ def claude_bin() -> str:
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
+
+
+SRT_MISSING = ("hansa needs srt (Anthropic's sandbox runtime) to run a lane's setup and check commands in a "
+               "sandbox, and srt is not on the PATH. Install it with `npm install -g @anthropic-ai/sandbox-runtime` "
+               "(the coordinator can do this). A lane with neither a setup nor a check command needs no srt.")
+
+
+def srt_bin() -> str:
+    """srt, which runs a lane's setup and check in the lane's sandbox; hansa never runs them without it."""
+    c = shutil.which("srt")
+    if not c:
+        raise RuntimeError(SRT_MISSING)
+    return c
+
+
+def srt_needed(s: dict) -> bool:
+    """Whether some lane has a setup or check command while srt, which runs them, is missing."""
+    return any(ln.get("setup") or ln.get("check") for ln in s["lanes"].values()) and not shutil.which("srt")
 
 
 def tmux_bin() -> str:
@@ -470,21 +493,30 @@ def is_local(host: str) -> bool:
     return host.lower().split(":")[0] in LOCAL_HOSTS
 
 
+def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
+    """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
+    check (srt): (the hosts it may reach, {"denyRead": the desk's keys and state, the provider's login and
+    credential files, "denyWrite": git's data, "allowWrite": the lane's write list}). Each adds the
+    worktree and a temporary folder to what may be written."""
+    home = Path.home()
+    deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
+                       *(home / f for f in HOME_SECRETS)])
+    # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
+    return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
+                                           "allowWrite": full_paths(lane.get("write", []))}
+
+
 def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
     """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
     any command, but files changed only in the worktree (and the lane's write list) and never git's
     history, no reading of keys and logins, no network but the lane's list, and no keys in the environment. It never falls back to
     running unsandboxed."""
-    home = Path.home()
-    deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
-                       *(home / f for f in HOME_SECRETS)])
-    hosts = list(lane.get("network", []))
+    hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True  # a worker may run a local server and reach it
-    fs = {"denyRead": deny, "denyWrite": git_write_deny(wt)}
-    if lane.get("write"):  # a build or test tool's cache folder; denyRead and denyWrite still win within it
-        fs["allowWrite"] = full_paths(lane["write"])
+    if not fs["allowWrite"]:
+        del fs["allowWrite"]
     return {"sandbox": {
         "enabled": True,
         "failIfUnavailable": True,
@@ -494,6 +526,43 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> d
         "network": network,
         "credentials": {"envVars": [{"name": v, "mode": "deny"} for v in KEY_VARS]},
     }}
+
+
+def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str) -> dict:
+    """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
+    worktree, the temporary folder `tmp` and the lane's write list."""
+    hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
+    network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
+    if any(is_local(h) for h in hosts):
+        network["allowLocalBinding"] = True
+    return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp]) + fs["allowWrite"],
+                                               "denyRead": fs["denyRead"], "denyWrite": fs["denyWrite"]}}
+
+
+def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
+    """What a lane's setup or check (`name`) runs in: (srt, its settings file in the task's raw folder,
+    a temporary folder made for this run, for the command's TMPDIR). Whoever runs the command removes
+    the folder after it; finish and finish_check remove one left behind."""
+    srt = srt_bin()
+    try:
+        check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
+    except GitFileChanged as e:
+        raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    tmp = tempfile.mkdtemp(prefix=f"hansa-{name}-")
+    f = desk.raw_dir(tid) / f"{name}-sandbox.json"
+    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp))
+    desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), tmp]})
+    return srt, str(f), tmp
+
+
+def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
+    """The srt settings of a task's setup and check, once they have ended, and their temporary folders
+    still there (one stopped midway leaves its own)."""
+    for name in ("setup", "check"):
+        (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
+    for t in desk.meta(tid).get("sandbox_tmp", []):
+        shutil.rmtree(t, ignore_errors=True)
+    desk.update(tid, sandbox_tmp=[])
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
@@ -694,14 +763,16 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     return wt, base
 
 
-def with_setup(desk: Desk, argv: list, lane: dict, raw: Path, wt: Path) -> list:
+def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
     """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT)."""
     if not lane.get("setup"):
         return argv
+    raw = desk.raw_dir(tid)
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
+    srt, settings, tmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
     line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
     return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
-            line, *argv]
+            line, tmp, srt, settings, *argv]
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
@@ -776,6 +847,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
+    command = with_setup(desk, tid, argv, lane, pname, p, wt)
     with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
         if cancelled_before_start(desk, tid):
             return None
@@ -785,7 +857,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                     setup_ran=bool(lane.get("setup")))
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
-            proc = subprocess.Popen(with_setup(desk, argv, lane, raw, wt), cwd=str(wt), env=env, stdin=stdin, stdout=out,
+            proc = subprocess.Popen(command, cwd=str(wt), env=env, stdin=stdin, stdout=out,
                                     stderr=err, start_new_session=True)
         desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid,
                     pid_start=proc_start(proc.pid))
@@ -830,7 +902,7 @@ def design_command(desk: Desk, tid: str):
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
-    return with_setup(desk, argv, lane, desk.raw_dir(tid), wt), env, wt
+    return with_setup(desk, tid, argv, lane, pname, p, wt), env, wt
 
 
 def start_design(desk: Desk, tid: str, lane_name: str) -> None:
@@ -845,6 +917,8 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     if prob:
         raise RuntimeError(f"the design provider {pname} cannot be used now: {prob}")
     tmux = tmux_bin()
+    if lane.get("setup"):
+        srt_bin()  # the session runs the lane's setup in srt, so it could not start without it
     if p["kind"] == "subscription":
         model = ds.get("model") or (co.get("model") if pname == co["provider"] else "") or p["model"]
     else:
@@ -952,6 +1026,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
     done.unlink(missing_ok=True)
+    remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
@@ -1063,22 +1138,24 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
 
 
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
-    """Run the lane's check command in the worktree, as hansa, after the worker is done; None when
-    the task was cancelled first. The exit code goes to a file, so a restarted server can still
-    read it."""
+    """Run the lane's check command in the worktree, in srt with the lane's sandbox, after the worker is
+    done; None when the task was cancelled first. The exit code goes to a file, so a restarted server
+    can still read it."""
     raw = desk.raw_dir(tid)
     (raw / "check.exit").unlink(missing_ok=True)
-    env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-    env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb"})
     token = f"hansa-check-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
     with desk.lock():  # a cancel lands before this (no check) or after it (the check is stopped)
-        m = desk.change(tid, lambda x: None if x.get("cancel") else
-                        {"launch": token, "check_started": now(), "check_command": lane["check"]})
-        if m is None:
+        meta = desk.meta(tid)
+        if meta.get("cancel"):
             return None
+        wt, pname = Path(meta.get("worktree") or desk.worktrees_dir / lane_name), meta.get("provider", "")
+        srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
+        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
+        env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp})
+        desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
-            proc = subprocess.Popen(["/bin/sh", "-c", 'sh -c "$1"; echo $? > "$2"', token, lane["check"],
-                                     str(raw / "check.exit")], cwd=m.get("worktree") or str(desk.worktrees_dir / lane_name),
+            proc = subprocess.Popen(["/bin/sh", "-c", '"$4" --settings "$5" -- sh -c "$1"; echo $? > "$2"; rm -rf "$3"',
+                                     token, lane["check"], str(raw / "check.exit"), tmp, srt, settings], cwd=str(wt),
                                     env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
@@ -1095,11 +1172,12 @@ def finish_check(desk: Desk, tid: str) -> dict:
     except (OSError, ValueError):
         code = None
     done.unlink(missing_ok=True)
+    remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "check.log")  # what the check printed can hold a key the change holds
     log = (d / "check.log").read_text(encoding="utf-8", errors="replace") if (d / "check.log").exists() else ""
     note = ("stopped on request" if m.get("cancel") else "stopped at the lane's time ceiling"
             if m.get("timed_out") else "" if code is not None else "the check was interrupted")
-    changed = ""  # the check runs in the worktree, outside any sandbox: it may have changed .git too
+    changed = ""  # the check's sandbox keeps the worktree's .git file, and hansa makes sure
     if m.get("worktree") and expected_git_line(desk, Path(m["worktree"])):
         try:
             check_git_file(desk, Path(m["worktree"]))
@@ -1241,7 +1319,15 @@ class Dispatcher:
             finish_check(desk, tid)
             return
         lane = s["lanes"].get(m.get("lane"), {})
-        proc = start_check(desk, tid, m["lane"], lane) if lane.get("check") else None
+        try:
+            proc = start_check(desk, tid, m["lane"], lane) if lane.get("check") else None
+        except Exception as e:  # noqa: BLE001 - srt missing, say: the check cannot run, so the task fails
+            why = desk.redact(f"the lane's check could not run: {e}")[:600]
+            remove_sandbox_tmp(desk, tid)
+            publish(desk, tid, "check.log")
+            desk.change(tid, lambda x: {"state": "failed", "phase": "", "pid": None, "pid_start": "", "error": why})
+            desk.event("task_checked", task=tid, ok=False, exit=None, note=why)
+            return
         if proc:
             self.procs[tid] = proc
             return

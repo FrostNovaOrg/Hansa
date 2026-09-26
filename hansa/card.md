@@ -62,8 +62,11 @@ its temporary folder and the lane's write list), cannot read the desk's keys and
 state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
-worker, outside the sandbox and with the network, so installing dependencies
-belongs there, not in the task.
+worker and its check after it, both in the lane's sandbox too (run by `srt`,
+Anthropic's sandbox runtime): the lane's network list and write list hold for
+them as for the worker, so a setup that downloads dependencies needs its
+registry on the network list. Installing dependencies belongs in the setup, not
+in the task.
 A task starts from the lane's base branch as it is at that moment, which can be
 before you merge the one ahead of it. If a task needs an earlier task's change,
 queue it after that merge.
@@ -157,17 +160,22 @@ here; work that needs code changed or a browser goes to a worker.
   its limits of turns and minutes) and how many tasks run at once. hansa checks
   each change as it checks the principal's; a change it refuses changes nothing.
 - A lane's setup, check and preview run outside the worker: hansa runs them
-  itself, and the lane's allowed commands do not hold them back. So each change
-  to them is recorded, and you tell the principal in the conversation what you
-  changed and why.
+  itself, and the lane's allowed commands do not hold them back. The setup and
+  check run in the lane's sandbox (its network and write lists apply); the
+  preview does not. So each change to them is recorded, and you tell the
+  principal in the conversation what you changed and why.
+- hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
+  lane's setup and check. Without it a task in a lane that has either fails,
+  and `hansa status` says so; you may install it.
 - A lane's network list (`hansa lane set L network HOST ...`, such as
   `registry.npmjs.org`, `*.pypi.org` or `localhost`) is what its workers may
-  reach during a task. Add a host only when the lane's work needs it during a
-  task (a build that downloads, say), not for installing dependencies, which is
-  the setup's; and tell the principal what you added and why.
+  reach during a task, and what its setup and check may reach. Add a host only
+  when the lane's work needs it (a setup that installs dependencies needs its
+  registry, a build that downloads, say); and tell the principal what you added
+  and why.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
-  `/Users/me/.m2`) is the folders its workers may write besides the worktree and
-  their temporary folder. Use it when a build or test tool needs its cache folder
+  `/Users/me/.m2`) is the folders its workers, setup and check may write besides
+  the worktree and their temporary folder. Use it when a build or test tool needs its cache folder
   (Maven's `~/.m2`, npm's `~/.npm`, pip's `~/.cache/pip`, Gradle's `~/.gradle`):
   add that tool's own folder, never the whole home folder. hansa refuses a path
   that would open what the sandbox keeps closed or what hansa runs: the home

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import build, cost
 from .desk import Desk, is_git_rule, read_json
-from .run import join_command, progress_of, provider_problem, server_up, waiting_reason
+from .run import SRT_MISSING, join_command, progress_of, provider_problem, server_up, srt_needed, waiting_reason
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -74,6 +74,7 @@ def status(desk: Desk) -> dict:
         "paused": desk.paused(),
         "server_up": server_up(desk),
         "server_seconds_ago": int(time.time() - hb) if hb else None,
+        "srt_missing": SRT_MISSING if srt_needed(s) else "",
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in running if m.get("lane") == n), None)}
@@ -111,6 +112,7 @@ def status_text(st: dict) -> str:
            "server up" if st["server_up"] else "server NOT running: start it with `hansa serve` (see hansa explain server)"]
     out += ["cost audit on"] if st.get("audits_cost") else []
     out = [" · ".join(out + [f"hansa {st['build']}", time.strftime("now %H:%M")])]
+    out += ["srt MISSING: " + st["srt_missing"]] if st.get("srt_missing") else []
     out.append("lanes:")
     for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
         out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or 'free'}")
@@ -266,12 +268,17 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
             f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
             " (check included); set high, so reaching it means something went wrong",
-            "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends;"
+            "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends,"
+                                            " in the lane's sandbox;"
                                             " hansa merge refuses a failed check)" if ln.get("check") else "none"),
-            "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts;"
+            "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts,"
+                                             " in the lane's sandbox, so one that downloads needs its registry on"
+                                             " the network list;"
                                              " what it changes in the repository is set aside; if it fails, the"
                                              " task fails and hansa show has its last lines)" if ln.get("setup")
                                              else "none"),
+            *(["  the setup and check run in srt with the lane's sandbox: the network and write lists below"
+               " hold for them as for workers"] if ln.get("setup") or ln.get("check") else []),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",

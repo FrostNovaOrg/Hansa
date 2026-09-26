@@ -15,7 +15,10 @@ project was called Bellhop; that version is on the `main` branch.
 Needs Python 3, git and Claude Code. Workers run in Claude Code's sandbox and do
 not start without it: on macOS it is built in; on Linux it needs `bubblewrap`
 and `socat`, and on Ubuntu 24.04 and later the system's AppArmor rules can stop
-it (see Claude Code's sandboxing documentation).
+it (see Claude Code's sandboxing documentation). A lane with a setup or check
+command also needs `srt`, Anthropic's sandbox runtime, which runs them in the
+lane's sandbox: `npm install -g @anthropic-ai/sandbox-runtime`. Without it,
+tasks in such a lane fail, and `hansa status` says so.
 ```sh
 bin/hansa init /path/to/desk --repo /path/to/checkout   # first lane is "a"
 cd /path/to/desk && hansa serve                          # keep it running (tmux, systemd, ...)
@@ -64,9 +67,11 @@ once for each lane's design worktree, in the first design session.
   reading of the desk's keys or of common credential files, no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
-  own branch, and merges only what the coordinator merges. The lane's setup runs
-  before the worker, outside the sandbox and with the network. Design sessions,
-  which the principal works in directly, and the coordinator run outside it.
+  own branch, and merges only what the coordinator merges. The lane's setup,
+  before the worker, and its check, after it, run in the same sandbox (with
+  `srt`): the lane's network and write lists hold for them too, so a setup that
+  downloads needs its registry on the network list. Design sessions, which the
+  principal works in directly, and the coordinator run outside it.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not
@@ -83,9 +88,9 @@ coordinator starts. Rules of your own go in `.claude/settings.local.json`.
 
 ## Current limits
 - Alpha: settings, commands and files may still change between versions.
-- A worker's commands run in the operating system's sandbox; the lane's check,
-  setup and preview commands, design sessions and the coordinator do not, and
-  run as the desk's user. Run a desk as a user, or on a machine, whose files you
+- A worker's commands, and the lane's setup and check commands, run in the
+  operating system's sandbox; the lane's preview command, design sessions and
+  the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the
