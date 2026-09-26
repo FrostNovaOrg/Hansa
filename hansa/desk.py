@@ -30,6 +30,10 @@ from pathlib import Path
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
+# A host a lane's workers may reach during a task: registry.npmjs.org, *.pypi.org, localhost:3000
+LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
+MAX_HOSTS = 50
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
@@ -69,7 +73,7 @@ def default_settings() -> dict:
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
     return {"repo": repo, "base": base, "providers": providers or ["claude"],
-            "allow": list(DEFAULT_ALLOW), "env": {}, "max_turns": 300, "timeout_min": 240}
+            "allow": list(DEFAULT_ALLOW), "network": [], "env": {}, "max_turns": 300, "timeout_min": 240}
 
 
 def now() -> float:
@@ -152,7 +156,7 @@ def validate(s: dict) -> list:
         if not isinstance(ln, dict):
             p.append(f"{at}: must be an object")
             continue
-        extra = set(ln) - {"repo", "base", "providers", "allow", "env", "check", "preview", "setup", "max_turns",
+        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "env", "check", "preview", "setup", "max_turns",
                            "timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
@@ -169,6 +173,10 @@ def validate(s: dict) -> list:
         elif any(is_git_rule(r) for r in allow):
             p.append(f"{at}: git is handled by hansa (workers can already look at status, diffs and history, "
                      "and hansa commits for them); remove the rules that run git")
+        hosts = ln.get("network", [])
+        if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
+            p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
+                     "*.pypi.org or localhost:3000")
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -238,6 +246,12 @@ def key_problem(k: str) -> str:
     if len(k) < 8:  # hansa looks for keys in what agents write; one this short would match ordinary text
         return "this is too short to be a key; paste the whole key"
     return ""
+
+
+def is_host(h) -> bool:
+    """A host name for a lane's network list, optionally *. in front and :port behind."""
+    m = HOST.match(h) if isinstance(h, str) and len(h) <= 260 else None
+    return bool(m) and (m["port"] is None or 0 < int(m["port"]) < 65536)
 
 
 def is_git_rule(rule: str) -> bool:

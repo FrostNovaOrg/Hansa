@@ -150,7 +150,7 @@ class DeskTest(unittest.TestCase):
         tid = self.desk.new_task("Add hello.txt", title="Add a greeting")
         m = self.settle(Dispatcher(self.desk), tid)
         argv = json.loads(seen.read_text().splitlines()[-1])
-        self.assertNotIn("Bash(git commit:*)", argv)
+        self.assertNotIn("Bash(git commit:*)", argv[argv.index("--allowedTools"):])
         self.assertIn("Bash(pnpm test:*)", argv)
         self.assertIn("hansa commits", argv[argv.index("--append-system-prompt") + 1])
         msg = subprocess.run(["git", "log", "-1", "--format=%s", m["head"]], cwd=self.repo,
@@ -728,6 +728,73 @@ class DeskTest(unittest.TestCase):
         self.assertIn(str(self.desk.root / "CLAUDE.md"),
                       json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["claudeMdExcludes"])
 
+    @staticmethod
+    def sandbox_of(argv):
+        return json.loads(argv[argv.index("--settings") + 1]).get("sandbox")
+
+    @staticmethod
+    def denied_by(argv):
+        return argv[argv.index("--disallowedTools") + 1:argv.index("--allowedTools")]
+
+    def test_workers_run_in_the_sandbox_and_leave_git_history_to_hansa(self):
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        s["lanes"]["a"]["network"] = ["registry.npmjs.org", "*.pypi.org"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        box = self.sandbox_of(argv)
+        self.assertEqual((box["enabled"], box["failIfUnavailable"], box["autoAllowBashIfSandboxed"],
+                          box["allowUnsandboxedCommands"]), (True, True, True, False))
+        self.assertEqual(box["network"], {"allowedDomains": ["registry.npmjs.org", "*.pypi.org"],
+                                          "strictAllowlist": True})  # no local server without localhost
+        for d in (self.desk.secrets_dir, self.desk.state_dir, Path.home() / ".ssh", Path.home() / ".claude.json"):
+            self.assertIn(str(d), box["filesystem"]["denyRead"])
+        self.assertEqual(box["credentials"]["envVars"], [{"name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny"},
+                                                         {"name": "ANTHROPIC_API_KEY", "mode": "deny"}])
+        self.assertIn("claudeMdExcludes", json.loads(argv[argv.index("--settings") + 1]))  # one object, both in it
+        deny = self.denied_by(argv)
+        for c in ("commit", "push", "merge", "reset", "stash", "switch", "branch", "checkout", "restore"):
+            self.assertIn(f"Bash(git {c}:*)", deny)
+
+        s = self.desk.settings()
+        s["lanes"]["a"]["network"] = ["localhost"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
+        box = self.sandbox_of(argv)
+        self.assertEqual((box["enabled"], box["allowUnsandboxedCommands"]), (True, False))
+        self.assertEqual(box["network"], {"allowedDomains": ["localhost"], "strictAllowlist": True,
+                                          "allowLocalBinding": True})
+        deny = self.denied_by(argv)
+        self.assertIn("Bash(git commit:*)", deny)
+        self.assertIn("Bash(git stash:*)", deny)
+        self.assertNotIn("Bash(git checkout:*)", deny)  # a verification may put code back to see a test fail
+        self.assertNotIn("Bash(git restore:*)", deny)
+        self.assertIn("Bash(git checkout:*)", argv)
+
+    def test_design_sessions_and_provider_checks_run_outside_the_sandbox(self):
+        from hansa import run
+        tid = self.desk.new_task("Make the badge bigger")
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.assertIsNone(self.sandbox_of(argv))
+        self.assertFalse([r for r in self.denied_by(argv) if r.startswith("Bash(git")])
+        seen = {}
+
+        def answer(argv, **kwargs):
+            seen["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertIsNone(self.sandbox_of(seen["argv"]))
+
     def test_lane_check_runs_after_the_worker_and_gates_the_merge(self):
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "test -f hello.txt && echo checked"
@@ -872,7 +939,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn(vid, subprocess.run(["git", "stash", "list"], cwd=wt, capture_output=True, text=True).stdout)
         argv = json.loads(seen.read_text().splitlines()[-1])
         self.assertIn("Bash(git checkout:*)", argv)
-        self.assertNotIn("Bash(git stash:*)", argv)
+        self.assertNotIn("Bash(git stash:*)", argv[argv.index("--allowedTools"):])
         self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
         self.assertIn("Run first", (self.desk.tasks_dir / vid / "task.md").read_text())
         st = views.status(self.desk)
@@ -1218,6 +1285,25 @@ class DeskTest(unittest.TestCase):
         self.assertIn("lane a: unknown provider nosuch", str(e.exception.code))
         self.assertEqual(self.desk.settings_path.read_text(), before)
         self.assertEqual(len(self.events("settings_saved")), saved)
+
+    def test_a_lanes_network_list(self):
+        out = self.hansa("lane", "set", "a", "network", "registry.npmjs.org")
+        self.assertIn('network: [] -> ["registry.npmjs.org"]', out)
+        self.assertIn("Tell the principal", out)
+        self.hansa("lane", "set", "a", "network", "registry.npmjs.org", "*.pypi.org", "localhost:3000")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["network"],
+                         ["registry.npmjs.org", "*.pypi.org", "localhost:3000"])
+        self.assertIn("network during a task: registry.npmjs.org, *.pypi.org, localhost:3000",
+                      views.explain_text(self.desk, "lane", "a"))
+        before = self.desk.settings_path.read_text()
+        for bad in (["https://registry.npmjs.org"], ["a..b"], ["*."], ["x.org:99999"], ["foo bar"],
+                    [f"h{i}.org" for i in range(51)]):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "network", *bad])
+            self.assertIn("lane a: network must be a list of up to 50 host names", str(e.exception.code))
+            self.assertEqual(self.desk.settings_path.read_text(), before)
+        self.hansa("lane", "set", "a", "network")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["network"], [])
 
     def test_a_setup_change_is_recorded_for_the_principal(self):
         out = self.hansa("lane", "set", "a", "setup", "pnpm install --frozen-lockfile")
