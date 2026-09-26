@@ -46,7 +46,7 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 #   <worker command...>
 SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
 line=$4
-env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
+env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
   rc=$?
   rm -rf "$5"
   ! ok || [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
@@ -541,8 +541,9 @@ def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str
 
 def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
     """What a lane's setup or check (`name`) runs in: (srt, its settings file in the task's raw folder,
-    a temporary folder made for this run, for the command's TMPDIR). Whoever runs the command removes
-    the folder after it; finish and finish_check remove one left behind."""
+    a temporary folder made for this run, for the command's TMPDIR). srt ignores the TMPDIR it is given
+    and sets its own from CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the folder.
+    Whoever runs the command removes the folder after it; finish and finish_check remove one left behind."""
     srt = srt_bin()
     try:
         check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
@@ -1151,7 +1152,7 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         wt, pname = Path(meta.get("worktree") or desk.worktrees_dir / lane_name), meta.get("provider", "")
         srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
         env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-        env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp})
+        env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp})
         desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
             proc = subprocess.Popen(["/bin/sh", "-c", '"$4" --settings "$5" -- sh -c "$1"; echo $? > "$2"; rm -rf "$3"',

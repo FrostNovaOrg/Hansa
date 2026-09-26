@@ -109,8 +109,10 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "nu
 
 
 # A stand-in for srt: records how it was called, with the settings file's content, then runs the command.
+# Like the real one, it ignores the TMPDIR it is given: inside, TMPDIR is CLAUDE_CODE_TMPDIR, else /tmp/claude.
 FAKE_SRT = r'''#!/usr/bin/env python3
 import json, os, sys
+os.environ["TMPDIR"] = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp/claude"
 args = sys.argv[1:]
 cut = args.index("--")
 settings = json.load(open(args[args.index("--settings") + 1]))
@@ -673,7 +675,7 @@ class DeskTest(unittest.TestCase):
         with self.without_srt():
             m = self.settle(d, self.desk.new_task("Add hello.txt"))
             self.assertEqual(m["state"], "done", m)  # no setup, no check: no srt needed
-            self.assertNotIn("srt", views.status_text(views.status(self.desk)))
+            self.assertNotIn("srt MISSING", views.status_text(views.status(self.desk)))
             s = self.desk.settings()
             s["lanes"]["a"]["check"] = "echo checked"
             self.assertEqual(self.desk.save_settings(s), [])
