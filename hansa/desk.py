@@ -413,7 +413,8 @@ class Desk:
             self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
 
-    PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json")
+    PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
+                 "merge-setup.log", "merge-check.err")
 
     def scrub(self, key: str, provider: str) -> None:
         """Take a newly saved key out of what hansa has already written down (text that was not a key

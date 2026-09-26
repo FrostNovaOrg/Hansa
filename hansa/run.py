@@ -66,6 +66,19 @@ rm -rf "$5"
 : > "$2.done"
 shift 7; exec "$@"
 """)
+# A follow-up made with `hansa retry --update` whose merge of the base conflicts: hansa merges the base again
+# here, after the lane's setup (which sets aside what it changes, and could not with a merge half done), and
+# leaves the conflict markers in the files for the worker. Its git runs only while the worktree's .git file
+# still holds the line git wrote for it, and never sees a provider's key.
+# sh -c UPDATE_SCRIPT hansa-update <base commit> <.git line> <error file> <worker command...>
+UPDATE_SCRIPT = ("""[ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$2" ] || {
+  echo "hansa: the worktree's .git file was changed before hansa merged the base in; hansa ran no git there" >>"$3"; exit 96; }
+env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ git merge --no-ff --no-commit --no-verify "$1" >/dev/null 2>&1
+shift 3; exec "$@"
+""")
+# The lane's check, in srt; its exit code goes to a file, so a restarted server can still read it.
+# sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings>
+CHECK_SCRIPT = '"$4" --settings "$5" -- sh -c "$1"; echo $? > "$2"; rm -rf "$3"'
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
 # The provider would not answer this request (its content filter or a refusal). That
@@ -170,6 +183,17 @@ the address it prints in the browser.
 NO_BROWSER_NOTE = """
 No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
 in words what changed and where they can see it.
+"""
+UPDATE_NOTE = """
+Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
+work. The merge conflicts in these files, which now hold git's conflict markers (<<<<<<< this branch,
+======= then {base}, >>>>>>> end): {files}. Settle each conflict by editing the file so it keeps what
+both sides need, and remove every marker. Do not run git merge or commit: when you end, hansa's commit
+completes the merge. Then do what the task says.
+"""
+UPDATE_CLEAN_NOTE = """
+Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
+work; it merged without conflicts.
 """
 DESIGN_NOTE = "(A design session: the principal shaped this directly with it. Its last message:)\n\n"
 # The principal is in the session, so it commits each step itself and brings in the base.
@@ -757,13 +781,8 @@ def leader(pids: list):
     return None
 
 
-def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
-    """Put the lane's worktree (or the one given) on a fresh task branch. Returns (worktree, base sha)."""
-    repo = Path(lane["repo"])
-    tid = meta["id"]
-    base = meta.get("base") or git("rev-parse", lane.get("base") or "main", cwd=repo)
-    start = meta.get("start_from") or base
-    wt = wt or desk.worktrees_dir / lane_name
+def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> None:
+    """Make the worktree if it is not there yet, check its .git file, and set aside what was left in it."""
     if not wt.exists():
         _remember_git_file(desk, wt, None)  # removed by hand: a new one gets its own line
     if not os.path.lexists(wt / ".git") and not expected_git_line(desk, wt):
@@ -773,14 +792,108 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
         check_git_file(desk, wt, repo)  # also finds and remembers the line of a worktree just made
     except GitFileChanged as e:  # changed since the last task ended: this one does not start, the next one can
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    if merge_in_progress(desk, wt):  # a merge left half done cannot be set aside
+        wgit(desk, wt, "merge", "--abort")
     if wgit(desk, wt, "status", "--porcelain"):
         wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}")
+
+
+def merge_in_progress(desk: Desk, wt: Path) -> bool:
+    try:
+        return bool(wgit(desk, wt, "rev-parse", "-q", "--verify", "MERGE_HEAD"))
+    except GitFileChanged:
+        raise
+    except RuntimeError:
+        return False
+
+
+def conflicted_files(run) -> list:
+    """The files a failed merge left unmerged; run: git in the checkout where it failed."""
+    try:
+        return run("diff", "--name-only", "--diff-filter=U").splitlines()
+    except GitFileChanged:
+        raise
+    except RuntimeError:
+        return []
+
+
+def conflict_places(cwd: Path, files: list, most_files: int = 10, most_lines: int = 16) -> str:
+    """Where the two sides of a failed merge meet, read from its files before the merge is aborted: for each
+    file, the lines of each conflict with their numbers."""
+    out = []
+    for f in files[:most_files]:
+        p = Path(cwd) / f
+        try:  # a link is not followed: what it points to is not the change's
+            text = p.read_bytes()[:1_000_000].decode("utf-8", "replace").splitlines() \
+                if stat.S_ISREG(os.lstat(p).st_mode) else []
+        except OSError:
+            text = []
+        blocks, top = [], None
+        for n, x in enumerate(text, 1):
+            if x.startswith("<<<<<<<") and top is None:
+                top = n
+            elif x.startswith(">>>>>>>") and top is not None:
+                blocks.append((top, n))
+                top = None
+        if not blocks:
+            out.append(f"  {f}: no conflict markers in it (one side deleted or renamed it, or it is not text)")
+        for a, b in blocks:
+            out.append(f"  {f}, lines {a}-{b}:")
+            shown = list(enumerate(text[a - 1:b], a))
+            if len(shown) > most_lines:
+                shown = shown[:most_lines - 1] + [(None, f"... {len(shown) - most_lines + 1} more lines")]
+            out += [f"    {'' if n is None else n:>5}  {x[:160]}" for n, x in shown]
+    if len(files) > most_files:
+        out.append(f"  and {len(files) - most_files} more file(s): {', '.join(files[most_files:])}")
+    return "\n".join(out)
+
+
+def conflict_advice(tid: str, base: str, places: str, error: str = "") -> str:
+    """What the coordinator is told when a task's merge conflicts with the base."""
+    where = (f" Where the two sides meet (<<<<<<< {base} as it is now, >>>>>>> {tid}):\n{places}\n" if places
+             else f" ({error})\n" if error else "\n")
+    return (f"hansa: {tid} conflicts with {base}; nothing was merged.{where}"
+            f"Next: hansa retry {tid} --update \"<how to settle the conflict>\" (a worker continues from {tid}'s "
+            f"branch with the current {base} merged into it, and settles the conflict by editing the files); "
+            f"or, to redo the whole change: hansa retry {tid} --fresh \"<the same change on the current {base}>\"")
+
+
+def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str) -> list:
+    """For `hansa retry --update`: merge the base's current tip into the task's fresh branch. Merged at once
+    when it merges cleanly; else aborted here and merged again just before the worker starts, after the
+    lane's setup (UPDATE_SCRIPT). Returns the files that conflict."""
+    try:
+        wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", f"Merge {name} into task/{tid}", tip)
+        return []
+    except GitFileChanged:
+        raise
+    except RuntimeError as e:
+        files = conflicted_files(lambda *a: wgit(desk, wt, *a))
+        if merge_in_progress(desk, wt):
+            wgit(desk, wt, "merge", "--abort")
+        if not files:
+            raise RuntimeError(f"could not merge the current {name} into task/{tid}: {e}") from None
+        return files
+
+
+def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
+    """Put the lane's worktree (or the one given) on a fresh task branch. Returns (worktree, base sha).
+    A follow-up made with --update gets the base's current tip merged into it (update_branch)."""
+    repo = Path(lane["repo"])
+    tid = meta["id"]
+    updating = bool(meta.get("update") and meta.get("start_from"))
+    base = git("rev-parse", lane.get("base") or "main", cwd=repo) if updating or not meta.get("base") else meta["base"]
+    start = meta.get("start_from") or base
+    wt = wt or desk.worktrees_dir / lane_name
+    ready_worktree(desk, repo, wt, tid, start)
     branch = f"task/{tid}"
     if wgit(desk, wt, "branch", "--list", branch):
         # an earlier try of this task: keep its commits under another name
         n = len(meta.get("attempts", []))
         wgit(desk, wt, "branch", "-m", branch, f"{branch}-try{n}")
     wgit(desk, wt, "checkout", "-q", "-B", branch, start)
+    if updating:
+        desk.update(tid, update_conflicts=update_branch(desk, wt, tid, lane.get("base") or "main", base))
     return wt, base
 
 
@@ -856,6 +969,11 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         cfg, extra = browser_for(desk, tid, s["browser"])
         argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
         argv += ["--mcp-config", str(cfg)]
+    conflicts = desk.meta(tid).get("update_conflicts") if meta.get("update") else None
+    if conflicts is not None:
+        note = UPDATE_NOTE if conflicts else UPDATE_CLEAN_NOTE
+        argv[argv.index("--append-system-prompt") + 1] += note.format(base=lane.get("base") or "main",
+                                                                       files=", ".join(conflicts))
     try:
         check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
     except GitFileChanged as e:
@@ -868,6 +986,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
+    if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
+        argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
+                expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
     command = with_setup(desk, tid, argv, lane, pname, p, wt)
     with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
         if cancelled_before_start(desk, tid):
@@ -1175,9 +1296,8 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp})
         desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
-            proc = subprocess.Popen(["/bin/sh", "-c", '"$4" --settings "$5" -- sh -c "$1"; echo $? > "$2"; rm -rf "$3"',
-                                     token, lane["check"], str(raw / "check.exit"), tmp, srt, settings], cwd=str(wt),
-                                    env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            proc = subprocess.Popen(["/bin/sh", "-c", CHECK_SCRIPT, token, lane["check"], str(raw / "check.exit"), tmp,
+                                     srt, settings], cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
     desk.event("check_started", task=tid, lane=lane_name)
@@ -1210,6 +1330,194 @@ def finish_check(desk: Desk, tid: str) -> dict:
                                            else "done", "phase": "", "pid": None, "pid_start": "", "check": check,
                                            "error": changed or ("cancelled" if now_meta.get("cancel") else "")})
     desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
+    return m
+
+
+# A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check.
+# The task is "merging" meanwhile, with merge_check {phase: queued | starting | running, ...}; hansa serve
+# runs it when the lane is free, in the lane's worktree, and it ends in "merged", or back in "done" with
+# merge_check_result saying why nothing was merged.
+MERGE_FILES = ("merge-check.log", "merge-setup.log", "merge-check.err")
+MERGE_MOVES = 2  # the base moved this often while its merge was being checked: hansa stops trying
+
+
+def base_moved(repo, tip: str, head: str) -> bool:
+    """Whether the base (at tip) has commits the task's branch (at head) does not."""
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", tip, head], cwd=str(repo), capture_output=True)
+    return r.returncode != 0
+
+
+def lane_occupied(m: dict) -> bool:
+    """Whether this task holds its lane's worktree now: a worker or check on it, or its merge check."""
+    return (m["state"] == "running" and m.get("kind") != "design") or \
+        (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running"))
+
+
+def close_verification(desk: Desk, m: dict, why: str) -> None:
+    """A verification belongs to the task it checks, and ends with it."""
+    if not m.get("verify"):
+        return
+    v = desk.meta(m["verify"])
+    if v["state"] in ("queued", "done"):
+        desk.update(v["id"], state="cancelled", error=why)
+    elif v["state"] == "running":  # hansa serve stops it within seconds
+        desk.update(v["id"], cancel=True)
+
+
+def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
+    """Nothing was merged: the task goes back to waiting for review, with the result saying why."""
+    m = desk.change(tid, lambda x: None if x["state"] != "merging" else
+                    {"state": "done", "merge_check": None, "merge_check_result": result})
+    if m:
+        desk.event("merge_check_ended", task=tid, ok=False, note=(result or {}).get("note", "cancelled"))
+    return m
+
+
+def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
+    """Merge a task onto the base's current tip in the lane's worktree, then run the lane's setup (if it has
+    one) and check there, in srt, as after a task. Returns the process; None when it did not start
+    (cancelled meanwhile), or ended at once (a conflict; or no check any more, and so merged)."""
+    raw = desk.raw_dir(tid)
+    for f in ("merge-check.exit", "merge-setup.log.done", *MERGE_FILES):
+        (raw / f).unlink(missing_ok=True)
+    token = f"hansa-merge-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
+    with desk.lock():  # a cancel lands before this (no check) or after it (the check is stopped)
+        m = desk.meta(tid)
+        mc = m.get("merge_check") or {}
+        if m["state"] != "merging" or mc.get("phase") != "queued":
+            return None
+        repo, name = Path(lane["repo"]), lane.get("base") or "main"
+        wt = desk.worktrees_dir / lane_name
+        tip = git("rev-parse", name, cwd=repo)
+        ready_worktree(desk, repo, wt, tid, tip)
+        try:
+            wgit(desk, wt, "checkout", "-q", "--detach", tip)
+            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", f"Merge {tid}: {m['title']}", m["head"])
+        except GitFileChanged as e:
+            raise RuntimeError(git_file_changed(desk, tid, e)) from None
+        except RuntimeError as e:
+            files = conflicted_files(lambda *a: wgit(desk, wt, *a))
+            places = desk.redact(conflict_places(wt, files)) if files else ""
+            if merge_in_progress(desk, wt):
+                wgit(desk, wt, "merge", "--abort")
+            end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "files": files,
+                                        "note": f"conflicts with {name} as it is now",
+                                        "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
+            return None
+        commit = wgit(desk, wt, "rev-parse", "HEAD")
+        if not lane.get("check"):  # the principal took the check away meanwhile: nothing to run
+            land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
+                                   "at": now(), "seconds": 0, "tail": []})
+            return None
+        pname = m.get("provider", "")
+        p = desk.settings()["providers"].get(pname) or {}
+        srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, p, wt)
+        argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, lane["check"], str(raw / "merge-check.exit"), tmp, srt, settings]
+        if lane.get("setup"):
+            ssrt, ssettings, stmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
+            argv = ["/bin/sh", "-c", SETUP_SCRIPT, token, lane["setup"], str(raw / "merge-setup.log"),
+                    str(raw / "merge-check.err"), expected_git_line(desk, wt) or "(unknown, so no git runs here)",
+                    stmp, ssrt, ssettings, *argv]
+        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
+        env.update({**lane.get("env", {}), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp})
+        mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": lane["check"],
+              "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
+        desk.update(tid, merge_check=mc)
+        with open(raw / "merge-check.log", "wb") as out:
+            proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        desk.update(tid, merge_check={**mc, "phase": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+    desk.event("merge_check_started", task=tid, lane=lane_name, onto=tip)
+    return proc
+
+
+def finish_merge_check(desk: Desk, tid: str) -> dict | None:
+    """After a merge check's process ended: merge, check again, or send the task back for review."""
+    m = desk.meta(tid)
+    mc = m.get("merge_check") or {}
+    if m["state"] != "merging" or mc.get("phase") not in ("starting", "running"):
+        return None
+    raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
+    try:
+        code = int((raw / "merge-check.exit").read_text().strip())
+    except (OSError, ValueError):
+        code = None
+    (raw / "merge-check.exit").unlink(missing_ok=True)
+    (raw / "merge-setup.log.done").unlink(missing_ok=True)
+    remove_sandbox_tmp(desk, tid)
+    publish(desk, tid, *MERGE_FILES)  # what the check printed can hold a key the change holds
+
+    def read(name):
+        return (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).exists() else ""
+    err = read("merge-check.err").strip()
+    setup = SETUP_FAILED.search(err)
+    note = ("stopped on request" if mc.get("cancel") else "stopped at the lane's time ceiling" if mc.get("timed_out")
+            else f"the lane's setup failed (exit {setup.group(1)}), so the check did not run" if setup
+            else "" if code is not None else (err.splitlines()[-1] if err else "the check was interrupted"))
+    if mc.get("worktree") and expected_git_line(desk, Path(mc["worktree"])):
+        try:
+            check_git_file(desk, Path(mc["worktree"]))
+        except GitFileChanged as e:
+            note = git_file_changed(desk, tid, e)
+    result = {"ok": code == 0 and not note, "exit": code, "note": note, "command": mc.get("command", ""),
+              "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
+              "seconds": round(now() - (mc.get("started") or now())),
+              "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
+    desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note)
+    if mc.get("cancel"):
+        return end_merge_check(desk, tid, None)
+    if not result["ok"]:
+        return end_merge_check(desk, tid, result)
+    return land_merge(desk, tid, result)
+
+
+def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
+    """Move the base to exactly the merge commit that passed, and only if the base is still where it was merged
+    onto; otherwise check once more on the new tip, and after the base's second move, stop."""
+    with desk.lock():  # a merge, a cancel or a key saved meanwhile lands before this or after it
+        m = desk.meta(tid)
+        mc = m.get("merge_check") or {}
+        if m["state"] != "merging":
+            return None
+        lane = desk.settings()["lanes"].get(m.get("lane"))
+        if not lane:
+            return end_merge_check(desk, tid, {**result, "ok": False, "note": f"lane {m.get('lane')} is no longer in "
+                                                                              "settings; nothing was merged"})
+        repo, name = lane["repo"], lane.get("base") or "main"
+        tip = git("rev-parse", name, cwd=repo)
+        if tip != result["onto"]:
+            moves = mc.get("moves", 0) + 1
+            desk.event("merge_check_base_moved", task=tid, onto=result["onto"], now=tip, moves=moves)
+            if moves >= MERGE_MOVES:
+                return end_merge_check(desk, tid, {**result, "ok": False, "note": (
+                    f"its merge passed the check twice, but {name} moved each time before hansa could merge it; "
+                    f"nothing was merged. Merge it again when {name} is quiet: hansa merge {tid}")})
+            desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": moves,
+                                          "passed_onto": result["onto"]})
+            return desk.meta(tid)
+        why = ""
+        current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+        if current != name:
+            why = f"the checkout at {repo} is on {current}, not {name}; the principal needs to switch it back"
+        elif git("status", "--porcelain", "--untracked-files=no", cwd=repo):
+            why = f"the checkout at {repo} has uncommitted changes"
+        else:
+            leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
+            if leaked:
+                desk.update(tid, leaked=leaked)
+                why = f"the change holds the key of {', '.join(leaked)}"
+        if not why:
+            try:
+                git("merge", "--ff-only", "-q", result["commit"], cwd=repo, env={"HANSA_MERGING": "1"})
+            except RuntimeError as e:
+                why = f"moving {name} to the checked merge failed ({str(e)[:200]})"
+        if why:
+            return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
+                                                                              "nothing was merged"})
+        m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
+                        merge_check_result=result)
+        close_verification(desk, m, f"closed: {tid} was merged")
+    desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"])
     return m
 
 
@@ -1303,6 +1611,7 @@ class Dispatcher:
     def __init__(self, desk: Desk) -> None:
         self.desk = desk
         self.procs = {}
+        self.merge_procs = {}  # merge checks this server started
 
     def ended(self, tid: str, returncode) -> None:
         if self.desk.meta(tid).get("phase") == "checking":
@@ -1356,6 +1665,61 @@ class Dispatcher:
         desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled", "finished": now()}
                     if x.get("cancel") else {"state": "done", "phase": ""})
 
+    def merge_checks(self, s: dict) -> None:
+        """Finish merge checks that ended, stop those cancelled or over the lane's time, take over or finish
+        those an earlier server left, and start queued ones on free lanes (also while dispatch is paused:
+        they use no provider)."""
+        desk = self.desk
+        for tid, proc in list(self.merge_procs.items()):
+            if has_ended(proc):
+                del self.merge_procs[tid]
+                stop(proc.pid, "", proc)
+                finish_merge_check(desk, tid)
+        for m in desk.tasks():
+            mc = m.get("merge_check") or {}
+            if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
+                continue
+            found = leader(pids_with_arg(mc.get("launch", "")))
+            if found and mc.get("phase") == "starting":  # an earlier server stopped right after starting it
+                desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found)})
+            elif not found and not alive(mc.get("pid"), mc.get("pid_start", "")):
+                if mc.get("phase") == "starting":  # it never started: once more from the start
+                    desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued"}}
+                                if x["state"] == "merging" else None)
+                else:
+                    finish_merge_check(desk, m["id"])
+        for m in desk.tasks():
+            mc = m.get("merge_check") or {}
+            if m["state"] != "merging" or mc.get("phase") != "running":
+                continue
+            limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
+            if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
+                desk.update(m["id"], merge_check={**mc, "timed_out": True})
+                stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
+        tasks = desk.tasks()
+        busy = {m.get("lane") for m in tasks if lane_occupied(m)}
+        free = s["concurrency"] - sum(map(lane_occupied, tasks))
+        for m in tasks:
+            if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
+                continue
+            ln = m.get("lane")
+            if ln not in s["lanes"]:
+                end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": f"lane {ln} is no longer in settings"})
+                continue
+            if ln in busy or free <= 0:
+                continue
+            try:
+                proc = start_merge_check(desk, m["id"], ln, s["lanes"][ln])
+            except Exception as e:  # noqa: BLE001 - srt missing, say: nothing is merged, and the task says why
+                remove_sandbox_tmp(desk, m["id"])
+                end_merge_check(desk, m["id"], {"ok": False, "at": now(),
+                                                "note": desk.redact(f"the merge check could not run: {e}")[:600]})
+                continue
+            if proc:
+                self.merge_procs[m["id"]] = proc
+                busy.add(ln)
+                free -= 1
+
     def tick(self) -> None:
         desk = self.desk
         s = desk.settings()
@@ -1384,6 +1748,7 @@ class Dispatcher:
                 if not m.get("cancel"):
                     desk.update(m["id"], timed_out=True)
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
+        self.merge_checks(s)
         if desk.paused():
             return
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
@@ -1396,7 +1761,7 @@ class Dispatcher:
                     not_started(desk, m["id"], e)
                 else:
                     designing.add(m["lane"])
-        running = [m for m in desk.tasks() if m["state"] == "running" and m.get("kind") != "design"]
+        running = [m for m in desk.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
         busy = {m["lane"] for m in running}
         for m in desk.tasks():
