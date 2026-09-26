@@ -57,7 +57,7 @@ const T = ZH ? {
   title:"工作台", status:"状态", settings:"设置", cost:"成本",
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新活不会开始",
-  lanes:"工作线", lane:"线", order:"用哪家（按顺序，前一家额度用完换下一家）", now:"现在", free:"空闲", trying:"试运行中", busyWith:"在做",
+  lanes:"工作线", lane:"工作线", order:"用哪家（按顺序，前一家额度用完换下一家）", now:"现在", free:"空闲", trying:"试运行中", busyWith:"在做",
   running:"正在做", queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
   asks:"智能体提的请求", answer:"回复（可不填）", close:"处理完",
@@ -68,16 +68,19 @@ const T = ZH ? {
   general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟", coordinator:"协调席",
   auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
-  allow:"执行层能跑的命令（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。不在这里的命令一律被拒，被拒的会记在任务详情里。不用写 git 和 ls 这类只读命令：执行层本来就能用，改动由框架替它存档）",
+  allow:"设计会话不用问就能跑的命令（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着这张单子。git 的规则写了也不算：提交由框架来做）",
+  network:"执行层做活时能连的主机", write:"执行层还能写的文件夹（工作树以外）",
   laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）", progressFmt:(n, idle) => idle == null ? "模型还没回话" : `已回 ${n} 轮，${idle} 分钟前还有动作`,
   browserCmd:"浏览器工具的启动命令（协调席派活时可以给单件活开浏览器；空＝不提供浏览器）",
   design:"设计会话（你直接在里面跟它改一件功能，结束后交回协调席核对、合并）", join:"接进去的命令（在这台机器上运行）", shots:"截图（最新在前）",
   designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看（空＝没有）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
-  providersList:"用哪几家（按顺序）", briefNote:"每条线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/线名/brief.md。",
-  lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条线，在对话里跟协调席说。",
+  providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
+  lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
   concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
-  laneCommands:"最近改过的线上命令和网络（这些命令由 hansa 自己跑，不在执行层的沙箱里；最新在前，最多 20 条）", field:"哪一项", change:"原来 -> 现在", at:"时间",
+  laneCommands:"工作线最近改过的命令、网络和可写文件夹（最新在前，最多 20 条）",
+  laneCommandsNote:"装依赖和验收命令由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟执行层一样的网络和可写范围）；起页面的命令由设计会话自己跑，设计会话不在沙箱里。网络和可写文件夹的改动，会放宽这条工作线的执行层（连同装依赖和验收）能做的事。",
+  f_setup:"装依赖", f_check:"验收命令", f_preview:"起页面", field:"哪一项", change:"原来 -> 现在", at:"时间",
   prices:"价目（美元／每百万 token）", in:"输入", out:"输出", cacheRead:"读缓存", cacheWrite:"写缓存", cacheWrite1h:"写缓存（1 小时）",
   addPrice:"加一个模型", pricesNote:"缓存价空着就按常见倍数算；第三方模型请填全。",
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
@@ -85,14 +88,15 @@ const T = ZH ? {
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
-  export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
+  export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
   noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   merging:"正在合并验收（跟基础分支现在的样子合在一起再跑一遍验收，通过就自动合并，不通过就回到待审）", mergeCheck:"合并验收",
-  mcRunning:n => `合并验收已跑了 ${n} 分钟`, mcQueuedBusy:(lane, id) => `合并验收在排队：等线 ${lane} 空出来（现在在做 ${id}）`,
-  mcQueuedSoon:"合并验收在排队：线空着，几秒内开始", mcQueuedNoServer:"合并验收在排队：后台没在运行，开始不了",
-  mcAgain:"（又一次：验收期间基础分支变了）"
+  mcRunning:n => `合并验收已跑了 ${n} 分钟`, mcQueuedBusy:(lane, id) => `合并验收在排队：等工作线 ${lane} 空出来（现在在做 ${id}）`,
+  mcQueuedSoon:"合并验收在排队：工作线空着，几秒内开始", mcQueuedNoServer:"合并验收在排队：后台没在运行，开始不了",
+  mcAgain:"（又一次：验收期间基础分支变了）",
+  checkMinutes:(c, n) => `验收已跑 ${c} 分钟（一共 ${n} 分钟）`
 } : {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
@@ -108,7 +112,8 @@ const T = ZH ? {
   general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a quota error (min)", coordinator:"Coordinator",
   auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
-  allow:"Commands workers may run (one rule per line; Bash(pnpm test:*) means any command starting with pnpm test; anything else is refused and listed on the task. No need for git or read-only commands such as ls: workers can already use them, and hansa commits for them)",
+  allow:"Commands a design session may run without asking (one rule per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no list. Git rules count for nothing: hansa does the committing",
+  network:"Hosts workers may reach during a task", write:"Extra folders workers may write to (besides the worktree)",
   laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)", progressFmt:(n, idle) => idle == null ? "no reply from the model yet" : `${n} replies, active ${idle} min ago`,
   browserCmd:"Browser tool command (the coordinator can give single tasks a browser; blank = none)",
   design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
@@ -117,7 +122,9 @@ const T = ZH ? {
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
-  laneCommands:"Recent changes to lane commands and networks (hansa runs these commands itself, outside the workers' sandbox; newest first, at most 20)", field:"Field", change:"old -> new", at:"When",
+  laneCommands:"Recent changes to lane commands, networks and write folders (newest first, at most 20)",
+  laneCommandsNote:"hansa runs the setup and check commands itself, in srt with the lane's sandbox (the workers' network and folders); the preview command is run by the design session, which has no sandbox. Network and write changes widen what the lane's workers, and its setup and check, may do.",
+  f_setup:"setup", f_check:"check", f_preview:"preview", field:"Field", change:"old -> new", at:"When",
   prices:"Prices (USD per million tokens)", in:"Input", out:"Output", cacheRead:"Cache read", cacheWrite:"Cache write", cacheWrite1h:"Cache write (1h)",
   addPrice:"Add model", pricesNote:"Blank cache prices use the usual multiples; fill them in for third-party models.",
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
@@ -131,7 +138,8 @@ const T = ZH ? {
   merging:"Merging (checked together with the base as it is now; each merges by itself if that passes, and comes back for review if not)", mergeCheck:"Merge check",
   mcRunning:n => `merge check running for ${n} min`, mcQueuedBusy:(lane, id) => `merge check queued: waits for lane ${lane}, busy with ${id}`,
   mcQueuedSoon:"merge check queued: starts within seconds", mcQueuedNoServer:"merge check queued: the server is not running",
-  mcAgain:" (again: the base moved while it was checked)"
+  mcAgain:" (again: the base moved while it was checked)",
+  checkMinutes:(c, n) => `${c} min so far (${n} min in all)`
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
@@ -209,7 +217,8 @@ async function loadStatus() {
       h("span", {class:"muted"}, `${T.today}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd.toFixed(2)} ${T.listValue}`))),
     section(T.lanes, table([T.lane, T.order, T.now], st.lanes.map(l => [l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : l.trying ? T.trying : T.free]))),
     st.running.length ? section(T.running, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
-      st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""), m.minutes,
+      st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""),
+        m.checking ? T.checkMinutes(m.check_minutes, m.minutes) : m.minutes,
         m.progress ? h("span", {}, m.title, h("br"), h("span", {class:"muted"}, T.progressFmt(m.progress.replies, m.progress.idle_min))) : m.title]))) : null,
     designs.length ? section(T.design, designs) : null,
     st.queued.length ? section(T.queued, table([T.task, T.lane, T.titleCol, T.waiting],
@@ -254,14 +263,17 @@ function checkButton(name, after) {
 /* ---------- settings ---------- */
 let S = null, KEYS = {}, REV = null, LANE_CMDS = [];
 async function loadSettings(problems) {
-  const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed&n=20")]);
+  const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed&n=20")]);
   S = r.settings; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev;
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
-  env:T.env, allow:T.allow, check:T.laneCheck, preview:T.preview, setup:T.setup};
+  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, preview:T.preview, setup:T.setup};
+/* The recent-changes list names the field briefly; a network or write change has no field, only its event. */
+const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, preview:T.f_preview, network:T.network, write:T.write};
+const changedField = e => e.event === "lane_network_changed" ? "network" : e.event === "lane_write_changed" ? "write" : e.field;
 function laneValue(k, v) {
   if (v == null || v === "" || (Array.isArray(v) && !v.length) || (typeof v === "object" && !Object.keys(v).length)) return T.none;
   if (k === "providers" && Array.isArray(v)) return v.join(" → ");
@@ -317,8 +329,8 @@ function renderSettings(problems) {
     section(T.lanes, h("p", {class:"warn"}, T.lanesNote), h("p", {class:"muted"}, T.briefNote),
       Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"}, h("strong", {}, name),
         h("div", {class:"facts"}, laneFields(l).map(([k, v]) => [h("span", {class:"muted"}, LANE_LABELS[k] || k), h("pre", {class:"mono"}, v)])))),
-      h("h3", {}, T.laneCommands),
-      LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane, LANE_LABELS[e.field || "network"] || e.field || "network",
+      h("h3", {}, T.laneCommands), h("p", {class:"muted"}, T.laneCommandsNote),
+      LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane, CHANGE_LABELS[changedField(e)] || changedField(e),
         h("span", {class:"mono"}, `${JSON.stringify(e.old ?? "")} -> ${JSON.stringify(e.new ?? "")}`)])) : h("p", {class:"muted"}, T.none)),
     section(T.general, h("div", {class:"grid"},
       T.concurrency, h("div", {}, h("strong", {}, S.concurrency), " ", h("span", {class:"muted"}, T.concurrencyNote)),

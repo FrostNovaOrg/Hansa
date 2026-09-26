@@ -3443,7 +3443,28 @@ class DeskTest(unittest.TestCase):
         self.assertIn("`merge check running for ${n} min`", page)
         self.assertIn("`merge check queued: waits for lane ${lane}, busy with ${id}`", page)
         self.assertIn("`合并验收已跑了 ${n} 分钟`", page)
-        self.assertIn("合并验收在排队：等线 ${lane} 空出来", page)
+        self.assertIn("合并验收在排队：等工作线 ${lane} 空出来", page)
+
+    def test_the_page_shows_how_long_the_check_itself_has_run(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", lane="a", phase="checking", started=time.time() - 8 * 60 - 5,
+                         check_started=time.time() - 60 - 5)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        tok = self.desk.web_token()
+        try:
+            with urllib.request.urlopen(f"{base}/api/status?t={tok}") as r:
+                running = {m["id"]: m for m in json.load(r)["running"]}
+            with urllib.request.urlopen(f"{base}/?t={tok}") as r:
+                page = r.read().decode()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual((running[tid]["checking"], running[tid]["check_minutes"], running[tid]["minutes"]), (True, 1, 8))
+        # the minutes column shows the check's own minutes then, as hansa status does, in both languages
+        self.assertIn("m.checking ? T.checkMinutes(m.check_minutes, m.minutes) : m.minutes", page)
+        self.assertIn("checkMinutes:(c, n) => `${c} min so far (${n} min in all)`", page)
+        self.assertIn("checkMinutes:(c, n) => `验收已跑 ${c} 分钟（一共 ${n} 分钟）`", page)
 
     def test_web_needs_token_and_header(self):
         httpd = start_web(self.desk, "127.0.0.1", 0)
