@@ -232,9 +232,85 @@ def srt_bin() -> str:
     return c
 
 
+SRT_TRY_SECONDS = 60
+
+
+class SrtCannotRun(RuntimeError):
+    """srt was not found, or found but could not run `true` in a sandbox: the machine's problem, not the task's.
+    str(): what srt printed (or that it is missing)."""
+
+
+def srt_record(desk: Desk) -> dict:
+    """What hansa serve last saw of srt: {found, path, ran, said, at}; {} when no server has tried it yet."""
+    return read_json(desk.state_dir / "srt.json", {}) or {}
+
+
+def try_srt(desk: Desk, settings_file, tmp: str, cwd, env: dict) -> str:
+    """Run `true` in srt with these settings and environment, as a setup or check would run, and record what
+    happened in the desk's state (srt_record). Returns srt's path; raises SrtCannotRun when it is not there
+    or does not run: srt is a node script, so a PATH without node finds srt and still cannot start it."""
+    path = shutil.which("srt", path=env.get("PATH", os.defpath)) or shutil.which("srt")
+    rec = {"found": bool(path), "path": path or "", "ran": False, "said": "", "at": now()}
+    if path:
+        try:
+            r = subprocess.run([path, "--settings", str(settings_file), "--", "true"], cwd=str(cwd),
+                               env={**env, "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
+            rec["ran"] = r.returncode == 0
+            said = " ".join((r.stdout + r.stderr).split())[-500:]
+            rec["said"] = "" if rec["ran"] else f"{said or 'nothing'} (exit {r.returncode})"
+        except subprocess.TimeoutExpired:
+            rec["said"] = f"no answer in {SRT_TRY_SECONDS} s"
+        except OSError as e:
+            rec["said"] = str(e)[:300]
+    else:
+        rec["said"] = SRT_MISSING
+    desk.state_dir.mkdir(exist_ok=True)
+    write_json(desk.state_dir / "srt.json", rec)
+    if not rec["ran"]:
+        raise SrtCannotRun(rec["said"] if not path else f"srt ({path}) could not start: {rec['said']}")
+    return path
+
+
+def try_srt_at_start(desk: Desk) -> dict:
+    """hansa serve's try of srt when it starts: `true` in a sandbox that may write only a temporary folder
+    (before each setup or check it tries again, with the lane's settings). Returns the record."""
+    tmp = tempfile.mkdtemp(prefix="hansa-srt-")
+    try:
+        f = Path(tmp) / "settings.json"
+        write_json(f, {"network": {"allowedDomains": [], "deniedDomains": []},
+                       "filesystem": {"allowWrite": full_paths([tmp]), "denyWrite": [],
+                                      "denyRead": full_paths([desk.secrets_dir, desk.state_dir])}})
+        try_srt(desk, f, tmp, tmp, {k: os.environ[k] for k in BASE_ENV if k in os.environ})
+    except SrtCannotRun:
+        pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return srt_record(desk)
+
+
 def srt_needed(s: dict) -> bool:
-    """Whether some lane has a setup or check command while srt, which runs them, is missing."""
-    return any(ln.get("setup") or ln.get("check") for ln in s["lanes"].values()) and not shutil.which("srt")
+    """Whether some lane has a setup or check command, which run in srt."""
+    return any(ln.get("setup") or ln.get("check") for ln in s["lanes"].values())
+
+
+def srt_problem(desk: Desk, s: dict) -> str:
+    """What stops a lane's setup and check from running, as hansa serve last saw srt; before any server has
+    tried it, as this process's PATH sees it, and said so. '' when nothing does, or no lane needs srt."""
+    if not srt_needed(s):
+        return ""
+    rec = srt_record(desk)
+    if not rec:
+        return "" if shutil.which("srt") else (
+            "srt MISSING (on the PATH of this command; hansa serve has not tried srt yet, and its PATH may differ): "
+            + SRT_MISSING)
+    if rec.get("ran"):
+        return ""
+    when = time.strftime("%m-%d %H:%M", time.localtime(rec.get("at") or 0))
+    if not rec.get("found"):
+        return f"srt MISSING (as hansa serve saw it, {when}): {SRT_MISSING}"
+    return (f"srt CANNOT RUN (as hansa serve saw it, {when}): it is at {rec.get('path')}, but a sandboxed `true` "
+            f"failed: {rec.get('said')}. Setups and checks do not run until this is fixed (hansa explain server)")
 
 
 def tmux_bin() -> str:
@@ -593,8 +669,8 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
     """What a lane's setup or check (`name`) runs in: (srt, its settings file in the task's raw folder,
     a temporary folder made for this run, for the command's TMPDIR). srt ignores the TMPDIR it is given
     and sets its own from CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the folder.
-    Whoever runs the command removes the folder after it; finish and finish_check remove one left behind."""
-    srt = srt_bin()
+    Whoever runs the command removes the folder after it; finish and finish_check remove one left behind.
+    srt is tried first with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs."""
     try:
         check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
     except GitFileChanged as e:
@@ -603,6 +679,12 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
     write_json(f, srt_settings(desk, lane, pname, p, wt, tmp))
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), tmp]})
+    env = {**{k: os.environ[k] for k in BASE_ENV if k in os.environ}, **lane.get("env", {})}
+    try:
+        srt = try_srt(desk, f, tmp, wt, env)
+    except SrtCannotRun:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return srt, str(f), tmp
 
 
@@ -929,10 +1011,12 @@ def cancelled_before_start(desk: Desk, tid: str) -> bool:
 
 def not_started(desk: Desk, tid: str, e: Exception) -> None:
     """Record why a task could not start; one cancelled meanwhile stays cancelled."""
-    why = desk.redact(f"could not start: {e}")[:300]
+    machine = isinstance(e, SrtCannotRun)  # the lane's setup could not run: not the task's doing
+    why = desk.redact(f"could not start: the lane's setup could not run: {e}" if machine else f"could not start: {e}")[:600]
     desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
                 {"state": "cancelled", "phase": "", "error": "cancelled before it started", "finished": now()}
-                if m.get("cancel") else {"state": "failed", "phase": "", "error": why, "finished": now()})
+                if m.get("cancel") else {"state": "failed", "phase": "", "error": why, "finished": now(),
+                                         "machine_problem": machine})
     desk.event("task_not_started", task=tid, error=why)
 
 
@@ -1345,7 +1429,8 @@ def finish_check(desk: Desk, tid: str) -> dict:
     return m
 
 
-# A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check.
+# A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check,
+# or `hansa merge --recheck` of any task on such a lane (merge_check {recheck: True, by: who asked}).
 # The task is "merging" meanwhile, with merge_check {phase: queued | starting | running, ...}; hansa serve
 # runs it when the lane is free, in the lane's worktree, and it ends in "merged", or back in "done" with
 # merge_check_result saying why nothing was merged.
@@ -1475,7 +1560,8 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
-    desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note)
+    desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note,
+               **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     if mc.get("cancel"):
         return end_merge_check(desk, tid, None)
     if not result["ok"]:
@@ -1505,7 +1591,8 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
                     f"its merge passed the check twice, but {name} moved each time before hansa could merge it; "
                     f"nothing was merged. Merge it again when {name} is quiet: hansa merge {tid}")})
             desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": moves,
-                                          "passed_onto": result["onto"]})
+                                          "passed_onto": result["onto"],
+                                          **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {})})
             return desk.meta(tid)
         why = ""
         current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
@@ -1529,7 +1616,8 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
                         merge_check_result=result)
         close_verification(desk, m, f"closed: {tid} was merged")
-    desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"])
+    desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
+               **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     return m
 
 
@@ -1663,7 +1751,18 @@ class Dispatcher:
         lane = s["lanes"].get(m.get("lane"), {})
         try:
             proc = start_check(desk, tid, m["lane"], lane) if lane.get("check") else None
-        except Exception as e:  # noqa: BLE001 - srt missing, say: the check cannot run, so the task fails
+        except SrtCannotRun as e:  # the machine's problem: the task is not judged on a check that never ran
+            said = desk.redact(str(e))[:600]
+            check = {"command": lane.get("check", ""), "ok": None, "could_not_run": True, "exit": None,
+                     "note": f"could not run: {said}", "seconds": 0, "tail": []}
+            remove_sandbox_tmp(desk, tid)
+            publish(desk, tid, "check.log")
+            desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "pid": None, "pid_start": "", "error": "cancelled",
+                                        "finished": now()} if x.get("cancel") else
+                        {"state": "done", "phase": "", "pid": None, "pid_start": "", "check": check})
+            desk.event("task_checked", task=tid, ok=None, exit=None, note=check["note"], could_not_run=True)
+            return
+        except Exception as e:  # noqa: BLE001 - say: the check cannot run, so the task fails
             why = desk.redact(f"the lane's check could not run: {e}")[:600]
             remove_sandbox_tmp(desk, tid)
             publish(desk, tid, "check.log")
@@ -1722,7 +1821,13 @@ class Dispatcher:
                 continue
             try:
                 proc = start_merge_check(desk, m["id"], ln, s["lanes"][ln])
-            except Exception as e:  # noqa: BLE001 - srt missing, say: nothing is merged, and the task says why
+            except SrtCannotRun as e:  # the machine's problem: nothing is merged, and nothing ran
+                remove_sandbox_tmp(desk, m["id"])
+                end_merge_check(desk, m["id"], {"ok": False, "at": now(), "could_not_run": True,
+                                                "command": s["lanes"][ln].get("check", ""), "tail": [],
+                                                "note": desk.redact(f"could not run: {e}")[:600]})
+                continue
+            except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
                 remove_sandbox_tmp(desk, m["id"])
                 end_merge_check(desk, m["id"], {"ok": False, "at": now(),
                                                 "note": desk.redact(f"the merge check could not run: {e}")[:600]})
