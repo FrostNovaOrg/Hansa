@@ -1243,8 +1243,8 @@ def sweep(desk: Desk, tid: str) -> list:
     the command doing this. What was stopped goes on the task (left_running) and in the event log."""
     keep = {os.getpid(), os.getppid()}
     try:
-        keep.add(int((desk.state_dir / "serve.lock").read_text().strip()))
-    except (OSError, ValueError):
+        keep.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
+    except (OSError, ValueError, IndexError):
         pass
 
     def running(p, start):
@@ -2544,12 +2544,13 @@ class Dispatcher:
         desk = self.desk
         s = desk.settings()
         desk.state_dir.mkdir(exist_ok=True)
-        (desk.state_dir / "heartbeat").write_text(str(now()))
+        beat(desk)
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
                 del self.procs[tid]
                 stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
                 self.ended(tid, proc.returncode)
+                beat(desk)
         for m in desk.tasks():
             if m["state"] != "running" or m["id"] in self.procs:
                 continue
@@ -2570,6 +2571,7 @@ class Dispatcher:
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
         self.tries(s)
         self.merge_checks(s)
+        beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
         if desk.paused():
             return
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
@@ -2609,9 +2611,84 @@ class Dispatcher:
                 break
 
 
+ROUND_QUIET = 30  # seconds without a finished round after which hansa serve counts as busy
+STUCK_AFTER = 300  # seconds without a finished round after which it is said to be busy or stuck
+
+
+def server_holder(desk: Desk) -> tuple:
+    """The hansa serve that serve.lock names (pid, start); (None, '') when it names none."""
+    try:
+        words = (desk.state_dir / "serve.lock").read_text().split()
+        return int(words[0]), " ".join(words[1:])
+    except (OSError, ValueError, IndexError):
+        return None, ""
+
+
+def _exists(pid, start: str) -> bool:
+    """alive(), but a process of another account (not ours to signal) counts as there."""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return alive(pid, start)
+
+
+def beat(desk: Desk) -> None:
+    """hansa serve got through a round, or a step of one: the heartbeat server_state reads."""
+    desk.state_dir.mkdir(exist_ok=True)
+    (desk.state_dir / "heartbeat").write_text(str(now()))
+
+
+def pulse(desk: Desk, every: float = 5.0) -> None:
+    """hansa serve's process answers: written from a thread while it runs, apart from the rounds, so that a
+    server whose rounds stopped coming is still told from one whose process stopped (server_state)."""
+    import threading
+
+    def run():
+        while True:
+            try:
+                write_json(desk.state_dir / "pulse", {"pid": os.getpid(), "at": time.time()})
+            except OSError:
+                pass
+            time.sleep(every)
+    threading.Thread(target=run, name="hansa-pulse", daemon=True).start()
+
+
+def server_state(desk: Desk) -> dict:
+    """One rule for whether hansa serve runs. gone: the process serve.lock names is no longer alive, or it
+    names none. up: alive, and it finished a round in the last ROUND_QUIET seconds. busy: alive, quiet for
+    longer (a round waiting on a worker to stop, say). stuck: alive, quiet for STUCK_AFTER seconds or more.
+    quiet: seconds since its last round; answers: whether its process still wrote its pulse lately (a
+    process stopped with Ctrl-Z, say, does not)."""
+    pid, start = server_holder(desk)
+    if not pid or not _exists(pid, start):
+        return {"state": "gone", "pid": None, "quiet": None, "answers": False}
+    quiet = max(0, int(time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0)))
+    pulse = read_json(desk.state_dir / "pulse", {}) or {}
+    answers = pulse.get("pid") == pid and time.time() - (pulse.get("at") or 0) < ROUND_QUIET
+    return {"state": "up" if quiet < ROUND_QUIET else "busy" if quiet < STUCK_AFTER else "stuck",
+            "pid": pid, "quiet": quiet, "answers": answers}
+
+
 def server_up(desk: Desk) -> bool:
-    """Whether hansa serve has looked at the desk in the last half minute."""
-    return time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0) < 30
+    """Whether hansa serve runs: its process is alive, busy or not (server_state)."""
+    return server_state(desk)["state"] != "gone"
+
+
+def server_text(st: dict) -> str:
+    """What server_state says, in words, for hansa status and hansa explain server."""
+    if st["state"] == "gone":
+        return "server NOT running: start it with `hansa serve` (see hansa explain server)"
+    if st["state"] == "up":
+        return "server up"
+    mins = st["quiet"] // 60
+    quiet = f"{mins} minute{'s' if mins != 1 else ''}" if mins else f"{st['quiet']} seconds"
+    return (f"server up (pid {st['pid']}) but busy: no round finished for {quiet}" if st["state"] == "busy" else
+            f"hansa serve (pid {st['pid']}) has not finished a round for {quiet}: busy or stuck"
+            + ("" if st["answers"] else "; its process does not answer either (stopped with Ctrl-Z?)")
+            + " · next: hansa explain server")
 
 
 def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:

@@ -1125,6 +1125,7 @@ class DeskTest(unittest.TestCase):
             while not stop_serving.is_set():
                 d.tick()
                 time.sleep(0.05)
+        held = cli.hold_server_lock(self.desk)  # as hansa serve holds it: it says the server runs
         d.tick()
         server = threading.Thread(target=serve)
         server.start()
@@ -1135,6 +1136,7 @@ class DeskTest(unittest.TestCase):
         finally:
             stop_serving.set()
             server.join()
+            held.close()
         said = said.getvalue()
         self.assertEqual(e.exception.code, 1)
         self.assertIn("set up for the try", said)
@@ -2272,6 +2274,78 @@ class DeskTest(unittest.TestCase):
         time.sleep(1)
         tried(False)  # it ran in between: this is news again
         self.soon(lambda: len(told()) == 2)
+
+    def serving(self, quiet=0.0):
+        """A stand-in for hansa serve: a live process that serve.lock names, whose last round was quiet s ago."""
+        p, _ = self.session()
+        (self.desk.state_dir / "serve.lock").write_text(f"{p.pid} {notify.proc_start(p.pid)}")
+        self.round_at(quiet)
+        return p
+
+    def round_at(self, quiet):
+        (self.desk.state_dir / "heartbeat").write_text(str(time.time() - quiet))
+
+    def server_posts(self, sock) -> str:
+        return "".join(self.posts(sock))
+
+    def test_a_live_server_in_a_long_round_is_not_down_and_one_quiet_for_long_is_busy_or_stuck(self):
+        from hansa import run
+        srv = self.serving()
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        self.round_at(45)  # a round past half a minute: stopping a worker's group, sweeping, on a busy machine
+        self.assertEqual(run.server_state(self.desk)["state"], "busy")
+        self.assertTrue(views.status(self.desk)["server_up"])
+        self.assertIn("server up (pid %d) but busy: no round finished for 45 seconds" % srv.pid,
+                      self.hansa_out("status"))
+        time.sleep(4)  # the follower looked a few times, and would have posted by now
+        self.assertNotIn("hansa serve", self.server_posts(sock))
+        self.round_at(run.STUCK_AFTER + 60)
+        told = self.soon(lambda: "busy or stuck" in self.server_posts(sock) and self.server_posts(sock))
+        self.assertIn(f"hansa serve (pid {srv.pid}) has not finished a round for 6 minutes: busy or stuck · next: "
+                      f"hansa explain server", told)
+        self.assertNotIn("not running", told)
+        self.assertIn(f"hansa serve (pid {srv.pid}) has not finished a round for 6 minutes: busy or stuck",
+                      self.hansa_out("status"))
+        self.assertIn("now: hansa serve (pid", self.hansa_out("explain", "server"))
+        self.assertEqual(views.status(self.desk)["server"]["state"], "stuck")
+        time.sleep(2)
+        self.assertEqual(self.server_posts(sock).count("busy or stuck"), 1)  # said once
+        self.round_at(0)  # its round came
+        self.soon(lambda: "hansa serve runs again" in self.server_posts(sock))
+        time.sleep(2)
+        self.assertEqual(self.server_posts(sock).count("hansa serve runs again"), 1)
+        self.assertIn("server up · ", self.hansa_out("status"))
+
+    def test_a_gone_server_is_posted_and_so_is_the_next_one_that_runs(self):
+        srv = self.serving()
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        srv.kill()
+        srv.wait()  # its heartbeat is fresh, but the process serve.lock names is gone
+        told = self.soon(lambda: "not running" in self.server_posts(sock) and self.server_posts(sock))
+        self.assertIn("hansa serve is not running (it stopped without a word): no task starts or ends until it runs "
+                      "again · next: hansa explain server", told)
+        self.assertFalse(views.status(self.desk)["server_up"])
+        self.assertIn("server NOT running", self.hansa_out("status"))
+        self.assertIn("now: server NOT running", self.hansa_out("explain", "server"))
+        self.assertNotIn("hansa serve runs again", told)
+        self.serving()  # a server started again
+        self.soon(lambda: "hansa serve runs again" in self.server_posts(sock))
+        (self.desk.state_dir / "serve.lock").write_text("")  # nothing holds the lock: not running either
+        self.assertFalse(views.status(self.desk)["server_up"])
+
+    def test_a_server_that_said_it_stopped_is_not_said_to_run_again_before_its_next_round(self):
+        stopped = [{"key": ["server"], "line": "hansa serve stopped"}]  # read while its process is still ending
+        items, down, stuck = notify.server_news({"server": {"state": "up", "quiet": 1}}, stopped, True, 0.0, 0.0)
+        self.assertEqual([x["line"] for x in items], ["hansa serve stopped"])  # its last round came before
+        self.assertTrue(down)
+        items, down, stuck = notify.server_news({"server": {"state": "up", "quiet": 0}}, [], True, down - 5, 0.0)
+        self.assertEqual(([x["line"] for x in items], down, stuck), (["hansa serve runs again"], 0.0, 0.0))
 
     def test_a_follower_restarts_on_new_code_and_keeps_its_position(self):
         code = self.tmp / "code"  # hansa's code as installed: a copy, so the test can upgrade it

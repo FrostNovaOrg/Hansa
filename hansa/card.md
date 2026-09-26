@@ -143,7 +143,9 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 ## Hearing from hansa
 hansa posts to your session through its inbox when something needs you: a task
 ended (after its check) or failed, a verification or design session ended, a
-merge check ended, the principal answered a request, the server stopped. Each
+merge check ended, the principal answered a request, the server stopped (or,
+still running, finished no round for 5 minutes: busy or stuck), and then that it
+runs again. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next
 command. A session started with `hansa coordinator` is posted to by itself;
 otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
