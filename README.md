@@ -31,8 +31,10 @@ It prints an address with a token; open it in the browser and keep the
 terminal open. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
-up the lanes, their allowed commands and how many tasks run at once with
-`hansa lane` and `hansa concurrency`.
+up the lanes and how many tasks run at once with `hansa lane` and
+`hansa concurrency`. A worker runs any command inside its sandbox, writing
+only its worktree, its own temporary folder and the lane's write list; a
+lane's allowed commands matter only to design sessions.
 
 hansa tells the coordinator's session when a task ends or you answer a request,
 through the session's inbox (`hansa notify` shows which sessions it posts to).
@@ -72,7 +74,7 @@ page gives.
   defaults, the models of the coordinator and of design sessions, prices,
   whether the coordinator audits cost. The page also shows what goes on.
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
-  provider order, allowed commands, network and write lists, environment,
+  provider order, allowed commands (for design sessions), network and write lists, environment,
   check, preview and setup commands, limits) and how many tasks run at once (`hansa concurrency`);
   each lane's standing instructions (`hansa lane brief`, kept in
   `lanes/<lane>/brief.md`); pause and resume.

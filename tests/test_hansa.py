@@ -1,5 +1,6 @@
 """Tests for hansa with a stand-in for claude, so no model is called."""
 import contextlib
+import functools
 import io
 import json
 import os
@@ -29,6 +30,7 @@ from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa: E402
 from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
 from hansa.web import start_web  # noqa: E402
+from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 
 # What Claude Code writes when a worker starts work in the background: the tool result's text and the row's
 # toolUseResult, used to pair background launches with completion notices.
@@ -83,6 +85,28 @@ if compat and os.environ.get("FAKE_QUOTA_ON_COMPAT"):
 if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "stop_reason": "content_filter",
                       "result": "The request was rejected because it was considered high risk", "num_turns": 1}))
+    sys.exit(0)
+if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
+    t = os.environ.get("CLAUDE_CODE_TMPDIR", "")
+    open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "there": os.path.isdir(t),
+        "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
+    time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
+if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
+    sid = sys.argv[sys.argv.index("--session-id") + 1]
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    os.makedirs(os.path.dirname(rec), exist_ok=True)
+    cmd = os.environ["FAKE_REFUSED"]
+    rows = [{"type": "assistant", "message": {"id": "r1", "content": [
+                {"type": "tool_use", "id": "toolu_r1", "name": "Bash", "input": {"command": cmd}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_r1", "is_error": True,
+                 "content": "<tool_use_error>Contains expansion</tool_use_error>"}]}}]
+    with open(rec, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
+                      "result": "Could not run the build: it was refused.",
+                      "permission_denials": [{"tool_name": "Bash", "tool_use_id": "toolu_r1",
+                                              "tool_input": {"command": cmd}}]}))
     sys.exit(0)
 if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a turn after the report
     sid = sys.argv[sys.argv.index("--session-id") + 1]
@@ -199,6 +223,16 @@ os.execvp(args[cut + 1], args[cut + 1:])
 '''
 
 
+@functools.lru_cache(maxsize=None)
+def tmp_writable() -> bool:
+    """Whether a folder can be made in /tmp, where hansa makes each worker run's own."""
+    try:
+        os.rmdir(tempfile.mkdtemp(dir="/tmp"))
+    except OSError:
+        return False
+    return True
+
+
 def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
 
@@ -231,6 +265,10 @@ class DeskTest(unittest.TestCase):
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
                           HANSA_NOTIFY_GATHER="0.5")
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
+        if not tmp_writable():  # inside a sandbox that keeps /tmp closed: the workers' folders go in the test's own
+            root = unittest.mock.patch("hansa.run.WORKER_TMP_ROOT", str(self.tmp))
+            root.start()
+            self.addCleanup(root.stop)
 
     def srt_calls(self, tries=False) -> list:
         """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts."""
@@ -2895,6 +2933,121 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("Bash(git restore:*)", deny)
         self.assertIn("Bash(git checkout:*)", argv)
         self.assertIn(str(common / "refs"), box["filesystem"]["denyWrite"])
+
+    @staticmethod
+    def allowed_by(argv):
+        return argv[argv.index("--allowedTools") + 1:]
+
+    def test_workers_may_run_any_command_in_the_sandbox_and_design_sessions_may_not(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        task, verify = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
+        self.assertIn("checking another worker's finished task", verify[verify.index("--append-system-prompt") + 1])
+        for argv in (task, verify):
+            self.assertIn("Bash", self.allowed_by(argv))
+            deny = self.denied_by(argv)  # weighed before the allow rules, so they still hold
+            for r in ("Bash(git commit:*)", "Bash(git push:*)", "Bash(git stash:*)", "ScheduleWakeup",
+                      run.rule("Read", self.desk.secrets_dir), run.rule("Read", self.desk.state_dir)):
+                self.assertIn(r, deny)
+            box = self.sandbox_of(argv)  # `Bash` is safe only while no command can leave the sandbox
+            self.assertIs(box["allowUnsandboxedCommands"], False)
+            self.assertNotIn("excludedCommands", box)
+            prompt = argv[argv.index("--append-system-prompt") + 1]
+            self.assertIn("any command runs", prompt)
+            self.assertIn("$TMPDIR", prompt)
+            self.assertIn("scratch files there, not in this directory", prompt)
+            self.assertIn("If a command you need is refused", prompt)
+        self.assertIn("Bash(git commit:*)", self.denied_by(task))
+        self.assertIn("Bash(git checkout:*)", self.allowed_by(verify))
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.assertNotIn("Bash", self.allowed_by(argv))  # outside the sandbox: the lane's rules and its own git
+        self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
+
+    def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
+        from hansa import run
+        seen, argvs = self.tmp / "tmp.jsonl", self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SEE_TMP": str(seen), "FAKE_SHOW_ARGV": str(argvs)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        t1 = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, t1)["state"], "done")
+        t2 = self.desk.new_task("Add hello.txt again")
+        self.assertEqual(self.settle(d, t2)["state"], "done")
+        runs = [json.loads(x) for x in seen.read_text().splitlines()]
+        argv = [json.loads(x) for x in argvs.read_text().splitlines()]
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(WORKER_TMP_ROOT, "/tmp")  # as hansa has it: not the server's TMPDIR
+        for r, a, tid in zip(runs, argv, (t1, t2)):
+            where, name = os.path.split(r["tmp"])
+            self.assertEqual(where, run.WORKER_TMP_ROOT)  # /tmp, or the test's own folder when a sandbox keeps /tmp closed
+            self.assertTrue(name.startswith(f"hansa-{tid}-"), r)
+            self.assertLessEqual(len(f"/tmp/{name}".encode()), 30, r)  # short: Claude Code makes sockets in it
+            self.assertEqual((r["there"], r["mode"]), (True, 0o700), r)
+            self.assertFalse(os.path.exists(r["tmp"]))  # removed once the worker ended
+            allowed = self.allowed_by(a)
+            for tool in ("Read", "Edit"):
+                self.assertIn(run.rule(tool, Path(r["tmp"])), allowed)
+        self.assertNotEqual(runs[0]["tmp"], runs[1]["tmp"])
+        self.assertEqual(self.desk.meta(t1).get("worker_tmp"), "")
+
+        made = []  # a worker that could not start: the lane's setup needs srt, and there is none
+
+        def making(desk, tid):
+            made.append(real(desk, tid))
+            return made[-1]
+        real = run.make_worker_tmp
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = "true"
+        self.assertEqual(self.desk.save_settings(s), [])
+        t3 = self.desk.new_task("Add hello.txt once more")
+        with self.without_srt(), unittest.mock.patch.object(run, "make_worker_tmp", making):
+            m = self.settle(d, t3)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("could not start", m["error"])
+        self.assertEqual(len(made), 1)
+        self.assertFalse(os.path.exists(made[0]))
+
+        s = self.desk.settings()  # cancelled while the worker runs
+        del s["lanes"]["a"]["setup"]
+        s["lanes"]["a"]["env"]["FAKE_TMP_WAIT"] = "30"
+        self.assertEqual(self.desk.save_settings(s), [])
+        t4 = self.desk.new_task("Add hello.txt slowly")
+        d.tick()
+        end = time.time() + 10
+        while len(seen.read_text().splitlines()) < 3 and time.time() < end:
+            time.sleep(0.1)
+        tmp = json.loads(seen.read_text().splitlines()[-1])["tmp"]
+        self.assertTrue(os.path.isdir(tmp))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "cancel", t4])
+        self.assertEqual(self.settle(d, t4)["state"], "cancelled")
+        self.assertFalse(os.path.exists(tmp))
+
+    def test_show_lists_a_refused_call_with_the_reason_claude_code_gave(self):
+        s = self.desk.settings()  # on mimo: its session records are in the desk
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_REFUSED": 'B="${TMPDIR:-/tmp}/x" && make'}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Build it"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["denial_reasons"], ["Contains expansion"])
+        shown = views.show_text(self.desk, m["id"])
+        self.assertIn("calls the worker had no permission for (1):", shown)
+        self.assertIn('Bash: B="${TMPDIR:-/tmp}/x" && make; Claude Code said: Contains expansion', shown)
+        self.assertNotIn("allowed commands", shown)
 
     def test_the_sandbox_keeps_workers_from_the_worktrees_git_file(self):
         from hansa import run

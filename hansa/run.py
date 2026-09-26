@@ -120,8 +120,8 @@ on branch task/{tid}, which was made for this task.
 - If git status lists untracked .bashrc, .gitconfig, .vscode, .mcp.json, .claude/ and the like that
   you did not make: they are the sandbox's placeholders, never committed; leave them and do not report them.
 - Do not push, do not switch branches, do not touch other directories.
-- To search, run read-only commands such as grep -rn, find and sed -n on paths in this
-  directory; they are allowed here.
+- You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
+  alone for this run and is removed when it ends: put scratch files there, not in this directory.
 - If a command you need is refused, say which one and why you need it in your report;
   do not look for a way around the refusal.
 - End with a short report: what you changed, how you checked it, and anything left undone.
@@ -139,7 +139,8 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - If git status lists untracked .bashrc, .gitconfig, .vscode, .mcp.json, .claude/ and the like that
   nobody made: they are the sandbox's placeholders, never committed; leave them and do not report them.
 - Do not push, do not switch branches, do not touch other directories.
-- To search, run read-only commands such as grep -rn, find and sed -n on paths in this directory.
+- You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
+  alone for this run and is removed when it ends: put scratch files there, not in this directory.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
 - Stop or wait for any background work you started before you write your report: your last
   message is taken as your report.
@@ -171,6 +172,12 @@ the task asked for it that way.
 """
 VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
 VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
+# A task or verification worker may run any command: its sandbox (sandbox_settings) holds what the command
+# can reach, and the deny rules, weighed before this, still hold. Without it Claude Code asks about commands
+# with ${...} or a heredoc holding braces and quotes, and nobody answers. This is safe only while the sandbox
+# never lets a command out (allowUnsandboxedCommands false, no excludedCommands).
+WORKER_ALLOW = ["Bash"]
+WORKER_TMP_ROOT = "/tmp"  # where each worker run's own temporary folder is made (make_worker_tmp)
 # Git history is hansa's. Inside the sandbox any command runs without a rule, so a git command
 # that changes history or branches is kept out by name. Verifications keep VERIFY_ALLOW's two.
 GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "reset", "tag", "cherry-pick",
@@ -897,12 +904,23 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     """The srt settings of a task's setup and check, once they have ended, and their temporary folders
-    still there (one stopped midway leaves its own)."""
+    still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
     for name in ("setup", "check"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
-    for t in desk.meta(tid).get("sandbox_tmp", []):
+    m = desk.meta(tid)
+    for t in [*m.get("sandbox_tmp", []), *([m["worker_tmp"]] if m.get("worker_tmp") else [])]:
         shutil.rmtree(t, ignore_errors=True)
-    desk.update(tid, sandbox_tmp=[])
+    desk.update(tid, sandbox_tmp=[], worker_tmp="")
+
+
+def make_worker_tmp(desk: Desk, tid: str) -> str:
+    """A temporary folder for one worker run, its alone (mode 700), recorded as the task's worker_tmp so
+    remove_sandbox_tmp removes it however the run ends. Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
+    per-user folder (the worker's TMPDIR) and its sockets in it, so its path is kept short: under /tmp,
+    not the server's TMPDIR (a long path under /var/folders on macOS)."""
+    tmp = tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=WORKER_TMP_ROOT)
+    desk.update(tid, worker_tmp=tmp)
+    return tmp
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
@@ -1399,6 +1417,7 @@ def not_started(desk: Desk, tid: str, e: Exception) -> None:
                 {"state": "cancelled", "phase": "", "error": "cancelled before it started", "finished": now()}
                 if m.get("cancel") else {"state": "failed", "phase": "", "error": why, "finished": now(),
                                          "machine_problem": machine})
+    remove_sandbox_tmp(desk, tid)
     desk.event("task_not_started", task=tid, error=why)
 
 
@@ -1454,10 +1473,12 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     argv += isolated(wt, sandbox_settings(desk, lane, pname, p, wt))
+    tmp = make_worker_tmp(desk, tid)
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
-    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
+    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
+             *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
@@ -1467,6 +1488,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     command = with_setup(desk, tid, argv, lane, pname, p, wt)
     with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
         if cancelled_before_start(desk, tid):
+            remove_sandbox_tmp(desk, tid)
             return None
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
@@ -1619,6 +1641,24 @@ def denial_of(d) -> str:
     return f"{d.get('tool_name', '?')}: {str(what)[:140]}"
 
 
+def refusal_reasons(home: Path, sid: str) -> dict:
+    """What Claude Code told the worker when it refused a call, from the session record: {tool use id: the
+    error text of its tool result} ("Contains expansion", say). Empty when the record cannot be read."""
+    out = {}
+    for d in _rows(home, sid) or []:
+        content = (d.get("message") or {}).get("content") if d.get("type") == "user" else None
+        for c in content if isinstance(content, list) else []:
+            if not (isinstance(c, dict) and c.get("type") == "tool_result" and c.get("is_error") and c.get("tool_use_id")):
+                continue
+            said = c.get("content")
+            if isinstance(said, list):
+                said = " ".join(x.get("text", "") for x in said if isinstance(x, dict))
+            said = " ".join(str(said or "").replace("<tool_use_error>", "").replace("</tool_use_error>", "").split())
+            if said:
+                out[c["tool_use_id"]] = said[:300]
+    return out
+
+
 def unusable_reason(run: dict, err: str):
     """Why this provider cannot be used for this run: ("quota" | "key" | "login" | "refused" | "", words)."""
     if run.get("stop_reason") in REFUSED_STOPS:
@@ -1673,11 +1713,16 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         run = {"num_turns": replies}
         end_design(desk, meta)
     report = desk.redact(report)
+    denied = run.get("permission_denials") or []
+    reasons = refusal_reasons(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
+        if p and denied else {}
     (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
-              "usage": usage, "denials": [desk.redact(denial_of(x)) for x in run.get("permission_denials") or []],
+              "usage": usage, "denials": [desk.redact(denial_of(x)) for x in denied],
+              "denial_reasons": [desk.redact(reasons.get(x.get("tool_use_id"), "") if isinstance(x, dict) else "")
+                                 for x in denied],
               "background_left": [desk.redact(x) for x in background_left(config_home(desk, meta["provider"], p),
                                                                           meta.get("session_id", ""))]
               if p and not designing else []}
@@ -2280,10 +2325,11 @@ class Dispatcher:
             if m.get("kind") != "design" else (None, None)
         if since:
             why = self.gave_up(since)
-            self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
-                             {"lookup_failing_since": since} if not why else
-                             {"state": "failed", "phase": "", "error": why, "finished": now(),
-                              "lookup_failing_since": None})
+            if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
+                                {"lookup_failing_since": since} if not why else
+                                {"state": "failed", "phase": "", "error": why, "finished": now(),
+                                 "lookup_failing_since": None}) and why:
+                remove_sandbox_tmp(self.desk, m["id"])
             return
         if found:
             self.desk.update(m["id"], phase="", pid=found, pid_start=proc_start(found), lookup_failing_since=None)
@@ -2294,11 +2340,12 @@ class Dispatcher:
                                capture_output=True, timeout=30)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 pass
-        self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
-                         {"state": "cancelled", "phase": "", "error": "cancelled before it started",
-                          "finished": now()} if x.get("cancel") else
-                         {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
-                          "lookup_failing_since": None})
+        if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
+                            {"state": "cancelled", "phase": "", "error": "cancelled before it started",
+                             "finished": now()} if x.get("cancel") else
+                            {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
+                             "lookup_failing_since": None}):
+            remove_sandbox_tmp(self.desk, m["id"])  # what it made for a worker that never started
 
     def check(self, m: dict, s: dict) -> None:
         """Run the lane's check on a task whose worker is done: or take over the one an earlier
