@@ -33,17 +33,19 @@ def _shots(desk, tid: str) -> list:
 
 
 def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
-    """The latest n events, newest first; with a kind, the latest n of that kind in the whole log."""
+    """The latest n events, newest first; with kinds (comma-separated), the latest n of those kinds in
+    the whole log."""
     if not desk.events_path.exists():
         return []
+    kinds = {k for k in kind.split(",") if k}
     lines = desk.events_path.read_text(encoding="utf-8").splitlines()
     out = []
-    for line in reversed(lines if kind else lines[-n:]):
+    for line in reversed(lines if kinds else lines[-n:]):
         try:
             e = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not kind or (isinstance(e, dict) and e.get("event") == kind):
+        if not kinds or (isinstance(e, dict) and e.get("event") in kinds):
             out.append(e)
             if len(out) >= n:
                 break
@@ -113,7 +115,10 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     rep.pop("rows")
                 return self._send(200, rep)
             if url.path == "/api/events":
-                n = max(1, min(200, int(q.get("n", ["60"])[0])))
+                try:
+                    n = max(1, min(200, int(q.get("n", ["60"])[0])))
+                except ValueError:  # not a number: the default
+                    n = 60
                 return self._send(200, _events(desk, n, q.get("event", [""])[0]))
             if url.path == "/api/task":
                 tid = q.get("id", [""])[0]

