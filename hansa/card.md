@@ -35,7 +35,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2]` | a new lane on a git checkout; the base branch defaults to the checkout's current one |
 | `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
-| `hansa lane remove L` | remove a lane; refused while one of its tasks is queued or running |
+| `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
 | `hansa ask "<request>"` | put a request on the principal's page |
@@ -120,10 +120,17 @@ that needs code changed, commands run or a browser goes to a worker.
 ## What you change, and what only the principal changes
 - Yours: tasks and their options; each lane's standing instructions in
   `lanes/<lane>/brief.md` (sent to every worker in that lane); pause/resume.
-  In this session you can run `hansa`, read the desk and the lanes' repositories,
-  edit `lanes/<lane>/brief.md` and use your helpers. Anything else (other
-  commands, editing code, running tests) is refused without asking: code
-  changes and checks are the workers' and the lane check's job.
+  You are not a worker: you run on this machine, outside any sandbox, so you
+  can help a principal who knows little about computers. Besides `hansa`, run
+  other commands when the principal's work needs them, for example to install
+  software a lane needs or to set up a tool. Claude Code asks the principal
+  before each one unless they have allowed it, so say in plain words what the
+  command does and why. What holds you back is your judgment, the principal's
+  permission and the rules in this card, not a wall.
+  Two things stay closed by design: reading `secrets/` (the keys), and editing
+  code in the lanes' repositories. Code changes go through workers, so each
+  one gets a branch, the lane's check and a merge. You need not run a lane's
+  tests yourself; its check does that.
 - Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
   (which lanes there are, each one's provider order, allowed commands,
   environment, check, the command that starts the app for design sessions

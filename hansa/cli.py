@@ -533,10 +533,17 @@ def cmd_lane(a):
         if a.name not in s["lanes"]:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
         if a.action == "remove":
-            busy = [m["id"] for m in desk.tasks() if m.get("lane") == a.name and m["state"] in ("queued", "running")]
+            tasks = [m for m in desk.tasks() if m.get("lane") == a.name]
+            busy = [m["id"] for m in tasks if m["state"] in ("queued", "running")]
             if busy:
                 raise SystemExit(f"hansa: lane {a.name} still has {', '.join(busy)} queued or running; nothing was "
                                  f"changed. Wait for them (hansa wait) or cancel them first")
+            # merging a finished task needs its lane's repo and base
+            review = [m["id"] for m in tasks if m["state"] == "done" and m.get("kind") != "verify"]
+            if review:
+                raise SystemExit(f"hansa: lane {a.name} still has {', '.join(review)} finished and waiting for review; "
+                                 f"nothing was changed. Merging needs the lane: clear them first with hansa merge "
+                                 f"or hansa cancel")
             del new["lanes"][a.name]
             _save(desk, new)
             print(f"lane {a.name} removed; its brief stays in {desk.lanes_dir / a.name}")
@@ -666,7 +673,7 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("field", choices=LANE_FIELDS)
     q.add_argument("values", nargs="*", metavar="value")
-    q = lane.add_parser("remove", help="remove a lane with no task queued or running")
+    q = lane.add_parser("remove", help="remove a lane with no task queued, running or waiting for review")
     q.add_argument("name")
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
     p.add_argument("n", nargs="?", type=int)

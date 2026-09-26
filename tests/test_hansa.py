@@ -1199,6 +1199,12 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "lane", "remove", "b"])
         self.assertIn(tid, str(e.exception.code))
         self.assertIn("b", self.desk.settings()["lanes"])
+        self.desk.update(tid, state="done")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "b"])
+        self.assertIn(f"{tid} finished and waiting for review", str(e.exception.code))
+        self.assertIn("hansa merge or hansa cancel", str(e.exception.code))
+        self.assertIn("b", self.desk.settings()["lanes"])
         self.desk.update(tid, state="cancelled")
         self.hansa("lane", "remove", "b")
         self.assertNotIn("b", self.desk.settings()["lanes"])
