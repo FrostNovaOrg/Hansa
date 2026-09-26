@@ -104,6 +104,21 @@ the task asked for it that way.
 """
 VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
 VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
+# Git history is hansa's. Inside the sandbox any command runs without a rule, so a git command
+# that changes history or branches is kept out by name. Verifications keep VERIFY_ALLOW's two.
+GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "reset", "tag", "cherry-pick",
+                                         "revert", "am", "stash", "switch", "branch", "checkout", "restore")]
+
+# Files under the home folder of the user hansa runs as that no worker command may read: logins and
+# keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
+# are added per run (sandbox_settings).
+HOME_SECRETS = (".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc",
+                ".pypirc")
+# What no worker command may write in git's own folders, so history stays hansa's whatever runs git
+# (git -c k=v commit, a build script): in the repository's common folder, and in the worktree's own.
+GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs")
+GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir")
+LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 BROWSER_NOTE = """
 This task comes with a browser (tools named mcp__browser__...). It has no saved logins.
@@ -289,15 +304,56 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
     return env
 
 
-def isolated(cwd) -> list:
+def isolated(cwd, settings: dict | None = None) -> list:
     """What keeps a Claude Code run hansa starts to its checkout and hansa's own instructions: no settings,
     plugins, hooks or CLAUDE.md of the user it runs as, no MCP servers but those hansa gives it, and no
-    CLAUDE.md from the folders above the checkout (the desk's card, the coordinator's, among them)."""
+    CLAUDE.md from the folders above the checkout (the desk's card, the coordinator's, among them).
+    `settings` go into the same --settings object (a worker's sandbox, say)."""
     above = []
     for d in dict.fromkeys([*Path(cwd).parents, *Path(cwd).resolve().parents]):
         above += [str(d / "CLAUDE.md"), str(d / "CLAUDE.local.md"), str(d / ".claude" / "CLAUDE.md")]
     return ["--setting-sources", "project,local", "--strict-mcp-config",
-            "--settings", json.dumps({"claudeMdExcludes": above})]
+            "--settings", json.dumps({"claudeMdExcludes": above, **(settings or {})})]
+
+
+def full_paths(paths) -> list:
+    """Each path as given and with links resolved (/tmp is /private/tmp on macOS), once."""
+    return list(dict.fromkeys(str(x) for q in paths for x in (Path(q), Path(q).resolve())))
+
+
+def git_write_deny(wt: Path) -> list:
+    """The paths in git's folders for the worktree `wt` that a sandboxed worker may not write, worked
+    out now: Claude Code opens a linked worktree's shared git folder for writing."""
+    common = Path(wt) / git("rev-parse", "--git-common-dir", cwd=wt)  # relative to wt, or absolute
+    own = Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
+    return full_paths([*(common / f for f in GIT_COMMON_DENY), *(own / f for f in GIT_OWN_DENY)])
+
+
+def is_local(host: str) -> bool:
+    return host.lower().split(":")[0] in LOCAL_HOSTS
+
+
+def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
+    """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
+    any command, but files changed only in the worktree and never git's history, no reading of keys and
+    logins, no network but the lane's list, and no keys in the environment. It never falls back to
+    running unsandboxed."""
+    home = Path.home()
+    deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
+                       *(home / f for f in HOME_SECRETS)])
+    hosts = list(lane.get("network", []))
+    network = {"allowedDomains": hosts, "strictAllowlist": True}
+    if any(is_local(h) for h in hosts):
+        network["allowLocalBinding"] = True  # a worker may run a local server and reach it
+    return {"sandbox": {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "filesystem": {"denyRead": deny, "denyWrite": git_write_deny(wt)},
+        "network": network,
+        "credentials": {"envVars": [{"name": v, "mode": "deny"} for v in KEY_VARS]},
+    }}
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
@@ -478,8 +534,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         cfg, extra = browser_for(desk, tid, s["browser"])
         argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
         argv += ["--mcp-config", str(cfg)]
-    argv += isolated(wt)
-    argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir)]
+    argv += isolated(wt, sandbox_settings(desk, lane, pname, p, wt))
+    argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
+             *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)]]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *(VERIFY_ALLOW if verifying else [])]
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",

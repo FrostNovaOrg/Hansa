@@ -34,7 +34,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2]` | a new lane on a git checkout; the base branch defaults to the checkout's current one |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
 | `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
@@ -56,6 +56,13 @@ other, gets a browser with no saved logins. It reads page text directly; charts,
 images and drawings it can only see in screenshots, which hansa keeps with the task.
 The page must be reachable from this machine. If the principal has not set up a
 browser, hansa says so and queues nothing.
+Workers run in Claude Code's sandbox, which the operating system enforces. Inside
+it a worker may run any command, but it changes files only in its worktree (and
+its temporary folder), cannot read the desk's keys and state or common credential
+files (`.ssh`, `.aws`, `.netrc` and the like), reaches no network but the lane's
+network list, and leaves git history to hansa (no commit, merge, reset, branch
+and the like). The lane's setup runs before the worker, outside the sandbox and
+with the network, so installing dependencies belongs there, not in the task.
 A task starts from the lane's base branch as it is at that moment, which can be
 before you merge the one ahead of it. If a task needs an earlier task's change,
 queue it after that merge.
@@ -64,7 +71,10 @@ queue it after that merge.
 `hansa show <id>` gives the worker's report plus facts hansa recorded itself: changed
 files, commits, the lane's check result, commands the lane refused, tokens. A
 refused command means the worker could not do something; decide whether the
-task needs it (then add it with `hansa lane set L allow ...`) or should be rewritten. A failed check shows its last
+task needs it (then add it with `hansa lane set L allow ...`) or should be rewritten.
+A command the worker says was refused, or a network call that failed, is usually
+the sandbox doing its job: fix it in the task (ask for less, or leave the
+download to the setup) or in the lane, never by switching the sandbox off. A failed check shows its last
 lines; send the task back with `hansa retry`, or, if the failure is not the
 task's doing, merge with `--despite-check` and say why. If the lane's setup
 command failed, the worker never started: `hansa show` has the setup's last lines;
@@ -141,6 +151,11 @@ that needs code changed, commands run or a browser goes to a worker.
   itself, and the lane's allowed commands do not hold them back. So each change
   to them is recorded, and you tell the principal in the conversation what you
   changed and why.
+- A lane's network list (`hansa lane set L network HOST ...`, such as
+  `registry.npmjs.org`, `*.pypi.org` or `localhost`) is what its workers may
+  reach during a task. Add a host only when the lane's work needs it during a
+  task (a build that downloads, say), not for installing dependencies, which is
+  the setup's; and tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in

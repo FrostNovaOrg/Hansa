@@ -273,9 +273,16 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
                                              " task fails and hansa show has its last lines)" if ln.get("setup")
                                              else "none"),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
-            "  what a worker may use (anything else is refused and shows up in hansa show):",
-            "    Read, Edit and Write inside the lane's worktree only, and read-only commands there"
-            " such as ls, grep, find, sed -n, git status, git diff and git log; hansa commits its changes",
+            "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
+            " what it refuses shows up in hansa show):",
+            "    any command, but it changes files only in the lane's worktree (and its temporary folder);"
+            " it cannot read the desk's keys and state or common credential files (.ssh, .aws, .netrc and the"
+            " like); it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
+            " reset, branch and the like), which commits its changes",
+            "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
+            "  allowed commands (a worker in the sandbox needs none; a design session runs outside the sandbox"
+            " and may run these plus its own git add, commit and merge):"
+            + ("" if ln.get("allow") else " none"),
             *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"

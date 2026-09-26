@@ -460,9 +460,9 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
     desk.event(event, file=dst.name)
 
 
-LANE_LISTS = ("providers", "allow")
+LANE_LISTS = ("providers", "allow", "network")
 LANE_NUMBERS = ("max_turns", "timeout_min")
-LANE_FIELDS = ("base", "providers", "allow", "env", "check", "preview", "setup", "max_turns", "timeout_min", "note")
+LANE_FIELDS = ("base", "providers", "allow", "network", "env", "check", "preview", "setup", "max_turns", "timeout_min", "note")
 OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not under the worker's allowed commands
 
 
@@ -549,7 +549,7 @@ def cmd_lane(a):
             print(f"lane {a.name} removed; its brief stays in {desk.lanes_dir / a.name}")
             return
         value = _lane_value(a.field, a.values)
-        old = s["lanes"][a.name].get(a.field, "")
+        old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
         new["lanes"][a.name][a.field] = value
         _save(desk, new)
     print(f"lane {a.name} {a.field}: {_shown(old)} -> {_shown(value)}")
@@ -557,6 +557,10 @@ def cmd_lane(a):
         desk.event("lane_command_changed", lane=a.name, field=a.field, old=old, new=value)
         print(f"The lane's {a.field} runs outside the worker, so this change is recorded. Tell the principal, in "
               f"the conversation, what you changed and why.")
+    if a.field == "network" and set(old) != set(value):  # the same hosts in another order change nothing
+        desk.event("lane_network_changed", lane=a.name, old=old, new=value)
+        print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "
+              f"this change is recorded. Tell the principal, in the conversation, what you changed and why.")
 
 
 def cmd_concurrency(a):
@@ -667,7 +671,7 @@ def main(argv=None):
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q = lane.add_parser("set", help="change one field of a lane", description=(
-        "providers and allow take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "providers, allow and network take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
         "timeout_min take one whole number"))
     q.add_argument("name")
