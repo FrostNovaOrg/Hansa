@@ -10,7 +10,7 @@ Layout (everything under one directory):
     events.jsonl         append-only record of everything that happened
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
-    .hansa/                 runtime state: provider cooling, heartbeat, web token, and runs/<id>/
+    .hansa/                 runtime state: provider cooling, heartbeat, web token and port, and runs/<id>/
                          (what a task's processes write, until hansa publishes it without keys)
 """
 from __future__ import annotations
@@ -45,10 +45,9 @@ EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
 MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
 
-# Bash commands every lane may run: none. File tools are added per run, scoped to the
-# lane's worktree; Claude Code already lets a worker run read-only commands there (ls,
-# grep, git status, git diff, git log); and hansa commits a worker's changes itself. A lane
-# lists only its own tools, such as its tests.
+# Bash commands a lane's design sessions may run without asking, for every lane: none. A lane's
+# allowed commands matter only to its design sessions, which run outside the sandbox: workers run
+# any command inside their sandbox and need none. A lane lists only its own, such as its tests.
 DEFAULT_ALLOW: list = []
 
 
@@ -62,7 +61,7 @@ def default_settings() -> dict:
         # or model: the coordinator's.
         "design": {"provider": "", "model": "", "effort": ""},
         "providers": {
-            "claude": {"kind": "subscription", "model": "sonnet", "effort": "", "config_dir": ""},
+            "claude": {"kind": "subscription", "model": "opus", "effort": "", "config_dir": ""},
         },
         "lanes": {},
         # The command that starts a browser tool (an MCP server on stdio). The coordinator

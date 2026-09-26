@@ -1369,6 +1369,52 @@ class DeskTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("another hansa serve", r.stdout + r.stderr)
 
+    def test_a_server_on_a_port_another_holds_says_so_in_one_line(self):
+        busy = socket.socket()
+        self.addCleanup(busy.close)
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "serve", "--port", str(port)], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(r.stderr.strip().splitlines(), [
+            f"hansa: port {port} is in use, perhaps by another desk's hansa serve; start this desk's server on a free "
+            f"port with hansa serve --port N (hansa web then finds it)"])
+
+    def test_the_web_command_opens_the_port_this_desks_server_serves_on(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
+        bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        serve = subprocess.Popen([bin_, "--desk", str(self.desk.root), "serve", "--port", "0"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
+        self.addCleanup(lambda: serve.poll() is None and (serve.kill(), serve.wait()))
+        self.addCleanup(serve.stdout.close)
+        said = serve.stdout.readline()
+        port = int(re.search(r"web page on 127\.0\.0\.1:(\d+) ", said).group(1))
+        self.assertNotEqual(port, 0)
+        self.assertEqual((self.desk.state_dir / "web-port").read_text(), str(port))
+        r = subprocess.run([bin_, "--desk", str(self.desk.root), "web"], input="", capture_output=True, text=True,
+                           env=env, timeout=20)
+        address = r.stdout.splitlines()[0]
+        self.assertTrue(address.startswith(f"Open http://127.0.0.1:{port}/?t="), address)
+        with urllib.request.urlopen(address.partition(" ")[2], timeout=10) as page:  # the page of this desk
+            self.assertEqual(page.status, 200)
+        r = subprocess.run([bin_, "--desk", str(self.desk.root), "web", "--port", "9999"], input="",
+                           capture_output=True, text=True, env=env, timeout=20)
+        self.assertIn("http://127.0.0.1:9999/", r.stdout)
+
+    def test_bin_hansa_runs_its_own_checkout_whatever_the_current_directory(self):
+        from hansa import build
+        other = self.tmp / "other-checkout"
+        (other / "hansa").mkdir(parents=True)
+        (other / "hansa" / "__init__.py").write_text("__version__ = '9.9.9'\n")
+        (other / "hansa" / "__main__.py").write_text("print('hansa 9.9.9 from the other checkout')\n")
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--version"], cwd=other,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, f"hansa {build()}"), r.stderr)
+
     def test_the_web_command_ends_when_its_connection_does(self):
         # run over ssh to keep a tunnel to the page open; a closed window or a laptop gone to sleep
         # must not leave it running on the server
@@ -1873,7 +1919,20 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"since {time.strftime('%m-%d')}", self.hansa_out("notify"))
         self.assertIn("last post: ", self.hansa_out("notify"))
         self.assertIn("t0001 done", self.hansa_out("notify"))
-        self.assertIn(f"hansa posts to: session (pid {p.pid})", self.hansa_out("status"))
+        self.assertIn(f"hansa posts to: pid {p.pid}\n", self.hansa_out("status"))
+
+    def test_a_session_is_named_by_its_pid_and_then_also_by_the_name_claude_code_gave_it(self):
+        p, _ = self.session()
+        self.hearing(p)
+        key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
+        self.assertIn(f"hansa posts to: pid {p.pid}\n", self.hansa_out("status"))
+        self.assertIn(f"  pid {p.pid} · since ", self.hansa_out("notify"))
+        rec = notify.records(self.desk)[0]
+        notify._write_record(self.desk, key, {**rec, "name": "desk-b4"})
+        self.assertIn(f"hansa posts to: pid {p.pid} (desk-b4)\n", self.hansa_out("status"))
+        self.assertIn(f"  pid {p.pid} (desk-b4) · since ", self.hansa_out("notify"))
+        self.assertIn(f"session pid {p.pid} (desk-b4) ended", notify.missed_head(
+            {"pid": p.pid, "name": "desk-b4", "session_ended": True, "at": time.time()}))
 
     def test_two_sessions_each_hear_their_own_tasks_and_both_hear_one_from_a_shell(self):
         (a, sa), (b, sb) = self.session(), self.session()
@@ -1943,10 +2002,10 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(first), 1, first)
         # whose it is: the session that ended and when, not "no session heard" (another may have heard all along)
         head = first[0].splitlines()[0]
-        self.assertRegex(head, rf": session {a.pid} ended at \d\d:\d\d; since then, for its tasks and requests:$")
+        self.assertRegex(head, rf": session pid {a.pid} ended at \d\d:\d\d; since then, for its tasks and requests:$")
         self.assertEqual(notify.missed_head({"pid": 16686, "name": "ntA", "session_ended": True,
                                              "at": time.mktime((2026, 9, 26, 22, 55, 0, 0, 0, -1))}),
-                         "session 16686 (ntA) ended at 22:55; since then, for its tasks and requests:")
+                         "session pid 16686 (ntA) ended at 22:55; since then, for its tasks and requests:")
         self.assertIn("- t0001 done: Added while nobody listened", first[0])
         self.hansa_out("add", "Added after")  # then it carries on from the end of the log
         self.settle(Dispatcher(self.desk), "t0002")
@@ -1995,7 +2054,7 @@ class DeskTest(unittest.TestCase):
         with self.in_session(a, sa):
             self.assertIn("now posts to this session", self.hansa_out("notify", "on"))
         first = self.soon(lambda: self.posts(sa))
-        self.assertIn(f"hansa stopped posting to session {a.pid} at ", first[0])
+        self.assertIn(f"hansa stopped posting to session pid {a.pid} at ", first[0])
         self.assertIn("- t0001 done: Added while its follower was dead", first[0])
 
     def test_srt_that_cannot_run_is_posted_once_until_it_runs_again(self):
@@ -2537,7 +2596,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(Path(sock).name, f"c{pid}.sock")
         self.assertEqual(stat.S_IMODE(os.stat(Path(sock).parent).st_mode), 0o700)  # only this account opens it
         rec = self.soon(lambda: [x for x in notify.records(self.desk) if x["session"]["pid"] == int(pid)])
-        self.assertEqual((rec[0]["socket"], rec[0]["name"]), (sock, "coordinator"))
+        self.assertEqual((rec[0]["socket"], rec[0]["name"]), (sock, ""))  # named once Claude Code names it
         self.soon(lambda: all(x.get("ended") for x in notify.records(self.desk)))  # it ended with the session
         r = subprocess.run(start + ["--messaging-socket-path", str(self.tmp / "mine.sock")], capture_output=True,
                            text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)}, timeout=30)
@@ -2668,8 +2727,8 @@ class DeskTest(unittest.TestCase):
         self.as_root()
         log, _ = self.stand_in_runuser()
         started = self.coordinator_as_root({})
-        _, sess, sock, name = started["follower"]
-        self.assertEqual((sess["pid"], name), (os.getpid(), "coordinator"))  # root's session, which this process becomes
+        _, sess, sock = started["follower"]
+        self.assertEqual(sess["pid"], os.getpid())  # root's session, which this process becomes
         self.assertEqual(started["argv"][started["argv"].index("--messaging-socket-path") + 1], sock)
         with unittest.mock.patch.object(notify.Path, "home", lambda: self.tmp / "root-home"):
             self.assertTrue(str(notify.private_dir(self.desk)).startswith(str(self.tmp / "root-home")))
@@ -2751,6 +2810,12 @@ class DeskTest(unittest.TestCase):
             argv = self.coordinator_as_root({})["argv"]
         self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-5[1m]")
         self.assertNotIn("--effort", argv)
+
+    def test_a_new_desks_claude_provider_and_coordinator_run_on_opus(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["init", str(self.tmp / "new-desk")])
+        s = Desk.find(str(self.tmp / "new-desk")).settings()
+        self.assertEqual((s["providers"]["claude"]["model"], s["coordinator"]["model"]), ("opus", "opus"))
 
     def test_init_for_an_account_refuses_a_link_or_a_folder_with_things_in_it(self):
         self.as_root()
@@ -4041,6 +4106,22 @@ class DeskTest(unittest.TestCase):
         self.assertIn("cost audit on", views.status_text(views.status(self.desk)))
         self.assertIn("cost audit on", (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text())
 
+    def test_status_sizes_its_columns_to_the_longest_lane_and_provider_names(self):
+        s = self.desk.settings()
+        s["providers"]["shop-claude"] = {"kind": "subscription", "model": "claude-opus-4-5[1m]", "effort": "",
+                                        "config_dir": ""}
+        s["lanes"]["shop-claude"] = {**s["lanes"]["a"], "providers": ["shop-claude", "claude"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        lines = views.status_text(views.status(self.desk)).splitlines()
+        rows = lines[lines.index("lanes:") + 1:lines.index("lanes:") + 3]
+        self.assertEqual([r.index("free") for r in rows], [rows[0].index("free")] * 2, rows)
+        self.assertEqual([r.split()[:2] for r in rows], [["a", "claude"], ["shop-claude", "shop-claude"]])
+        provs = lines[lines.index("providers:") + 1:lines.index("providers:") + 3]
+        self.assertEqual(len({r.index("subscription") for r in provs}), 1, provs)
+        models = [("claude", "opus"), ("shop-claude", "claude-opus-4-5[1m]")]
+        ends = [r.index(m) + len(m) for r, (_, m) in zip(provs, models)]
+        self.assertEqual(len({e + len(r[e:]) - len(r[e:].lstrip()) for r, e in zip(provs, ends)}), 1, provs)
+
     def test_a_design_session_waiting_for_a_stopped_server_says_so(self):
         self.desk.new_task("Shape the badge", kind="design", lane="a")
         self.assertIn("`hansa serve` is not running", views.status(self.desk)["queued"][0]["waiting"])
@@ -4240,6 +4321,25 @@ class DeskTest(unittest.TestCase):
         self.desk.update(tid, state="cancelled")
         self.hansa("lane", "remove", "b")
         self.assertNotIn("b", self.desk.settings()["lanes"])
+
+    def test_explain_lane_names_the_command_that_made_or_last_changed_it(self):
+        first = views.explain_text(self.desk, "lane", "a").splitlines()[0]
+        self.assertEqual(first, "lane a (made with hansa init; not by the principal on the web page)")
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "dev", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=other)
+        self.hansa("lane", "add", "b", "--repo", str(other))
+        self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
+                         "lane b (made with hansa lane add; not by the principal on the web page)")
+        self.hansa("lane", "set", "b", "max_turns", "50")
+        self.hansa("lane", "set", "a", "note", "the shop front")
+        self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
+                         "lane b (made with hansa lane add; last changed with hansa lane set b max_turns; "
+                         "not by the principal on the web page)")
+        self.desk.events_path.write_text("")  # a desk from before hansa recorded them
+        self.assertIn("set by the coordinator with hansa lane add or hansa lane set",
+                      views.explain_text(self.desk, "lane", "b").splitlines()[0])
 
     def test_a_refused_lane_change_changes_nothing(self):
         before = self.desk.settings_path.read_text()

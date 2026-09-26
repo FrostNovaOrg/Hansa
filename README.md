@@ -28,7 +28,9 @@ From your own computer, open the page through an SSH tunnel:
 ssh -L 8765:127.0.0.1:8765 HOST /path/to/bin/hansa --desk /path/to/desk web
 ```
 It prints an address with a token; open it in the browser and keep the
-terminal open. On the page: add providers (a Claude Code login, or any
+terminal open. More than one desk on a machine: each desk's `hansa serve` needs
+its own port (`hansa serve --port 8766`), and that desk's `hansa web` finds it
+(tunnel that port instead). On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
