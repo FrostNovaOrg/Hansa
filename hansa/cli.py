@@ -549,7 +549,7 @@ def cmd_lane(a):
             print(f"lane {a.name} removed; its brief stays in {desk.lanes_dir / a.name}")
             return
         value = _lane_value(a.field, a.values)
-        old = s["lanes"][a.name].get(a.field, "")
+        old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
         new["lanes"][a.name][a.field] = value
         _save(desk, new)
     print(f"lane {a.name} {a.field}: {_shown(old)} -> {_shown(value)}")
@@ -557,10 +557,10 @@ def cmd_lane(a):
         desk.event("lane_command_changed", lane=a.name, field=a.field, old=old, new=value)
         print(f"The lane's {a.field} runs outside the worker, so this change is recorded. Tell the principal, in "
               f"the conversation, what you changed and why.")
-    if a.field == "network" and old != value:
+    if a.field == "network" and set(old) != set(value):  # the same hosts in another order change nothing
         desk.event("lane_network_changed", lane=a.name, old=old, new=value)
-        print("The lane's workers may now reach these hosts during a task. Tell the principal, in the conversation, "
-              "what you changed and why.")
+        print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "
+              f"this change is recorded. Tell the principal, in the conversation, what you changed and why.")
 
 
 def cmd_concurrency(a):

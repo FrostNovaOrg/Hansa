@@ -280,7 +280,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " like); it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
             " reset, branch and the like), which commits its changes",
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
-            "  allowed commands (the only ones a design session may run; in the sandbox a worker may run any):"
+            "  allowed commands (a worker in the sandbox needs none; a design session runs outside the sandbox"
+            " and may run these plus its own git add, commit and merge):"
             + ("" if ln.get("allow") else " none"),
             *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],

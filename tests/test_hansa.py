@@ -755,6 +755,18 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(box["credentials"]["envVars"], [{"name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny"},
                                                          {"name": "ANTHROPIC_API_KEY", "mode": "deny"}])
         self.assertIn("claudeMdExcludes", json.loads(argv[argv.index("--settings") + 1]))  # one object, both in it
+        # git history is kept by the sandbox too: the lane's linked worktree's git folders, worked out for real
+        wt = Path(self.desk.meta(tid)["worktree"])
+        common = (self.repo / ".git").resolve()
+        own = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=wt, capture_output=True,
+                                  text=True, check=True).stdout.strip()).resolve()
+        self.assertNotEqual(own, common)  # a linked worktree has its own folder under the common one
+        self.assertEqual(own.parent.parent, common)
+        for f in ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs"):
+            self.assertIn(str(common / f), box["filesystem"]["denyWrite"])
+        for f in ("HEAD", "logs", "commondir", "gitdir"):
+            self.assertIn(str(own / f), box["filesystem"]["denyWrite"])
+        self.assertNotIn(str(wt.resolve()), box["filesystem"]["denyWrite"])  # the worktree itself stays writable
         deny = self.denied_by(argv)
         for c in ("commit", "push", "merge", "reset", "stash", "switch", "branch", "checkout", "restore"):
             self.assertIn(f"Bash(git {c}:*)", deny)
@@ -777,6 +789,20 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("Bash(git checkout:*)", deny)  # a verification may put code back to see a test fail
         self.assertNotIn("Bash(git restore:*)", deny)
         self.assertIn("Bash(git checkout:*)", argv)
+        self.assertIn(str(common / "refs"), box["filesystem"]["denyWrite"])
+
+    def test_a_local_host_in_any_case_or_as_127_0_0_1_allows_local_binding(self):
+        from hansa import run
+        p = self.desk.settings()["providers"]["claude"]
+
+        def local(hosts):
+            box = run.sandbox_settings(self.desk, {"network": hosts}, "claude", p, self.repo)["sandbox"]
+            return box["network"].get("allowLocalBinding", False)
+        for hosts in (["localhost"], ["LOCALHOST"], ["Localhost:8080"], ["127.0.0.1"], ["127.0.0.1:3000"],
+                      ["registry.npmjs.org", "localhost:5173"]):
+            self.assertTrue(local(hosts), hosts)
+        for hosts in ([], ["registry.npmjs.org"], ["localhost.example.org"], ["127.0.0.2"], ["*.localhost"]):
+            self.assertFalse(local(hosts), hosts)
 
     def test_design_sessions_and_provider_checks_run_outside_the_sandbox(self):
         from hansa import run
@@ -1287,9 +1313,19 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(self.events("settings_saved")), saved)
 
     def test_a_lanes_network_list(self):
+        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "network"))  # [] -> []: no change
+        self.assertEqual(self.events("lane_network_changed"), [])
         out = self.hansa("lane", "set", "a", "network", "registry.npmjs.org")
         self.assertIn('network: [] -> ["registry.npmjs.org"]', out)
         self.assertIn("Tell the principal", out)
+        self.assertEqual(len(self.events("lane_network_changed")), 1)
+        out = self.hansa("lane", "set", "a", "network", "registry.npmjs.org")
+        self.assertNotIn("Tell the principal", out)
+        self.assertEqual(len(self.events("lane_network_changed")), 1)
+        self.hansa("lane", "set", "a", "network", "registry.npmjs.org", "*.pypi.org", "localhost:3000")
+        self.assertEqual(len(self.events("lane_network_changed")), 2)
+        self.assertNotIn("Tell the principal",  # the same hosts in another order
+                         self.hansa("lane", "set", "a", "network", "*.pypi.org", "registry.npmjs.org", "localhost:3000"))
         self.hansa("lane", "set", "a", "network", "registry.npmjs.org", "*.pypi.org", "localhost:3000")
         self.assertEqual(self.desk.settings()["lanes"]["a"]["network"],
                          ["registry.npmjs.org", "*.pypi.org", "localhost:3000"])
@@ -1302,8 +1338,11 @@ class DeskTest(unittest.TestCase):
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "network", *bad])
             self.assertIn("lane a: network must be a list of up to 50 host names", str(e.exception.code))
             self.assertEqual(self.desk.settings_path.read_text(), before)
-        self.hansa("lane", "set", "a", "network")
+        out = self.hansa("lane", "set", "a", "network")  # removing hosts is told the same way
         self.assertEqual(self.desk.settings()["lanes"]["a"]["network"], [])
+        self.assertIn('["registry.npmjs.org", "*.pypi.org", "localhost:3000"] -> []', out)
+        self.assertIn("Tell the principal", out)
+        self.assertEqual(self.events("lane_network_changed")[-1]["new"], [])
 
     def test_a_setup_change_is_recorded_for_the_principal(self):
         out = self.hansa("lane", "set", "a", "setup", "pnpm install --frozen-lockfile")
