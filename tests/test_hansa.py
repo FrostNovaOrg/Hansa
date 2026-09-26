@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hansa import account, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa: E402
-from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
+from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
+                       waiting_reason)
 from hansa.web import start_web  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 
@@ -170,6 +171,7 @@ if os.environ.get("FAKE_SAY_KEY"):  # an endpoint's error that repeats the key
 hello = os.environ.get("FAKE_HELLO", "hello.txt")
 if os.environ.get("FAKE_SEE") and os.path.exists(hello):  # what the file held when the worker started
     open(os.environ["FAKE_SEE"], "w").write(open(hello).read())
+os.makedirs(os.path.dirname(hello) or ".", exist_ok=True)
 open(hello, "w").write("hello from " + os.environ.get("HANSA_TASK", "?") + "\n")
 if os.environ.get("FAKE_WRITE_BINARY"):
     open("blob.bin", "wb").write(b"\x00\x01PK" + os.environ["FAKE_WRITE_BINARY"].encode() + b"\x00\xff")
@@ -300,6 +302,42 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(main(["--desk", str(self.desk.root), "merge", tid]), 0)
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
         self.assertTrue((self.repo / "hello.txt").exists())
+
+    def test_show_gives_the_text_hansa_read_queued_running_and_finished(self):
+        f = self.tmp / "task.md"
+        f.write_text("Add hello.txt\n" + "".join(f"line {i}\n" for i in range(2, 13)))
+        self.hansa("add", "--file", str(f))
+        f.write_text("Edited after it was queued\n")  # read when it was queued: this changes nothing
+        tid = "t0001"
+        cut = f"  (4 more lines: hansa show {tid} --full)"
+        for state in ("queued", "running"):
+            if state == "running":
+                self.desk.update(tid, state="running", phase="starting", started=now())
+            shown = self.hansa("show", tid)
+            self.assertIn("text (as hansa read it when it was queued", shown)
+            self.assertIn("\n  Add hello.txt\n  line 2\n", shown)
+            self.assertIn("\n  line 8\n" + cut + "\n", shown)
+            self.assertNotIn("line 9", shown)
+            self.assertNotIn("Edited", shown)
+            self.assertIn("  line 12\n", self.hansa("show", tid, "--full"))
+        self.desk.update(tid, state="queued", phase="", started=None)
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        (self.desk.tasks_dir / tid / "result.md").write_text("".join(f"said {i}\n" for i in range(70)))
+        shown = self.hansa("show", tid)
+        self.assertIn("\n  Add hello.txt\n", shown)
+        self.assertIn(cut, shown)
+        self.assertIn(f"  ... 10 more lines: hansa show {tid} --full", shown)
+        self.assertNotIn("said 60", shown)
+        self.assertNotIn(str(self.desk.tasks_dir), shown)
+        full = self.hansa("show", tid, "--full")
+        self.assertIn("  line 12\n", full)
+        self.assertIn("  said 69\n", full)
+        self.assertNotIn("more lines", full)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["add", "--help"])
+        self.assertIn("It is read when the task is queued", " ".join(out.getvalue().split()))
 
     def test_hansa_commits_for_the_worker_and_keeps_git_rules_from_it(self):
         seen = self.tmp / "argv.jsonl"
@@ -692,16 +730,16 @@ class DeskTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
                               text=True).stdout.strip()
 
-    def two_lanes(self, check=""):
+    def two_lanes(self, check="", names=("a.txt", "b.txt")):
         """Lanes a and b on the one repository, each worker writing a file of its own (a.txt, b.txt), and one
         finished task on each, both made from the same base."""
         s = self.desk.settings()
         s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
-        s["lanes"]["a"].update(env={"FAKE_HELLO": "a.txt"}, check=check)
-        s["lanes"]["b"].update(env={"FAKE_HELLO": "b.txt"}, check=check)
+        s["lanes"]["a"].update(env={"FAKE_HELLO": names[0]}, check=check)
+        s["lanes"]["b"].update(env={"FAKE_HELLO": names[1]}, check=check)
         self.assertEqual(self.desk.save_settings(s), [])
         d = Dispatcher(self.desk)
-        t1, t2 = self.desk.new_task("Add a.txt", lane="a"), self.desk.new_task("Add b.txt", lane="b")
+        t1, t2 = self.desk.new_task(f"Add {names[0]}", lane="a"), self.desk.new_task(f"Add {names[1]}", lane="b")
         for t in (t1, t2):
             m = self.settle(d, t)
             self.assertEqual((m["state"], (m.get("check") or {"ok": True})["ok"]), ("done", True), m)
@@ -832,6 +870,36 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.git_out("rev-parse", "main"), tip)
         self.assertFalse((self.repo / "hello.txt").exists())
         self.assertIn("still broken", views.show_text(self.desk, tid))
+
+    def test_a_merge_check_tells_a_session_that_hears_from_hansa_that_it_will_be_told(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "true"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        p, sock = self.session()
+        with self.in_session(p, sock):  # no follower: it waits, as before
+            out = self.hansa("merge", tid, "--recheck")
+            self.assertIn(f"Wait for it: hansa wait {tid} (hansa show {tid} says where it is", out)
+            self.assertIn(f"next: hansa wait {tid}: it merges by itself", views.show_text(self.desk, tid))
+            self.assertIn("hansa wait <id>", views.status_text(views.status(self.desk)))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "merge", tid])
+            self.assertIn(f"Wait for it: hansa wait {tid}", str(e.exception.code))
+        self.hansa("cancel", tid)
+        self.hearing(p)
+        with self.in_session(p, sock):
+            out = self.hansa("merge", tid, "--recheck")
+            self.assertIn(f"hansa tells this session when {tid} ends (hansa show {tid} says where it is", out)
+            self.assertNotIn("hansa wait", out)
+            shown = views.show_text(self.desk, tid)
+            self.assertIn(f"next: hansa tells this session when {tid} ends: it merges by itself", shown)
+            self.assertNotIn("hansa wait", shown)
+            self.assertIn("hansa tells this session when each ends", views.status_text(views.status(self.desk)))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "merge", tid])
+            self.assertIn(f"hansa tells this session when {tid} ends", str(e.exception.code))
+            self.assertNotIn("hansa wait", str(e.exception.code))
 
     def test_a_lane_without_a_check_merges_at_once_and_says_its_tasks_go_untested(self):
         out = self.hansa("lane", "add", "b", "--repo", str(self.repo))
@@ -1083,6 +1151,37 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(self.git_out("rev-list", "--parents", "-n", "1", m["head"]).split()), 3)  # the merge
         self.assertIn(f"{t3} merged into main", self.hansa("merge", t3))
         self.assertEqual((self.repo / "hello.txt").read_text(), f"hello from {t3}\n")
+
+    def test_diff_takes_paths_and_new_shows_only_what_a_follow_up_added(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": "some notes"}  # the worker writes hello.txt and notes.txt
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        t1 = self.desk.new_task("Add hello.txt")
+        self.settle(d, t1)
+        only = self.hansa("diff", t1, "notes.txt")
+        self.assertIn("+some notes", only)
+        self.assertNotIn("hello.txt", only)
+        stat = self.hansa("diff", t1, "notes.txt", "--stat")
+        self.assertIn("notes.txt", stat)
+        self.assertNotIn("hello.txt", stat)
+        self.assertIn("(no changes in nothing.txt)", self.hansa("diff", t1, "nothing.txt"))
+        self.assertIn(f"{t1} did not continue from an earlier attempt", self.hansa("diff", t1, "--new"))
+        (self.repo / "base.txt").write_text("the base moved\n")  # the follow-up gets this merged in
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base moves", cwd=self.repo)
+        self.hansa("retry", t1, "--update", "say it again")
+        t2 = self.desk.meta(t1)["replaced_by"]
+        m = self.settle(d, t2)
+        self.assertEqual((m["state"], m["update_conflicts"]), ("done", []), m)
+        self.assertIn("notes.txt", self.hansa("diff", t2))  # against the base: t1's work too
+        new = self.hansa("diff", t2, "--new")
+        self.assertIn(f"what {t2} added on top of {t1}'s last commit ({m['start_from'][:10]}), without the base", new)
+        self.assertIn(f"+hello from {t2}", new)
+        self.assertNotIn("notes.txt", new)  # t1's
+        self.assertNotIn("base.txt", new)  # the base's
+        self.assertIn("hello.txt", self.hansa("diff", t2, "--new", "--stat", "hello.txt"))
+        self.assertNotIn("hello.txt", self.hansa("diff", t2, "--new", "notes.txt"))
 
     def test_conflict_markers_a_worker_leaves_are_shown_and_never_merged(self):
         d = Dispatcher(self.desk)
@@ -1722,6 +1821,13 @@ class DeskTest(unittest.TestCase):
     def in_session(self, p, sock):
         """Commands run from that session, as its Bash tool runs them."""
         return unittest.mock.patch.dict(os.environ, {"CLAUDE_PID": str(p.pid), "CLAUDE_CODE_MESSAGING_SOCKET": sock})
+
+    def hearing(self, p):
+        """The desk's register holds a live follower for that session, as hansa notify on leaves it; none runs, so
+        nothing is posted: this is only what commands read. Seen in the future, so it stays live for the test."""
+        sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+        key = notify.key_of(sess)
+        notify._write_record(self.desk, key, {"key": key, "session": sess, "seen": time.time() + 3600, "ended": None})
 
     def hansa_out(self, *args) -> str:
         out = io.StringIO()
@@ -3547,8 +3653,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in st["review"]], [tid])  # the verification is not up for review itself
         self.assertIn(f"verification {vid}: does not hold", views.status_text(st))
         self.assertIn(f"{vid}: does not hold", views.show_text(self.desk, tid))
-        self.assertIn(f"more lines; the whole report is {self.desk.tasks_dir / vid / 'result.md'}",
-                      views.show_text(self.desk, vid))
+        self.assertIn(f"more lines: hansa show {vid} --full", views.show_text(self.desk, vid))
+        self.assertNotIn(str(self.desk.tasks_dir), views.show_text(self.desk, vid))
         for args in (["merge", vid], ["merge", tid]):  # never merged itself; "does not hold" holds the task
             with self.assertRaises(SystemExit):
                 main(["--desk", str(self.desk.root), *args])
@@ -3556,6 +3662,125 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
         self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(vid)["state"]), ("merged", "cancelled"))
         self.assertIn("verdict: does not hold", views.show_text(self.desk, vid))
+
+    def test_add_verify_retry_and_show_tell_a_session_that_hears_from_hansa_it_will_be_told(self):
+        d = Dispatcher(self.desk)
+        t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
+        for t in (t1, t2):
+            self.settle(d, t)
+        (a, sa), (b, sb) = self.session(), self.session()
+        self.hearing(a)
+        with self.in_session(b, sb):  # no follower: hansa wait, as before
+            out = self.hansa("verify", t1)
+            v1 = self.desk.meta(t1)["verify"]
+            self.assertIn(f"Follow it with: hansa wait {v1}; the verdict shows in hansa show {t1}", out)
+            self.assertIn(f"next: wait for the verification: hansa wait {v1}", views.show_text(self.desk, t1))
+            self.assertIn("Follow it with: hansa show t0004", self.hansa("add", "Queued from b"))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "retry", "t0004", "again"])
+            self.assertIn("Wait for it: hansa wait t0004, or cancel it first", str(e.exception.code))
+        with self.in_session(a, sa):
+            out = self.hansa("verify", t2)
+            v2 = self.desk.meta(t2)["verify"]
+            self.assertIn(f"hansa tells this session when {v2} ends; the verdict shows in hansa show {t2}", out)
+            self.assertIn(f"next: wait for the verification: hansa tells this session when {v2} ends",
+                          views.show_text(self.desk, t2))
+            # b's own verification: no other session hears it, so a does
+            self.assertIn(f"hansa tells this session when {v1} ends", views.show_text(self.desk, t1))
+            self.assertIn("t0006 queued. hansa tells this session when t0006 ends; hansa show t0006 says where it is",
+                          self.hansa("add", "Queued from a"))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "retry", "t0006", "again"])
+            self.assertIn("hansa tells this session when t0006 ends, or cancel it first", str(e.exception.code))
+            out = self.hansa("retry", t2, "again")
+            self.assertIn("t0007 queued as a follow-up", out)
+            self.assertIn("hansa tells this session when t0007 ends", out)
+            self.assertNotIn("hansa wait", out)
+            self.hearing(b)  # now b hears its own: a is not told of them
+            self.assertIn(f"next: wait for the verification: hansa wait {v1}", views.show_text(self.desk, t1))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "retry", "t0004", "again"])
+            self.assertIn("Wait for it: hansa wait t0004", str(e.exception.code))
+
+    def test_merge_says_when_nothing_verified_a_change_to_more_than_text(self):
+        d = Dispatcher(self.desk)
+
+        def done(name, text="Add a file"):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_HELLO": name, "FAKE_VERDICT": "holds"}
+            self.assertEqual(self.desk.save_settings(s), [])
+            return self.settle(d, self.desk.new_task(text))["id"]
+
+        def verified(tid):
+            self.hansa("verify", tid)
+            self.assertEqual(self.settle(d, self.desk.meta(tid)["verify"])["verdict"], "holds")
+            return self.desk.meta(tid)["verify"]
+
+        t1 = done("a.py")
+        verified(t1)
+        out = self.hansa("merge", t1)
+        self.assertIn(f"{t1} merged into main", out)
+        self.assertNotIn("note:", out)
+        t2 = done("b.py")
+        out = self.hansa("merge", t2)
+        self.assertIn(f"{t2} merged into main", out)  # merged all the same
+        self.assertIn(f"note: nothing verified this change: {t2} changed b.py, and no verification of it holds", out)
+        self.assertEqual(self.desk.meta(t2)["state"], "merged")
+        t3 = done("c.py")
+        v3 = verified(t3)
+        self.hansa("retry", t3, "more")
+        t4 = self.desk.meta(t3)["replaced_by"]
+        self.assertEqual(self.settle(d, t4)["files"], ["c.py"])
+        out = self.hansa("merge", t4)
+        self.assertIn(f"{t4} merged into main", out)
+        self.assertIn(f"note: {t4} changed c.py, and no verification of {t4} held; {v3} verified {t3}, the attempt "
+                      f"it retries, not this one", out)
+        t5 = done("d.py")
+        self.hansa("retry", t5, "more")
+        t6 = self.desk.meta(t5)["replaced_by"]
+        self.settle(d, t6)
+        self.assertIn(f"neither it nor {t5}, the attempt it retries, has a verification that holds",
+                      self.hansa("merge", t6))
+        t7 = done("guide.md")
+        out = self.hansa("merge", t7)
+        self.assertIn(f"{t7} merged into main", out)
+        self.assertNotIn("note:", out)  # only text: nothing to verify
+
+    def test_a_merge_through_a_merge_check_says_when_nothing_verified_it(self):
+        d, t1, t2 = self.two_lanes(check="true", names=("a.py", "b.py"))
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_VERDICT"] = "holds"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", t1)
+        self.assertEqual(self.settle(d, self.desk.meta(t1)["verify"])["verdict"], "holds")
+        out = self.hansa("merge", t1, "--recheck")  # verified: nothing to say
+        self.assertIn(f"{t1} is not merged yet", out)
+        self.assertNotIn("note:", out)
+        self.assertEqual(self.settle_merge(d, t1)["state"], "merged")
+        out = self.hansa("merge", t2)  # main moved: a merge check, and nothing verified it
+        self.assertIn(f"{t2} is not merged yet: main has", out)
+        self.assertIn(f"note: nothing verified this change: {t2} changed b.py, and no verification of it holds", out)
+        self.assertIn("this is a note, not a stop", out)
+        self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
+        heard = {x["key"][1]: x["line"] for x in notify.items_for(self.desk, self.events("task_merged"),
+                                                                   {"key": "k", "session": None})}
+        self.assertNotIn("note:", heard[t1])
+        self.assertIn(f"after its merge check passed: Add b.py · note: nothing verified this change: {t2} changed "
+                      f"b.py", heard[t2])
+        self.assertNotIn("note:", views.show_text(self.desk, t1))
+        self.assertIn(f"note: nothing verified this change: {t2} changed b.py", views.show_text(self.desk, t2))
+
+    def test_what_is_text_goes_by_the_kind_of_file_not_its_folder(self):
+        for p in ("guide.md", "docs/guide.md", "notes.txt", "doc/index.rst", "README", "LICENSE", "sub/COPYING",
+                  "LICENSE-COMMERCIAL.md"):
+            self.assertTrue(text_only(p), p)
+        for p in ("docs/conf.py", "doc/app.js", "a.py", "README.py", "docs/Makefile"):
+            self.assertFalse(text_only(p), p)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_HELLO": "docs/conf.py"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.settle(Dispatcher(self.desk), self.desk.new_task("Add docs/conf.py"))["id"]
+        self.assertIn(f"note: nothing verified this change: {tid} changed docs/conf.py", self.hansa("merge", tid))
 
     def test_design_session_opens_for_the_principal_and_comes_back_for_review(self):
         try:
@@ -3682,6 +3907,25 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.meta(tid)["state"], "queued")
         why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
         self.assertIn("mimo: no endpoint address", why)
+
+    def test_add_retry_and_verify_say_when_no_provider_of_the_lane_can_start_the_task(self):
+        d = Dispatcher(self.desk)
+        tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
+        out = self.hansa("add", "Ready at once")
+        self.assertNotIn("waits", out)  # claude is ready
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}
+        s["lanes"]["b"] = {**json.loads(json.dumps(s["lanes"]["a"])), "providers": ["claude"]}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertNotIn("waits", self.hansa("add", "On lane b", "--lane", "b"))
+        for args in (["add", "Waits on lane a", "--lane", "a"], ["verify", tid], ["retry", tid, "again"]):
+            out = self.hansa(*args)
+            new = max(m["id"] for m in self.desk.tasks())
+            why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(new), set())
+            self.assertIn(f"\n{new} waits: lane a has no provider ready (mimo: no endpoint address", out)
+            self.assertIn(f"{new} waits: {why}\n", out)
+            self.assertIn(f"waiting: {why}", views.status_text(views.status(self.desk)))  # in the same words
 
     def test_settings_refuse_keys_and_unknown_fields(self):
         s = self.desk.settings()

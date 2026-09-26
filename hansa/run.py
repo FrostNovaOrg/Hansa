@@ -1902,6 +1902,40 @@ def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
         desk.update(v["id"], cancel=True, cancel_by=by)
 
 
+TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc", ".org")
+TEXT_NAMES = ("LICENSE", "LICENCE", "README", "CHANGELOG", "NOTICE", "AUTHORS", "COPYING", "CONTRIBUTING")
+
+
+def text_only(path: str) -> bool:
+    """A file of text or documentation, which a verification has nothing to run in: by its kind, wherever it is
+    (a .py under docs/ is code)."""
+    p = Path(path)
+    suffix = p.suffix.lower()
+    return suffix in TEXT_SUFFIXES or (not suffix and p.name.upper() in TEXT_NAMES)
+
+def unverified_note(desk: Desk, m: dict) -> str:
+    """For a merge: that nothing verified a change beyond text and documentation, without the leading 'note: ';
+    '' when its verification holds, or it changed only text."""
+    def holds(t):
+        v = desk.meta(t["verify"]) if t and t.get("verify") else None
+        return v if v and v.get("verdict") == "holds" else None
+    code = [f for f in m.get("files") or [] if not text_only(f)]
+    if not code or holds(m):
+        return ""
+    what = f"{m['id']} changed {', '.join(code[:3])}" + (f" and {len(code) - 3} more" if len(code) > 3 else "")
+    try:
+        pm = desk.meta(m["parent"]) if m.get("parent") else None
+    except SystemExit:
+        pm = None
+    pv = holds(pm)
+    if pv:
+        return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {pm['id']}, the attempt it "
+                f"retries, not this one")
+    return (f"nothing verified this change: {what}, and "
+            + (f"neither it nor {pm['id']}, the attempt it retries, has a verification that holds" if pm
+               else "no verification of it holds"))
+
+
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
     """Nothing was merged: the task goes back to waiting for review, with the result saying why."""
     m = desk.change(tid, lambda x: None if x["state"] != "merging" else
@@ -2056,7 +2090,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
             return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
                                                                               "nothing was merged"})
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
-                        merge_check_result=result)
+                        merge_check_result=result, unverified=unverified_note(desk, m) or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
