@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 __version__ = "0.5.0a1"
+_handed = os.environ.pop("HANSA_BUILD", "")  # root's answer to build(), read once and not passed on to what this starts
 
 
 @functools.lru_cache(maxsize=1)
@@ -18,9 +19,8 @@ def build() -> str:
     """This version and which code it is: hansa/BUILD when an install wrote one, else the git commit. As
     another account (root's hansa run again as the desk's, account.py) git would refuse a checkout it does not
     own, so it is told this one is safe, and root's hansa hands its own answer over (HANSA_BUILD) as well."""
-    handed = os.environ.get("HANSA_BUILD", "")
-    if handed.startswith(f"{__version__} "):
-        return handed
+    if _handed.startswith(f"{__version__} "):
+        return _handed
     here = Path(__file__).resolve().parent
     try:
         return f"{__version__} {(here / 'BUILD').read_text(encoding='utf-8').strip()}".strip()

@@ -2836,6 +2836,7 @@ class DeskTest(unittest.TestCase):
         (bin_ / "runuser").write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
                                       f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
                                       f"open({str(log)!r} + '.cwd', 'a').write(os.getcwd() + '\\n')\n"
+                                      f"open({str(log)!r} + '.build', 'a').write(os.environ.get('HANSA_BUILD', '') + '\\n')\n"
                                       "os.execvp(sys.argv[4], sys.argv[4:])\n")
         (bin_ / "runuser").chmod(0o755)
         path = unittest.mock.patch.dict(os.environ, {"PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}"})
@@ -2920,6 +2921,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(done.exception.code, 0, ran[-1].stderr)
         from hansa import build
         self.assertIn(f" · hansa {build()} · ", ran[-1].stdout.splitlines()[0])  # the account's, as root's --version
+        self.assertEqual(Path(str(log) + ".build").read_text().splitlines()[-1], build())  # root handed its answer over
         self.assertIn(f"--desk={self.desk.root}", json.loads(log.read_text().splitlines()[-1]))
         self.assertEqual(Path(str(log) + ".cwd").read_text().splitlines(), ["/", "/"])
 
@@ -4006,6 +4008,25 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{v1}, the verification of {t1}, ended: verdict: holds",
                       notify.task_line(self.desk, self.desk.meta(v1)))
         self.assertNotIn("merge or send back", notify.task_line(self.desk, self.desk.meta(v1)))
+        t4 = self.desk.new_task("Add hello.txt 4")  # hansa cancel on an ended verification itself: kept as well
+        self.settle(d, t4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", t4])
+        v4 = self.desk.meta(t4)["verify"]
+        self.settle(d, v4)
+        for v, why in ((v4, f"closed: {v4} was closed with hansa cancel"), (v1, f"closed: {t1} was merged")):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                main(["--desk", str(self.desk.root), "cancel", v])
+            self.assertEqual(out.getvalue(), f"{v} closed; it stays done, verdict: holds\n")
+            m = self.desk.meta(v)
+            self.assertEqual((m["state"], m["verdict"], m.get("error", ""), m["closed"]), ("done", "holds", "", why))
+            shown = views.show_text(self.desk, v)
+            self.assertIn(f"\n{why}\n", shown)
+            self.assertNotIn("error:", shown)
+        self.assertEqual(self.desk.meta(t4)["state"], "done")  # its task still waits for review, verified
+        from hansa.run import unverified_note
+        self.assertEqual(unverified_note(self.desk, self.desk.meta(t4)), "")  # v4's verdict still counts
+        self.assertEqual([m["id"] for m in views.status(self.desk)["review"]], [t4])
 
     def test_add_verify_retry_and_show_tell_a_session_that_hears_from_hansa_it_will_be_told(self):
         d = Dispatcher(self.desk)
@@ -4402,9 +4423,20 @@ class DeskTest(unittest.TestCase):
             for handed, said in (("", hansa.__version__), (f"{hansa.__version__} abc1234", f"{hansa.__version__} abc1234"),
                                  ("9.9.9 abc1234", hansa.__version__)):  # another version's answer is not taken
                 hansa.build.cache_clear()
-                with unittest.mock.patch.dict(os.environ, {"HANSA_BUILD": handed}):
+                with unittest.mock.patch.object(hansa, "_handed", handed):
                     self.assertEqual(hansa.build(), said)
         self.assertIn(f"safe.directory={Path(hansa.__file__).resolve().parent.parent}", calls[0])
+
+    def test_the_handed_build_is_read_once_and_not_passed_on_to_what_hansa_starts(self):
+        import hansa
+        handed = f"{hansa.__version__} abc1234"
+        env = {**os.environ, "HANSA_BUILD": handed,
+               "PYTHONPATH": str(Path(hansa.__file__).resolve().parent.parent)}
+        out = subprocess.run([sys.executable, "-c", "import hansa, os, subprocess, sys; print(hansa.build()); "
+                              "print(repr(os.environ.get('HANSA_BUILD'))); sys.stdout.flush(); "
+                              "subprocess.run([sys.executable, '-c', 'import os; print(repr(os.environ.get(\"HANSA_BUILD\")))'])"],
+                             env=env, capture_output=True, text=True, cwd="/")
+        self.assertEqual(out.stdout.splitlines(), [handed, "None", "None"], out.stderr)  # a restart asks git again
 
     def test_status_sizes_its_columns_to_the_longest_lane_and_provider_names(self):
         s = self.desk.settings()
