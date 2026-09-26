@@ -1,4 +1,4 @@
-# Hansa
+# Hansa Agents
 
 **A small team of Claude Code agents, organized like a company.**
 
