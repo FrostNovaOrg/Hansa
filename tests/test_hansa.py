@@ -1858,11 +1858,34 @@ class DeskTest(unittest.TestCase):
     RULE = "\x1b[38;5;244m" + "─" * 60 + "\x1b[39m"
     BOX_EMPTY = "\x1b[39m❯\xa0"
     BOX_TYPED = "\x1b[39m❯\xa0\x1b[38;5;153m/clear\x1b[39m"
+    # the bottom lines of a session started with --name cleartest: the rule above the box carries its name
+    NAMED_RULE = "\x1b[38;5;244m" + "─" * 100 + " \x1b[38;5;246mcleartest\x1b[38;5;244m ─\x1b[39m"
+    PLAIN_RULE = "\x1b[38;5;244m" + "─" * 113 + "\x1b[39m"
+    FOOTER = "  \x1b[38;5;211m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle) · ← for agents\x1b[39m"
+
+    def test_box_text_reads_the_box_under_a_rule_with_the_sessions_name_or_none(self):
+        def capture(*box):
+            return "\n".join(["\x1b[39m⏺ Done.", "", *box, self.FOOTER, "", ""])
+        for name, box, want in (
+                ("empty", self.BOX_EMPTY, ""),
+                ("a dimmed placeholder", '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m', ""),
+                ("typed words", "\x1b[39m❯\xa0half-typed words", "half-typed words")):
+            with self.subTest(name):
+                self.assertEqual(notify.box_text(capture(self.NAMED_RULE, box, self.PLAIN_RULE)).strip(" "), want)
+                self.assertEqual(notify.box_text(capture(self.PLAIN_RULE, box, self.PLAIN_RULE)).strip(" "), want)
+        self.assertEqual(notify.ESC.sub("", self.NAMED_RULE).split("─ ")[-1], "cleartest ─")
+        question = ["\x1b[38;5;153m Which colour?\x1b[39m",
+                    "\x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m1.\x1b[39m \x1b[38;5;153mRed\x1b[39m",
+                    "  \x1b[38;5;246m2.\x1b[39m Blue", "", "\x1b[2mEnter to select · Esc to cancel\x1b[0m"]
+        self.assertIsNone(notify.box_text("\n".join(["\x1b[39m⏺ Done.", "", self.PLAIN_RULE, *question, ""])))
+        self.assertIsNone(notify.box_text(capture(self.NAMED_RULE, *question, self.PLAIN_RULE)))
+        for line in ("──", "── cleartest ─", "──────x", "─────── cleartest", "❯\xa0"):
+            self.assertFalse(notify._rule(line), line)
 
     def pane(self, *box) -> str:
         """A capture of the session's pane: the conversation, then the input box (these lines), and the footer."""
         return "\n".join(["\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231mUse the scout on lane a\x1b[0m",
-                          "\x1b[39m⏺ Done: the scout reported.", "", *box, "  \x1b[2m? for shortcuts\x1b[0m", "", ""])
+                          "\x1b[39m⏺ Done: the scout reported.", "", *box, self.FOOTER, "", ""])
 
     def clearing(self, *, status="idle", waiting=None, listed=True, fails=False, box=None, typed=None,
                  keys_ago=None, window="00-24", pane_pid=None):
@@ -1904,9 +1927,11 @@ class DeskTest(unittest.TestCase):
         if fails:
             (d / "fails").write_text("")
         (d / "pane_pid").write_text(str(pane_pid or p.pid))
-        (d / "pane.txt").write_text(self.pane(*(box or [self.RULE, self.BOX_EMPTY, self.RULE])), encoding="utf-8")
-        if typed:
-            (d / "pane-typed.txt").write_text(self.pane(self.RULE, typed, self.RULE), encoding="utf-8")
+        (d / "pane.txt").write_text(self.pane(*(box or [self.NAMED_RULE, self.BOX_EMPTY, self.PLAIN_RULE])),
+                                    encoding="utf-8")
+        if typed:  # the box line after /clear is typed, or all the lines then
+            (d / "pane-typed.txt").write_text(self.pane(*typed) if isinstance(typed, list) else
+                                              self.pane(self.NAMED_RULE, typed, self.PLAIN_RULE), encoding="utf-8")
         (d / "keys").write_text("" if keys_ago is None else str(keys_ago))
         env = {"PATH": f"{d / 'bin'}{os.pathsep}{os.environ['PATH']}", "HANSA_CLAUDE": str(d / "bin" / "claude"),
                "TMUX_PANE": "%7", "TMUX": f"{d}/tmux-socket,1,0", "HANSA_CLEAR_EVERY": "0.3", "HANSA_CLEAR_QUIET": "0"}
@@ -1975,6 +2000,17 @@ class DeskTest(unittest.TestCase):
         self.soon(lambda: "the /clear was taken back" in log.read_text())
         self.held(log, "there are words in the input box", 2)  # the next checks find the words and wait
         self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["BSpace"] * 6])
+
+    def test_daily_clear_leaves_it_for_the_day_when_the_box_cannot_be_read_after_clear_is_typed(self):
+        _, d, log = self.clearing(typed=[self.NAMED_RULE, "\x1b[39m❯\xa0/clear", "\x1b[39m  /clear  Clear the "
+                                         "conversation", "  /compact  Compact it", self.PLAIN_RULE])
+        self.soon(lambda: "/clear may be left in the box" in log.read_text())
+        self.assertEqual(len([x for x in (d / "calls.jsonl").read_text().splitlines() if "capture-pane" in x]),
+                         1 + 1 + notify.TYPED_READS)  # the check, then the reads over two seconds after typing
+        self.soon(lambda: re.search(r"daily clear 00-24: /clear typed at \d\d:\d\d, but the box could not be read "
+                                    r"after it: /clear may be left in the box", self.hansa_out("notify")))
+        time.sleep(1.5)  # no second try that day
+        self.assertEqual(self.keys_sent(d), [["-l", "/clear"]])
 
     def test_daily_clear_types_nothing_outside_its_window_or_outside_the_sessions_pane(self):
         h = time.localtime().tm_hour

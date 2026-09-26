@@ -601,6 +601,8 @@ CLEAR_QUIET = 300  # no post to the session for this long before a clear (HANSA_
 KEYS_QUIET = 90  # no key pressed in a terminal on the pane's tmux session for this long
 CLEARED_WAIT = 15  # after Enter, the session's sessionId changes within this long
 TYPED_WAIT = 0.5  # after typing /clear, before the box is read again
+TYPED_READS = 4  # when the box cannot be read then, it is read again this many times, TYPED_WAIT apart
+RULE = re.compile(r"─{3,}(?: .+ ─+)?")  # a rule line; the one above the box may carry the session's name
 WINDOW = re.compile(r"^([0-9]{1,2})-([0-9]{1,2})$")
 ESC = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]")
 DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0m|\x1b\[22m|$)")
@@ -670,8 +672,7 @@ def _plain(line: str) -> str:
 
 
 def _rule(line: str) -> bool:
-    t = ESC.sub("", line).strip()
-    return len(t) >= 3 and set(t) == {"─"}
+    return bool(RULE.fullmatch(ESC.sub("", line).strip()))
 
 
 def box_text(capture: str):
@@ -705,7 +706,7 @@ def idle_reading(pid: int) -> tuple:
 
 class DailyClear:
     """A follower's daily /clear of its session. Its record (rec) goes into the register, for hansa notify:
-    window, pane, off (why it cannot be done), day, state (cleared / unconfirmed), at, held (the last reason)."""
+    window, pane, off (why it cannot be done), day, state (cleared / unconfirmed / left), at, held (the last reason)."""
 
     def __init__(self, window: str, pid: int, rec=None):
         self.window, self.pid = window, pid
@@ -785,11 +786,19 @@ class DailyClear:
         self.idle_since = None  # whatever happens, two idle readings again before the next try
         try:
             tmux("send-keys", "-t", pane, "-l", "/clear")
-            time.sleep(TYPED_WAIT)
-            box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
+            for _ in range(1 + TYPED_READS):  # a box that cannot be read yet: again, for about two seconds
+                time.sleep(TYPED_WAIT)
+                box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
+                if box is not None:
+                    break
+            if box is None:  # what hansa typed may be there still; not typed again today
+                self.rec.update(state="left", at=now(), held=None)
+                _say("daily clear: typed /clear, but then the input box could not be read; no Enter, nothing taken "
+                     "back, and no other try today: /clear may be left in the box")
+                return
             ok, said = idle_reading(self.pid)
-            if box is None or box.rstrip(" ") != "/clear" or not ok:
-                back = box is not None and box.rstrip(" ").endswith("/clear")
+            if box.rstrip(" ") != "/clear" or not ok:
+                back = box.rstrip(" ").endswith("/clear")
                 if back:  # take back what hansa typed; whatever else is there stays as it was
                     tmux("send-keys", "-t", pane, *["BSpace"] * 6)
                 self.hold(f"after /clear was typed the box read {box!r} and the session "
@@ -833,6 +842,8 @@ def clear_text(c, t: float = 0) -> str:
     held = f"held: {mine['held']}" if mine.get("held") else ""
     if mine.get("state") == "cleared":
         today = f"cleared at {hm}"
+    elif mine.get("state") == "left":
+        today = f"/clear typed at {hm}, but the box could not be read after it: /clear may be left in the box"
     elif mine.get("state"):
         today = f"Enter pressed at {hm}, but no new session was seen"
     elif inside:
