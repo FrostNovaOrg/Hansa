@@ -33,8 +33,10 @@ button.link { border:none; background:none; color:var(--accent); padding:0; text
 .mono { font:13px/1.45 ui-monospace,Menlo,monospace; }
 pre { white-space:pre-wrap; word-break:break-word; margin:0; }
 .lane { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:8px 0; }
+.facts { display:grid; grid-template-columns: minmax(0, 24em) 1fr; gap:6px 12px; align-items:start; }
+.facts > .muted { font-size:13px; }
 .bar { position:sticky; bottom:0; background:var(--bg); padding:10px 0; }
-@media (max-width:640px) { main { padding:10px; } .grid { grid-template-columns:1fr; } th, td { padding:5px 4px; } }
+@media (max-width:640px) { main { padding:10px; } .grid, .facts { grid-template-columns:1fr; } th, td { padding:5px 4px; } }
 </style>
 </head>
 <body>
@@ -72,7 +74,10 @@ const T = ZH ? {
   design:"设计会话（你直接在里面跟它改一件功能，结束后交回协调席核对、合并）", join:"接进去的命令（在这台机器上运行）", shots:"截图（最新在前）",
   designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看（空＝没有）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
-  providersList:"用哪几家（按顺序，用逗号隔开）", addLane:"加一条线", briefNote:"每条线的常驻说明由协调席写在 lanes/线名/brief.md。",
+  providersList:"用哪几家（按顺序）", briefNote:"每条线的常驻说明由协调席写在 lanes/线名/brief.md。",
+  lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条线，在对话里跟协调席说。",
+  concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
+  laneCommands:"最近改过的线上命令和网络（这些命令由 hansa 自己跑，不在执行层的沙箱里；最新在前，最多 20 条）", field:"哪一项", change:"原来 -> 现在", at:"时间",
   prices:"价目（美元／每百万 token）", in:"输入", out:"输出", cacheRead:"读缓存", cacheWrite:"写缓存", cacheWrite1h:"写缓存（1 小时）",
   addPrice:"加一个模型", pricesNote:"缓存价空着就按常见倍数算；第三方模型请填全。",
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
@@ -104,7 +109,10 @@ const T = ZH ? {
   design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
   designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it (blank = none)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
-  providersList:"Providers, in order (comma separated)", addLane:"Add lane", briefNote:"The coordinator writes each lane's standing instructions in lanes/<lane>/brief.md.",
+  providersList:"Providers, in order", briefNote:"The coordinator writes each lane's standing instructions in lanes/<lane>/brief.md.",
+  lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
+  concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
+  laneCommands:"Recent changes to lane commands and networks (hansa runs these commands itself, outside the workers' sandbox; newest first, at most 20)", field:"Field", change:"old -> new", at:"When",
   prices:"Prices (USD per million tokens)", in:"Input", out:"Output", cacheRead:"Cache read", cacheWrite:"Cache write", cacheWrite1h:"Cache write (1h)",
   addPrice:"Add model", pricesNote:"Blank cache prices use the usual multiples; fill them in for third-party models.",
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
@@ -229,11 +237,26 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, KEYS = {}, REV = null;
+let S = null, KEYS = {}, REV = null, LANE_CMDS = [];
 async function loadSettings(problems) {
-  const r = await api("/api/settings");
-  S = r.settings; KEYS = r.keys; REV = r.rev;
+  const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed&n=20")]);
+  S = r.settings; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev;
   renderSettings(problems && problems.length ? problems : r.problems);
+}
+/* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
+   then any other field the lane has, under its own name. */
+const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
+  env:T.env, allow:T.allow, check:T.laneCheck, preview:T.preview, setup:T.setup};
+function laneValue(k, v) {
+  if (v == null || v === "" || (Array.isArray(v) && !v.length) || (typeof v === "object" && !Object.keys(v).length)) return T.none;
+  if (k === "providers" && Array.isArray(v)) return v.join(" → ");
+  if (k === "env" && typeof v === "object") return Object.entries(v).map(([n, x]) => `${n}=${x}`).join("\n");
+  if (Array.isArray(v) && v.every(x => typeof x !== "object")) return v.join("\n");
+  return typeof v === "object" ? JSON.stringify(v, null, 2) : String(v);
+}
+function laneFields(l) {
+  const keys = [...Object.keys(LANE_LABELS), ...Object.keys(l).filter(k => !(k in LANE_LABELS))];
+  return keys.map(k => [k, laneValue(k, l[k])]);
 }
 function bind(obj, key, kind) {
   const set = el => {
@@ -248,13 +271,8 @@ function pick(obj, key, options, labels) {
   return h("select", {onchange: e => { obj[key] = e.target.value; }},
     options.map((o, i) => h("option", {value:o, selected: (obj[key] || "") === o}, labels ? labels[i] : (o || T.effortDefault))));
 }
-function linesArea(obj, key, toText, fromText) {
-  return h("textarea", {value: toText(obj[key]), oninput: e => { obj[key] = fromText(e.target.value); }});
-}
 function renderSettings(problems) {
   const newProv = h("input", {placeholder:T.newName});
-  const newLane = h("input", {placeholder:T.newName});
-  const newRepo = h("input", {placeholder:"/path/to/repo", style:"min-width:260px"});
   const newPrice = h("input", {placeholder:"model"});
   const msg = h("span", {});
   $("#tab-settings").replaceChildren(
@@ -281,26 +299,15 @@ function renderSettings(problems) {
       }),
       h("div", {class:"row"}, newProv, h("button", {onclick: () => { const n = newProv.value.trim();
         if (n && !S.providers[n]) { S.providers[n] = {kind:"compatible", model:"", effort:"", base_url:""}; renderSettings(); } }}, T.addProvider))),
-    section(T.lanes, h("p", {class:"muted"}, T.briefNote),
-      Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"},
-        h("div", {class:"row"}, h("strong", {}, name), h("button", {onclick: () => { delete S.lanes[name]; renderSettings(); }}, T.remove)),
-        h("div", {class:"grid"},
-          T.repo, bind(l, "repo"), T.base, bind(l, "base"),
-          T.providersList, h("input", {value:(l.providers || []).join(", "), oninput: e => { l.providers = e.target.value.split(",").map(x => x.trim()).filter(Boolean); }}),
-          T.maxTurns, bind(l, "max_turns", "number"), T.timeout, bind(l, "timeout_min", "number")),
-        h("h3", {}, T.env), linesArea(l, "env", v => Object.entries(v || {}).map(([k, x]) => `${k}=${x}`).join("\n"),
-          t => Object.fromEntries(t.split("\n").map(x => x.trim()).filter(Boolean).map(x => [x.split("=")[0].trim(), x.slice(x.indexOf("=") + 1).trim()]))),
-        h("h3", {}, T.allow), linesArea(l, "allow", v => (v || []).join("\n"), t => t.split("\n").map(x => x.trim()).filter(Boolean)),
-        h("h3", {}, T.laneCheck), h("input", {value: l.check || "", style:"width:100%",
-          oninput: e => { const v = e.target.value.trim(); if (v) l.check = v; else delete l.check; }}),
-        ...["preview", "setup"].map(k => [h("h3", {}, T[k]), h("input", {value: l[k] || "", style:"width:100%",
-          oninput: e => { const v = e.target.value.trim(); if (v) l[k] = v; else delete l[k]; }})]))),
-      h("div", {class:"row"}, newLane, newRepo, h("button", {onclick: () => { const n = newLane.value.trim();
-        if (n && !S.lanes[n]) { S.lanes[n] = {repo:newRepo.value.trim(), base:"main", providers:Object.keys(S.providers).slice(0, 1),
-          allow:[],
-          env:{}, max_turns:300, timeout_min:240}; renderSettings(); } }}, T.addLane))),
+    section(T.lanes, h("p", {class:"warn"}, T.lanesNote), h("p", {class:"muted"}, T.briefNote),
+      Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"}, h("strong", {}, name),
+        h("div", {class:"facts"}, laneFields(l).map(([k, v]) => [h("span", {class:"muted"}, LANE_LABELS[k] || k), h("pre", {class:"mono"}, v)])))),
+      h("h3", {}, T.laneCommands),
+      LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane, LANE_LABELS[e.field || "network"] || e.field || "network",
+        h("span", {class:"mono"}, `${JSON.stringify(e.old ?? "")} -> ${JSON.stringify(e.new ?? "")}`)])) : h("p", {class:"muted"}, T.none)),
     section(T.general, h("div", {class:"grid"},
-      T.concurrency, bind(S, "concurrency", "number"), T.coolMinutes, bind(S, "cool_minutes", "number"),
+      T.concurrency, h("div", {}, h("strong", {}, S.concurrency), " ", h("span", {class:"muted"}, T.concurrencyNote)),
+      T.coolMinutes, bind(S, "cool_minutes", "number"),
       T.coordinator, h("div", {class:"row"}, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers)),
         T.model, bind(S.coordinator, "model"), T.effort, pick(S.coordinator, "effort", EFFORTS)),
       T.auditsCost, bind(S.coordinator, "audits_cost", "bool"),

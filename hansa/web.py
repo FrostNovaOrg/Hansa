@@ -32,21 +32,37 @@ def _shots(desk, tid: str) -> list:
     return [f.name for f in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)]
 
 
-def _events(desk: Desk, n: int = 60) -> list:
+def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
+    """The latest n events, newest first; with kinds (comma-separated), the latest n of those kinds in
+    the whole log."""
     if not desk.events_path.exists():
         return []
-    lines = desk.events_path.read_text(encoding="utf-8").splitlines()[-n:]
+    kinds = {k for k in kind.split(",") if k}
+    lines = desk.events_path.read_text(encoding="utf-8").splitlines()
     out = []
-    for line in reversed(lines):
+    for line in reversed(lines if kinds else lines[-n:]):
         try:
-            out.append(json.loads(line))
+            e = json.loads(line)
         except json.JSONDecodeError:
-            pass
+            continue
+        if not kinds or (isinstance(e, dict) and e.get("event") in kinds):
+            out.append(e)
+            if len(out) >= n:
+                break
     return out
 
 
+# The coordinator sets these (hansa lane, hansa concurrency); the page only shows them.
+NOT_FROM_PAGE = ("lanes", "concurrency")
+
+
 def _save_settings(desk: Desk, body: dict) -> dict:
-    problems = desk.save_settings(body.get("settings"), by="page", rev=body.get("rev"))
+    new = body.get("settings")
+    with desk.lock():  # the same lock save_settings takes, so no lane change lands in between
+        if isinstance(new, dict):
+            on_disk = desk.settings()
+            new = {**new, **{k: on_disk[k] for k in NOT_FROM_PAGE if k in on_disk}}
+        problems = desk.save_settings(new, by="page", rev=body.get("rev"))
     if not problems:
         for name in desk.settings()["lanes"]:
             brief = desk.lanes_dir / name / "brief.md"
@@ -99,7 +115,11 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     rep.pop("rows")
                 return self._send(200, rep)
             if url.path == "/api/events":
-                return self._send(200, _events(desk))
+                try:
+                    n = max(1, min(200, int(q.get("n", ["60"])[0])))
+                except ValueError:  # not a number: the default
+                    n = 60
+                return self._send(200, _events(desk, n, q.get("event", [""])[0]))
             if url.path == "/api/task":
                 tid = q.get("id", [""])[0]
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
