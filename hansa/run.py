@@ -28,6 +28,7 @@ QUOTA = re.compile(r"API Error: (402|429)|rate_limit_error|usage limit reached|c
 QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
+LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)\)$", re.M)
 # The lane's setup command runs first in the worker's own process, then the worker replaces it:
@@ -47,6 +48,7 @@ fi
 shift 3; exec "$@"
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
+# or logs in (then a check that answers clears it)
 # The provider would not answer this request (its content filter or a refusal). That
 # says nothing about other tasks, so the provider does not rest; the task moves on.
 REFUSED_STOPS = {"content_filter", "refusal"}
@@ -208,6 +210,9 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
     if st.get("cool_until", 0) > time.time():
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
+        if str(st.get("reason", "")).startswith("not logged in"):
+            return (f"{st['reason']}; log in with `CLAUDE_CONFIG_DIR={config_home(desk, name, p)} claude`, "
+                    f"then `hansa check {name}` brings it back")
         return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
     return ""
 
@@ -625,7 +630,7 @@ def denial_of(d) -> str:
 
 
 def unusable_reason(run: dict, err: str):
-    """Why this provider cannot be used for this run: ("quota" | "key" | "refused" | "", words)."""
+    """Why this provider cannot be used for this run: ("quota" | "key" | "login" | "refused" | "", words)."""
     if run.get("stop_reason") in REFUSED_STOPS:
         return "refused", f"refused the request ({run['stop_reason']})"
     status = run.get("api_error_status")
@@ -637,6 +642,8 @@ def unusable_reason(run: dict, err: str):
     m = QUOTA.search(text)
     if m:
         return "quota", f"out of quota ({m.group(0)})"
+    if LOGIN.search(text):
+        return "login", "not logged in (Please run /login)"
     m = AUTH.search(text)
     if m:
         return "key", f"key rejected ({m.group(0)})"
