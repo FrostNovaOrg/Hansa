@@ -340,6 +340,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     if m.get("error"):
         out.append(f"error: {m['error']}")
+    if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
+        out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":
         out.append("  this is the machine's problem, not the task's: srt, which runs the lane's setup, could not run "
                    "on the server, so the worker never started (hansa explain server)")
@@ -378,6 +380,13 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
             why = reasons[i] if i < len(reasons) else ""
             out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else "")
                        + (f"; Claude Code said: {plain(why)[:200]}" if why else ""))
+    tmps = m.get("worker_tmps") or []
+    for i, r in enumerate(tmps):
+        how = ("removed when the run ended" if r.get("removed") else "still there: removing it failed"
+               if r.get("removed") is False else "in use by the run" if m["state"] == "running" and i == len(tmps) - 1
+               else "not removed yet")
+        out.append(f"temporary folder{f' of run {i + 1} of {len(tmps)}' if len(tmps) > 1 else ''}: "
+                   f"{r.get('path')} ({how})")
     if m.get("left_running"):
         out.append(f"left running, stopped by hansa when the task ended ({len(m['left_running'])}):")
         out += [f"  pid {x['pid']}: {x['command']}" for x in m["left_running"]]
@@ -461,6 +470,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         nxt = {"done": f"read the report above, then merge or send back {m.get('parent')}",
                "failed": f"hansa verify {m.get('parent')} to try again", "running": f"hansa cancel {tid} to stop it",
                "queued": "hansa status shows what it is waiting for"}
+        if m.get("closed"):  # its task is closed: nothing is left to do with it
+            nxt = {}
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
     return "\n".join(out)

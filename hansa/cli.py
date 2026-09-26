@@ -486,6 +486,8 @@ def cmd_cancel(a):
             desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now(), cancel_by=by)
         elif m["state"] == "running":  # hansa serve stops it; stopping it here as well is only quicker
             m = desk.update(a.id, cancel=True, cancel_by=by)
+        elif m["state"] == "done" and m.get("kind") == "verify":  # it has ended: it keeps its state and verdict
+            desk.update(a.id, closed=m.get("closed") or f"closed: {a.id} was closed with hansa cancel")
         elif m["state"] == "done":
             desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by)
         elif m["state"] == "merging":  # the merge check stops; the task goes back to waiting for review
@@ -510,6 +512,9 @@ def cmd_cancel(a):
         print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
         return
     desk.event("task_cancel", task=a.id)
+    if m["state"] == "done" and m.get("kind") == "verify":
+        print(f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else ""))
+        return
     print(f"{a.id} cancelled")
 
 
