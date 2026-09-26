@@ -179,8 +179,10 @@ class DeskTest(unittest.TestCase):
         self.addCleanup(path.stop)
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
 
-    def srt_calls(self) -> list:
-        return [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
+    def srt_calls(self, tries=False) -> list:
+        """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts."""
+        calls = [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
+        return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
 
     def without_srt(self):
         """PATH without the stand-in srt, or any other."""
@@ -531,6 +533,46 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
         self.assertEqual(len(self.srt_calls()), calls)  # no check ran for the merge
 
+    def recheck_after_a_failed_check(self, check):
+        """A task whose check failed ("exit 1"), on a base that has not moved, then the lane's check set to
+        `check` (the machine fixed, say) and hansa merge --recheck on a server."""
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "exit 1"
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, tid)["check"]["ok"], False)
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = check
+        self.assertEqual(self.desk.save_settings(s), [])
+        tip, calls = self.git_out("rev-parse", "main"), len(self.srt_calls())
+        with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+            out = self.hansa("merge", tid, "--recheck")
+        self.assertIn(f"{tid} is not merged yet: hansa runs the lane's check again", out)
+        self.assertEqual(self.desk.meta(tid)["state"], "merging")
+        m = self.settle_merge(d, tid)
+        self.assertEqual([c["argv"][-1] for c in self.srt_calls()[calls:]], [check])  # it ran again
+        [queued] = self.events("check_rerun_queued")
+        self.assertEqual((queued["task"], queued["by"]), (tid, "coordinator"))
+        [checked] = self.events("merge_checked")
+        self.assertEqual((checked["recheck"], checked["by"]), (True, "coordinator"))
+        return tid, tip, m
+
+    def test_recheck_runs_the_check_again_on_an_unmoved_base_and_merges_when_it_passes(self):
+        tid, tip, m = self.recheck_after_a_failed_check("test -f hello.txt")
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])
+        self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", "main").split()[1:], [tip, m["head"]])
+        self.assertTrue((self.repo / "hello.txt").exists())
+        self.assertTrue(self.events("task_merged")[-1]["recheck"])
+
+    def test_recheck_that_fails_merges_nothing(self):
+        tid, tip, m = self.recheck_after_a_failed_check("echo still broken; exit 2")
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"], m["merge_check_result"]["exit"]), ("done", False, 2))
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertFalse((self.repo / "hello.txt").exists())
+        self.assertIn("still broken", views.show_text(self.desk, tid))
+
     def test_a_lane_without_a_check_merges_at_once_and_says_its_tasks_go_untested(self):
         out = self.hansa("lane", "add", "b", "--repo", str(self.repo))
         self.assertIn("Lane b has no check, so its tasks will be merged untested", out)
@@ -583,7 +625,8 @@ class DeskTest(unittest.TestCase):
         self.assertIn("checked badly", said)
         self.assertIn("exit 3", said)
         self.assertIn("exit 0", said)  # the setup's
-        setup, check = self.srt_calls()
+        tried_srt, setup, check = self.srt_calls(tries=True)
+        self.assertEqual(tried_srt["argv"][-2:], ["--", "true"])  # srt is tried first, in the lane's sandbox
         self.assertEqual((setup["argv"][-1], check["argv"][-1]),
                          ("echo set up for the try; echo left > left.txt", "echo checked badly; exit 3"))
         wt = self.desk.worktrees_dir / "a"
@@ -608,6 +651,30 @@ class DeskTest(unittest.TestCase):
         self.assertIn("nothing was run", str(e.exception.code))
         self.assertEqual(self.srt_calls(), [])
         self.assertFalse(run.try_file(self.desk, "a").exists())
+
+    def test_lane_try_holds_the_lane_and_says_could_not_run_when_srt_cannot_start(self):
+        from hansa import run
+        ran = self.tmp / "check-ran"
+        self.hansa("lane", "set", "a", "check", f"touch {ran}")
+        run.write_try(self.desk, "a", {"id": "t1", "phase": "queued", "asked": time.time()})
+        row = next(ln for ln in views.status_text(views.status(self.desk)).splitlines() if ln.startswith("  a "))
+        self.assertIn("held by a try", row)
+        broken = self.tmp / "nonode"  # srt is a node script; this PATH finds it but has no node
+        broken.mkdir()
+        (broken / "srt").write_text("#!/bin/sh\necho 'env: node: No such file or directory' >&2\nexit 127\n")
+        (broken / "srt").chmod(0o755)
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{broken}{os.pathsep}{os.environ['PATH']}"}):
+            Dispatcher(self.desk).tick()
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["phase"], t["ok"], t["could_not_run"]), ("done", False, True), t)
+        said = views.try_text("a", t)
+        self.assertIn("could not run", said)
+        self.assertIn("env: node: No such file or directory", said)
+        self.assertIn("nothing was run", said)
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertEqual(run.tried_lanes(self.desk), set())
+        self.assertNotIn("held by a try", views.status_text(views.status(self.desk)))
 
     def test_a_merge_check_can_be_cancelled_queued_or_running(self):
         d, t1, t2 = self.two_lanes(check="test -f README.md")
@@ -689,6 +756,27 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("start_from", self.desk.meta(t2))
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             main(["--desk", str(self.desk.root), "merge", tid, "stray"])  # other commands still refuse extra words
+
+    def test_a_retry_note_can_come_from_a_file_or_standard_input(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        note = self.tmp / "note.md"
+        note.write_text("Make the greeting longer.\n\n- keep it on one line\n- say `hello` first\n")
+        self.assertIn("from the base branch", self.hansa("retry", "--file", str(note), tid, "--fresh"))
+        t2 = self.desk.meta(tid)["replaced_by"]
+        text = (self.desk.tasks_dir / t2 / "task.md").read_text()
+        self.assertIn("What to change: Make the greeting longer.\n\n- keep it on one line\n- say `hello` first", text)
+        self.settle(d, t2)
+        with unittest.mock.patch("sys.stdin", io.StringIO("Now in French, from standard input.")):
+            self.assertIn("with the current main merged", self.hansa("retry", t2, "--update", "--file", "-"))
+        t3 = self.desk.meta(t2)["replaced_by"]
+        self.assertIn("What to change: Now in French, from standard input.",
+                      (self.desk.tasks_dir / t3 / "task.md").read_text())
+        self.settle(d, t3)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "retry", t3, "words", "--file", str(note)])  # one or the other
+        self.assertEqual(self.desk.meta(t3)["state"], "done")
 
     def test_design_rules_for_a_check_keep_quoted_text_together(self):
         from hansa.run import command_rules
@@ -988,7 +1076,8 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(Path(call["tmpdir"]).exists())  # removed once the setup ended
         self.assertFalse((self.desk.state_dir / "runs" / tid).exists())  # the settings file too
 
-    def test_without_srt_a_lane_with_setup_or_check_fails_its_tasks_and_one_with_neither_runs(self):
+    def test_without_srt_a_lane_with_setup_or_check_runs_neither_and_one_with_neither_runs(self):
+        from hansa.run import try_srt_at_start
         d = Dispatcher(self.desk)
         with self.without_srt():
             m = self.settle(d, self.desk.new_task("Add hello.txt"))
@@ -997,22 +1086,71 @@ class DeskTest(unittest.TestCase):
             s = self.desk.settings()
             s["lanes"]["a"]["check"] = "echo checked"
             self.assertEqual(self.desk.save_settings(s), [])
-            self.assertIn("srt MISSING", views.status_text(views.status(self.desk)))
+            said = views.status_text(views.status(self.desk))  # no server has tried srt: this command's PATH
+            self.assertIn("srt MISSING (on the PATH of this command; hansa serve has not tried srt yet", said)
             m = self.settle(d, self.desk.new_task("Add hello.txt again"))
-            self.assertEqual(m["state"], "failed", m)
-            self.assertIn("hansa needs srt", m["error"])
-            self.assertIn("npm install -g @anthropic-ai/sandbox-runtime", m["error"])
-            self.assertIn("coordinator can do this", m["error"])
+            self.assertEqual(m["state"], "done", m)  # not judged on a check that never ran
+            self.assertTrue(m["check"]["could_not_run"])
+            self.assertIn("could not run: hansa needs srt", m["check"]["note"])
+            self.assertIn("coordinator can do this", m["check"]["note"])
             self.assertIn("npm install -g @anthropic-ai/sandbox-runtime", views.show_text(self.desk, m["id"]))
+            self.assertIn("srt MISSING (as hansa serve saw it", views.status_text(views.status(self.desk)))
             s = self.desk.settings()
             s["lanes"]["a"].update(check="", setup="echo installing")
             self.assertEqual(self.desk.save_settings(s), [])
             m = self.settle(d, self.desk.new_task("Add hello.txt once more"))
-            self.assertEqual(m["state"], "failed", m)
+            self.assertEqual(m["state"], "failed", m)  # the setup could not run, so the worker never started
             self.assertIn("hansa needs srt", m["error"])
-            self.assertIn("srt MISSING", views.status_text(views.status(self.desk)))
-        self.assertEqual(self.srt_calls(), [])
-        self.assertNotIn("srt MISSING", views.status_text(views.status(self.desk)))  # srt is back on the PATH
+            self.assertIn("the machine's problem, not the task's", views.show_text(self.desk, m["id"]))
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertIn("srt MISSING", views.status_text(views.status(self.desk)))  # the server has not tried again
+        self.assertTrue(try_srt_at_start(self.desk)["ran"])  # as a restarted server does
+        self.assertNotIn("srt MISSING", views.status_text(views.status(self.desk)))
+
+    def test_status_reports_srt_as_the_server_sees_it(self):
+        from hansa.run import try_srt_at_start
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "echo checked"
+        self.assertEqual(self.desk.save_settings(s), [])
+        rec = try_srt_at_start(self.desk)  # the server's PATH has srt
+        self.assertEqual((rec["found"], rec["ran"], rec["path"]), (True, True, str(self.tmp / "bin" / "srt")))
+        with self.without_srt():  # the coordinator's has not
+            st = views.status(self.desk)
+            self.assertEqual(st["srt_missing"], "")
+            self.assertNotIn("srt MISSING", views.status_text(st))
+            self.assertTrue(st["srt"]["ran"])  # the page reads the same record
+        self.assertIn("hansa serve tried srt", views.explain_text(self.desk, "server"))
+
+    def test_an_srt_that_is_found_but_cannot_start_runs_no_check_and_does_not_fail_the_task(self):
+        ran = self.tmp / "check-ran"
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"touch {ran}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        broken = self.tmp / "nonode"  # srt is a node script; this PATH finds it but has no node
+        broken.mkdir()
+        (broken / "srt").write_text("#!/bin/sh\necho 'env: node: No such file or directory' >&2\nexit 127\n")
+        (broken / "srt").chmod(0o755)
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{broken}{os.pathsep}{os.environ['PATH']}"}):
+            m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+            st = views.status(self.desk)
+        self.assertEqual(m["state"], "done", m)
+        self.assertIsNone(m["check"]["ok"])  # not marked as failing its check
+        self.assertIn("could not run: srt", m["check"]["note"])
+        self.assertIn("env: node: No such file or directory", m["check"]["note"])
+        self.assertFalse(ran.exists())  # nothing ran
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertIn("srt CANNOT RUN", st["srt_missing"])
+        self.assertNotIn("check FAILED", views.status_text(st))
+        self.assertIn("check could not run", views.status_text(st))
+        shown = views.show_text(self.desk, m["id"])
+        self.assertIn("the machine's problem, not the task's", shown)
+        self.assertIn("hansa explain server", shown)
+        self.assertIn(f"hansa merge {m['id']} --recheck", shown)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "merge", m["id"]])
+        said = str(e.exception.code)
+        self.assertLess(said.index("--recheck"), said.index("--despite-check"))
+        self.assertEqual(self.desk.meta(m["id"])["state"], "done")
 
     def test_retry_is_only_for_a_task_that_has_ended(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -1806,6 +1944,17 @@ class DeskTest(unittest.TestCase):
         main(["--desk", str(self.desk.root), "merge", m["id"], "--despite-check"])
         self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
 
+    def test_a_check_that_fails_printing_nothing_says_nothing_came_out(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "exit 127"
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["check"]["ok"], m["check"]["tail"]), ("done", False, []), m)
+        shown = views.show_text(self.desk, m["id"])
+        self.assertIn("nothing came out: it printed nothing at all, which usually means the command could not start",
+                      shown)
+        self.assertIn(f"hansa merge {m['id']} --recheck", shown)
+
     def test_the_lane_check_runs_in_srt_with_the_lanes_sandbox(self):
         s = self.desk.settings()
         s["lanes"]["a"].update(check='test -f hello.txt && echo "tmp=$TMPDIR"', network=["pypi.org"])
@@ -1824,6 +1973,9 @@ class DeskTest(unittest.TestCase):
         self.assertIn(m["worktree"], got["filesystem"]["allowWrite"])
         self.assertIn(call["tmpdir"], got["filesystem"]["allowWrite"])  # TMPDIR is a folder the check may write
         self.assertIn("tmp=" + call["tmpdir"], m["check"]["tail"])
+        [tried] = [c for c in self.srt_calls(tries=True) if c not in self.srt_calls()]  # srt was tried first
+        self.assertEqual((tried["settings"]["network"], tried["cwd"]), (got["network"], call["cwd"]))
+        self.assertTrue(self.desk.state_dir.joinpath("srt.json").exists())
         self.assertTrue(call["tmp_there"])
         self.assertFalse(Path(call["tmpdir"]).exists())
         self.assertEqual(m["sandbox_tmp"], [])

@@ -15,7 +15,7 @@ from . import account, build, cost, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder, provider_env,
-                  read_try, server_up, stop, write_try)
+                  read_try, server_up, stop, try_srt_at_start, write_try)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -159,9 +159,24 @@ def cmd_merge(a):
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
     # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
     # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
+    if a.recheck and a.despite_check:
+        raise SystemExit("hansa: --recheck runs the lane's check again before merging and --despite-check merges without "
+                         "it; choose one. Nothing was merged")
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
         tip = git("rev-parse", base, cwd=repo)
+        if a.recheck:
+            if not lane.get("check"):
+                raise SystemExit(f"hansa: lane {m['lane']} has no check to run again; nothing was merged")
+            by = os.environ.get("HANSA_ROLE", "cli")
+            desk.update(a.id, state="merging", merge_check_result=None,
+                        merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by})
+            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by)
+            print(f"{a.id} is not merged yet: hansa runs the lane's check again. It merges {a.id} onto {base} as it is "
+                  f"now in lane {m['lane']}'s worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check "
+                  f"there, and merges exactly that if the check passes. It runs when lane {m['lane']} is free. "
+                  f"Wait for it: hansa wait {a.id} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)")
+            return
         # the base has commits the task's branch does not: the two together were never checked
         unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
         if unchecked and not a.despite_check:
@@ -226,10 +241,18 @@ def _mergeable(desk: Desk, a):
                          f"hansa show {v['task']} says what it ran. Send it back with hansa retry {a.id} \"...\", "
                          f"or merge anyway: hansa merge {a.id} --despite-check")
     chk = m.get("check")
-    if chk and not chk["ok"] and not a.despite_check:
+    if chk and not chk["ok"] and not a.despite_check and not a.recheck:
+        if chk.get("could_not_run"):
+            raise SystemExit(f"hansa: {a.id}'s check {chk['note']}; nothing was merged. That is the machine's problem, "
+                             f"not the task's: see hansa explain server. Once it is fixed, run the check again and merge "
+                             f"if it passes: hansa merge {a.id} --recheck (or, to merge it unchecked: "
+                             f"hansa merge {a.id} --despite-check)")
+        machine = views.machine_hint(chk)
         raise SystemExit(f"hansa: {a.id} failed the lane's check ({chk['note'] or 'exit ' + str(chk['exit'])}); "
                          f"nothing was merged. hansa show {a.id} has the output. "
-                         f"To merge it anyway: hansa merge {a.id} --despite-check")
+                         + (f"{machine}; once that is fixed: hansa merge {a.id} --recheck (to merge it anyway: "
+                            f"hansa merge {a.id} --despite-check)" if machine else
+                            f"To merge it anyway: hansa merge {a.id} --despite-check"))
     current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     if current != base:
         raise SystemExit(f"hansa: the checkout at {repo} is on {current}, not {base}; the principal needs to switch it back")
@@ -259,8 +282,10 @@ def _retry(desk: Desk, a) -> None:
                          f"\"...\". Nothing was queued")
     if m["state"] == "replaced":
         raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
+    if a.file and a.note:
+        raise SystemExit("hansa: give the note as words or with --file, not both. Nothing was queued")
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
-    note = " ".join(a.note).strip()
+    note = (_text(a) if a.file else " ".join(a.note)).strip()
     text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
     report = desk.tasks_dir / a.id / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
@@ -472,6 +497,11 @@ def cmd_serve(a):
     d = Dispatcher(desk)
     desk.event("server_started", port=a.port)
     print(f"hansa serve: desk {desk.root}; web page on {a.host}:{a.port} (run `hansa web` for the address)", flush=True)
+    srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks
+    desk.event("srt_tried", found=srt.get("found"), path=srt.get("path"), ran=srt.get("ran"), said=srt.get("said"))
+    problem = views.srt_problem(desk, desk.settings())
+    if problem:
+        print(f"hansa serve: {problem}", file=sys.stderr, flush=True)
     try:
         while True:
             try:
@@ -870,9 +900,13 @@ def main(argv=None):
     p = add("merge", cmd_merge, "merge a finished task into the lane's base branch")
     p.add_argument("id")
     p.add_argument("--despite-check", action="store_true", help="merge even though the lane's check failed (recorded)")
+    p.add_argument("--recheck", action="store_true", help="run the lane's check again on the task merged onto the base "
+                   "as it is now, and merge exactly that if it passes (after a check that failed or could not run for "
+                   "the machine's sake, once that is fixed; recorded)")
     p = add("retry", cmd_retry, "queue a follow-up to a task")
     p.add_argument("id")
     p.add_argument("note", nargs="*")
+    p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
     p.add_argument("--update", action="store_true", help="continue from the previous attempt with the base as it is "
                    "now merged into its branch; a conflict is left in the files for the worker to settle")
