@@ -34,6 +34,12 @@ RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
 LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
 MAX_HOSTS = 50
+MAX_WRITE = 20
+# Files under the home folder of the user hansa runs as that no worker command may read: logins and
+# keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
+# are added per run (run.sandbox_settings); no lane's write list may reach any of them.
+HOME_SECRETS = (".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc",
+                ".pypirc")
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
@@ -101,8 +107,9 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def validate(s: dict) -> list:
-    """Every problem with a settings object, in words; empty means valid."""
+def validate(s: dict, root=None) -> list:
+    """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
+    which no lane's write list may reach into."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
@@ -156,8 +163,8 @@ def validate(s: dict) -> list:
         if not isinstance(ln, dict):
             p.append(f"{at}: must be an object")
             continue
-        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "env", "check", "preview", "setup", "max_turns",
-                           "timeout_min", "note"}
+        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "preview", "setup",
+                           "max_turns", "timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -177,6 +184,7 @@ def validate(s: dict) -> list:
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
                      "*.pypi.org or localhost:3000")
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs)]
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -254,6 +262,59 @@ def is_host(h) -> bool:
     return bool(m) and (m["port"] is None or 0 < int(m["port"]) < 65536)
 
 
+def _overlaps(a: str, b: str) -> bool:
+    """Whether one of two full paths is the other or inside it."""
+    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
+
+
+def _above(a: str, b: str) -> bool:
+    """Whether full path a is b or a folder above it."""
+    return a == b or b.startswith(a.rstrip("/") + "/")
+
+
+def claude_home(state_dir, name: str, p: dict) -> Path:
+    """Where Claude Code keeps a provider's login or settings, and its session records."""
+    if p.get("kind") == "subscription":
+        return Path(p.get("config_dir") or os.path.expanduser("~/.claude"))
+    return Path(state_dir) / f"claude-{name}"
+
+
+def write_problems(paths, repo=None, root=None, providers=None) -> list:
+    """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
+    None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it."""
+    if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
+            not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
+        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
+    home = os.path.expanduser("~")
+    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as")]
+    if root:
+        fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
+    if isinstance(repo, str) and repo.startswith("/"):
+        fenced.append((os.path.join(repo, ".git"), lambda a, b: _above(b, a),  # around it: the repository's
+                       "it is the repository's .git folder, whose history hansa keeps"))
+        fenced.append((repo, _overlaps, f"it would open {repo}, the lane's repository; workers change code "
+                                        "only in their worktree"))
+    for name, pv in (providers if isinstance(providers, dict) else {}).items():
+        if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
+                and (root or pv.get("kind") == "subscription"):
+            h = str(claude_home(Path(root or "/") / ".hansa", name, pv))
+            if h.startswith("/"):  # a relative config_dir is refused above
+                fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Claude Code folder, "
+                                             "which workers may not read"))
+    fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key "
+                                                  "that workers may not read") for f in HOME_SECRETS]
+    fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
+               for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    p = []
+    for x in paths:
+        mine = {os.path.normpath(x), os.path.realpath(x)}  # each as given and with links resolved
+        for f, hit, why in fenced:
+            if any(hit(v, g) for v in mine for g in {os.path.normpath(f), os.path.realpath(f)}):
+                p.append(f"write cannot include {x}: {why}")
+                break
+    return p
+
+
 def is_git_rule(rule: str) -> bool:
     """Whether an allowed-command rule runs git anywhere in it: also behind env, sudo, a variable,
     a path or a shell's -c."""
@@ -308,7 +369,7 @@ class Desk:
             if rev is not None and rev != self.settings_rev():
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
-            problems = validate(new)
+            problems = validate(new, self.root)
             if problems:
                 return problems
             old = self.settings()
@@ -544,4 +605,4 @@ def public_settings(desk: Desk) -> dict:
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
-    return {"settings": s, "keys": keys, "problems": validate(s), "rev": rev}
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev}

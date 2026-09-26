@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desk import Desk, is_git_rule, now, read_json, write_json
+from .desk import HOME_SECRETS, Desk, claude_home, is_git_rule, now, read_json, write_json
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -115,12 +115,6 @@ VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
 # that changes history or branches is kept out by name. Verifications keep VERIFY_ALLOW's two.
 GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "reset", "tag", "cherry-pick",
                                          "revert", "am", "stash", "switch", "branch", "checkout", "restore")]
-
-# Files under the home folder of the user hansa runs as that no worker command may read: logins and
-# keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
-# are added per run (sandbox_settings).
-HOME_SECRETS = (".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc",
-                ".pypirc")
 # What no worker command may write in git's own folders, so history stays hansa's whatever runs git
 # (git -c k=v commit, a build script): in the repository's common folder, and in the worktree's own.
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs")
@@ -246,9 +240,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
 
 def config_home(desk: Desk, name: str, p: dict) -> Path:
     """Where Claude Code keeps this provider's login or settings, and its session records."""
-    if p["kind"] == "subscription":
-        return Path(p.get("config_dir") or os.path.expanduser("~/.claude"))
-    return desk.state_dir / f"claude-{name}"
+    return claude_home(desk.state_dir, name, p)
 
 
 def _record(home: Path, sid: str):
@@ -480,8 +472,8 @@ def is_local(host: str) -> bool:
 
 def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
     """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
-    any command, but files changed only in the worktree and never git's history, no reading of keys and
-    logins, no network but the lane's list, and no keys in the environment. It never falls back to
+    any command, but files changed only in the worktree (and the lane's write list) and never git's
+    history, no reading of keys and logins, no network but the lane's list, and no keys in the environment. It never falls back to
     running unsandboxed."""
     home = Path.home()
     deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
@@ -490,12 +482,15 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> d
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True  # a worker may run a local server and reach it
+    fs = {"denyRead": deny, "denyWrite": git_write_deny(wt)}
+    if lane.get("write"):  # a build or test tool's cache folder; denyRead and denyWrite still win within it
+        fs["allowWrite"] = full_paths(lane["write"])
     return {"sandbox": {
         "enabled": True,
         "failIfUnavailable": True,
         "autoAllowBashIfSandboxed": True,
         "allowUnsandboxedCommands": False,
-        "filesystem": {"denyRead": deny, "denyWrite": git_write_deny(wt)},
+        "filesystem": fs,
         "network": network,
         "credentials": {"envVars": [{"name": v, "mode": "deny"} for v in KEY_VARS]},
     }}

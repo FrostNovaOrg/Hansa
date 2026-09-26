@@ -34,7 +34,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2]` | a new lane on a git checkout; the base branch defaults to the checkout's current one |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
 | `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
@@ -58,11 +58,12 @@ The page must be reachable from this machine. If the principal has not set up a
 browser, hansa says so and queues nothing.
 Workers run in Claude Code's sandbox, which the operating system enforces. Inside
 it a worker may run any command, but it changes files only in its worktree (and
-its temporary folder), cannot read the desk's keys and state or common credential
-files (`.ssh`, `.aws`, `.netrc` and the like), reaches no network but the lane's
-network list, and leaves git history to hansa (no commit, merge, reset, branch
-and the like). The lane's setup runs before the worker, outside the sandbox and
-with the network, so installing dependencies belongs there, not in the task.
+its temporary folder and the lane's write list), cannot read the desk's keys and
+state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
+no network but the lane's network list, and leaves git history to hansa (no
+commit, merge, reset, branch and the like). The lane's setup runs before the
+worker, outside the sandbox and with the network, so installing dependencies
+belongs there, not in the task.
 A task starts from the lane's base branch as it is at that moment, which can be
 before you merge the one ahead of it. If a task needs an earlier task's change,
 queue it after that merge.
@@ -164,6 +165,15 @@ here; work that needs code changed or a browser goes to a worker.
   reach during a task. Add a host only when the lane's work needs it during a
   task (a build that downloads, say), not for installing dependencies, which is
   the setup's; and tell the principal what you added and why.
+- A lane's write list (`hansa lane set L write PATH ...`, full paths such as
+  `/Users/me/.m2`) is the folders its workers may write besides the worktree and
+  their temporary folder. Use it when a build or test tool needs its cache folder
+  (Maven's `~/.m2`, npm's `~/.npm`, pip's `~/.cache/pip`, Gradle's `~/.gradle`):
+  add that tool's own folder, never the whole home folder. hansa refuses a path
+  that would open what the sandbox keeps closed or what hansa runs: the home
+  folder or above it, the desk, the lane's repository, a provider's Claude Code
+  folder, credential files such as `~/.ssh`, and folders on the `PATH` or above
+  them. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in
