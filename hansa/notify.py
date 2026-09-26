@@ -109,6 +109,37 @@ def live_records(desk: Desk) -> list:
     return [r for r in records(desk) if is_live(r)]
 
 
+def hears(desk: Desk, sess="here") -> bool:
+    """Whether a session (by default the one this command runs in) has a live follower, so hansa tells it when
+    its tasks end."""
+    sess = session_here() if sess == "here" else sess
+    return bool(sess) and any(same(r.get("session"), sess) for r in live_records(desk))
+
+
+def hears_of(desk: Desk, tid: str) -> bool:
+    """Whether the session this command runs in is told when this task ends: it has a live follower, and the task
+    is its own or no other live session's (as items_for sends it)."""
+    me = session_here()
+    if not me:
+        return False
+    lives = [r.get("session") for r in live_records(desk)]
+    if not any(same(me, s) for s in lives):
+        return False
+    try:
+        theirs = desk.meta(tid).get("session")
+    except SystemExit:
+        return False
+    return not theirs or same(theirs, me) or not any(same(theirs, s) for s in lives)
+
+
+def wait_step(desk: Desk, tid: str, heard=None) -> str:
+    """The next step for a task that runs on by itself: hansa tells a session that hears from it when the task
+    ends; any other session waits for it. heard: whether the session hears of it (default: ask)."""
+    if hears_of(desk, tid) if heard is None else heard:
+        return f"hansa tells this session when {tid} ends"
+    return f"hansa wait {tid}"
+
+
 def log_end(desk: Desk) -> int:
     """Where the log's last whole line ends."""
     try:
@@ -145,7 +176,7 @@ def _next_step(desk: Desk, tid: str) -> str:
     """What hansa show would suggest next for this task, with hansa show first."""
     from .views import show_text
     try:
-        nxt = next((x[6:] for x in show_text(desk, tid).splitlines() if x.startswith("next: ")), "")
+        nxt = next((x[6:] for x in show_text(desk, tid, heard=True).splitlines() if x.startswith("next: ")), "")
     except (SystemExit, OSError, ValueError, KeyError):
         nxt = ""
     nxt = nxt.replace("read the report above", f"read hansa show {tid}")
@@ -198,7 +229,9 @@ def _item(desk: Desk, e: dict):
             line = (f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}: "
                     f"{m.get('title', '')} · next: {_next_step(desk, tid)}")
         elif kind == "task_merged":
-            key, line = ("merge", tid), f"{tid} merged into {e.get('into')} after its merge check passed: {m.get('title', '')}"
+            key, line = ("merge", tid), (f"{tid} merged into {e.get('into')} after its merge check passed: "
+                                         f"{m.get('title', '')}"
+                                         + (f" · note: {m['unverified']}" if m.get("unverified") else ""))
         else:
             key, line = ("task", tid), task_line(desk, m)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
