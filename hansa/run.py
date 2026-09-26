@@ -926,7 +926,8 @@ def publish(desk: Desk, tid: str, *names: str) -> None:
 # macOS has no /proc, and Claude Code's sandbox there will not start ps: these ask the kernel with
 # sysctl instead. A struct kinfo_proc is 648 bytes; at offset 0 is its start time (a timeval: a long
 # of seconds, then an int of microseconds at 8), at 36 its state p_stat (a char), at 40 its pid, and
-# at 392 its real user id. The sandbox refuses a list by user (KERN_PROC_UID), not the full list.
+# at 392 its real user id, at 420 its effective user id (e_ucred.cr_uid). The sandbox refuses a list by
+# user (KERN_PROC_UID), not the full list.
 _CTL_KERN, _KERN_PROC, _KERN_PROCARGS2 = 1, 14, 49
 _KERN_PROC_ALL, _KERN_PROC_PID, _KERN_PROC_PGRP = 0, 1, 2
 _KINFO_PROC_SIZE, _SZOMB = 648, 5
@@ -991,58 +992,121 @@ def _mac_group_running(pgid) -> bool:
     return any(k[36] != _SZOMB for k in _mac_procs(_KERN_PROC_PGRP, int(pgid)))
 
 
-def _mac_procargs(pid: int) -> tuple:
-    """A process's arguments and environment, as two lists; ([], []) when they cannot be read."""
+def _mac_procargs(pid: int):
+    """A process's arguments and environment, as two lists; None when they cannot be read (a process
+    of another account, one in the middle of an exec, one that ended meanwhile)."""
     data = _sysctl(_CTL_KERN, _KERN_PROCARGS2, pid)
     if not data or len(data) < 4:
-        return [], []
+        return None
     argc = struct.unpack_from("@i", data, 0)[0]
     rest = data[4:]
     end = rest.find(b"\0")  # the executable's path, then NULs up to the first argument
     if end < 0:
-        return [], []
+        return None
     words = rest[end:].lstrip(b"\0").split(b"\0")
     env = words[argc:]  # the environment ends at an empty string; the kernel's own strings follow it
     return words[:argc], env[:env.index(b"")] if b"" in env else env
 
 
-def _mac_args(pid: int) -> list:
-    """A process's arguments, without its environment; [] when they cannot be read."""
-    return _mac_procargs(pid)[0]
+class CannotLook(Exception):
+    """The process list, or the arguments of a process that may be the one looked for, could not be
+    read: what is looked for may be running all the same."""
 
 
-def _mac_pids_with_arg(token: str) -> list:
-    pids = [struct.unpack_from("@i", k, 40)[0] for k in _mac_procs(_KERN_PROC_ALL, 0)
-            if struct.unpack_from("@I", k, 392)[0] == os.getuid()]
-    return [p for p in pids if p > 0 and token.encode() in _mac_args(p)]
+LOOK_TRIES = 5  # reads of the process list, and of a process's arguments, before hansa says it could not look
+LOOK_LIMIT = 300  # seconds a task waits, while hansa cannot look for what an earlier server started, before it fails
 
 
-def pids_with_arg(token: str) -> list:
+def _may_lead(pid: int) -> bool:
+    """Whether this process leads its own process group, or may: its group cannot be read."""
+    try:
+        return os.getpgid(pid) == pid
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def _mac_pids_with_arg(token: str, since=None) -> list:
+    """As pids_with_arg. A process of this account whose arguments cannot be read is read again a few
+    times; one that still cannot be, and leads its own process group as hansa's processes do, may be
+    the one looked for: CannotLook. Not read at all: one that started before `since` (the launch word
+    was made then), and one whose effective user is not its real user (a setuid program such as sudo,
+    which hansa never starts, and whose arguments cannot be read). (One that does not lead its group
+    is not the one looked for either: some of the account's processes never let their arguments be read.)"""
+    for i in range(LOOK_TRIES):
+        data = _sysctl(_CTL_KERN, _KERN_PROC, _KERN_PROC_ALL, 0, slack=_KINFO_PROC_SIZE * 16)
+        if data:
+            break
+        time.sleep(0.05 * (i + 1))
+    else:
+        raise CannotLook("the process list could not be read")
+    found, unread = [], []
+    for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
+        k = data[i:i + _KINFO_PROC_SIZE]
+        pid = struct.unpack_from("@i", k, 40)[0]
+        if pid <= 0 or k[36] == _SZOMB or struct.unpack_from("@I", k, 392)[0] != os.getuid() or \
+                struct.unpack_from("@I", k, 420)[0] != os.getuid():
+            continue
+        if since and struct.unpack_from("@l", k, 0)[0] < since - 2:  # 2 s for the rounding of both clocks
+            continue
+        got = _mac_procargs(pid)
+        if got is None:
+            unread += [pid] if _may_lead(pid) else []
+        elif token.encode() in got[0]:
+            found.append(pid)
+    for i in range(LOOK_TRIES):  # in the middle of an exec, say: a moment later it can be read, or is gone
+        if not unread:
+            break
+        time.sleep(0.05 * (i + 1))
+        again = []
+        for pid in unread:
+            got = _mac_procargs(pid)
+            if got is not None:
+                found += [pid] if token.encode() in got[0] else []
+            elif _mac_state(pid) not in ("", "Z") and _may_lead(pid):
+                again.append(pid)
+        unread = again
+    if unread:
+        raise CannotLook(f"the arguments of process {unread[0]} could not be read")
+    return found
+
+
+def pids_with_arg(token: str, since=None) -> list:
     """Processes whose command line holds this word: hansa puts one on each process it starts, so a
-    restarted server can find one whose number it never recorded."""
+    restarted server can find one whose number it never recorded; `since`, when given, is the time
+    the word was made, and no older process is looked at. CannotLook when the process list cannot be
+    read: not the same as an empty list, which says the word is on no process."""
     if not token:
         return []
     found = []
     if Path("/proc").is_dir():
-        for p in Path("/proc").iterdir():
-            try:
+        try:
+            entries = list(Path("/proc").iterdir())
+        except OSError as e:
+            raise CannotLook(f"the process list could not be read: {e}") from None
+        for p in entries:
+            try:  # one that ends meanwhile is not there, which is right
                 if p.name.isdigit() and token.encode() in (p / "cmdline").read_bytes().split(b"\0"):
                     found.append(int(p.name))
             except OSError:
                 pass
     else:
-        found = _mac_pids_with_arg(token)
+        found = _mac_pids_with_arg(token, since)
     return [p for p in found if p != os.getpid()]
 
 
 def leader(pids: list):
-    """The one of these that leads its own process group, as each process hansa starts does."""
+    """The one of these that leads its own process group, as each process hansa starts does.
+    CannotLook when the group of one that still runs cannot be read."""
     for p in pids:
         try:
             if os.getpgid(p) == p:
                 return p
-        except OSError:
+        except ProcessLookupError:  # ended meanwhile
             pass
+        except OSError as e:
+            raise CannotLook(f"the process group of process {p} could not be read: {e}") from None
     return None
 
 
@@ -1066,7 +1130,7 @@ def task_processes(tid: str) -> list:
         for k in _mac_procs(_KERN_PROC_ALL, 0):
             pid = struct.unpack_from("@i", k, 40)[0]
             if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
-                args, env = _mac_procargs(pid)
+                args, env = _mac_procargs(pid) or ([], [])
                 if ours(env):
                     found.append((pid, args))
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
@@ -2104,12 +2168,41 @@ class Dispatcher:
         else:
             finish(self.desk, tid, returncode)
 
+    def look(self, tid: str, launch: str, launched, since, what: str):
+        """The process an earlier server started with this launch word, made at the time `launched`:
+        (pid or None, None) when hansa could look; (None, since) when it could not, with since the time
+        it first could not, which the caller keeps. Each time it could not is in the event log."""
+        try:
+            return leader(pids_with_arg(launch, launched)), None
+        except CannotLook as e:
+            since = since or now()
+            self.desk.event("process_lookup_failed", task=tid, looking_for=what, error=str(e),
+                            seconds=round(time.time() - since))
+            return None, since
+
+    def gave_up(self, since) -> str:
+        """Once hansa has not been able to look for LOOK_LIMIT seconds: why the task ends; '' before."""
+        if time.time() - since < LOOK_LIMIT:
+            return ""
+        return (f"hansa could not read the process list for {LOOK_LIMIT // 60} minutes, so it could not tell "
+                "whether what an earlier server started still runs; it was not started a second time")
+
     def recover(self, m: dict) -> None:
         """A task an earlier server claimed but did not record as started: a worker it did start
-        is taken over; otherwise the task goes back to the queue, or ends there if cancelled."""
-        found = leader(pids_with_arg(m.get("launch", ""))) if m.get("kind") != "design" else None
+        is taken over; otherwise the task goes back to the queue, or ends there if cancelled. While
+        hansa cannot look for that worker, the task stays as it is, and fails after LOOK_LIMIT."""
+        found, since = self.look(m["id"], m.get("launch", ""), m.get("started"), m.get("lookup_failing_since"),
+                                  "worker") \
+            if m.get("kind") != "design" else (None, None)
+        if since:
+            why = self.gave_up(since)
+            self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
+                             {"lookup_failing_since": since} if not why else
+                             {"state": "failed", "phase": "", "error": why, "finished": now(),
+                              "lookup_failing_since": None})
+            return
         if found:
-            self.desk.update(m["id"], phase="", pid=found, pid_start=proc_start(found))
+            self.desk.update(m["id"], phase="", pid=found, pid_start=proc_start(found), lookup_failing_since=None)
             return
         if m.get("tmux"):  # a design session it may have opened, which nobody was asked to join yet
             try:
@@ -2120,13 +2213,23 @@ class Dispatcher:
         self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
                          {"state": "cancelled", "phase": "", "error": "cancelled before it started",
                           "finished": now()} if x.get("cancel") else
-                         {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None})
+                         {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
+                          "lookup_failing_since": None})
 
     def check(self, m: dict, s: dict) -> None:
         """Run the lane's check on a task whose worker is done: or take over the one an earlier
         server started, or finish the one it left finished."""
         desk, tid = self.desk, m["id"]
-        found = leader(pids_with_arg(m.get("launch", "")))
+        found, since = self.look(tid, m.get("launch", ""), m.get("check_started"), m.get("lookup_failing_since"),
+                                "check")
+        if since:  # not run a second time beside one that may still run: looked for again next tick
+            why = self.gave_up(since)
+            desk.change(tid, lambda x: None if x["state"] != "running" or x.get("phase") != "checking" or x.get("pid")
+                        else {"lookup_failing_since": since} if not why else
+                        {"state": "failed", "phase": "", "error": why, "lookup_failing_since": None})
+            return
+        if m.get("lookup_failing_since"):
+            desk.update(tid, lookup_failing_since=None)
         if found:
             desk.update(tid, pid=found, pid_start=proc_start(found))
             return
@@ -2178,12 +2281,24 @@ class Dispatcher:
             mc = m.get("merge_check") or {}
             if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
                 continue
-            found = leader(pids_with_arg(mc.get("launch", "")))
+            found, since = self.look(m["id"], mc.get("launch", ""), mc.get("started"),
+                                     mc.get("lookup_failing_since"), "merge check")
+            if since and mc.get("phase") == "starting":  # not started a second time: looked for again next tick
+                why = self.gave_up(since)
+                if why:
+                    end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": why})
+                else:
+                    desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "lookup_failing_since": since}}
+                                if x["state"] == "merging" and (x.get("merge_check") or {}).get("phase") == "starting"
+                                else None)
+                continue
             if found and mc.get("phase") == "starting":  # an earlier server stopped right after starting it
-                desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found)})
+                desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found),
+                                                  "lookup_failing_since": None})
             elif not found and not alive(mc.get("pid"), mc.get("pid_start", "")):
                 if mc.get("phase") == "starting":  # it never started: once more from the start
-                    desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued"}}
+                    desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued",
+                                                                    "lookup_failing_since": None}}
                                 if x["state"] == "merging" else None)
                 else:
                     finish_merge_check(desk, m["id"])
