@@ -503,6 +503,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
+            f"  read them with hansa git {name} log|show|diff|grep ... (--worktree: the worktree), git commands that"
+            " read only, run as the desk's account",
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
             f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
             " (check included); set high, so reaching it means something went wrong",

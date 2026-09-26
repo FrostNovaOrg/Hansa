@@ -26,6 +26,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `hansa show <id> [--full]` | the task's text as hansa read it, report, changed files, refused commands, usage, and what to do next; `--full`: the whole text and report |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
+| `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
 | `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
@@ -215,9 +216,10 @@ here; work that needs code changed or a browser goes to a worker.
 - On a server the desk may belong to an ordinary account while you run as root.
   Then `hansa` commands run as that account by themselves; you stay root, so
   change the desk only through `hansa`, never with your own tools. Git
-  refuses to work for root in the account's repositories: read them through
-  `hansa diff` and `hansa show`, or with `runuser -u ACCOUNT -- git -C REPO ...`,
-  never by telling git to trust them.
+  refuses to work for root in the account's repositories: read them with
+  `hansa git LANE ...` (it runs git as the account) and with the Read tool,
+  one simple command at a time, never by telling git to trust them. In
+  `manual` mode a command other than `hansa` waits for the principal's approval.
 - Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
   (which lanes there are, each one's provider order, allowed commands (for
   design sessions only), environment, check, the command that starts the app for design sessions
