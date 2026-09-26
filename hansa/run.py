@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -21,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desk import Desk, is_git_rule, now, read_json
+from .desk import Desk, is_git_rule, now, read_json, write_json
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -37,17 +38,22 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 # hansa serve never waits on it, and stopping the task stops it too. It never sees a provider's key.
 # What it changes in the repository (a lock file, say) is set aside, so it is not part of the task;
 # <log>.done says it got that far (a setup stopped midway leaves its changes uncommitted).
-# sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <worker command...>
-SETUP_SCRIPT = ("env " + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
+# Its git commands run only while the worktree's .git file still holds the line git wrote for it (see
+# check_git_file); otherwise the worker does not start, and hansa's finish says what happened.
+# sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <.git line> <worker command...>
+SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
+line=$4
+env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
   rc=$?
-  [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
+  ! ok || [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
   echo "hansa: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
+ok || { echo "hansa: the worktree's .git file was changed during the lane's setup; hansa ran no git there" >>"$3"; exit 96; }
 if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -q -m "hansa: what the lane's setup changed" >>"$2" 2>&1
   echo "hansa: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
 fi
 : > "$2.done"
-shift 3; exec "$@"
+shift 4; exec "$@"
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
@@ -324,10 +330,148 @@ def full_paths(paths) -> list:
 
 def git_write_deny(wt: Path) -> list:
     """The paths in git's folders for the worktree `wt` that a sandboxed worker may not write, worked
-    out now: Claude Code opens a linked worktree's shared git folder for writing."""
+    out now: Claude Code opens a linked worktree's shared git folder for writing. The worktree's own
+    .git file is among them: pointed at a git folder of the worker's making, it would run the worker's
+    hooks and settings the next time hansa runs git there, outside the sandbox."""
     common = Path(wt) / git("rev-parse", "--git-common-dir", cwd=wt)  # relative to wt, or absolute
     own = Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
-    return full_paths([*(common / f for f in GIT_COMMON_DENY), *(own / f for f in GIT_OWN_DENY)])
+    return full_paths([*(common / f for f in GIT_COMMON_DENY), *(own / f for f in GIT_OWN_DENY), Path(wt) / ".git"])
+
+
+# A linked worktree's .git is a one-line file (gitdir: <folder>) that tells git where the worktree's
+# history and settings live. Whatever runs in the worktree could point it at a git folder with hooks
+# or settings of its own, which the next git command hansa runs there would obey, outside any sandbox.
+# So hansa reads it as a plain file before each git command it runs in a worktree, against the line
+# it took from the repository when it made the worktree (.hansa/worktrees.json), and runs no git
+# there when they differ.
+
+class GitFileChanged(RuntimeError):
+    """The worktree's .git file is not the one git wrote for it. str(): what the principal is told."""
+
+    def __init__(self, wt: Path, found: str, expected: str) -> None:
+        self.wt, self.found, self.expected = Path(wt), found, expected
+        super().__init__(f"the worktree's .git file was changed: {found} instead of "
+                         f"{expected.split(':', 1)[-1].strip()}; hansa ran no git in {wt}")
+
+
+def _known_git_files(desk: Desk) -> dict:
+    return read_json(desk.state_dir / "worktrees.json", {}) or {}
+
+
+def _remember_git_file(desk: Desk, wt: Path, line) -> None:
+    with desk.lock():
+        known = _known_git_files(desk)
+        if line:
+            known[str(wt)] = line
+        elif str(wt) not in known:
+            return
+        else:
+            del known[str(wt)]
+        desk.state_dir.mkdir(exist_ok=True)
+        write_json(desk.state_dir / "worktrees.json", known)
+
+
+def git_admin_dirs(repo: Path, wt: Path) -> list:
+    """The folders under the repository's worktrees/ whose gitdir file names this worktree's .git:
+    the worktree's own git folder, found from the repository and not from the worktree."""
+    common = Path(repo) / git("rev-parse", "--git-common-dir", cwd=repo)  # relative to repo, or absolute
+    target, found = Path(wt).resolve() / ".git", []
+    for d in sorted((common / "worktrees").iterdir()) if (common / "worktrees").is_dir() else []:
+        try:
+            named = Path((d / "gitdir").read_text(encoding="utf-8").strip())
+        except OSError:
+            continue
+        if (named if named.is_absolute() else d / named).resolve() == target:
+            found.append(d.resolve())
+    return found
+
+
+def _read_git_file(wt: Path):
+    """(line, what was found) for the worktree's .git, read as a plain file and never through git;
+    line is None when it is not a regular file."""
+    dot = Path(wt) / ".git"
+    try:
+        st = os.lstat(dot)
+    except FileNotFoundError:
+        return None, "it is gone"
+    if stat.S_ISLNK(st.st_mode):
+        return None, f"it is now a link to {os.readlink(dot)}"
+    if stat.S_ISDIR(st.st_mode):
+        return None, "it is now a folder"
+    if not stat.S_ISREG(st.st_mode):
+        return None, "it is no longer a plain file"
+    try:
+        with os.fdopen(os.open(dot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as fh:
+            line = fh.read(4096).decode("utf-8", "replace").strip()
+    except OSError as e:
+        return None, f"it cannot be read ({e.strerror})"
+    where = line[len("gitdir:"):].strip() if line.startswith("gitdir:") else ""
+    return line, f"it now points to {where}" if where else f"it now holds {line[:100]!r}"
+
+
+def expected_git_line(desk: Desk, wt: Path, repo=None):
+    """The gitdir line git wrote for this worktree: remembered when hansa made it, or else found from the
+    lane's repository (a worktree made before hansa remembered them) and remembered then. None: unknown."""
+    line = _known_git_files(desk).get(str(wt))
+    if line or repo is None:
+        return line
+    try:
+        dirs = git_admin_dirs(Path(repo), Path(wt))
+    except (RuntimeError, OSError):
+        return None
+    if len(dirs) != 1:  # none, or another folder names it too: which one is git's cannot be told
+        return None
+    line, now_line = f"gitdir: {dirs[0]}", _read_git_file(Path(wt))[0]
+    if now_line and now_line.startswith("gitdir:"):  # the same folder written another way (relative, say)
+        written = Path(now_line[len("gitdir:"):].strip())
+        if (written if written.is_absolute() else Path(wt) / written).resolve() == dirs[0]:
+            line = now_line
+    _remember_git_file(desk, Path(wt), line)
+    return line
+
+
+def check_git_file(desk: Desk, wt: Path, repo=None) -> None:
+    """Raise GitFileChanged unless the worktree's .git is still the regular file holding the line git
+    wrote for it. hansa runs it before each git command it runs in a worktree."""
+    wt = Path(wt)
+    line = expected_git_line(desk, wt, repo)
+    if not line:
+        raise RuntimeError(f"hansa does not know which git folder {wt} belongs to, so it runs no git there")
+    found, what = _read_git_file(wt)
+    if found != line:
+        raise GitFileChanged(wt, what, line)
+
+
+def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
+    """After a worktree's .git was found changed: keep what was found in the task's raw folder, put the
+    right file back so the lane works again, record it, and say it in plain words."""
+    dot = e.wt / ".git"
+    keep = desk.raw_dir(tid) / f"worktree-git-{int(time.time() * 1000)}"
+    keep.mkdir(parents=True, exist_ok=True)
+    (keep / "what-was-found.txt").write_text(f"{dot}: {e.found}\nexpected: {e.expected}\n", encoding="utf-8")
+    if e.found.startswith("it now points to "):  # the settings and hooks hansa's git would have run
+        target = Path(e.found[len("it now points to "):])
+        target = target if target.is_absolute() else e.wt / target
+        for name in ("config", "hooks"):
+            try:
+                if (target / name).is_dir():
+                    shutil.copytree(target / name, keep / name, symlinks=True)
+                elif (target / name).is_file():
+                    shutil.copy2(target / name, keep / name)
+            except OSError:
+                pass
+    if os.path.lexists(dot):
+        shutil.move(str(dot), str(keep / "found.git"))
+    dot.write_text(e.expected + "\n", encoding="utf-8")
+    desk.event("worktree_git_changed", task=tid, worktree=str(e.wt), found=e.found, expected=e.expected)
+    return (f"{e}. What was found is kept in .hansa/runs/{tid}/{keep.name}; the right file is back, "
+            f"so the lane's next task runs normally")
+
+
+def wgit(desk: Desk, wt: Path, *args) -> str:
+    """git in a worktree, run only after its .git file is checked."""
+    check_git_file(desk, wt)
+    return git(*args, cwd=wt)
 
 
 def is_local(host: str) -> bool:
@@ -535,27 +679,34 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     base = meta.get("base") or git("rev-parse", lane.get("base") or "main", cwd=repo)
     start = meta.get("start_from") or base
     wt = wt or desk.worktrees_dir / lane_name
-    if not (wt / ".git").exists():
+    if not wt.exists():
+        _remember_git_file(desk, wt, None)  # removed by hand: a new one gets its own line
+    if not os.path.lexists(wt / ".git") and not expected_git_line(desk, wt):
         wt.parent.mkdir(parents=True, exist_ok=True)
         git("worktree", "add", "--detach", str(wt), start, cwd=repo)
-    if git("status", "--porcelain", cwd=wt):
-        git("stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}", cwd=wt)
+    try:
+        check_git_file(desk, wt, repo)  # also finds and remembers the line of a worktree just made
+    except GitFileChanged as e:  # changed since the last task ended: this one does not start, the next one can
+        raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    if wgit(desk, wt, "status", "--porcelain"):
+        wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}")
     branch = f"task/{tid}"
-    if git("branch", "--list", branch, cwd=wt):
+    if wgit(desk, wt, "branch", "--list", branch):
         # an earlier try of this task: keep its commits under another name
         n = len(meta.get("attempts", []))
-        git("branch", "-m", branch, f"{branch}-try{n}", cwd=wt)
-    git("checkout", "-q", "-B", branch, start, cwd=wt)
+        wgit(desk, wt, "branch", "-m", branch, f"{branch}-try{n}")
+    wgit(desk, wt, "checkout", "-q", "-B", branch, start)
     return wt, base
 
 
-def with_setup(argv: list, lane: dict, raw: Path) -> list:
+def with_setup(desk: Desk, argv: list, lane: dict, raw: Path, wt: Path) -> list:
     """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT)."""
     if not lane.get("setup"):
         return argv
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
+    line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
     return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
-            *argv]
+            line, *argv]
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
@@ -618,6 +769,10 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         cfg, extra = browser_for(desk, tid, s["browser"])
         argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
         argv += ["--mcp-config", str(cfg)]
+    try:
+        check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
+    except GitFileChanged as e:
+        raise RuntimeError(git_file_changed(desk, tid, e)) from None
     argv += isolated(wt, sandbox_settings(desk, lane, pname, p, wt))
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)]]
@@ -635,7 +790,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                     setup_ran=bool(lane.get("setup")))
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
-            proc = subprocess.Popen(with_setup(argv, lane, raw), cwd=str(wt), env=env, stdin=stdin, stdout=out,
+            proc = subprocess.Popen(with_setup(desk, argv, lane, raw, wt), cwd=str(wt), env=env, stdin=stdin, stdout=out,
                                     stderr=err, start_new_session=True)
         desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid,
                     pid_start=proc_start(proc.pid))
@@ -680,7 +835,7 @@ def design_command(desk: Desk, tid: str):
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
-    return with_setup(argv, lane, desk.raw_dir(tid)), env, wt
+    return with_setup(desk, argv, lane, desk.raw_dir(tid), wt), env, wt
 
 
 def start_design(desk: Desk, tid: str, lane_name: str) -> None:
@@ -833,30 +988,38 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         found = VERDICT.findall(result)
         fields["verdict"] = found[-1].lower() if found else ""
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
+    changed = ""  # what the principal is told when the worktree's .git was changed: then the task fails
     try:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
-        if git("status", "--porcelain", cwd=wt) and set_up and not setup:  # a setup's leftovers are nobody's work
+        check_git_file(desk, wt, desk.settings()["lanes"].get(meta.get("lane"), {}).get("repo"))
+        if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
-                git("stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes", cwd=wt)
+                wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
-                git("add", "-A", cwd=wt)
-                git("commit", "-q", "--no-verify", "-m", f"{tid}: {meta.get('title') or 'work'}"[:100], cwd=wt)
-        head = git("rev-parse", "HEAD", cwd=wt)
-        fields.update(head=head, commits=int(git("rev-list", "--count", f"{meta['base']}..{head}", cwd=wt) or 0),
-                      files=git("diff", "--name-only", meta["base"], head, cwd=wt).splitlines(),
-                      stat=git("diff", "--shortstat", meta["base"], head, cwd=wt))
+                wgit(desk, wt, "add", "-A")
+                wgit(desk, wt, "commit", "-q", "--no-verify", "-m", f"{tid}: {meta.get('title') or 'work'}"[:100])
+        head = wgit(desk, wt, "rev-parse", "HEAD")
+        fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
+                      files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),
+                      stat=wgit(desk, wt, "diff", "--shortstat", meta["base"], head))
+        check_git_file(desk, wt)  # keys_in_change runs git there too
         fields["leaked"] = keys_in_change(desk, wt, meta["base"], head)  # it would travel with the merge
         if fields["leaked"]:
             desk.event("key_in_change", task=tid, providers=fields["leaked"])
+    except GitFileChanged as e:
+        changed = git_file_changed(desk, tid, e)
+        fields.update(head="", commits=0, files=[], stat="")
     except (RuntimeError, KeyError, OSError) as e:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
 
     attempts = list(meta.get("attempts", []))
     if setup:
         fields["setup_exit"] = int(setup.group(1))
-    kind, why = ("", "") if meta.get("cancel") or setup else unusable_reason(run, err)
-    if meta.get("cancel"):
+    kind, why = ("", "") if meta.get("cancel") or setup or changed else unusable_reason(run, err)
+    if changed:
+        state, error = "failed", changed
+    elif meta.get("cancel"):
         state, error = "cancelled", "cancelled"
     elif setup:
         state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
@@ -893,7 +1056,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
 
     def decide(now_meta):
-        final, message = ("cancelled", "cancelled") if now_meta.get("cancel") else (state, error)
+        final, message = ("cancelled", "cancelled") if now_meta.get("cancel") and not changed else (state, error)
         checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                     and meta.get("kind") != "verify")  # a verification is never merged, so never checked
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
@@ -941,11 +1104,17 @@ def finish_check(desk: Desk, tid: str) -> dict:
     log = (d / "check.log").read_text(encoding="utf-8", errors="replace") if (d / "check.log").exists() else ""
     note = ("stopped on request" if m.get("cancel") else "stopped at the lane's time ceiling"
             if m.get("timed_out") else "" if code is not None else "the check was interrupted")
-    check = {"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
+    changed = ""  # the check runs in the worktree, outside any sandbox: it may have changed .git too
+    if m.get("worktree") and expected_git_line(desk, Path(m["worktree"])):
+        try:
+            check_git_file(desk, Path(m["worktree"]))
+        except GitFileChanged as e:
+            changed = git_file_changed(desk, tid, e)
+    check ={"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
              "seconds": round(now() - (m.get("check_started") or now())), "tail": log.strip().splitlines()[-15:]}
-    m = desk.change(tid, lambda now_meta: {"state": "cancelled" if now_meta.get("cancel") else "done", "phase": "",
-                                           "pid": None, "pid_start": "", "check": check,
-                                           "error": "cancelled" if now_meta.get("cancel") else ""})
+    m = desk.change(tid, lambda now_meta: {"state": "failed" if changed else "cancelled" if now_meta.get("cancel")
+                                           else "done", "phase": "", "pid": None, "pid_start": "", "check": check,
+                                           "error": changed or ("cancelled" if now_meta.get("cancel") else "")})
     desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
     return m
 

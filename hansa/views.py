@@ -334,9 +334,12 @@ def cost_text(rep: dict, by: str = "day") -> str:
 
 
 def diff_text(desk: Desk, tid: str, stat_only: bool = False) -> str:
-    from .run import git
+    from .run import GitFileChanged, wgit
     m = desk.meta(tid)
     if not m.get("head") or not m.get("worktree"):
         return f"{tid} has no changes recorded yet (state: {m['state']})"
     args = ["diff", "--stat" if stat_only else "--patch", m["base"], m["head"]]
-    return desk.redact(git(*args, cwd=Path(m["worktree"]))) or "(no changes)"
+    try:  # the worktree's .git is checked first; the task working there now fails for it when it ends
+        return desk.redact(wgit(desk, Path(m["worktree"]), *args)) or "(no changes)"
+    except GitFileChanged as e:
+        return f"hansa: {e}; the diff is not shown"

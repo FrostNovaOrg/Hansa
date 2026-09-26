@@ -88,6 +88,14 @@ if os.environ.get("FAKE_LEAVE_CHILD"):  # something it started and left running,
     open(os.environ["FAKE_LEAVE_CHILD"], "w").write(str(c.pid))
 if os.environ.get("FAKE_WRITE"):
     open("notes.txt", "w").write(os.environ["FAKE_WRITE"] + "\n")
+if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git folder with a hook of its own
+    import shutil
+    common = subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+    shutil.copytree(common, "copied-git", symlinks=True)
+    hook = os.path.join("copied-git", "hooks", "post-commit")
+    open(hook, "w").write("#!/bin/sh\ntouch " + os.environ["FAKE_REDIRECT_GIT"] + "\n")
+    os.chmod(hook, 0o755)
+    open(".git", "w").write("gitdir: " + os.path.abspath("copied-git") + "\n")
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
@@ -871,6 +879,84 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("Bash(git restore:*)", deny)
         self.assertIn("Bash(git checkout:*)", argv)
         self.assertIn(str(common / "refs"), box["filesystem"]["denyWrite"])
+
+    def test_the_sandbox_keeps_workers_from_the_worktrees_git_file(self):
+        from hansa import run
+        wt = self.tmp / "wt"
+        sh("git", "worktree", "add", "--detach", str(wt), cwd=self.repo)
+        deny = run.git_write_deny(wt)
+        self.assertIn(str(wt / ".git"), deny)
+        self.assertIn(str(wt.resolve() / ".git"), deny)  # with links resolved too (/var is /private/var on macOS)
+
+    def test_a_worktree_whose_git_file_was_redirected_gets_no_git_and_is_put_right(self):
+        marker = self.tmp / "hook-ran"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_REDIRECT_GIT": str(marker)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(d, tid)
+        wt = Path(m["worktree"])
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("the worktree's .git file was changed: it now points to", m["error"])
+        self.assertIn(str(wt / "copied-git"), m["error"])
+        self.assertFalse(marker.exists())  # hansa did not commit through the copy, so its hook never ran
+        seen = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                if e["event"] == "worktree_git_changed"]
+        self.assertEqual([e["task"] for e in seen], [tid])
+        kept = list((self.desk.state_dir / "runs" / tid).glob("worktree-git-*"))
+        self.assertEqual(len(kept), 1)
+        self.assertIn("copied-git", (kept[0] / "found.git").read_text())
+        self.assertTrue((kept[0] / "hooks" / "post-commit").exists())
+        own = (self.repo / ".git" / "worktrees" / wt.name).resolve()
+        self.assertEqual(Path((wt / ".git").read_text().split(":", 1)[1].strip()).resolve(), own)
+        self.assertIn("was changed", views.show_text(self.desk, tid))
+
+        s["lanes"]["a"]["env"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
+        self.assertEqual(Path((wt / ".git").read_text().split(":", 1)[1].strip()).resolve(), own)
+        self.assertFalse(marker.exists())
+
+    def test_a_git_file_changed_between_tasks_is_caught_before_any_git_runs(self):
+        from hansa import run
+        lane = self.desk.settings()["lanes"]["a"]
+        first = self.desk.new_task("Add hello.txt")
+        wt, _ = run.prepare(self.desk, "a", lane, self.desk.meta(first))
+        right = (wt / ".git").read_text()
+        copy = self.tmp / "copied-git"
+        (copy / "hooks").mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {copy}\n")
+        tid = self.desk.new_task("Add hello.txt again")
+        with unittest.mock.patch.object(run, "git", wraps=run.git) as ran:
+            with self.assertRaisesRegex(RuntimeError, f"the worktree's .git file was changed: it now points to {copy}"):
+                run.prepare(self.desk, "a", lane, self.desk.meta(tid))
+            self.assertFalse([c for c in ran.call_args_list if c.kwargs.get("cwd") == wt])
+        self.assertEqual((wt / ".git").read_text(), right)  # put back for the next task
+        self.assertIn(f"gitdir: {copy}", next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.git"))
+                      .read_text())
+        self.assertIn("worktree_git_changed", self.desk.events_path.read_text())
+        (wt / ".git").unlink()
+        (wt / ".git").mkdir()  # a folder, not the file git wrote
+        self.desk.update(first, head="HEAD", base="HEAD", worktree=str(wt))
+        self.assertIn("it is now a folder", views.diff_text(self.desk, first))  # no diff through it either
+        with self.assertRaisesRegex(RuntimeError, "it is now a folder"):
+            run.prepare(self.desk, "a", lane, self.desk.meta(tid))
+        self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0], wt)  # the lane works again
+
+    def test_a_git_file_changed_by_the_lanes_setup_stops_the_task_before_its_worker(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = "echo 'gitdir: /elsewhere' > .git"
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        m = self.settle(d, self.desk.new_task("Add hello.txt"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("it now points to /elsewhere", m["error"])
+        s["lanes"]["a"]["setup"] = ""
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
 
     def test_a_local_host_in_any_case_or_as_127_0_0_1_allows_local_binding(self):
         from hansa import run
