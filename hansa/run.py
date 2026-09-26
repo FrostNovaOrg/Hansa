@@ -46,6 +46,9 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 # hansa serve never waits on it, and stopping the task stops it too. It never sees a provider's key,
 # and runs in srt with the lane's sandbox (see in_srt); its temporary folder is removed when it ends.
 # What it changes in the repository (a lock file, say) is set aside, so it is not part of the task;
+# Its output goes into a pipe, which cat (outside srt) copies to <log>: on macOS, a sandbox that hides .hansa
+# also refuses some of what a command does with its own output file there (python dies at once), not a pipe.
+# Its exit code comes back on fd 3, since sh has no pipefail.
 # <log>.done says it got that far (a setup stopped midway leaves its changes uncommitted).
 # Its git commands run only while the worktree's .git file still holds the line git wrote for it (see
 # check_git_file); otherwise the worker does not start, and hansa's finish says what happened.
@@ -53,8 +56,9 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 #   <worker command...>
 SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
 line=$4
-env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null >"$2" 2>&1 || {
-  rc=$?
+rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null 2>&1 3>&-
+  echo $? >&3; } | cat >"$2"; } 3>&1 )
+[ "$rc" = 0 ] || {
   rm -rf "$5"
   ! ok || [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
   echo "hansa: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
@@ -78,8 +82,9 @@ env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ git merge --no-ff --no-com
 shift 3; exec "$@"
 """)
 # The lane's check, in srt; its exit code goes to a file, so a restarted server can still read it.
+# Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
 # sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings>
-CHECK_SCRIPT = '"$4" --settings "$5" -- sh -c "$1"; echo $? > "$2"; rm -rf "$3"'
+CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; echo $? > "$2"; } | cat; rm -rf "$3"'
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
 # The provider would not answer this request (its content filter or a refusal). That

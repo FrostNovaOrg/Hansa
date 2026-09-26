@@ -138,14 +138,16 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "nu
 # A stand-in for srt: records how it was called, with the settings file's content, then runs the command.
 # Like the real one, it ignores the TMPDIR it is given: inside, TMPDIR is CLAUDE_CODE_TMPDIR, else /tmp/claude.
 FAKE_SRT = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, stat, sys
 os.environ["TMPDIR"] = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp/claude"
 args = sys.argv[1:]
 cut = args.index("--")
 settings = json.load(open(args[args.index("--settings") + 1]))
+mode = os.fstat(1).st_mode
 with open(LOG, "a") as f:
     f.write(json.dumps({"argv": args, "settings": settings, "tmpdir": os.environ.get("TMPDIR", ""),
-                        "tmp_there": os.path.isdir(os.environ.get("TMPDIR", "")), "cwd": os.getcwd()}) + "\n")
+                        "tmp_there": os.path.isdir(os.environ.get("TMPDIR", "")), "cwd": os.getcwd(),
+                        "stdout": "pipe" if stat.S_ISFIFO(mode) else "file" if stat.S_ISREG(mode) else "other"}) + "\n")
 os.execvp(args[cut + 1], args[cut + 1:])
 '''
 
@@ -488,6 +490,22 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", main).split()[1:], [tip, m["head"]])
         self.assertTrue((self.repo / "b.txt").exists())
         self.assertEqual(self.git_out("status", "--porcelain"), "")
+
+    def test_a_merge_checks_setup_and_check_write_into_a_pipe_and_their_output_is_kept(self):
+        d, t1, t2 = self.two_lanes()
+        s = self.desk.settings()
+        s["lanes"]["b"].update(setup="echo set up for the merge", check="echo merged badly; exit 3")
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("merge", t1)
+        calls = len(self.srt_calls())
+        self.hansa("merge", t2)
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["exit"]), ("done", 3), m)
+        setup, check = self.srt_calls()[calls:]
+        self.assertEqual((setup["argv"][-1], check["argv"][-1]), ("echo set up for the merge", "echo merged badly; exit 3"))
+        self.assertEqual((setup["stdout"], check["stdout"]), ("pipe", "pipe"))
+        self.assertIn("set up for the merge", (self.desk.tasks_dir / t2 / "merge-setup.log").read_text())
+        self.assertIn("merged badly", (self.desk.tasks_dir / t2 / "merge-check.log").read_text())
 
     def test_a_merge_check_whose_base_keeps_moving_is_checked_once_more_then_stops(self):
         d, t1, t2 = self.two_lanes()
@@ -879,6 +897,7 @@ class DeskTest(unittest.TestCase):
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "failed", m)
         self.assertIn("setup command failed (exit 3)", m["error"])
+        self.assertEqual(self.srt_calls()[-1]["stdout"], "pipe")  # read into the log by a process outside srt
         self.assertIn("registry: API Error: 429", views.show_text(self.desk, tid))
         self.assertFalse(provider_problem(self.desk, self.desk.settings(), "claude"))  # not the provider's quota
         self.assertEqual(m["attempts"], [])
@@ -897,6 +916,7 @@ class DeskTest(unittest.TestCase):
         argv, got = call["argv"], call["settings"]
         self.assertEqual(argv[0], "--settings")
         self.assertEqual(argv[2:6], ["--", "/bin/sh", "-c", 'echo "tmp=$TMPDIR"'])
+        self.assertEqual(call["stdout"], "pipe")  # not the log file in the raw folder srt hides
         self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
                                           "deniedDomains": [], "allowLocalBinding": True})
@@ -1698,6 +1718,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         m = self.settle(d, self.desk.new_task("Add hello.txt again"))
         self.assertEqual((m["state"], m["check"]["ok"], m["check"]["exit"]), ("done", False, 3), m)
+        self.assertEqual(m["check"]["tail"], ["not good"])  # the check's exit code, not the log reader's
+        self.assertIn("not good", (self.desk.tasks_dir / m["id"] / "check.log").read_text())
         self.assertIn("FAILED (exit 3)", views.show_text(self.desk, m["id"]))
         self.assertIn("check FAILED", views.status_text(views.status(self.desk)))
         with self.assertRaises(SystemExit):
@@ -1714,6 +1736,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
         [call] = self.srt_calls()
         self.assertEqual(call["argv"][2:], ["--", "sh", "-c", 'test -f hello.txt && echo "tmp=$TMPDIR"'])
+        self.assertEqual(call["stdout"], "pipe")  # not the log file in the raw folder srt hides
         self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
         got = call["settings"]
         self.assertEqual(got["network"], {"allowedDomains": ["pypi.org"], "deniedDomains": []})
@@ -1738,6 +1761,26 @@ class DeskTest(unittest.TestCase):
         d.procs[tid].wait()  # the old server is gone; its check still wrote the exit code
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+
+    def test_a_check_cancelled_while_it_runs_leaves_no_process_behind(self):
+        from hansa.run import alive, group_running
+        pidfile = self.tmp / "check.pid"
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"echo $$ > {pidfile}; sleep 30"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d, end = Dispatcher(self.desk), time.time() + 20
+        while not pidfile.exists() and time.time() < end:
+            d.tick()
+            time.sleep(0.05)
+        group, check = self.desk.meta(tid)["pid"], int(pidfile.read_text())
+        self.addCleanup(lambda: alive(check) and os.kill(check, 9))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "cancel", tid])
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["check"]["note"]), ("cancelled", "stopped on request"), m)
+        self.assertFalse(group_running(group))  # the check, srt and the log's reader
+        self.assertFalse(alive(check))
 
     def test_a_refused_task_moves_on_without_resting_the_provider(self):
         s = self.desk.settings()
