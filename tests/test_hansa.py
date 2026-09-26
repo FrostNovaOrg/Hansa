@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -614,10 +615,24 @@ class DeskTest(unittest.TestCase):
         s["providers"]["claude"]["config_dir"] = str(self.desk.root / "claude-home")
         self.assertEqual(self.desk.save_settings(s), [])
         prob = provider_problem(self.desk, self.desk.settings(), "claude")
-        self.assertIn(f"CLAUDE_CONFIG_DIR={self.desk.root / 'claude-home'} claude", prob)
+        self.assertIn(f"CLAUDE_CONFIG_DIR={shlex.quote(str(self.desk.root / 'claude-home'))} claude", prob)
         self.assertIn("hansa check claude", prob)
+        s["providers"]["claude"]["config_dir"] = "/Users/me/claude two"  # pastes as one word
+        self.assertEqual(self.desk.save_settings(s), [])
+        prob = provider_problem(self.desk, self.desk.settings(), "claude")
+        self.assertIn("log in with `CLAUDE_CONFIG_DIR='/Users/me/claude two' claude`", prob)
         self.assertEqual(run.unusable_reason({"is_error": True, "result": "Invalid API key · Please run /login"}, "")[0],
                          "key")
+
+    def test_a_config_dir_must_be_a_full_path(self):
+        want = "provider claude: config_dir must be a full path starting with /"
+        for bad in ("~/x", "x/y"):
+            s = self.desk.settings()
+            s["providers"]["claude"]["config_dir"] = bad
+            self.assertIn(want, self.desk.save_settings(s), bad)
+        self.assertEqual(self.desk.settings()["providers"]["claude"]["config_dir"], "")  # neither was saved
+        s["providers"]["claude"]["config_dir"] = "/abs/path"
+        self.assertEqual(self.desk.save_settings(s), [])
 
     def test_wait_returns_when_a_task_ends(self):
         tid = self.desk.new_task("Add hello.txt")
