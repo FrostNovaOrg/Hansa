@@ -959,18 +959,24 @@ def _mac_group_running(pgid) -> bool:
     return any(k[36] != _SZOMB for k in _mac_procs(_KERN_PROC_PGRP, int(pgid)))
 
 
-def _mac_args(pid: int) -> list:
-    """A process's arguments, without its environment; [] when they cannot be read."""
+def _mac_procargs(pid: int) -> tuple:
+    """A process's arguments and environment, as two lists; ([], []) when they cannot be read."""
     data = _sysctl(_CTL_KERN, _KERN_PROCARGS2, pid)
     if not data or len(data) < 4:
-        return []
+        return [], []
     argc = struct.unpack_from("@i", data, 0)[0]
     rest = data[4:]
     end = rest.find(b"\0")  # the executable's path, then NULs up to the first argument
     if end < 0:
-        return []
-    rest = rest[end:].lstrip(b"\0")
-    return rest.split(b"\0")[:argc]
+        return [], []
+    words = rest[end:].lstrip(b"\0").split(b"\0")
+    env = words[argc:]  # the environment ends at an empty string; the kernel's own strings follow it
+    return words[:argc], env[:env.index(b"")] if b"" in env else env
+
+
+def _mac_args(pid: int) -> list:
+    """A process's arguments, without its environment; [] when they cannot be read."""
+    return _mac_procargs(pid)[0]
 
 
 def _mac_pids_with_arg(token: str) -> list:
@@ -1006,6 +1012,70 @@ def leader(pids: list):
         except OSError:
             pass
     return None
+
+
+def task_processes(tid: str) -> list:
+    """This account's processes whose environment gives HANSA_TASK as this task, and no other task:
+    [(pid, arguments)]. One that cleared its environment is not found."""
+    want, found = f"HANSA_TASK={tid}".encode(), []
+
+    def ours(env: list) -> bool:
+        named = [x for x in env if x.startswith(b"HANSA_TASK=")]
+        return bool(named) and all(x == want for x in named)
+    if Path("/proc").is_dir():
+        for p in Path("/proc").iterdir():
+            try:
+                if p.name.isdigit() and p.stat().st_uid == os.getuid() and \
+                        ours((p / "environ").read_bytes().split(b"\0")):
+                    found.append((int(p.name), (p / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")))
+            except OSError:
+                pass
+    else:
+        for k in _mac_procs(_KERN_PROC_ALL, 0):
+            pid = struct.unpack_from("@i", k, 40)[0]
+            if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
+                args, env = _mac_procargs(pid)
+                if ours(env):
+                    found.append((pid, args))
+    return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
+
+
+SWEEP_GRACE = 5  # seconds between the polite signal and the one that cannot be refused
+
+
+def sweep(desk: Desk, tid: str) -> list:
+    """Stop what a task's processes left running once nothing of the task should run any more: a server or
+    watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor
+    the command doing this. What was stopped goes on the task (left_running) and in the event log."""
+    keep = {os.getpid(), os.getppid()}
+    try:
+        keep.add(int((desk.state_dir / "serve.lock").read_text().strip()))
+    except (OSError, ValueError):
+        pass
+
+    def running(p, start):
+        return alive(p, start) and _state(p) != "Z"
+    found = [(p, args, proc_start(p)) for p, args in task_processes(tid) if p not in keep]
+    found = [(p, args, s) for p, args, s in found if running(p, s)]
+    if not found:
+        return []
+    for sig, grace in ((signal.SIGTERM, SWEEP_GRACE), (signal.SIGKILL, 2)):
+        for p, _, start in found:
+            if running(p, start):
+                try:
+                    os.kill(p, sig)
+                except OSError:
+                    pass
+        end = time.time() + grace
+        while any(running(p, s) for p, _, s in found) and time.time() < end:
+            time.sleep(0.1)
+        if not any(running(p, s) for p, _, s in found):
+            break
+    stopped = [{"pid": p, "command": desk.redact(" ".join(args))[:120]} for p, args, s in found if not running(p, s)]
+    if stopped:
+        desk.change(tid, lambda x: {"left_running": [*(x.get("left_running") or []), *stopped]})
+        desk.event("left_running_stopped", task=tid, processes=[f"{x['pid']} {x['command']}" for x in stopped])
+    return stopped
 
 
 def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> None:
@@ -1515,6 +1585,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.change(tid, decide)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
+    if meta.get("phase") != "checking":  # else after its check, which carries the same id
+        sweep(desk, tid)
+        meta = desk.meta(tid)
     return meta
 
 
@@ -1569,7 +1642,8 @@ def finish_check(desk: Desk, tid: str) -> dict:
                                            else "done", "phase": "", "pid": None, "pid_start": "", "check": check,
                                            "error": changed or ("cancelled" if now_meta.get("cancel") else "")})
     desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
-    return m
+    sweep(desk, tid)
+    return desk.meta(tid)
 
 
 # A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check,
@@ -1686,6 +1760,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
     (raw / "merge-setup.log.done").unlink(missing_ok=True)
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, *MERGE_FILES)  # what the check printed can hold a key the change holds
+    sweep(desk, tid)  # what the merge check left running
 
     def read(name):
         return (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).exists() else ""
@@ -2040,6 +2115,7 @@ class Dispatcher:
                                         "finished": now()} if x.get("cancel") else
                         {"state": "done", "phase": "", "pid": None, "pid_start": "", "check": check})
             desk.event("task_checked", task=tid, ok=None, exit=None, note=check["note"], could_not_run=True)
+            sweep(desk, tid)
             return
         except Exception as e:  # noqa: BLE001 - say: the check cannot run, so the task fails
             why = desk.redact(f"the lane's check could not run: {e}")[:600]
@@ -2047,6 +2123,7 @@ class Dispatcher:
             publish(desk, tid, "check.log")
             desk.change(tid, lambda x: {"state": "failed", "phase": "", "pid": None, "pid_start": "", "error": why})
             desk.event("task_checked", task=tid, ok=False, exit=None, note=why)
+            sweep(desk, tid)
             return
         if proc:
             self.procs[tid] = proc
@@ -2054,6 +2131,7 @@ class Dispatcher:
         publish(desk, tid, "check.log")  # cancelled first, or the principal removed the check meanwhile
         desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled", "finished": now()}
                     if x.get("cancel") else {"state": "done", "phase": ""})
+        sweep(desk, tid)
 
     def merge_checks(self, s: dict) -> None:
         """Finish merge checks that ended, stop those cancelled or over the lane's time, take over or finish

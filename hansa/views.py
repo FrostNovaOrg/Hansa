@@ -292,6 +292,9 @@ def show_text(desk: Desk, tid: str) -> str:
         for x in m["denials"][:8]:
             first, *more = x.splitlines() or [""]
             out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else ""))
+    if m.get("left_running"):
+        out.append(f"left running, stopped by hansa when the task ended ({len(m['left_running'])}):")
+        out += [f"  pid {x['pid']}: {x['command']}" for x in m["left_running"]]
     shots = sorted((d / "browser").glob("*")) if (d / "browser").is_dir() else []
     if shots:
         out.append(f"browser files ({len(shots)}) in {d / 'browser'}: " + ", ".join(x.name for x in shots[:6])
