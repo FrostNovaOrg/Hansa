@@ -12,7 +12,8 @@ from pathlib import Path
 
 from . import account, build, cost, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
-from .run import VERIFY_TASK, Dispatcher, check_provider, git, keys_in_change, provider_env, stop
+from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
+                  conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, provider_env, stop)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -157,21 +158,39 @@ def cmd_merge(a):
     # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
     # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
     with desk.lock():
-        m, v, chk, repo, base = _mergeable(desk, a)
+        m, v, chk, repo, base, lane = _mergeable(desk, a)
+        tip = git("rev-parse", base, cwd=repo)
+        # the base has commits the task's branch does not: the two together were never checked
+        unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
+        if unchecked and not a.despite_check:
+            desk.update(a.id, state="merging", merge_check={"phase": "queued", "queued": now(), "moves": 0},
+                        merge_check_result=None)
+            behind = git("rev-list", "--count", f"{m['head']}..{tip}", cwd=repo)
+            desk.event("merge_check_queued", task=a.id, onto=tip)
+            print(f"{a.id} is not merged yet: {base} has {behind} commit(s) that {a.id}'s branch does not, so the two "
+                  f"together were never checked. hansa merges {a.id} onto {base} as it is now in lane {m['lane']}'s "
+                  f"worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges "
+                  f"exactly that if the check passes. "
+                  f"It runs when lane {m['lane']} is free. Wait for it: hansa wait {a.id} "
+                  f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)")
+            return
         try:
             git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
         except RuntimeError as e:
+            files = conflicted_files(lambda *x: git(*x, cwd=repo))
+            places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
             try:
                 git("merge", "--abort", cwd=repo)
             except RuntimeError:
                 pass
-            raise SystemExit(f"hansa: {a.id} conflicts with {base} ({e}); nothing was merged. "
-                             f"Try: hansa retry {a.id} --fresh \"<same change on the current base>\"")
+            raise SystemExit(desk.redact(conflict_advice(a.id, base, places, str(e)[:300])))
         desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo))
-        _close_verification(desk, m, f"closed: {a.id} was merged")
-    despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold")
-    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}))
-    print(f"{a.id} merged into {base} at {repo}")
+        close_verification(desk, m, f"closed: {a.id} was merged")
+    despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
+    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}),
+               **({"merge_not_checked": True} if unchecked else {}))
+    print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
+                                                     f"since it was made)" if unchecked else ""))
 
 
 def _mergeable(desk: Desk, a):
@@ -180,6 +199,10 @@ def _mergeable(desk: Desk, a):
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification of {m.get('parent')}; it is never merged. "
                          f"Read it, then merge or send back {m.get('parent')}")
+    if m["state"] == "merging":
+        raise SystemExit(f"hansa: {a.id}'s merge check is already {(m.get('merge_check') or {}).get('phase', 'queued')}; "
+                         f"it merges by itself if the check passes. Wait for it: hansa wait {a.id} "
+                         f"(hansa cancel {a.id} stops it)")
     if m["state"] != "done":
         raise SystemExit(f"hansa: only a finished task can be merged; {a.id} is {m['state']}")
     lane = desk.settings()["lanes"].get(m["lane"])
@@ -210,7 +233,7 @@ def _mergeable(desk: Desk, a):
         raise SystemExit(f"hansa: the checkout at {repo} is on {current}, not {base}; the principal needs to switch it back")
     if git("status", "--porcelain", "--untracked-files=no", cwd=repo):
         raise SystemExit(f"hansa: the checkout at {repo} has uncommitted changes; nothing was merged")
-    return m, v, chk, repo, base
+    return m, v, chk, repo, base, lane
 
 
 def cmd_retry(a):
@@ -223,9 +246,15 @@ def _retry(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification; send back the task it checked: hansa retry {m.get('parent')} \"...\"")
-    if m["state"] in ("queued", "running"):
+    if m["state"] in ("queued", "running", "merging"):
         raise SystemExit(f"hansa: {a.id} is {m['state']}; a follow-up is for a task that has ended. Wait for it "
                          f"(hansa wait {a.id}), or cancel it first (hansa cancel {a.id})")
+    if a.update and a.fresh:
+        raise SystemExit("hansa: --update continues from the previous attempt and --fresh starts from the base; "
+                         "choose one. Nothing was queued")
+    if a.update and not m.get("head"):
+        raise SystemExit(f"hansa: {a.id} has no branch to bring up to date; start over with hansa retry {a.id} --fresh "
+                         f"\"...\". Nothing was queued")
     if m["state"] == "replaced":
         raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
@@ -238,14 +267,21 @@ def _retry(desk: Desk, a) -> None:
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
             "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser")}
-    if not a.fresh and m.get("head"):
+    base = (desk.settings()["lanes"].get(m.get("lane")) or {}).get("base") or "main"
+    if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
+        opts.update(start_from=m["head"], update=True)
+        text += (f"\nYou start from the previous attempt's last commit ({m['head'][:10]}), with {base} as it is now "
+                 f"merged into it.")
+    elif not a.fresh and m.get("head"):
         opts.update(start_from=m["head"], base=m["base"])
         text += f"\nYou start from the previous attempt's last commit ({m['head'][:10]})."
     tid = desk.new_task(text, **opts)
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
         desk.update(a.id, state="replaced", replaced_by=tid)
-        _close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
-    print(f"{tid} queued as a follow-up to {a.id}" + (" from the base branch" if a.fresh else ""))
+        close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
+    print(f"{tid} queued as a follow-up to {a.id}" + (" from the base branch" if a.fresh else
+                                                      f", with the current {base} merged into its branch when it starts "
+                                                      f"(a conflict is left for the worker to settle)" if a.update else ""))
 
 
 def cmd_cancel(a):
@@ -258,12 +294,27 @@ def cmd_cancel(a):
             m = desk.update(a.id, cancel=True)
         elif m["state"] == "done":
             desk.update(a.id, state="cancelled", error="closed without merging")
+        elif m["state"] == "merging":  # the merge check stops; the task goes back to waiting for review
+            mc = m.get("merge_check") or {}
+            if mc.get("phase") == "queued":
+                desk.update(a.id, state="done", merge_check=None)
+            else:
+                desk.update(a.id, merge_check={**mc, "cancel": True})
         else:
-            raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running or unmerged finished tasks can be "
-                             f"cancelled")
-        _close_verification(desk, m, f"closed: {a.id} was cancelled")
+            raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running, merging or unmerged finished tasks "
+                             f"can be cancelled")
+        if m["state"] != "merging":
+            close_verification(desk, m, f"closed: {a.id} was cancelled")
     if m["state"] == "running":
         stop(m.get("pid"), m.get("pid_start", ""))
+    if m["state"] == "merging":
+        mc = m.get("merge_check") or {}
+        if mc.get("phase") != "queued":
+            stop(mc.get("pid"), mc.get("pid_start", ""))
+            finish_merge_check(desk, a.id)  # hansa serve would too; this is only quicker
+        desk.event("merge_check_cancel", task=a.id)
+        print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
+        return
     desk.event("task_cancel", task=a.id)
     print(f"{a.id} cancelled")
 
@@ -297,21 +348,10 @@ def _verify(desk: Desk, a) -> None:
                         start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
                         browser=a.browser or m.get("browser"))
     if v:
-        _close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
+        close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
     desk.update(a.id, verify=vid)
     print(f"{vid} queued: a worker will run {a.id}'s change to see whether it holds. "
           f"Follow it with: hansa wait {vid}; the verdict shows in hansa show {a.id}")
-
-
-def _close_verification(desk: Desk, m: dict, why: str) -> None:
-    """A verification belongs to the task it checks, and ends with it."""
-    v = views.verification(desk, m)
-    if not v:
-        return
-    if v["state"] in ("queued", "done"):
-        desk.update(v["task"], state="cancelled", error=why)
-    elif v["state"] == "running":  # hansa serve stops it within seconds
-        desk.update(v["task"], cancel=True)
 
 
 def cmd_pause(a):
@@ -328,8 +368,8 @@ def cmd_wait(a):
     """Return when a watched task stops running, the principal answers a request, or time is up.
     Meant to run in the background, so the session is told when there is something to look at."""
     desk = Desk.find(a.desk)
-    live = lambda t: desk.meta(t)["state"] in ("queued", "running")  # noqa: E731
-    watch = sorted(set(a.ids)) or sorted(m["id"] for m in desk.tasks() if m["state"] in ("queued", "running"))
+    live = lambda t: desk.meta(t)["state"] in ("queued", "running", "merging")  # noqa: E731
+    watch = sorted(set(a.ids)) or sorted(m["id"] for m in desk.tasks() if m["state"] in ("queued", "running", "merging"))
     open_asks = {x["id"] for x in desk.asks() if not x["closed"]}
     done_already = [t for t in watch if not live(t)]
     if not done_already and not any(map(live, watch)) and not open_asks:
@@ -345,7 +385,12 @@ def cmd_wait(a):
             break
         time.sleep(a.every)
     for m in ended:
-        print(f"{m['id']} {m['state']}: {m['title']}  (hansa show {m['id']})")
+        mc = m.get("merge_check_result") or {}
+        print(f"{m['id']} {m['state']}: {m['title']}  (hansa show {m['id']})"
+              + (f"\n  its merge check did not pass, so nothing was merged: "
+                 + (mc.get("note") or f"the check failed (exit {mc.get('exit')})")
+                 if m["state"] == "done" and mc and not mc.get("ok") else
+                 "\n  merged after its merge check passed" if m["state"] == "merged" and mc.get("ok") else ""))
     for x in answered:
         print(f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
     still = [desk.meta(t) for t in watch if live(t)]
@@ -354,7 +399,8 @@ def cmd_wait(a):
     for m in still:
         mins = int((time.time() - m["started"]) // 60) if m.get("started") else 0
         print(f"{m['id']} {m['state']}" + (f" {mins} min, so far: {views.progress_text(desk, m)}"
-                                           if m["state"] == "running" else ""))
+                                           if m["state"] == "running" else
+                                           f": {views.merge_check_text(desk, m)}" if m["state"] == "merging" else ""))
     if still:
         print("hansa wait again to keep waiting. Some providers take minutes per reply; a task is stuck"
               " only when nothing has happened for a long while.")
@@ -605,15 +651,26 @@ def cmd_lane(a):
             except (RuntimeError, OSError) as e:
                 raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
             providers = [x for x in (a.providers or "").split(",") if x] or None
-            new["lanes"][a.name] = default_lane(repo, base, providers)
+            new["lanes"][a.name] = ln = default_lane(repo, base, providers)
+            ln.update({k: v for k, v in (("check", a.check), ("setup", a.setup), ("allow", a.allow)) if v})
             _save(desk, new)
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
             if not brief.exists():
                 brief.write_text("", encoding="utf-8")
-            ln = new["lanes"][a.name]
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
-                  f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes")
+                  f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
+                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "setup", "check") if ln.get(f)))
+            for f in OUTSIDE_WORKER:
+                if ln.get(f):
+                    desk.event("lane_command_changed", lane=a.name, field=f, old="", new=ln[f])
+            if ln.get("setup") or ln.get("check"):
+                print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
+                      "in the conversation, what they run and why.")
+            if not ln.get("check"):
+                print(f"Lane {a.name} has no check, so its tasks will be merged untested: hansa merge checks nothing "
+                      f"before it merges them, not even when {base} has moved since a task was made. Set one with: "
+                      f"hansa lane set {a.name} check \"<the command that runs the tests>\"")
             return
         if a.name not in s["lanes"]:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
@@ -632,7 +689,7 @@ def cmd_lane(a):
             return
         if a.action == "remove":
             tasks = [m for m in desk.tasks() if m.get("lane") == a.name]
-            busy = [m["id"] for m in tasks if m["state"] in ("queued", "running")]
+            busy = [m["id"] for m in tasks if m["state"] in ("queued", "running", "merging")]
             if busy:
                 raise SystemExit(f"hansa: lane {a.name} still has {', '.join(busy)} queued or running; nothing was "
                                  f"changed. Wait for them (hansa wait) or cancel them first")
@@ -762,6 +819,8 @@ def main(argv=None):
     p.add_argument("id")
     p.add_argument("note", nargs="*")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
+    p.add_argument("--update", action="store_true", help="continue from the previous attempt with the base as it is "
+                   "now merged into its branch; a conflict is left in the files for the worker to settle")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--browser", action="store_true", help="give the follow-up a browser")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
@@ -790,6 +849,9 @@ def main(argv=None):
     q.add_argument("--repo", required=True, help="the git checkout the lane works on")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
+    q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved")
+    q.add_argument("--setup", help="the command that installs dependencies before each task")
+    q.add_argument("--allow", nargs="+", metavar="RULE", help="the lane's allowed commands, such as 'Bash(pnpm test:*)'")
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
@@ -827,7 +889,12 @@ def main(argv=None):
     p.add_argument("--by", type=int, required=True)
 
     argv, rest = _split_claude_args(sys.argv[1:] if argv is None else list(argv))
-    a = ap.parse_args(argv)
+    a, extra = ap.parse_known_args(argv)
+    # words after an option belong to the note: hansa retry ID --fresh "note" as well as hansa retry ID "note" --fresh
+    if extra and getattr(a, "cmd", "") in ("retry", "verify") and not any(x.startswith("-") for x in extra):
+        a.note += extra
+    elif extra:
+        ap.error(f"unrecognized arguments: {' '.join(extra)}")
     a.rest = rest
     if not getattr(a, "fn", None):
         ap.print_help()

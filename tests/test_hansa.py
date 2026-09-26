@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -81,7 +82,10 @@ if "single word OK" in prompt:
 if os.environ.get("FAKE_SAY_KEY"):  # an endpoint's error that repeats the key
     print("endpoint said: bad token " + os.environ.get("ANTHROPIC_AUTH_TOKEN", ""), file=sys.stderr, flush=True)
     time.sleep(float(os.environ["FAKE_SAY_KEY"]))
-open("hello.txt", "w").write("hello from " + os.environ.get("HANSA_TASK", "?") + "\n")
+hello = os.environ.get("FAKE_HELLO", "hello.txt")
+if os.environ.get("FAKE_SEE") and os.path.exists(hello):  # what the file held when the worker started
+    open(os.environ["FAKE_SEE"], "w").write(open(hello).read())
+open(hello, "w").write("hello from " + os.environ.get("HANSA_TASK", "?") + "\n")
 if os.environ.get("FAKE_WRITE_BINARY"):
     open("blob.bin", "wb").write(b"\x00\x01PK" + os.environ["FAKE_WRITE_BINARY"].encode() + b"\x00\xff")
 if os.environ.get("FAKE_LEAVE_CHILD"):  # something it started and left running, in its process group
@@ -397,6 +401,201 @@ class DeskTest(unittest.TestCase):
                            env={**os.environ, "HANSA_MERGING": "1"})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("hook of a hansa merge", r.stderr)
+
+    def git_out(self, *args, cwd=None) -> str:
+        return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def two_lanes(self, check=""):
+        """Lanes a and b on the one repository, each worker writing a file of its own (a.txt, b.txt), and one
+        finished task on each, both made from the same base."""
+        s = self.desk.settings()
+        s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
+        s["lanes"]["a"].update(env={"FAKE_HELLO": "a.txt"}, check=check)
+        s["lanes"]["b"].update(env={"FAKE_HELLO": "b.txt"}, check=check)
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        t1, t2 = self.desk.new_task("Add a.txt", lane="a"), self.desk.new_task("Add b.txt", lane="b")
+        for t in (t1, t2):
+            m = self.settle(d, t)
+            self.assertEqual((m["state"], (m.get("check") or {"ok": True})["ok"]), ("done", True), m)
+        return d, t1, t2
+
+    def settle_merge(self, d, tid, timeout=20):
+        end = time.time() + timeout
+        while time.time() < end:
+            d.tick()
+            if self.desk.meta(tid)["state"] != "merging":
+                return self.desk.meta(tid)
+            time.sleep(0.1)
+        self.fail(f"{tid}'s merge check did not end: {self.desk.meta(tid)}")
+
+    def test_two_changes_that_fail_the_check_together_are_not_merged(self):
+        d, t1, t2 = self.two_lanes(check="if test -f a.txt && test -f b.txt; then echo a and b clash; exit 1; fi")
+        self.assertIn(f"{t1} merged into main", self.hansa("merge", t1))  # the base had not moved: at once
+        tip = self.git_out("rev-parse", "main")
+        out = self.hansa("merge", t2)
+        self.assertIn(f"{t2} is not merged yet: main has 2 commit(s) that {t2}'s branch does not", out)
+        self.assertIn(f"hansa wait {t2}", out)
+        self.assertEqual(self.desk.meta(t2)["state"], "merging")
+        self.assertIn("merge check queued", views.show_text(self.desk, t2))
+        self.assertIn(f"{t2} b: Add b.txt\n      merge check queued", views.status_text(views.status(self.desk)))
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"], m["merge_check_result"]["exit"]), ("done", False, 1))
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)  # nothing was merged
+        self.assertFalse((self.repo / "b.txt").exists())
+        self.assertEqual(Path(self.srt_calls()[-1]["cwd"]).resolve(), (self.desk.worktrees_dir / "b").resolve())
+        shown = views.show_text(self.desk, t2)
+        self.assertIn(f"ran the lane's check there): FAILED (exit 1)", shown)
+        self.assertIn("a and b clash", shown)
+        self.assertIn(f"hansa retry {t2} --update", shown)
+        self.assertIn("merge check FAILED", views.status_text(views.status(self.desk)))
+
+    def test_two_changes_that_pass_together_merge_after_their_merge_check(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        self.hansa("merge", t1)
+        tip = self.git_out("rev-parse", "main")
+        self.hansa("merge", t2)
+        d.tick()
+        self.assertIn("merge check running", views.show_text(self.desk, t2))
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        main = self.git_out("rev-parse", "main")
+        self.assertEqual(main, m["merge_commit"])
+        self.assertEqual(main, m["merge_check_result"]["commit"])  # exactly the commit that was checked
+        self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", main).split()[1:], [tip, m["head"]])
+        self.assertTrue((self.repo / "b.txt").exists())
+        self.assertEqual(self.git_out("status", "--porcelain"), "")
+
+    def test_a_merge_check_whose_base_keeps_moving_is_checked_once_more_then_stops(self):
+        d, t1, t2 = self.two_lanes()
+        s = self.desk.settings()  # a check that moves the base each time it runs
+        s["lanes"]["b"]["check"] = f"git -C {self.repo} -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("merge", t1)
+        self.hansa("merge", t2)
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("done", False), m)
+        self.assertIn("moved each time before hansa could merge it; nothing was merged", m["merge_check_result"]["note"])
+        self.assertEqual([e["moves"] for e in self.events("merge_check_base_moved")], [1, 2])
+        self.assertFalse((self.repo / "b.txt").exists())
+
+    def test_a_task_whose_base_did_not_move_merges_at_once(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "test -f hello.txt"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        calls = len(self.srt_calls())
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+        self.assertEqual(len(self.srt_calls()), calls)  # no check ran for the merge
+
+    def test_a_lane_without_a_check_merges_at_once_and_says_its_tasks_go_untested(self):
+        out = self.hansa("lane", "add", "b", "--repo", str(self.repo))
+        self.assertIn("Lane b has no check, so its tasks will be merged untested", out)
+        self.assertIn('hansa lane set b check "', out)
+        self.hansa("lane", "set", "a", "env", "FAKE_HELLO=a.txt")
+        self.hansa("lane", "set", "b", "env", "FAKE_HELLO=b.txt")
+        d = Dispatcher(self.desk)
+        t1, t2 = self.desk.new_task("Add a.txt", lane="a"), self.desk.new_task("Add b.txt", lane="b")
+        for t in (t1, t2):
+            self.settle(d, t)
+        self.assertIn("Lane b has no check, so this task will be merged untested", views.show_text(self.desk, t2))
+        self.hansa("merge", t1)
+        self.assertIn(f"{t2} merged into main", self.hansa("merge", t2))  # the base moved, but there is no check
+        self.assertEqual((self.desk.meta(t2)["state"], (self.repo / "b.txt").exists()), ("merged", True))
+
+    def test_lane_add_sets_the_check_setup_and_allowed_commands(self):
+        out = self.hansa("lane", "add", "c", "--repo", str(self.repo), "--check", "make test", "--setup", "make deps",
+                         "--allow", "Bash(make test:*)", "Bash(make lint:*)")
+        c = self.desk.settings()["lanes"]["c"]
+        self.assertEqual((c["check"], c["setup"], c["allow"]),
+                         ("make test", "make deps", ["Bash(make test:*)", "Bash(make lint:*)"]))
+        self.assertNotIn("untested", out)
+        self.assertIn("Tell the principal", out)
+        self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")), ["check", "setup"])
+
+    def test_a_merge_check_can_be_cancelled_queued_or_running(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        self.hansa("merge", t1)
+        self.hansa("merge", t2)
+        self.assertIn("stopped; nothing was merged", self.hansa("cancel", t2))
+        m = self.desk.meta(t2)
+        self.assertEqual((m["state"], m.get("merge_check")), ("done", None))
+        self.assertIn(t2, [r["id"] for r in views.status(self.desk)["review"]])
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = "sleep 30"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tip = self.git_out("rev-parse", "main")
+        self.hansa("merge", t2)
+        end = time.time() + 20
+        while (self.desk.meta(t2).get("merge_check") or {}).get("phase") != "running" and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.hansa("cancel", t2)
+        d.tick()
+        m = self.desk.meta(t2)
+        self.assertEqual((m["state"], m.get("merge_check"), self.git_out("rev-parse", "main")), ("done", None, tip))
+
+    def test_a_conflict_lists_its_files_and_lines(self):
+        d = Dispatcher(self.desk)
+        t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
+        for t in (t1, t2):
+            self.settle(d, t)
+        self.hansa("merge", t1)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "merge", t2])
+        said = str(e.exception.code)
+        self.assertIn(f"{t2} conflicts with main; nothing was merged", said)
+        self.assertIn("hello.txt, lines 1-5:", said)
+        self.assertIn(f"hello from {t1}", said)
+        self.assertIn(f"hello from {t2}", said)
+        self.assertLess(said.index(f"hansa retry {t2} --update"), said.index(f"hansa retry {t2} --fresh"))
+        self.assertEqual(self.git_out("status", "--porcelain"), "")  # the merge was aborted after it was read
+        for cmd in re.findall(r"hansa (retry [^;()]*?\"<[^>]*>\")", said):  # the advice is commands that parse
+            self.assertEqual(shlex.split(cmd)[:2], ["retry", t2])
+            with unittest.mock.patch("hansa.cli.cmd_retry") as retry:
+                main(["--desk", str(self.desk.root), *shlex.split(cmd)])
+            self.assertTrue(retry.call_args[0][0].note)
+
+    def test_retry_update_leaves_the_conflict_to_the_worker_and_then_merges_cleanly(self):
+        d = Dispatcher(self.desk)
+        t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
+        for t in (t1, t2):
+            self.settle(d, t)
+        self.hansa("merge", t1)
+        seen, argv = self.tmp / "seen.txt", self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SEE": str(seen), "FAKE_SHOW_ARGV": str(argv)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        out = self.hansa("retry", t2, "--update", "keep", "the", "newer", "greeting")
+        t3 = self.desk.meta(t2)["replaced_by"]
+        self.assertIn("with the current main merged into its branch", out)
+        m = self.settle(d, t3)
+        self.assertEqual(m["state"], "done", m)
+        started_with = seen.read_text()  # the markers were in the file when the worker started
+        self.assertIn("<<<<<<<", started_with)
+        self.assertIn(f"hello from {t1}", started_with)
+        self.assertIn(f"hello from {t2}", started_with)
+        prompt = json.loads(argv.read_text().splitlines()[-1])
+        prompt = prompt[prompt.index("--append-system-prompt") + 1]
+        self.assertIn("conflicts in these files, which now hold git's conflict markers", prompt)
+        self.assertIn("hello.txt", prompt)
+        self.assertEqual(m["base"], self.git_out("rev-parse", "main"))
+        self.assertEqual(len(self.git_out("rev-list", "--parents", "-n", "1", m["head"]).split()), 3)  # the merge
+        self.assertIn(f"{t3} merged into main", self.hansa("merge", t3))
+        self.assertEqual((self.repo / "hello.txt").read_text(), f"hello from {t3}\n")
+
+    def test_retry_options_may_come_before_or_after_the_note(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        self.assertIn("from the base branch", self.hansa("retry", tid, "--fresh", "the", "same", "change"))
+        t2 = self.desk.meta(tid)["replaced_by"]
+        self.assertIn("What to change: the same change", (self.desk.tasks_dir / t2 / "task.md").read_text())
+        self.assertNotIn("start_from", self.desk.meta(t2))
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "merge", tid, "stray"])  # other commands still refuse extra words
 
     def test_design_rules_for_a_check_keep_quoted_text_together(self):
         from hansa.run import command_rules
