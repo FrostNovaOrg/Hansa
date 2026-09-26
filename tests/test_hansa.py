@@ -108,6 +108,21 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "nu
 '''
 
 
+# A stand-in for srt: records how it was called, with the settings file's content, then runs the command.
+# Like the real one, it ignores the TMPDIR it is given: inside, TMPDIR is CLAUDE_CODE_TMPDIR, else /tmp/claude.
+FAKE_SRT = r'''#!/usr/bin/env python3
+import json, os, sys
+os.environ["TMPDIR"] = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp/claude"
+args = sys.argv[1:]
+cut = args.index("--")
+settings = json.load(open(args[args.index("--settings") + 1]))
+with open(LOG, "a") as f:
+    f.write(json.dumps({"argv": args, "settings": settings, "tmpdir": os.environ.get("TMPDIR", ""),
+                        "tmp_there": os.path.isdir(os.environ.get("TMPDIR", "")), "cwd": os.getcwd()}) + "\n")
+os.execvp(args[cut + 1], args[cut + 1:])
+'''
+
+
 def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
 
@@ -125,7 +140,23 @@ class DeskTest(unittest.TestCase):
         fake.write_text(FAKE)
         fake.chmod(0o755)
         os.environ["HANSA_CLAUDE"] = str(fake)
+        self.srt_log = self.tmp / "srt-calls.jsonl"
+        (self.tmp / "bin").mkdir()
+        srt = self.tmp / "bin" / "srt"
+        srt.write_text(FAKE_SRT.replace("open(LOG", f"open({str(self.srt_log)!r}"))
+        srt.chmod(0o755)
+        path = unittest.mock.patch.dict(os.environ, {"PATH": f"{self.tmp / 'bin'}{os.pathsep}{os.environ['PATH']}"})
+        path.start()
+        self.addCleanup(path.stop)
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
+
+    def srt_calls(self) -> list:
+        return [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
+
+    def without_srt(self):
+        """PATH without the stand-in srt, or any other."""
+        keep = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "srt").exists()]
+        return unittest.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(keep)})
 
     def settle(self, d, tid, timeout=20):
         end = time.time() + timeout
@@ -606,6 +637,64 @@ class DeskTest(unittest.TestCase):
         self.assertIn("registry: API Error: 429", views.show_text(self.desk, tid))
         self.assertFalse(provider_problem(self.desk, self.desk.settings(), "claude"))  # not the provider's quota
         self.assertEqual(m["attempts"], [])
+
+    def test_the_lane_setup_runs_in_srt_with_the_workers_sandbox(self):
+        seen, m2 = self.tmp / "argv.jsonl", self.tmp / "m2"
+        m2.mkdir()
+        s = self.desk.settings()
+        s["lanes"]["a"].update(setup='echo "tmp=$TMPDIR"', network=["registry.npmjs.org", "localhost:5173"],
+                               write=[str(m2)], env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        [call] = self.srt_calls()
+        argv, got = call["argv"], call["settings"]
+        self.assertEqual(argv[0], "--settings")
+        self.assertEqual(argv[2:6], ["--", "/bin/sh", "-c", 'echo "tmp=$TMPDIR"'])
+        self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
+        self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
+                                          "deniedDomains": [], "allowLocalBinding": True})
+        worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
+        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])  # the same lists as the worker's
+        self.assertEqual(got["filesystem"]["denyWrite"], worker["denyWrite"])
+        self.assertIn(str(self.desk.secrets_dir), got["filesystem"]["denyRead"])
+        self.assertIn(str(Path.home() / ".ssh"), got["filesystem"]["denyRead"])
+        self.assertIn(str(Path(m["worktree"]) / ".git"), got["filesystem"]["denyWrite"])
+        allow = got["filesystem"]["allowWrite"]
+        self.assertIn(m["worktree"], allow)
+        self.assertIn(str(m2), allow)
+        self.assertTrue(call["tmp_there"])
+        self.assertIn(call["tmpdir"], allow)  # TMPDIR is a folder the setup may write
+        self.assertIn("tmp=" + call["tmpdir"], (self.desk.tasks_dir / tid / "setup.log").read_text())
+        self.assertFalse(Path(call["tmpdir"]).exists())  # removed once the setup ended
+        self.assertFalse((self.desk.state_dir / "runs" / tid).exists())  # the settings file too
+
+    def test_without_srt_a_lane_with_setup_or_check_fails_its_tasks_and_one_with_neither_runs(self):
+        d = Dispatcher(self.desk)
+        with self.without_srt():
+            m = self.settle(d, self.desk.new_task("Add hello.txt"))
+            self.assertEqual(m["state"], "done", m)  # no setup, no check: no srt needed
+            self.assertNotIn("srt MISSING", views.status_text(views.status(self.desk)))
+            s = self.desk.settings()
+            s["lanes"]["a"]["check"] = "echo checked"
+            self.assertEqual(self.desk.save_settings(s), [])
+            self.assertIn("srt MISSING", views.status_text(views.status(self.desk)))
+            m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+            self.assertEqual(m["state"], "failed", m)
+            self.assertIn("hansa needs srt", m["error"])
+            self.assertIn("npm install -g @anthropic-ai/sandbox-runtime", m["error"])
+            self.assertIn("coordinator can do this", m["error"])
+            self.assertIn("npm install -g @anthropic-ai/sandbox-runtime", views.show_text(self.desk, m["id"]))
+            s = self.desk.settings()
+            s["lanes"]["a"].update(check="", setup="echo installing")
+            self.assertEqual(self.desk.save_settings(s), [])
+            m = self.settle(d, self.desk.new_task("Add hello.txt once more"))
+            self.assertEqual(m["state"], "failed", m)
+            self.assertIn("hansa needs srt", m["error"])
+            self.assertIn("srt MISSING", views.status_text(views.status(self.desk)))
+        self.assertEqual(self.srt_calls(), [])
+        self.assertNotIn("srt MISSING", views.status_text(views.status(self.desk)))  # srt is back on the PATH
 
     def test_retry_is_only_for_a_task_that_has_ended(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -1365,6 +1454,27 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", m["id"]])
         main(["--desk", str(self.desk.root), "merge", m["id"], "--despite-check"])
         self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
+
+    def test_the_lane_check_runs_in_srt_with_the_lanes_sandbox(self):
+        s = self.desk.settings()
+        s["lanes"]["a"].update(check='test -f hello.txt && echo "tmp=$TMPDIR"', network=["pypi.org"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+        [call] = self.srt_calls()
+        self.assertEqual(call["argv"][2:], ["--", "sh", "-c", 'test -f hello.txt && echo "tmp=$TMPDIR"'])
+        self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
+        got = call["settings"]
+        self.assertEqual(got["network"], {"allowedDomains": ["pypi.org"], "deniedDomains": []})
+        self.assertIn(str(self.desk.state_dir), got["filesystem"]["denyRead"])
+        self.assertIn(str(Path(m["worktree"]) / ".git"), got["filesystem"]["denyWrite"])
+        self.assertIn(m["worktree"], got["filesystem"]["allowWrite"])
+        self.assertIn(call["tmpdir"], got["filesystem"]["allowWrite"])  # TMPDIR is a folder the check may write
+        self.assertIn("tmp=" + call["tmpdir"], m["check"]["tail"])
+        self.assertTrue(call["tmp_there"])
+        self.assertFalse(Path(call["tmpdir"]).exists())
+        self.assertEqual(m["sandbox_tmp"], [])
 
     def test_check_result_survives_a_server_restart(self):
         s = self.desk.settings()
