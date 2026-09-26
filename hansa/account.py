@@ -73,7 +73,12 @@ def switch_args(argv: list, desk_root: Path) -> list:
     and `--file -` for a --file, whose text root reads and hands over on standard input (root can
     read files the account cannot, and an argument would show the text to every user)."""
     out, i, rest = [], 0, []
-    if "--" in argv:
+    j = 0  # `hansa git LANE ...`: what follows the word git is git's, and stays as it is
+    while j < len(argv) and argv[j].startswith("-"):
+        j += 1 if "=" in argv[j] or argv[j] not in PATH_OPTIONS + ("--desk",) else 2
+    if j < len(argv) and argv[j] == "git":
+        argv, rest = argv[:j + 1], argv[j + 1:]
+    elif "--" in argv:
         argv, rest = argv[:argv.index("--")], argv[argv.index("--"):]
     while i < len(argv):
         x = argv[i]

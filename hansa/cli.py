@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 import uuid
@@ -164,6 +165,94 @@ def cmd_show(a):
 
 def cmd_diff(a):
     print(views.diff_text(Desk.find(a.desk), a.id, a.stat))
+
+
+# `hansa git LANE ...`: git commands that read, in a lane's repository or worktree, as the desk's account.
+GIT_READS = ("log", "show", "diff", "status", "grep", "blame", "ls-files", "ls-tree", "cat-file", "rev-parse",
+             "rev-list", "merge-base", "shortlog", "describe", "name-rev", "branch", "tag")
+# options that write a file or run a program; git takes a long option by any unambiguous start of it
+GIT_REFUSED_LONG = ("--output", "--open-files-in-pager", "--ext-diff", "--textconv", "--filters", "--exec-path")
+GIT_LIST_FLAGS = {  # what branch and tag take when they only list; the rest create, delete, move or edit
+    "branch": {"-a", "--all", "-r", "--remotes", "-l", "--list", "-v", "-vv", "--verbose", "-q", "--quiet",
+               "--show-current", "--color", "--no-color", "--column", "--no-column", "-i", "--ignore-case",
+               "--omit-empty", "--no-abbrev", "--abbrev"},
+    "tag": {"-l", "--list", "-n", "--color", "--no-color", "--column", "--no-column", "-i", "--ignore-case",
+            "--omit-empty"}}
+GIT_LIST_VALUES = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
+
+
+def git_refused(args: list) -> str:
+    """Why hansa git will not run `git ARGS`; '' when it will."""
+    if not args:
+        return "name a git command, such as hansa git LANE log --oneline -5"
+    cmd = args[0]
+    if cmd.startswith("-"):
+        return (f"{cmd} before the git command is refused: hansa git runs git in the lane's repository with its own "
+                "settings (no -c, -C, --exec-path, --git-dir or the like)")
+    changes = "code changes go through workers (hansa add), and merges through hansa merge"
+    if cmd not in GIT_READS:
+        return (f"git {cmd} is not one hansa git runs; it runs only commands that read: {', '.join(GIT_READS)} "
+                f"(branch and tag only to list). {changes}")
+    opts = args[1:args.index("--")] if "--" in args else args[1:]
+    for x in opts:
+        name = x.partition("=")[0]
+        if name.startswith("--") and len(name) > 3 and any(r.startswith(name) for r in GIT_REFUSED_LONG):
+            return f"{x} is refused: it would write a file or run a program"
+        if not name.startswith("--") and name.startswith("-") and (
+                name.startswith("-O") or (cmd == "grep" and "O" in name)
+                or (name.startswith("-o") and cmd in ("diff", "log", "show"))):
+            return f"{x} is refused: it would write a file or run a program"
+    if cmd in ("branch", "tag"):
+        listing, words, i = False, [], 0
+        while i < len(opts):
+            x = opts[i]
+            name = x.partition("=")[0]
+            if name in GIT_LIST_VALUES:
+                listing = True
+                i += 1 if "=" in x or name in ("--contains", "--no-contains", "--merged", "--no-merged") else 2
+                continue
+            if x in ("-l", "--list") or (cmd == "tag" and re.fullmatch(r"-n\d*", x)):
+                listing = True
+            elif x.startswith("-") and name not in GIT_LIST_FLAGS[cmd] and not re.fullmatch(r"-n\d*", x):
+                return f"git {cmd} {x} is refused: hansa git runs {cmd} only to list. {changes}"
+            elif not x.startswith("-"):
+                words.append(x)
+            i += 1
+        if words and not listing:
+            return f"git {cmd} {' '.join(words)} would make a {cmd}; hansa git runs {cmd} only to list. {changes}"
+    return ""
+
+
+def cmd_git(a):
+    from .run import check_git_file
+    desk = Desk.find(a.desk)
+    args, where = list(a.args), a.worktree
+    while args and args[0] == "--worktree":
+        args, where = args[1:], True
+    ln = desk.settings()["lanes"].get(a.lane)
+    if not ln:
+        raise SystemExit(f"hansa: no lane {a.lane}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
+    why = git_refused(args)
+    if why:
+        raise SystemExit(f"hansa git: {why}. Nothing was run")
+    cwd = Path(ln["repo"])
+    if where:
+        cwd = desk.worktrees_dir / a.lane
+        if not cwd.is_dir():
+            raise SystemExit(f"hansa: lane {a.lane} has no worktree yet ({cwd}); its first task makes it")
+        try:  # a worker may have pointed the worktree's .git elsewhere: no git through it then
+            check_git_file(desk, cwd, ln["repo"])
+        except RuntimeError as e:
+            raise SystemExit(f"hansa: {e}")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_PAGER="cat", PAGER="cat", GIT_EDITOR="false", EDITOR="false", VISUAL="false",
+               GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="false", SSH_ASKPASS="false")
+    r = subprocess.run(["git", "--no-pager", *args], cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, errors="replace")
+    sys.stdout.write(desk.redact(r.stdout))
+    sys.stderr.write(desk.redact(r.stderr))
+    if r.returncode:
+        raise SystemExit(r.returncode)
 
 
 def cmd_merge(a):
@@ -1004,6 +1093,11 @@ def main(argv=None):
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("--stat", action="store_true")
+    p = add("git", cmd_git, "run a git command that reads (log, show, diff, grep ...) in a lane's repository, or "
+            "with --worktree in its worktree, as the desk's account")
+    p.add_argument("--worktree", action="store_true", help="the lane's worktree instead of its repository")
+    p.add_argument("lane")
+    p.add_argument("args", nargs=argparse.REMAINDER, metavar="git-args")
     p = add("merge", cmd_merge, "merge a finished task into the lane's base branch")
     p.add_argument("id")
     p.add_argument("--despite-check", action="store_true", help="merge even though the lane's check failed (recorded)")

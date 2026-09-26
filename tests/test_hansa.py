@@ -359,6 +359,118 @@ class DeskTest(unittest.TestCase):
         self.desk.event("anything", detail=f"the endpoint said: bad key {key}")
         self.assertNotIn(key, self.desk.events_path.read_text())
 
+    def hansa_git(self, *args):
+        """(exit code, standard output, standard error) of hansa git ARGS."""
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                main(["--desk", str(self.desk.root), "git", *args])
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+                err.write("" if isinstance(e.code, int) else str(e.code))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_hansa_git_reads_a_lanes_repository_and_worktree_as_git_prints_them(self):
+        key = "sk-test-0123456789"
+        self.desk.write_key("mimo", key)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": key}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(self.hansa_git("a", "log", "--oneline", "-1"),
+                         (0, self.git_out("log", "--oneline", "-1") + "\n", ""))
+        code, out, _ = self.hansa_git("a", "show", f"task/{tid}", "--", "hello.txt")
+        self.assertEqual((code, out), (0, self.git_out("show", f"task/{tid}", "--", "hello.txt") + "\n"))
+        code, out, _ = self.hansa_git("a", "grep", "-n", "demo")
+        self.assertEqual((code, out), (0, "README.md:1:demo\n"))
+        code, out, _ = self.hansa_git("a", "show", f"task/{tid}:notes.txt")  # a stored key is never shown
+        self.assertEqual(code, 0)
+        self.assertNotIn(key, out)
+        self.assertIn("[key of mimo]", out)
+        (Path(m["worktree"]) / "scratch.txt").write_text("x\n")
+        for args in (("a", "--worktree", "status", "--short"), ("--worktree", "a", "status", "--short")):
+            self.assertEqual(self.hansa_git(*args), (0, "?? scratch.txt\n", ""))
+        self.assertEqual(self.hansa_git("a", "status", "--short"), (0, "", ""))  # the repository, not the worktree
+        self.assertEqual(self.hansa_git("a", "branch", "--list", "task/*")[:2], (0, f"+ task/{tid}\n"))  # in a worktree
+        self.assertEqual(self.hansa_git("a", "log", "--bogus")[0], 128)  # git's own failure, as git ends
+        code, _, err = self.hansa_git("z", "log")
+        self.assertIn("no lane z", err)
+
+    def test_hansa_git_refuses_commands_and_options_that_write_or_run_and_changes_nothing(self):
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        wt = Path(m["worktree"])
+
+        def state():
+            return (self.git_out("for-each-ref"), self.git_out("status", "--porcelain", "--ignored"),
+                    self.git_out("status", "--porcelain", "--ignored", cwd=wt), sorted(os.listdir(self.repo)),
+                    sorted(os.listdir(wt)), sorted(os.listdir(self.tmp)))
+        before = state()
+        here = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, here)
+        for args, says in ((["commit", "--allow-empty", "-m", "x"], "git commit is not one hansa git runs"),
+                           (["push"], "git push is not one"), (["checkout", f"task/{tid}"], "git checkout is not one"),
+                           (["branch", "-D", f"task/{tid}"], "git branch -D is refused"),
+                           (["branch", "new"], "would make a branch"), (["tag", "v1"], "would make a tag"),
+                           (["tag", "-d", "v1"], "git tag -d is refused"),
+                           (["diff", "--output=x"], "--output=x is refused"), (["diff", "--outp=x"], "refused"),
+                           (["log", "--output", "x"], "refused"), (["grep", "-O", "demo"], "-O is refused"),
+                           (["grep", "-iOvim", "demo"], "refused"),
+                           (["grep", "--open-files-in-pager", "demo"], "refused"), (["diff", "--ext-diff"], "refused"),
+                           (["cat-file", "--textconv", "HEAD:README.md"], "refused"),
+                           (["-c", "core.pager=x", "log"], "-c before the git command is refused"),
+                           (["--exec-path=x", "log"], "refused"), (["-C", str(self.tmp), "log"], "refused"),
+                           ([], "name a")):
+            for where in ([], ["--worktree"]):
+                code, out, err = self.hansa_git("a", *where, *args)
+                self.assertEqual((code, out), (1, ""), args)
+                self.assertIn(says, err, args)
+                self.assertIn("Nothing was run", err)
+        self.assertIn("code changes go through workers", self.hansa_git("a", "commit")[2])
+        self.assertEqual(state(), before)
+        self.assertFalse((self.tmp / "x").exists())
+        for args in (["branch"], ["branch", "-a", "-v"], ["branch", "--contains", "HEAD"], ["tag"], ["tag", "-l", "v*"],
+                     ["tag", "-n"], ["grep", "-c", "demo"], ["ls-files", "-o"], ["diff", "--output-indicator-new=+"]):
+            self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
+        self.assertIn("hansa git a", views.explain_text(self.desk, "lane", "a"))
+
+    def test_hansa_git_runs_as_the_desks_account_with_its_arguments_as_they_are(self):
+        log, ran = self.stand_in_runuser()
+        self.as_root()
+        git_args = ["grep", "-e", "--file=y", "--or", "-e", "--repo", "--", "README.md"]  # hansa's options, not git's
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as done:
+            main(["--desk", str(self.desk.root), "git", "a", *git_args])
+        self.assertEqual(done.exception.code, 1)  # git grep found neither: the account's hansa ended as git did
+        me = account.name_of(os.getuid())
+        args = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(args, ["-u", me, "--", sys.executable, "-m", "hansa", f"--desk={self.desk.root}", "git", "a",
+                                *git_args])
+        self.assertEqual((ran[-1].stdout, ran[-1].stderr), ("", ""))
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() == 0, "needs root on Linux")
+    def test_as_root_hansa_git_reads_an_accounts_repository_as_the_account(self):
+        user, src = "nobody", Path(__file__).resolve().parent.parent
+        pw = account.pwd.getpwnam(user)
+        if not account.can_enter(src / "hansa", user):
+            self.skipTest(f"{user} cannot read this hansa at {src}")
+        os.chmod(self.tmp, 0o755)
+        for d, _, files in os.walk(self.repo):
+            for f in [d, *(os.path.join(d, x) for x in files)]:
+                os.chown(f, pw.pw_uid, pw.pw_gid)
+        desk, env = self.tmp / "account-desk", {**os.environ, "PYTHONPATH": str(src)}
+        hansa = [sys.executable, "-m", "hansa"]
+        r = subprocess.run([*hansa, "init", str(desk), "--repo", str(self.repo), "--user", user],
+                           capture_output=True, text=True, cwd=str(self.tmp), env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run([*hansa, "--desk", str(desk), "git", "a", "log", "--format=%s"],
+                           capture_output=True, text=True, cwd=str(self.tmp), env=env)
+        self.assertEqual((r.returncode, r.stdout), (0, "init\n"), r.stderr)  # git refuses root itself there
+        r = subprocess.run([*hansa, "--desk", str(desk), "git", "a", "commit", "-m", "x"],
+                           capture_output=True, text=True, cwd=str(self.tmp), env=env)
+        self.assertIn("code changes go through workers", r.stderr)
+
     def test_a_key_too_short_to_look_for_is_refused(self):
         with self.assertRaises(ValueError):
             self.desk.write_key("mimo", "sk-1234")
