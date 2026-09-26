@@ -493,6 +493,57 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         self.assertFalse(alive(child))  # it ignored the polite signal, so the group was killed
 
+    def sleeper(self, *args, env=None):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *args], env=env,
+                             start_new_session=True)
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        return p
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Linux reads /proc")
+    def test_without_proc_a_start_time_tells_one_process_from_another(self):
+        from hansa.run import alive, proc_start
+        a, b = self.sleeper(), self.sleeper()
+        self.assertTrue(proc_start(a.pid))
+        self.assertEqual(proc_start(a.pid), proc_start(a.pid))
+        self.assertNotEqual(proc_start(a.pid), proc_start(b.pid))
+        self.assertTrue(alive(a.pid, proc_start(a.pid)))
+        self.assertFalse(alive(a.pid, proc_start(b.pid)))
+        self.assertTrue(alive(a.pid, "Sat Sep 26 10:00:00 2026"))  # ps's start text, from before: unknown
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Linux reads /proc")
+    def test_without_proc_an_ended_child_not_yet_reaped_has_ended(self):
+        from hansa.run import has_ended
+        p = self.sleeper()
+        self.assertFalse(has_ended(p))
+        os.kill(p.pid, 9)
+        end = time.time() + 10
+        while not has_ended(p) and time.time() < end:
+            time.sleep(0.1)
+        self.assertTrue(has_ended(p))
+        self.assertIsNone(p.returncode)  # seen without reaping it
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Linux reads /proc")
+    def test_without_proc_a_group_runs_until_it_is_killed(self):
+        from hansa.run import group_running
+        p = self.sleeper()
+        self.assertTrue(group_running(p.pid))
+        os.killpg(p.pid, 9)
+        end = time.time() + 10
+        while group_running(p.pid) and time.time() < end:
+            time.sleep(0.1)
+        self.assertFalse(group_running(p.pid))  # its leader is not reaped yet, and does not count
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Linux reads /proc")
+    def test_without_proc_a_word_is_found_in_arguments_but_not_in_the_environment(self):
+        from hansa.run import pids_with_arg
+        word = f"hansa-test-{os.getpid()}"
+        p = self.sleeper(word, env={**os.environ, "HANSA_TEST_WORD": word})
+        end = time.time() + 10
+        while p.pid not in pids_with_arg(word) and time.time() < end:  # until its arguments are set
+            time.sleep(0.1)
+        self.assertEqual(pids_with_arg(word), [p.pid])
+        self.assertEqual(pids_with_arg(f"HANSA_TEST_WORD={word}"), [])  # the same word, in its environment
+
     def test_the_lane_setup_runs_before_every_task_without_provider_keys(self):
         trace = self.tmp / "setup-trace.txt"
         s = self.desk.settings()
@@ -987,6 +1038,13 @@ class DeskTest(unittest.TestCase):
             tmux = tmux_bin()
         except RuntimeError:
             self.skipTest("no tmux here")
+        sockets = unittest.mock.patch.dict(os.environ, {"TMUX_TMPDIR": str(self.tmp)})  # not /tmp, tmux's default
+        sockets.start()
+        self.addCleanup(sockets.stop)
+        probe = [tmux, "-L", tmux_socket(self.desk) + "-probe"]
+        subprocess.run(probe + ["new-session", "-d", "sleep 5"], capture_output=True, timeout=30)
+        if subprocess.run(probe + ["kill-server"], capture_output=True, timeout=30).returncode:
+            self.skipTest("tmux cannot make its socket here (a sandbox refuses to create Unix sockets)")
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["providers"]["claude"]["config_dir"] = str(self.tmp / "cc")
