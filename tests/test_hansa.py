@@ -342,17 +342,82 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["commits"], m["files"]), ("failed", 0, []), m)
 
-    def test_a_worker_started_just_before_the_server_stopped_is_taken_over(self):
+    def orphan_starting(self, **fields):
+        """A worker an earlier server started, and a task it left in `starting`: (task, worker)."""
         token = f"hansa-launch-test-{uuid.uuid4().hex[:8]}"  # another suite running meanwhile has its own
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
-        self.addCleanup(lambda: orphan.poll() is None and orphan.kill())
+        self.addCleanup(lambda: orphan.poll() is None and (orphan.kill(), orphan.wait()))
         tid = self.desk.new_task("Add hello.txt")
         self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=time.time(),
-                         pid=None, launch=token)
+                         pid=None, launch=token, **fields)
+        return tid, orphan
+
+    def test_a_worker_started_just_before_the_server_stopped_is_taken_over(self):
+        tid, orphan = self.orphan_starting()
         Dispatcher(self.desk).tick()
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", orphan.pid), m)
         self.assertIsNone(orphan.poll())  # still working, not stopped and started over
+
+    def test_a_worker_is_taken_over_every_time_while_processes_start_and_end_around_it(self):
+        stop = threading.Event()
+
+        def churn():  # short-lived processes, as on a busy machine
+            while not stop.is_set():
+                subprocess.run(["/bin/sleep", "0.01"])
+        churners = [threading.Thread(target=churn, daemon=True) for _ in range(3)]
+        for t in churners:
+            t.start()
+        self.addCleanup(lambda: (stop.set(), [t.join() for t in churners]))
+        for i in range(20):
+            tid, orphan = self.orphan_starting()
+            Dispatcher(self.desk).tick()
+            m = self.desk.meta(tid)
+            self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", orphan.pid), (i, m))
+            self.assertIsNone(orphan.poll())
+            orphan.kill()
+            orphan.wait()
+            self.desk.update(tid, state="failed", phase="", pid=None)  # out of the way of the next one
+
+    def test_while_the_process_list_cannot_be_read_a_starting_task_is_left_as_it_is(self):
+        from hansa import run
+        tid, orphan = self.orphan_starting()
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "pids_with_arg", side_effect=run.CannotLook("the process list could not be read")):
+            d.tick()
+            d.tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "starting", None), m)  # not queued, not started
+        self.assertTrue(m["lookup_failing_since"])
+        self.assertFalse(self.desk.raw_dir(tid).joinpath("run.json").exists())  # no second worker
+        failed = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                  if e["event"] == "process_lookup_failed"]
+        self.assertEqual([(e["task"], e["looking_for"]) for e in failed], [(tid, "worker")] * 2)
+        d.tick()  # the list reads again
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["phase"], m["pid"], m["lookup_failing_since"]), ("running", "", orphan.pid, None), m)
+        self.assertIsNone(orphan.poll())
+
+    def test_a_task_hansa_cannot_look_for_for_minutes_fails_and_is_not_started_again(self):
+        from hansa import run
+        tid, orphan = self.orphan_starting(lookup_failing_since=time.time() - run.LOOK_LIMIT - 1)
+        with unittest.mock.patch.object(run, "pids_with_arg", side_effect=run.CannotLook("the process list could not be read")):
+            Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["phase"], m["pid"]), ("failed", "", None), m)
+        self.assertIn("could not read the process list for 5 minutes", m["error"])
+        self.assertFalse(self.desk.raw_dir(tid).joinpath("run.json").exists())
+
+    def test_a_process_whose_arguments_cannot_be_read_is_not_taken_for_gone(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        real = run._mac_procargs
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=lambda p: None if p == orphan.pid else real(p)), \
+                unittest.mock.patch.object(run.time, "sleep"), self.assertRaises(run.CannotLook):
+            run.pids_with_arg(self.desk.meta(tid)["launch"])
+        self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
 
     def test_a_check_an_earlier_server_finished_is_not_run_again(self):
         marker = self.tmp / "checked"
