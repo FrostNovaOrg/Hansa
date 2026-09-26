@@ -103,6 +103,8 @@ on branch task/{tid}, which was made for this task.
 - If a command you need is refused, say which one and why you need it in your report;
   do not look for a way around the refusal.
 - End with a short report: what you changed, how you checked it, and anything left undone.
+  Stop or wait for any background work you started before you write it: your last message
+  is taken as your report.
 """
 
 
@@ -114,6 +116,8 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - Do not push, do not switch branches, do not touch other directories.
 - To search, run read-only commands such as grep -rn, find and sed -n on paths in this directory.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
+- Stop or wait for any background work you started before you write your report: your last
+  message is taken as your report.
 """
 
 VERIFY_TASK = """Find out, by running things, whether task {id} does what it asked. Its change is
@@ -209,6 +213,7 @@ DESIGN_ALLOW = ["Bash(git add:*)", "Bash(git commit:*)", "Bash(git merge:*)"]
 # was given a task too big or unclear, or got stuck. Its notes show where it went.
 CEILING = "the task was probably too big or unclear, or the worker got stuck"
 STOPPED_NOTE = "(Stopped at the ceiling before it wrote its report. Its notes along the way, to see what went wrong:)\n\n"
+LATE_NOTE = "\n\n(Written after that, when a background notice came in:)\n\n"
 
 
 def claude_bin() -> str:
@@ -342,6 +347,55 @@ def _record(home: Path, sid: str):
 def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
     """What a worker wrote along the way, from its session record."""
     return "\n\n".join(_record(home, sid)[0])[-limit:]
+
+
+def report_after_notices(home: Path, sid: str):
+    """(report, what it wrote after) when the session ended on turns a background notice opened
+    (a watch it started timing out, say): Claude Code then takes its answer to the notice as the
+    result, and the report is its last message before the first of those notices. None when the
+    session did not end so, or its record cannot be read."""
+    rows = []
+    try:
+        for f in home.glob(f"projects/*/{sid}.jsonl") if sid else []:
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict):
+                    rows.append(d)
+    except OSError:
+        return None
+    rows = [d for d in rows if d.get("type") in ("user", "assistant")]
+
+    def blocks(d, kind):
+        content = (d.get("message") or {}).get("content") if d.get("type") == "assistant" else None
+        return [c for c in content if isinstance(c, dict) and c.get("type") == kind] if isinstance(content, list) else []
+
+    def texts(d):
+        return [c["text"].strip() for c in blocks(d, "text") if isinstance(c.get("text"), str) and c["text"].strip()]
+
+    # A turn opens on a user row with turnOrigin; tool results are user rows without it. A notice
+    # that came in while the worker was busy, or after which it went on working, is part of the work:
+    # only a notice that opened a turn after the worker had stopped, and that it only answered, is after the report.
+    openers = [i for i, d in enumerate(rows) if d.get("type") == "user" and d.get("turnOrigin")]
+    cut, end = None, len(rows)
+    while openers and rows[openers[-1]]["turnOrigin"] == "task_notification":
+        i = openers.pop()
+        stopped = i > 0 and rows[i - 1].get("type") == "assistant" and not blocks(rows[i - 1], "tool_use")
+        if not stopped or any(blocks(d, "tool_use") for d in rows[i:end]):
+            break
+        cut, end = i, i
+    if cut is None:
+        return None
+    said = [(i, (rows[i].get("message") or {}).get("id")) for i in range(cut) if texts(rows[i])]
+    if not said:
+        return None
+    last_id = said[-1][1]
+    ids = [i for i, mid in said if mid == last_id] if last_id else [said[-1][0]]
+    report = "\n\n".join(t for i in ids for t in texts(rows[i]))
+    later = "\n\n".join(t for d in rows[cut:] for t in texts(d))
+    return report, later
 
 
 def progress_of(desk: Desk, m: dict) -> dict:
@@ -1193,6 +1247,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     if not usage and p:
         usage = usage_from_record(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
     designing = meta.get("kind") == "design"
+    late = report_after_notices(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
+        if p and not designing and not stopped else None
+    if late:
+        report = late[0] + (LATE_NOTE + late[1] if late[1] else "")
     if stopped and not result.strip() and p:
         notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
@@ -1209,7 +1267,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
               "usage": usage, "denials": [desk.redact(denial_of(x)) for x in run.get("permission_denials") or []]}
     if meta.get("kind") == "verify":
-        found = VERDICT.findall(result)
+        found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     changed = ""  # what the principal is told when the worktree's .git was changed: then the task fails

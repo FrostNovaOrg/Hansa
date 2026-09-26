@@ -8,7 +8,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 1. You queue a task: one change a worker can make and check on its own.
 2. `hansa serve` (always running) starts it in a free lane: a separate Claude Code
    run in the lane's own git worktree, on a fresh branch `task/<id>`.
-3. The worker changes files there and ends with a short report; hansa then
+3. The worker changes files there and ends with a short report (anything it
+   wrote after it, answering a notice from its own background work, follows it); hansa then
    commits the changes on the branch (workers are not given git commands that
    commit or push). If the task changed something and the lane has a check
    command, hansa runs it on the branch itself, so the result does not depend on

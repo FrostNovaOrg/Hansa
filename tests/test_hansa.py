@@ -60,6 +60,28 @@ if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "stop_reason": "content_filter",
                       "result": "The request was rejected because it was considered high risk", "num_turns": 1}))
     sys.exit(0)
+if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a turn after the report
+    sid = sys.argv[sys.argv.index("--session-id") + 1]
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    os.makedirs(os.path.dirname(rec), exist_ok=True)
+    notice = lambda n: {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
+        "role": "user", "content": "<task-notification> <task-id>" + n + "</task-id> timed out"}}
+    say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "model": "mimo-x", "content": [
+        {"type": "text", "text": t}]}}
+    report = "Report: fixed the badge; the tests pass." + (" Key: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "")
+    rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}},
+            say("a1", "Starting a watch."),
+            {"type": "assistant", "message": {"id": "a1", "content": [{"type": "tool_use", "id": "u1", "name": "Bash"}]}},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "u1"}]}},
+            notice("early"), say("a2", "The watch said the tests pass."), say("a3", report)]
+    late = os.environ["FAKE_TRANSCRIPT"] == "late"
+    if late:
+        rows += [notice("baxumxafe"), say("a4", "That notice is the watch. My report above is still my final report.")]
+    with open(rec, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 5, "session_id": sid,
+                      "result": rows[-1]["message"]["content"][0]["text"]}))
+    sys.exit(0)
 if os.environ.get("FAKE_STOP_AT_TURNS"):
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -1843,6 +1865,38 @@ class DeskTest(unittest.TestCase):
         follow = (self.desk.tasks_dir / "t0002" / "task.md").read_text()
         self.assertIn("The previous attempt's report:", follow)
         self.assertIn("week badge is still in English", follow)
+
+    def transcript_run(self, kind: str, key: str = "") -> str:
+        """The report of a worker run on mimo whose stand-in writes a session record of this kind."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": kind, **({"FAKE_WRITE": key} if key else {})}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", key or "sk-test-01")
+        tid = self.desk.new_task("Fix the badge")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        return (self.desk.tasks_dir / tid / "result.md").read_text()
+
+    def test_a_report_followed_by_a_background_notice_is_kept(self):
+        key = "sk-test-late-0421"
+        report = self.transcript_run("late", key)
+        self.assertEqual(report, "Report: fixed the badge; the tests pass. Key: [key of mimo]\n\n"
+                                 "(Written after that, when a background notice came in:)\n\n"
+                                 "That notice is the watch. My report above is still my final report.\n")
+        shown = views.show_text(self.desk, "t0001")
+        self.assertLess(shown.index("Report: fixed the badge"), shown.index("That notice is the watch"))
+        self.assertNotIn(key, shown)
+
+    def test_a_report_with_no_notice_after_it_is_unchanged(self):
+        self.assertEqual(self.transcript_run("plain"), "Report: fixed the badge; the tests pass.\n")
+
+    def test_without_a_session_record_the_report_is_the_last_message(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text(),
+                         "Added hello.txt. Checked it exists.\n")
 
     def test_verify_runs_the_change_and_holds_the_merge(self):
         seen = self.tmp / "argv.jsonl"
