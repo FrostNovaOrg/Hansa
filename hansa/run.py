@@ -916,8 +916,10 @@ def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
 def make_worker_tmp(desk: Desk, tid: str) -> str:
     """A temporary folder for one worker run, its alone (mode 700), recorded as the task's worker_tmp so
     remove_sandbox_tmp removes it however the run ends. Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
-    per-user folder (the worker's TMPDIR) and its sockets in it, so its path is kept short: under /tmp,
-    not the server's TMPDIR (a long path under /var/folders on macOS)."""
+    per-user folder (the TMPDIR of the worker's commands) and its sockets in it; and as TMPDIR, where its own
+    sandbox makes its proxy sockets (srt-mux-*.sock, claude-http-*.sock) and, on Linux, the empty folders it
+    mounts over paths it hides (claude-empty-*), which it leaves when it ends. So its path is kept short:
+    under /tmp, not the server's TMPDIR (a long path under /var/folders on macOS)."""
     tmp = tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=WORKER_TMP_ROOT)
     desk.update(tid, worker_tmp=tmp)
     return tmp
@@ -1139,7 +1141,7 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         time.sleep(0.05 * (i + 1))
     else:
         raise CannotLook("the process list could not be read")
-    found, unread = [], []
+    found, unsure = [], {}
     for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
         k = data[i:i + _KINFO_PROC_SIZE]
         pid = struct.unpack_from("@i", k, 40)[0]
@@ -1149,24 +1151,28 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         if since and struct.unpack_from("@l", k, 0)[0] < since - 2:  # 2 s for the rounding of both clocks
             continue
         got = _mac_procargs(pid)
-        if got is None:
-            unread += [pid] if _may_lead(pid) else []
-        elif token.encode() in got[0]:
+        if got is not None and token.encode() in got[0]:
             found.append(pid)
-    for i in range(LOOK_TRIES):  # in the middle of an exec, say: a moment later it can be read, or is gone
-        if not unread:
+        elif _may_lead(pid):  # unread, or read without the word: as each process hansa starts, it leads its group
+            unsure[pid] = got
+    # In the middle of an exec the arguments cannot be read, or are read half written (all NULs, a path
+    # cut short): read again until two reads agree, or it is gone.
+    for i in range(LOOK_TRIES):
+        if not unsure:
             break
         time.sleep(0.05 * (i + 1))
-        again = []
-        for pid in unread:
+        again = {}
+        for pid, before in unsure.items():
             got = _mac_procargs(pid)
-            if got is not None:
-                found += [pid] if token.encode() in got[0] else []
-            elif _mac_state(pid) not in ("", "Z") and _may_lead(pid):
-                again.append(pid)
-        unread = again
-    if unread:
-        raise CannotLook(f"the arguments of process {unread[0]} could not be read")
+            if got is not None and token.encode() in got[0]:
+                found.append(pid)
+            elif got is None and _mac_state(pid) in ("", "Z") or got is not None and got == before:
+                pass
+            elif _may_lead(pid):
+                again[pid] = got
+        unsure = again
+    if unsure:
+        raise CannotLook(f"the arguments of process {next(iter(unsure))} could not be read")
     return found
 
 
@@ -1478,7 +1484,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
+           "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)

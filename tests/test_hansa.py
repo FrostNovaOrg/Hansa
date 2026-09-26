@@ -89,7 +89,7 @@ if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
     sys.exit(0)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
     t = os.environ.get("CLAUDE_CODE_TMPDIR", "")
-    open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "there": os.path.isdir(t),
+    open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
@@ -235,13 +235,45 @@ def tmp_writable() -> bool:
     return True
 
 
+def stop_started_on(desk_root: Path, since: float, wait=10) -> None:
+    """Stop what still runs with `--desk <desk_root>` on its command line and started after `since` (a follower
+    hansa notify on started), and wait until it has ended: it writes its last state in the desk on its way out."""
+    from hansa import run
+    try:
+        pids = {p for d in {str(desk_root), str(desk_root.resolve())} for p in run.pids_with_arg(d, since)}
+    except run.CannotLook:
+        return
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    end = time.time() + wait
+    while pids and time.time() < end:
+        pids = {p for p in pids if run.alive(p)}
+        time.sleep(0.05)
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
 
 
 class DeskTest(unittest.TestCase):
     def setUp(self):
+        started = time.time()
         self.tmp = Path(tempfile.mkdtemp())
+        # registered first, so it runs last: after the other cleanups have stopped what the test started, and
+        # after the followers of its desk (detached, each ends a moment after its session) have ended
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(stop_started_on, self.tmp / "desk", started)
+        env = unittest.mock.patch.dict(os.environ)  # what setUp and the test set in it is put back when it ends
+        env.start()
+        self.addCleanup(env.stop)
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         sh("git", "init", "-q", "-b", "main", cwd=self.repo)
@@ -662,6 +694,18 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", orphan.pid), m)
         self.assertIsNone(orphan.poll())  # still working, not stopped and started over
 
+    def test_a_test_leaves_neither_its_folder_nor_its_environment(self):
+        before = dict(os.environ)
+        case = DeskTest("test_a_task_that_ends_after_its_check_is_posted_once_to_its_session")  # a worker, a follower
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual((result.testsRun, result.errors, result.failures), (1, [], []))
+        self.assertNotEqual(case.tmp, self.tmp)
+        self.assertFalse(case.tmp.exists())
+        time.sleep(1.5)  # a follower ends a moment after its session: none is left to write there again
+        self.assertFalse(case.tmp.exists())
+        self.assertEqual(dict(os.environ), before)
+
     def test_a_worker_is_taken_over_every_time_while_processes_start_and_end_around_it(self):
         stop = threading.Event()
 
@@ -721,6 +765,17 @@ class DeskTest(unittest.TestCase):
                 unittest.mock.patch.object(run.time, "sleep"), self.assertRaises(run.CannotLook):
             run.pids_with_arg(self.desk.meta(tid)["launch"])
         self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
+
+    def test_a_process_read_half_way_through_an_exec_is_read_again(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        real, halves = run._mac_procargs, [([b"ython3", b"", b""], []), ([b""], [])]  # as macOS gave them mid-exec
+        with unittest.mock.patch.object(run, "_mac_procargs",
+                                        side_effect=lambda p: halves.pop(0) if p == orphan.pid and halves else real(p)), \
+                unittest.mock.patch.object(run.time, "sleep"):
+            self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
 
     def unreadable_beside(self, change):
         """On macOS: a worker left in `starting`, and beside it a process of this account that leads its
@@ -3260,8 +3315,11 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         seen, argvs = self.tmp / "tmp.jsonl", self.tmp / "argv.jsonl"
         s = self.desk.settings()
-        s["lanes"]["a"]["env"] = {"FAKE_SEE_TMP": str(seen), "FAKE_SHOW_ARGV": str(argvs)}
+        s["lanes"]["a"]["env"] = {"FAKE_SEE_TMP": str(seen), "FAKE_SHOW_ARGV": str(argvs), "TMPDIR": "/tmp"}
         self.assertEqual(self.desk.save_settings(s), [])
+        server_tmp = unittest.mock.patch.dict(os.environ, {"TMPDIR": str(self.tmp)})  # the server's own, not the run's
+        server_tmp.start()
+        self.addCleanup(server_tmp.stop)
         d = Dispatcher(self.desk)
         t1 = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(d, t1)["state"], "done")
@@ -3277,6 +3335,8 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(name.startswith(f"hansa-{tid}-"), r)
             self.assertLessEqual(len(f"/tmp/{name}".encode()), 30, r)  # short: Claude Code makes sockets in it
             self.assertEqual((r["there"], r["mode"]), (True, 0o700), r)
+            # also its TMPDIR, where Claude Code's own sandbox makes its sockets and empty folders, which it leaves
+            self.assertEqual(r["tmpdir"], r["tmp"])
             self.assertFalse(os.path.exists(r["tmp"]))  # removed once the worker ended
             allowed = self.allowed_by(a)
             for tool in ("Read", "Edit"):
