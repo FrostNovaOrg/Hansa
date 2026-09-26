@@ -85,6 +85,26 @@ shift 3; exec "$@"
 # Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
 # sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings>
 CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; echo $? > "$2"; } | cat; rm -rf "$3"'
+# `hansa lane try`: the lane's setup, then its check, each in srt as for a task; the first that fails ends it.
+# Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
+# and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
+# sh -c TRY_SCRIPT <token> <folder> <srt> [<name> <command> <srt settings> <temporary folder>]...
+TRY_SCRIPT = ("""d=$1 srt=$2
+run() {
+  t0=$(date +%s)
+  rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- /bin/sh -c "$2" </dev/null 2>&1 3>&-
+    echo $? >&3; } | cat >"$d/$1.log"; } 3>&1 )
+  rm -rf "$4"
+  echo "$rc $(( $(date +%s) - t0 ))" >"$d/$1.exit"
+  [ "$rc" = 0 ]
+}
+shift 2
+while [ $# -ge 4 ]; do
+  run "$1" "$2" "$3" "$4" || break
+  shift 4
+done
+while [ $# -ge 4 ]; do rm -rf "$4"; shift 4; done
+""")
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
 # The provider would not answer this request (its content filter or a refusal). That
@@ -153,6 +173,7 @@ GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "r
 # (git -c k=v commit, a build script): in the repository's common folder, and in the worktree's own.
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs")
 GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir")
+GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 BROWSER_NOTE = """
@@ -528,9 +549,33 @@ def git_write_deny(wt: Path) -> list:
     out now: Claude Code opens a linked worktree's shared git folder for writing. The worktree's own
     .git file is among them: pointed at a git folder of the worker's making, it would run the worker's
     hooks and settings the next time hansa runs git there, outside the sandbox."""
+    return full_paths([*_git_folder_deny(wt), Path(wt) / ".git"])
+
+
+def _git_folder_deny(wt: Path) -> list:
+    """The paths of git_write_deny in git's folders: the repository's common folder and the worktree's own.
+    A main checkout has no folder of its own (and no commondir or gitdir): its folder is the common one."""
     common = Path(wt) / git("rev-parse", "--git-common-dir", cwd=wt)  # relative to wt, or absolute
     own = Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
-    return full_paths([*(common / f for f in GIT_COMMON_DENY), *(own / f for f in GIT_OWN_DENY), Path(wt) / ".git"])
+    return [*(common / f for f in GIT_COMMON_DENY),
+            *(own / f for f in GIT_OWN_DENY if own.resolve() != common.resolve())]
+
+
+def make_git_write_deny(wt: Path) -> None:
+    """Create each path of git_write_deny that is missing, empty. On Linux the sandbox (bwrap) puts a device
+    nobody can open where a listed path does not exist, and git then fails reading it: packed-refs, say,
+    which a repository made with git init has only once refs are packed. Git takes an empty packed-refs
+    as none. A path that exists is left as it is."""
+    for f in _git_folder_deny(wt):
+        if os.path.lexists(f):
+            continue
+        try:
+            if f.name in GIT_DENY_DIRS:
+                f.mkdir()
+            else:
+                os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+        except FileExistsError:  # made meanwhile, by git say
+            pass
 
 
 # A linked worktree's .git is a one-line file (gitdir: <folder>) that tells git where the worktree's
@@ -678,6 +723,7 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     check (srt): (the hosts it may reach, {"denyRead": the desk's keys and state, the provider's login and
     credential files, "denyWrite": git's data, "allowWrite": the lane's write list}). Each adds the
     worktree and a temporary folder to what may be written."""
+    make_git_write_deny(wt)  # before anything starts in the sandbox
     home = Path.home()
     deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
                        *(home / f for f in HOME_SECRETS)])
@@ -1679,6 +1725,141 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
     return m
 
 
+# A try: `hansa lane try L` runs the lane's setup and check once, with no worker, to see that they work where
+# tasks run. hansa serve runs it (with the server's environment), when the lane is free, in the lane's worktree
+# detached at the base's tip, and puts the worktree back clean at that tip after. .hansa/tries/<lane>.json holds
+# the try: {id, phase: queued | running | done, ...}, and when done its result, which the command waits for.
+TRY_STEPS = ("setup", "check")
+
+
+def try_file(desk: Desk, lane_name: str) -> Path:
+    return desk.state_dir / "tries" / f"{lane_name}.json"
+
+
+def read_try(desk: Desk, lane_name: str) -> dict:
+    return read_json(try_file(desk, lane_name), {}) or {}
+
+
+def write_try(desk: Desk, lane_name: str, t: dict) -> None:
+    try_file(desk, lane_name).parent.mkdir(parents=True, exist_ok=True)
+    write_json(try_file(desk, lane_name), t)
+
+
+def tried_lanes(desk: Desk) -> set:
+    """Lanes with a try queued or running: no task or merge check starts there meanwhile."""
+    d = desk.state_dir / "tries"
+    return {f.stem for f in (d.glob("*.json") if d.is_dir() else [])
+            if (read_json(f, {}) or {}).get("phase") in ("queued", "running")}
+
+
+def lane_holder(desk: Desk, lane_name: str):
+    """The task holding the lane's worktree now, if any."""
+    return next((m for m in desk.tasks() if m.get("lane") == lane_name and lane_occupied(m)), None)
+
+
+def end_try(desk: Desk, lane_name: str, result: dict) -> dict:
+    t = {**read_try(desk, lane_name), "phase": "done", "at": now(), **result}
+    for k in ("pid", "pid_start", "tmp", "launch"):
+        t.pop(k, None)
+    write_try(desk, lane_name, t)
+    desk.event("lane_tried", lane=lane_name, ok=t.get("ok", False), note=t.get("note", ""), onto=t.get("onto", ""),
+               **{s: {"exit": x.get("exit"), "seconds": x.get("seconds")} for s, x in t.get("steps", {}).items()})
+    return t
+
+
+def start_try(desk: Desk, lane_name: str, lane: dict):
+    """Start a queued try of the lane; None when there is none, or it ended at once (the lane is busy)."""
+    d = desk.state_dir / "tries" / lane_name
+    tid = f"try-{lane_name}"  # where a changed .git file found here is kept (git_file_changed)
+    with desk.lock():  # no task starts on the lane meanwhile
+        t = read_try(desk, lane_name)
+        if t.get("phase") != "queued":
+            return None
+        holder = lane_holder(desk, lane_name)
+        if holder:
+            end_try(desk, lane_name, {"ok": False, "busy": holder["id"], "steps": {},
+                                      "note": f"lane {lane_name} is busy with {holder['id']}; nothing was run"})
+            return None
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+        repo, name = Path(lane["repo"]), lane.get("base") or "main"
+        wt = desk.worktrees_dir / lane_name
+        tip = git("rev-parse", name, cwd=repo)
+        ready_worktree(desk, repo, wt, tid, tip)
+        try:
+            wgit(desk, wt, "checkout", "-q", "--detach", tip)
+        except GitFileChanged as e:
+            raise RuntimeError(git_file_changed(desk, tid, e)) from None
+        s = desk.settings()
+        pname = (lane.get("providers") or [""])[0]  # the sandbox of the lane's first provider, as a task's
+        p = s["providers"].get(pname) or {}
+        token, args, tmps = f"hansa-try-{lane_name}-{uuid.uuid4().hex[:8]}", [], []
+        for step in TRY_STEPS:
+            if lane.get(step):
+                tmp = tempfile.mkdtemp(prefix=f"hansa-{step}-")
+                write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp))
+                args += [step, lane[step], str(d / f"{step}-sandbox.json"), tmp]
+                tmps.append(tmp)
+        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
+        env.update({**lane.get("env", {}), "TERM": "dumb"})
+        try:  # srt first, with the first step's settings (as in_srt): when it cannot run, nothing runs
+            srt = try_srt(desk, args[2], args[3], wt, env) if args else srt_bin()
+        except SrtCannotRun as e:
+            for x in tmps:
+                shutil.rmtree(x, ignore_errors=True)
+            shutil.rmtree(d, ignore_errors=True)
+            end_try(desk, lane_name, {"ok": False, "could_not_run": True, "steps": {}, "onto": tip,
+                                      "note": desk.redact(f"could not run: {e}")[:600]})
+            return None
+        t = {**t, "phase": "running", "launch": token, "onto": tip, "worktree": str(wt), "started": now(),
+             "tmp": tmps, **{step: lane.get(step, "") for step in TRY_STEPS}}
+        write_try(desk, lane_name, t)
+        with open(d / "try.err", "wb") as err:
+            proc = subprocess.Popen(["/bin/sh", "-c", TRY_SCRIPT, token, str(d), srt, *args], cwd=str(wt), env=env,
+                                    stdin=subprocess.DEVNULL, stdout=err, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+        write_try(desk, lane_name, {**t, "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+    desk.event("lane_try_started", lane=lane_name, onto=tip)
+    return proc
+
+
+def finish_try(desk: Desk, lane_name: str) -> dict:
+    """After a try's process ended: read what each step did, keys removed, and put the worktree back clean at
+    the base's tip it ran on."""
+    t = read_try(desk, lane_name)
+    d = desk.state_dir / "tries" / lane_name
+    steps, failed = {}, ""
+    for step in TRY_STEPS:
+        if not t.get(step):
+            continue
+        try:
+            code, secs = map(int, (d / f"{step}.exit").read_text().split())
+        except (OSError, ValueError):
+            code = secs = None
+        log = (d / f"{step}.log").read_text(encoding="utf-8", errors="replace") if (d / f"{step}.log").exists() else ""
+        ran = code is not None or (d / f"{step}.log").exists()
+        steps[step] = {"command": t[step], "ran": ran, "exit": code, "seconds": secs,
+                       "tail": desk.redact(log).strip().splitlines()[-15:]}
+        if ran and code != 0 and not failed:
+            failed = step
+    for x in t.get("tmp", []):
+        shutil.rmtree(x, ignore_errors=True)
+    note = ("stopped at the lane's time ceiling" if t.get("timed_out") else
+            f"the {failed} was interrupted" if failed and steps[failed]["exit"] is None else "")
+    wt, clean = Path(t.get("worktree") or desk.worktrees_dir / lane_name), False
+    try:
+        wgit(desk, wt, "reset", "-q", "--hard", t.get("onto") or "HEAD")
+        wgit(desk, wt, "clean", "-fdq")
+        clean = True
+    except GitFileChanged as e:
+        note = git_file_changed(desk, f"try-{lane_name}", e)
+    except RuntimeError as e:
+        note = note or desk.redact(f"the worktree could not be put back clean: {e}")[:300]
+    shutil.rmtree(d, ignore_errors=True)
+    ok = bool(steps) and all(x["exit"] == 0 for x in steps.values()) and not note
+    return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean})
+
+
 def proc_start(pid) -> str:
     """When a process started, to tell it from a later one given the same number; '' if unknown."""
     if not pid:
@@ -1770,6 +1951,7 @@ class Dispatcher:
         self.desk = desk
         self.procs = {}
         self.merge_procs = {}  # merge checks this server started
+        self.try_procs = {}  # tries (hansa lane try) this server started, by lane
 
     def ended(self, tid: str, returncode) -> None:
         if self.desk.meta(tid).get("phase") == "checking":
@@ -1866,7 +2048,7 @@ class Dispatcher:
                 desk.update(m["id"], merge_check={**mc, "timed_out": True})
                 stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
         tasks = desk.tasks()
-        busy = {m.get("lane") for m in tasks if lane_occupied(m)}
+        busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
         free = s["concurrency"] - sum(map(lane_occupied, tasks))
         for m in tasks:
             if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
@@ -1894,6 +2076,41 @@ class Dispatcher:
                 self.merge_procs[m["id"]] = proc
                 busy.add(ln)
                 free -= 1
+
+    def tries(self, s: dict) -> None:
+        """Finish tries that ended, stop those over the lane's time, finish those an earlier server left, and
+        start queued ones (also while dispatch is paused: they use no provider)."""
+        desk = self.desk
+        for ln, proc in list(self.try_procs.items()):
+            if has_ended(proc):
+                del self.try_procs[ln]
+                stop(proc.pid, "", proc)
+                finish_try(desk, ln)
+        d = desk.state_dir / "tries"
+        for ln in sorted(f.stem for f in d.glob("*.json")) if d.is_dir() else []:
+            t = read_try(desk, ln)
+            if t.get("phase") == "running" and ln not in self.try_procs:
+                if not alive(t.get("pid"), t.get("pid_start", "")):  # started by an earlier server
+                    finish_try(desk, ln)
+                    continue
+            if t.get("phase") == "running" and not t.get("timed_out"):
+                if time.time() - (t.get("started") or time.time()) > 60 * s["lanes"].get(ln, {}).get("timeout_min", 240):
+                    write_try(desk, ln, {**t, "timed_out": True})
+                    stop(t.get("pid"), t.get("pid_start", ""), self.try_procs.get(ln))
+            if t.get("phase") != "queued":
+                continue
+            if ln not in s["lanes"]:
+                end_try(desk, ln, {"ok": False, "steps": {}, "note": f"lane {ln} is no longer in settings"})
+                continue
+            try:
+                proc = start_try(desk, ln, s["lanes"][ln])
+            except Exception as e:  # noqa: BLE001 - srt missing, say: the try says why it did not run
+                for x in read_try(desk, ln).get("tmp", []):
+                    shutil.rmtree(x, ignore_errors=True)
+                end_try(desk, ln, {"ok": False, "steps": {}, "note": desk.redact(f"the try could not run: {e}")[:600]})
+                continue
+            if proc:
+                self.try_procs[ln] = proc
 
     def tick(self) -> None:
         desk = self.desk
@@ -1923,6 +2140,7 @@ class Dispatcher:
                 if not m.get("cancel"):
                     desk.update(m["id"], timed_out=True)
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
+        self.tries(s)
         self.merge_checks(s)
         if desk.paused():
             return
@@ -1938,7 +2156,7 @@ class Dispatcher:
                     designing.add(m["lane"])
         running = [m for m in desk.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
-        busy = {m["lane"] for m in running}
+        busy = {m["lane"] for m in running} | tried_lanes(desk)
         for m in desk.tasks():
             if free <= 0:
                 break
