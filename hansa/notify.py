@@ -177,7 +177,8 @@ def task_line(desk: Desk, m: dict) -> str:
 
 
 def _item(desk: Desk, e: dict):
-    """What one event tells the coordinator: (key, line, recorded session, desk-wide), or None."""
+    """What one event tells the coordinator: (key, line, recorded session, desk-wide, the session not to tell),
+    or None. The session that cancelled a task with hansa cancel does not hear that it was cancelled."""
     kind, tid = e.get("event"), e.get("task")
     if kind in ("task_finished", "task_checked", "task_not_started", "merge_check_ended", "task_merged"):
         if kind == "task_finished" and e.get("state") in ("checking", "queued"):  # not ended yet / moved on
@@ -198,21 +199,21 @@ def _item(desk: Desk, e: dict):
             key, line = ("merge", tid), f"{tid} merged into {e.get('into')} after its merge check passed: {m.get('title', '')}"
         else:
             key, line = ("task", tid), task_line(desk, m)
-        return key, line, m.get("session"), False
+        return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
     if kind == "ask_closed" and e.get("by") != "hansa":  # hansa closes a design session's request itself
         x = next((a for a in desk.asks() if a.get("id") == e.get("id")), None)
         if not x:
             return None
         return (("ask", x["id"]), f"request #{x['id']} answered: {x.get('answer') or '(closed without a note)'}"
-                                  f" (you asked: {str(x.get('text', ''))[:120]})", x.get("session"), False)
+                                  f" (you asked: {str(x.get('text', ''))[:120]})", x.get("session"), False, None)
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
-                             "hansa explain server"), None, True
+                             "hansa explain server"), None, True, None
     if kind == "srt_tried" and not e.get("ran") and srt_needed(desk.settings()):
         said = ("found, but it could not run: " + str(e.get("said") or "")[:200]) if e.get("found") \
             else "not found on its PATH"
         return ("srt",), (f"hansa serve could not run srt ({said}), so the lanes' setups and checks cannot run "
-                          "· next: hansa explain server"), None, True
+                          "· next: hansa explain server"), None, True, None
     return None
 
 
@@ -224,7 +225,9 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
         it = _item(desk, e)
         if not it:
             continue
-        key, line, sess, desk_wide = it
+        key, line, sess, desk_wide, quiet = it
+        if quiet and same(quiet, me.get("session")):
+            continue  # it cancelled the task itself
         if not (desk_wide or not sess or same(sess, me.get("session")) or not any(same(sess, o) for o in others)):
             continue  # its own session hears it
         out.pop(key, None)  # the latest line of a task comes last
@@ -739,7 +742,7 @@ class DailyClear:
             self.idle_since = None
             return
         if self.rec.get("day") != day:
-            self.rec.update(day=day, state=None, at=None, held=None, held_at=None, left=None)
+            self.rec.update(day=day, state=None, at=None, held=None, held_at=None, left=None, step=None)
         if self.rec.get("state"):  # done today
             return
         why = self.why_not(t, last_post, pending)
@@ -781,18 +784,24 @@ class DailyClear:
             return "there are words in the input box"
         return ""
 
-    def left(self, what: str) -> None:
-        """/clear was typed, or may have been, and what became of it is not known: nothing more is typed today."""
-        self.rec.update(state="left", at=now(), held=None, left=what)
-        _say(f"daily clear: typed /clear, but then {what}; no Enter, nothing taken back, and no other try today: "
+    def left(self, what: str, step: str = "") -> None:
+        """/clear was typed, or may have been, and what became of it is not known: nothing more is typed today.
+        step: 'typing' when typing /clear itself failed, 'back' when the backspaces taking it back failed."""
+        self.rec.update(state="left", at=now(), held=None, left=what, step=step or None)
+        head = "hansa tried to type /clear" if step == "typing" else "typed /clear"
+        back = ("it is not known how many of the six backspaces taking it back went through" if step == "back"
+                else "nothing taken back")
+        _say(f"daily clear: {head}, but then {what}; no Enter, {back}, and no other try today: "
              "/clear may be left in the box")
 
     def clear(self) -> None:
         """Type /clear; press Enter only when the box then reads exactly that and the session is still idle."""
         pane = self.rec["pane"]
         self.idle_since = None  # whatever happens, two idle readings again before the next try
+        step = "typing"  # what tmux was doing when it failed
         try:
             tmux("send-keys", "-t", pane, "-l", "/clear")
+            step = ""
             for _ in range(1 + TYPED_READS):  # a box that cannot be read yet: again, for about two seconds
                 time.sleep(TYPED_WAIT)
                 box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
@@ -804,13 +813,14 @@ class DailyClear:
             if box.rstrip(" ") != "/clear" or not ok:
                 if not box.rstrip(" ").endswith("/clear"):  # where its /clear went is not known: left as it is
                     return self.left(f"the box read {box!r}")
+                step = "back"
                 tmux("send-keys", "-t", pane, *["BSpace"] * 6)  # take it back; whatever else is there stays
                 self.hold(f"after /clear was typed the box read {box!r} and the session "
                           f"{'was idle' if ok else 'was not idle: ' + said}; no Enter; the /clear was taken back")
                 return
             tmux("send-keys", "-t", pane, "Enter")
         except RuntimeError as e:
-            return self.left(f"tmux failed ({e})")
+            return self.left(f"tmux failed ({e})", step)
         end, sid = time.time() + CLEARED_WAIT, ""
         while time.time() < end:
             time.sleep(0.5)
@@ -845,8 +855,10 @@ def clear_text(c, t: float = 0) -> str:
     if mine.get("state") == "cleared":
         today = f"cleared at {hm}"
     elif mine.get("state") == "left":
-        today = (f"/clear typed at {hm}, but then {mine.get('left') or 'the input box could not be read'}: "
-                 "/clear may be left in the box")
+        today = (("hansa tried to type /clear" if mine.get("step") == "typing" else "/clear typed")
+                 + f" at {hm}, but then {mine.get('left') or 'the input box could not be read'}"
+                 + ("; it is not known how many of the six backspaces taking it back went through"
+                    if mine.get("step") == "back" else "") + ": /clear may be left in the box")
     elif mine.get("state"):
         today = f"Enter pressed at {hm}, but no new session was seen"
     elif inside:

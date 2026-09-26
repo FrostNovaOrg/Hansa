@@ -1762,15 +1762,16 @@ def lane_occupied(m: dict) -> bool:
         (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running"))
 
 
-def close_verification(desk: Desk, m: dict, why: str) -> None:
-    """A verification belongs to the task it checks, and ends with it."""
+def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
+    """A verification belongs to the task it checks, and ends with it. by: the session whose hansa cancel closed
+    it, which hears nothing of it."""
     if not m.get("verify"):
         return
     v = desk.meta(m["verify"])
     if v["state"] in ("queued", "done"):
-        desk.update(v["id"], state="cancelled", error=why)
+        desk.update(v["id"], state="cancelled", error=why, cancel_by=by)
     elif v["state"] == "running":  # hansa serve stops it within seconds
-        desk.update(v["id"], cancel=True)
+        desk.update(v["id"], cancel=True, cancel_by=by)
 
 
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:

@@ -336,14 +336,15 @@ def _retry(desk: Desk, a) -> None:
 
 def cmd_cancel(a):
     desk = Desk.find(a.desk)
+    by = notify.session_here()  # the session that cancelled it hears nothing of it; others do
     with desk.lock():  # the state read here is the state changed here
         m = desk.meta(a.id)
         if m["state"] == "queued":
-            desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now())
+            desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now(), cancel_by=by)
         elif m["state"] == "running":  # hansa serve stops it; stopping it here as well is only quicker
-            m = desk.update(a.id, cancel=True)
+            m = desk.update(a.id, cancel=True, cancel_by=by)
         elif m["state"] == "done":
-            desk.update(a.id, state="cancelled", error="closed without merging")
+            desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by)
         elif m["state"] == "merging":  # the merge check stops; the task goes back to waiting for review
             mc = m.get("merge_check") or {}
             if mc.get("phase") == "queued":
@@ -354,7 +355,7 @@ def cmd_cancel(a):
             raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running, merging or unmerged finished tasks "
                              f"can be cancelled")
         if m["state"] != "merging":
-            close_verification(desk, m, f"closed: {a.id} was cancelled")
+            close_verification(desk, m, f"closed: {a.id} was cancelled", by)
     if m["state"] == "running":
         stop(m.get("pid"), m.get("pid_start", ""))
     if m["state"] == "merging":
