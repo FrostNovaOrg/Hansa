@@ -606,6 +606,8 @@ class DeskTest(unittest.TestCase):
         shown = {p["name"]: p["problem"] for p in views.status(self.desk)["providers"]}
         self.assertEqual(shown["claude"], prob)
         self.assertIn("hansa check claude", prob)
+        self.assertEqual(run.unusable_reason({"is_error": True, "result": "Invalid API key · Please run /login"}, "")[0],
+                         "key")
 
     def test_wait_returns_when_a_task_ends(self):
         tid = self.desk.new_task("Add hello.txt")

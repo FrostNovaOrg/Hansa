@@ -642,11 +642,11 @@ def unusable_reason(run: dict, err: str):
     m = QUOTA.search(text)
     if m:
         return "quota", f"out of quota ({m.group(0)})"
-    if LOGIN.search(text):
-        return "login", "not logged in (Please run /login)"
-    m = AUTH.search(text)
+    m = AUTH.search(text)  # before LOGIN: "Invalid API key · Please run /login" is a key problem
     if m:
         return "key", f"key rejected ({m.group(0)})"
+    if LOGIN.search(text):
+        return "login", "not logged in (Please run /login)"
     return "", ""
 
 
