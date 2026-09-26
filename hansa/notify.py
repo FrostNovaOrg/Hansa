@@ -10,6 +10,10 @@ process does.
     `hansa coordinator`   starts one for the session it launches (--messaging-socket-path, a path it chose)
     `hansa notify on`     starts one for the session it is run from (CLAUDE_PID, CLAUDE_CODE_MESSAGING_SOCKET)
     `hansa notify off`    stops that one; `hansa notify` lists the desk's followers
+    --clear-daily HH-HH   (with either of the first two) the follower also clears the session once a day (below)
+
+When hansa's code on disk changes (an upgrade), a follower runs itself again on the new code, in the same process
+and from where it was: otherwise a module it imports later would come from the new files, and the rest from the old.
 
 Where things are kept:
     .hansa/followers/<key>.json   the desk's register: one record per follower (session, socket, read
@@ -43,7 +47,7 @@ from pathlib import Path
 
 from . import account
 from .desk import Desk, now, read_json, write_json
-from .run import alive, claude_bin, proc_start, server_up, srt_needed
+from .run import alive, claude_bin, proc_start, server_up, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
 MOST_LINES = 10  # past this many events in one message, the rest are counted, and hansa status has them
@@ -228,6 +232,29 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
     return list(out.values())
 
 
+def _srt_ran(desk: Desk):
+    """Whether srt ran on hansa's last try of it: True, False, or None before any try."""
+    return srt_record(desk).get("ran")
+
+
+def _proc_gone(f) -> bool:
+    """Whether a process a register records ({pid, start}: a follower, a session) is known to have ended. Another
+    account's process (root's, seen by the account) counts as there when it cannot be signalled."""
+    if not isinstance(f, dict) or not isinstance(f.get("pid"), int) or f["pid"] <= 0:
+        return False
+    try:
+        os.kill(f["pid"], 0)
+    except ProcessLookupError:
+        return True
+    except OSError:  # not ours to signal: it is there
+        pass
+    start = str(f.get("start") or "")
+    if not start or any(c.isspace() for c in start):
+        return False
+    seen = proc_start(f["pid"])
+    return bool(seen) and seen != start
+
+
 def _write_record(desk: Desk, key: str, rec: dict) -> None:
     register_dir(desk).mkdir(parents=True, exist_ok=True)
     write_json(register_dir(desk) / f"{key}.json", rec)
@@ -244,12 +271,20 @@ def handle(desk: Desk, req: dict) -> dict:
         raise ValueError(f"not a follower's key: {key!r}")
     old = read_json(register_dir(desk) / f"{key}.json", {}) or {}
     if op == "start":
+        if isinstance(req.get("resume"), int):  # the same follower, restarted on new code: where it was
+            _write_record(desk, key, {**old, **me, "pos": req["resume"], "seen": now(), "ended": None})
+            return {"pos": req["resume"], "summary": [], "server_up": server_up(desk)}
         end = log_end(desk)
+        for r in records(desk):  # a follower killed outright has ended, however recently it was seen
+            if not r.get("ended") and _proc_gone(r.get("follower")):
+                _write_record(desk, r["key"], {**r, "ended": r.get("seen") or now()})
         mine = [r for r in records(desk) if r.get("uid") == me.get("uid") and not is_live(r)]
         for r in mine:  # long ended: forgotten
             if time.time() - (r.get("seen") or 0) > KEEP_DAYS * 86400:
                 (register_dir(desk) / f"{r['key']}.json").unlink(missing_ok=True)
         prev = max(mine, key=lambda r: r.get("seen") or 0, default=None)
+        if prev and prev.get("caught_up"):  # a follower after it already said what it missed
+            prev = None
         summary = []
         if prev and int(prev.get("pos") or 0) < end:  # it ended before reading to the end: what was missed
             events, _ = read_log(desk, int(prev.get("pos") or 0), end - int(prev.get("pos") or 0))
@@ -263,14 +298,26 @@ def handle(desk: Desk, req: dict) -> dict:
                     summary.append(desk.redact(task_line(desk, desk.meta(k[1]))) if k[0] == "task" else x["line"])
                 except SystemExit:  # a task folder gone meanwhile
                     continue
+        if prev and not summary:  # nothing to tell: whoever starts next need not tell it either
+            _write_record(desk, prev["key"], {**prev, "caught_up": now()})
         _write_record(desk, key, {**me, "pos": end, "since": me.get("since") or now(), "seen": now(), "ended": None})
-        return {"pos": end, "summary": summary, "missed_since": (prev or {}).get("seen") if summary else None,
-                "server_up": server_up(desk)}
+        missed = None
+        if summary:
+            ps = prev.get("session") or {}
+            missed = {"key": prev["key"], "pid": ps.get("pid"), "name": prev.get("name") or "",
+                      "at": prev.get("ended") or prev.get("seen"), "session_ended": _proc_gone(ps)}
+        return {"pos": end, "summary": summary, "missed": missed, "server_up": server_up(desk)}
+    if op == "caught_up":  # the follower posted what an ended one missed: nobody is to post it again
+        k = str(req.get("of", ""))
+        r = read_json(register_dir(desk) / f"{k}.json", {}) if KEY.match(k) else {}
+        if isinstance(r, dict) and r.get("ended"):
+            _write_record(desk, k, {**r, "caught_up": now()})
+        return {}
     if op == "feed":
         events, pos = read_log(desk, int(req.get("pos") or 0))
         items = items_for(desk, events, me)
         _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or 0), "seen": now(), "ended": None})
-        return {"pos": pos, "items": items, "server_up": server_up(desk)}
+        return {"pos": pos, "items": items, "server_up": server_up(desk), "srt_ran": _srt_ran(desk)}
     if op == "end":
         _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or old.get("pos") or 0), "seen": now(),
                                   "ended": now()})
@@ -331,24 +378,91 @@ def message(desk_root: str, lines: list, head: str = "") -> str:
 
 
 # -- the follower ---------------------------------------------------------------------------------------
+def agents_rows() -> list:
+    """The live sessions as `claude agents --json` lists them. RuntimeError when it cannot say."""
+    try:
+        r = subprocess.run([claude_bin(), "agents", "--json"], capture_output=True, text=True, errors="replace",
+                           timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"claude agents --json could not run ({e})") from None
+    if r.returncode:
+        raise RuntimeError(f"claude agents --json ended with {r.returncode}: {(r.stderr or r.stdout).strip()[-200:]}")
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        raise RuntimeError(f"claude agents --json printed what is not JSON: {r.stdout.strip()[:120]!r}") from None
+    rows = data if isinstance(data, list) else next((v for v in data.values() if isinstance(v, list)), None) \
+        if isinstance(data, dict) else None
+    if rows is None:
+        raise RuntimeError(f"claude agents --json printed no list of sessions: {r.stdout.strip()[:120]!r}")
+    return [x for x in rows if isinstance(x, dict)]
+
+
+def session_row(pid: int):
+    """The session's entry in `claude agents --json`, or None when it has none. RuntimeError when it cannot say."""
+    return next((x for x in agents_rows() if str(x.get("pid")) == str(pid)), None)
+
+
 def session_name(pid: int) -> str:
     """The session's name as `claude agents --json` lists it; '' when it cannot say."""
     try:
-        r = subprocess.run([claude_bin(), "agents", "--json"], capture_output=True, text=True, timeout=15,
-                           stdin=subprocess.DEVNULL)
-        data = json.loads(r.stdout)
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        return str((session_row(pid) or {}).get("name") or "")[:80]
+    except RuntimeError:
         return ""
-    rows = data if isinstance(data, list) else next((v for v in data.values() if isinstance(v, list)), []) \
-        if isinstance(data, dict) else []
-    return next((str(x.get("name") or "")[:80] for x in rows if isinstance(x, dict) and str(x.get("pid")) == str(pid)), "")
 
 
 def _say(text: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S ") + text, flush=True)
 
 
-def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = "") -> int:
+def missed_head(m) -> str:
+    """The first line of what a follower posts about what an ended one missed: whose it was, and since when."""
+    if not isinstance(m, dict):
+        return "what changed while no session heard from hansa, as it is now:"
+    who = f"session {m.get('pid')}" + (f" ({m['name']})" if m.get("name") else "")
+    at = time.strftime("%H:%M", time.localtime(m["at"])) if m.get("at") else "?"
+    how = f"{who} ended at {at}" if m.get("session_ended") else f"hansa stopped posting to {who} at {at}"
+    return f"{how}; since then, for its tasks and requests:"
+
+
+CODE_SETTLE = 2.0  # seconds hansa's code stays as it is before a follower restarts on it (an upgrade writes files)
+
+
+def code_mark() -> tuple:
+    """hansa's code on disk as it stands: each module's path, change time and size."""
+    out = []
+    for f in sorted(Path(__file__).resolve().parent.rglob("*.py")):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        out.append((str(f), st.st_mtime_ns, st.st_size))
+    return tuple(out)
+
+
+def _restart(state: dict) -> None:
+    """Run this follower again on hansa's code as it is now on disk, in this process (its pid stays), from where
+    it was. Returns only when it could not."""
+    if "notify-follow" not in sys.argv:
+        return
+    env = {**os.environ, "HANSA_NOTIFY_RESUME": json.dumps(state)}
+    sys.stdout.flush()
+    try:
+        os.execve(sys.executable, [sys.executable, "-m", "hansa", *sys.argv[1:]], env)
+    except OSError as e:
+        _say(f"could not restart on the new code ({e}); this follower carries on with the old")
+
+
+def _resumed():
+    """What a follower restarted on new code was doing (_restart); None for one started afresh."""
+    try:
+        st = json.loads(os.environ.pop("HANSA_NOTIFY_RESUME", "") or "null")
+    except ValueError:
+        return None
+    return st if isinstance(st, dict) and isinstance(st.get("pos"), int) else None
+
+
+def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = "", clear: str = "") -> int:
     """`hansa notify-follow`: run the follower of one session until that session's process ends."""
     priv = private_dir(desk)
     held = open(priv / f"{key}.lock", "a")
@@ -361,29 +475,41 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
     else:
         _say("another follower already runs for this session; this one ends")
         return 0
+    resume = _resumed()
+    was = resume or {}
     me_proc = {"pid": os.getpid(), "start": proc_start(os.getpid())}
     write_json(priv / f"{key}.state.json", {**me_proc, "nonce": nonce, "session": sess, "socket": sock,
-                                             "since": now()})
+                                             "since": was.get("since") or now()})
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     ask = source(desk)
     via_account = bool(account.desk_account(desk.root))
     poll = float(os.environ.get("HANSA_NOTIFY_POLL") or (2.0 if via_account else 1.0))
     gather = float(os.environ.get("HANSA_NOTIFY_GATHER") or 3.0)
-    me = {"key": key, "session": sess, "socket": sock, "name": name, "follower": me_proc, "uid": os.getuid(),
-          "user": account.name_of(os.getuid()), "since": now(), "last_post": None}
+    me = {"key": key, "session": sess, "socket": sock, "name": was.get("name") or name, "follower": me_proc,
+          "uid": os.getuid(), "user": account.name_of(os.getuid()), "since": was.get("since") or now(),
+          "last_post": was.get("last_post")}
+    daily = DailyClear(clear, sess["pid"], was.get("clear")) if clear else None
+    if daily:
+        me["clear"] = daily.rec
     done = 0
     try:
-        r = ask({"op": "start", "me": me})
+        r = ask({"op": "start", "me": me, **({"resume": resume["pos"]} if resume else {})})
         pos = done = r["pos"]
-        was_up, told_down = r.get("server_up"), False
-        _say(f"following desk {desk.root} for session {sess['pid']} at {sock}, from byte {pos}")
+        if resume:
+            was_up, told_down, told_srt = was.get("was_up"), bool(was.get("told_down")), bool(was.get("told_srt"))
+        else:
+            was_up, told_down, told_srt = r.get("server_up"), False, False
+        _say(("restarted on hansa's new code; " if resume else "") +
+             f"following desk {desk.root} for session {sess['pid']} at {sock}, from byte {pos}")
         if r.get("summary"):
-            since = time.strftime("%H:%M", time.localtime(r["missed_since"])) if r.get("missed_since") else "earlier"
-            text = message(str(desk.root), r["summary"],
-                           f"no session heard from hansa since {since}; what changed meanwhile, as it is now")
-            if not _deliver(sock, text, sess, me):
+            if not _deliver(sock, message(str(desk.root), r["summary"], missed_head(r.get("missed"))), sess, me):
                 return 0
+            try:
+                ask({"op": "caught_up", "me": me, "of": (r.get("missed") or {}).get("key")})
+            except Exception as e:  # noqa: BLE001 - the next follower may then say it again
+                _say(f"could not record that what was missed is told: {e}")
         pending, first, last, errors, named = [], 0.0, 0.0, 0, time.time() + 5
+        mark, changed = code_mark(), 0.0
         while True:
             if gone(sess):
                 _say("the session's process ended; so does this follower")
@@ -391,6 +517,15 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             if time.time() >= named:
                 me["name"] = session_name(sess["pid"]) or me["name"]
                 named = time.time() + 300
+            new_mark = code_mark()
+            if new_mark != mark:  # an upgrade: a module imported from now on would come from the new files
+                mark, changed = new_mark, time.time()
+            elif changed and time.time() - changed >= CODE_SETTLE:
+                _say(f"hansa's code changed on disk; restarting on it from byte {done}")
+                _restart({"pos": done, "since": me["since"], "name": me["name"], "last_post": me["last_post"],
+                          "was_up": was_up, "told_down": told_down, "told_srt": told_srt,
+                          "clear": daily.rec if daily else None})
+                changed = 0.0
             try:
                 r = ask({"op": "feed", "me": me, "pos": pos, "done": done})
                 errors = 0
@@ -413,6 +548,10 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             elif up and was_up is False:
                 told_down = False
             was_up = up
+            srt = any(x["key"] == ["srt"] for x in items)
+            if srt and (told_srt or r.get("srt_ran")):  # said once until srt runs again; or it runs by now
+                items = [x for x in items if x["key"] != ["srt"]]
+            told_srt = False if r.get("srt_ran") else told_srt or srt
             if items:
                 pending += [x["line"] for x in items]
                 last = time.time()
@@ -421,6 +560,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 if not _deliver(sock, message(str(desk.root), pending), sess, me):
                     return 0
                 pending, first, done = [], 0.0, pos
+            if daily:
+                daily.tick((me["last_post"] or {}).get("at") or 0.0, bool(pending))
             time.sleep(poll)
     finally:
         try:
@@ -448,6 +589,259 @@ def _deliver(sock: str, text: str, sess: dict, me: dict) -> bool:
                 _say(f"gave up posting after {POST_WAIT} s ({e}): " + text.replace("\n", " | ")[:500])
                 return True
             time.sleep(2)
+
+
+# -- the daily clear ------------------------------------------------------------------------------------
+# hansa coordinator --clear-daily 04-09 (or hansa notify on --clear-daily 04-09): once a day, in that window of
+# hours, the follower types /clear into the session's tmux pane, only when the session is idle, nobody is typing
+# and the input box is empty. An Enter that lands on a dialog picks an option, and /clear after someone's
+# half-written line would send it: so anything it cannot read counts as busy.
+CLEAR_EVERY = 60  # seconds between checks in the window (HANSA_CLEAR_EVERY)
+CLEAR_QUIET = 300  # no post to the session for this long before a clear (HANSA_CLEAR_QUIET)
+KEYS_QUIET = 90  # no key pressed in a terminal on the pane's tmux session for this long
+CLEARED_WAIT = 15  # after Enter, the session's sessionId changes within this long
+TYPED_WAIT = 0.5  # after typing /clear, before the box is read again
+WINDOW = re.compile(r"^([0-9]{1,2})-([0-9]{1,2})$")
+ESC = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]")
+DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0m|\x1b\[22m|$)")
+
+
+def parse_window(text) -> tuple:
+    """--clear-daily's window, HH-HH in local time (22-03 runs past midnight): (first hour, hour it ends)."""
+    m = WINDOW.match(str(text or "").strip())
+    a, b = (int(m[1]), int(m[2]) or 24) if m else (-1, -1)
+    if not (0 <= a <= 23 and 1 <= b <= 24 and a != b):
+        raise ValueError(f"--clear-daily takes a window of hours in local time, such as 04-09; not {text!r}")
+    return a, b
+
+
+def in_window(window: str, t: float) -> tuple:
+    """(inside the window now, the day its latest start fell on, whether that window has passed)."""
+    a, b = parse_window(window)
+    lt = time.localtime(t)
+    h, today = lt.tm_hour, time.strftime("%Y-%m-%d", lt)
+    if a < b:
+        return a <= h < b, today, h >= b
+    day = today if h >= a else time.strftime("%Y-%m-%d", time.localtime(t - 86400))
+    return h >= a or h < b, day, b <= h < a
+
+
+def tmux(*args) -> str:
+    """What a tmux command printed. RuntimeError when it could not run or failed."""
+    try:
+        r = subprocess.run(["tmux", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"tmux could not run ({e})") from None
+    if r.returncode:
+        raise RuntimeError(f"tmux {args[0]} ended with {r.returncode}: {r.stderr.strip()[-200:]}")
+    return r.stdout
+
+
+def _parent(pid: int) -> int:
+    try:
+        return int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True,
+                                  timeout=10).stdout.strip() or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def clear_pane(pid: int) -> tuple:
+    """The tmux pane the session runs in (TMUX_PANE, whose process is the session or runs it): (pane, ''), or
+    ('', why the daily clear cannot be done)."""
+    pane = os.environ.get("TMUX_PANE", "")
+    if not pane:
+        return "", "the session does not run in tmux (TMUX_PANE is not set), and hansa types the /clear through tmux"
+    try:
+        top = int(tmux("display-message", "-p", "-t", pane, "#{pane_pid}").strip())
+    except (RuntimeError, ValueError) as e:
+        return "", f"tmux could not say which process runs in pane {pane} ({e})"
+    p, seen = int(pid), set()
+    while p > 1 and p not in seen:
+        if p == top:
+            return pane, ""
+        seen.add(p)
+        p = _parent(p)
+    return "", f"the session (pid {pid}) does not run in tmux pane {pane}, whose process is {top}"
+
+
+def _plain(line: str) -> str:
+    return ESC.sub("", DIM.sub("", line))
+
+
+def _rule(line: str) -> bool:
+    t = ESC.sub("", line).strip()
+    return len(t) >= 3 and set(t) == {"─"}
+
+
+def box_text(capture: str):
+    """What is typed in the session's input box, from `tmux capture-pane -p -e`: the text after the prompt, with
+    dimmed placeholders and suggestions left out. None when the box is not where it is when nothing else is up (a
+    rule, the box line: ❯ and a no-break space, a rule, and below them only the footer): a dialog, a menu, a box
+    of several lines."""
+    lines = capture.rstrip("\n").split("\n")
+    last = max((i for i, x in enumerate(lines) if _rule(x)), default=-1)
+    if last < 2 or not _rule(lines[last - 2]):
+        return None
+    box = _plain(lines[last - 1])
+    return box[2:] if box.startswith("❯\xa0") else None
+
+
+def idle_reading(pid: int) -> tuple:
+    """(True, its sessionId) when `claude agents --json` shows the session idle with nothing waiting for an
+    answer; (False, why not) otherwise, and when it cannot say."""
+    try:
+        row = session_row(pid)
+    except RuntimeError as e:
+        return False, str(e)
+    if row is None:
+        return False, f"claude agents --json lists no session with pid {pid}"
+    if row.get("status") != "idle":
+        return False, f"the session is {row.get('status')!r}, not idle"
+    if row.get("waitingFor"):
+        return False, f"the session waits: {str(row['waitingFor'])[:80]}"
+    return True, str(row.get("sessionId") or "")
+
+
+class DailyClear:
+    """A follower's daily /clear of its session. Its record (rec) goes into the register, for hansa notify:
+    window, pane, off (why it cannot be done), day, state (cleared / unconfirmed), at, held (the last reason)."""
+
+    def __init__(self, window: str, pid: int, rec=None):
+        self.window, self.pid = window, pid
+        self.every = float(os.environ.get("HANSA_CLEAR_EVERY") or CLEAR_EVERY)
+        self.quiet = float(os.environ.get("HANSA_CLEAR_QUIET") or CLEAR_QUIET)
+        if isinstance(rec, dict) and rec.get("window") == window:  # restarted on new code: as it was
+            self.rec = rec
+        else:
+            pane, why = clear_pane(pid)
+            self.rec = {"window": window, "pane": pane, "off": why or None}
+            _say(f"daily clear {window}: " + (f"off: {why}" if why else f"on, through tmux pane {pane}"))
+        self.next, self.idle_since, self.inside, self.sid = 0.0, None, None, ""
+
+    def hold(self, why: str) -> None:
+        self.rec.update(held=why, held_at=now())
+        _say(f"daily clear held: {why}")
+
+    def tick(self, last_post: float, pending: bool) -> None:
+        """Called on each round of the follower; checks once every minute, in the window."""
+        t = time.time()
+        if self.rec.get("off") or t < self.next:
+            return
+        self.next = t + self.every
+        inside, day, _ = in_window(self.window, t)
+        if inside != self.inside:
+            _say(f"daily clear: {'inside' if inside else 'outside'} the window {self.window}")
+            self.inside = inside
+        if not inside:
+            self.idle_since = None
+            return
+        if self.rec.get("day") != day:
+            self.rec.update(day=day, state=None, at=None, held=None, held_at=None)
+        if self.rec.get("state"):  # done today
+            return
+        why = self.why_not(t, last_post, pending)
+        if why:
+            self.hold(why)
+        else:
+            self.clear()
+
+    def why_not(self, t: float, last_post: float, pending: bool) -> str:
+        """Why the session is not to be cleared now; '' when every condition holds."""
+        ok, said = idle_reading(self.pid)
+        if not ok:
+            self.idle_since = None
+            return said
+        self.sid = said
+        if self.idle_since is None:
+            self.idle_since = t
+            return "idle on one reading; a second one comes a minute later"
+        if t - self.idle_since < self.every:
+            return "idle on readings less than a minute apart"
+        if pending or t - last_post < self.quiet:
+            return "hansa has a message for the session" if pending else \
+                f"hansa posted to the session {int(t - last_post)} s ago"
+        pane = self.rec["pane"]
+        try:
+            where = tmux("display-message", "-p", "-t", pane, "#{session_id}").strip()
+            keys = [int(x) for x in tmux("list-clients", "-t", where, "-F", "#{client_activity}").split()]
+        except (RuntimeError, ValueError) as e:
+            return f"could not read when a key was last pressed ({e})"
+        if keys and t - max(keys) < KEYS_QUIET:
+            return f"a key was pressed in a terminal on the session's tmux session {int(t - max(keys))} s ago"
+        try:
+            box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
+        except RuntimeError as e:
+            return f"could not read the pane ({e})"
+        if box is None:
+            return "no input box alone at the bottom of the pane (a dialog, a menu, or a box of several lines)"
+        if box.strip(" "):
+            return "there are words in the input box"
+        return ""
+
+    def clear(self) -> None:
+        """Type /clear; press Enter only when the box then reads exactly that and the session is still idle."""
+        pane = self.rec["pane"]
+        self.idle_since = None  # whatever happens, two idle readings again before the next try
+        try:
+            tmux("send-keys", "-t", pane, "-l", "/clear")
+            time.sleep(TYPED_WAIT)
+            box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
+            ok, said = idle_reading(self.pid)
+            if box is None or box.rstrip(" ") != "/clear" or not ok:
+                back = box is not None and box.rstrip(" ").endswith("/clear")
+                if back:  # take back what hansa typed; whatever else is there stays as it was
+                    tmux("send-keys", "-t", pane, *["BSpace"] * 6)
+                self.hold(f"after /clear was typed the box read {box!r} and the session "
+                          f"{'was idle' if ok else 'was not idle: ' + said}; no Enter"
+                          + ("; the /clear was taken back" if back else ""))
+                return
+            tmux("send-keys", "-t", pane, "Enter")
+        except RuntimeError as e:
+            self.hold(f"tmux failed while typing ({e})")
+            return
+        end, sid = time.time() + CLEARED_WAIT, ""
+        while time.time() < end:
+            time.sleep(0.5)
+            try:
+                sid = str((session_row(self.pid) or {}).get("sessionId") or "")
+            except RuntimeError:
+                continue
+            if sid and sid != self.sid:
+                break
+        if sid and sid != self.sid:
+            self.rec.update(state="cleared", at=now())
+            _say(f"daily clear: cleared the session (sessionId {self.sid or '?'} -> {sid})")
+        else:
+            self.rec.update(state="unconfirmed", at=now())  # not typed again today: what it met is not known
+            _say(f"daily clear: pressed Enter after /clear, but the sessionId did not change within {CLEARED_WAIT} s "
+                 f"(still {sid or 'unreadable'}); no other try today")
+
+
+def clear_text(c, t: float = 0) -> str:
+    """A follower's daily clear for hansa notify: its window and today's state; '' when it has none."""
+    if not isinstance(c, dict) or not c.get("window"):
+        return ""
+    if c.get("off"):
+        return f"daily clear {c['window']}: off ({c['off']})"
+    try:
+        inside, day, passed = in_window(c["window"], t or time.time())
+    except ValueError:
+        return f"daily clear {c['window']}: not a window"
+    mine = c if c.get("day") == day else {}
+    hm = time.strftime("%H:%M", time.localtime(mine["at"])) if mine.get("at") else "?"
+    held = f"held: {mine['held']}" if mine.get("held") else ""
+    if mine.get("state") == "cleared":
+        today = f"cleared at {hm}"
+    elif mine.get("state"):
+        today = f"Enter pressed at {hm}, but no new session was seen"
+    elif inside:
+        today = held or "in the window, not checked yet"
+    elif passed:
+        today = "window passed without a clear" + (f" (last {held})" if held else "")
+    else:
+        today = "window not reached yet today"
+    return f"daily clear {c['window']}: {today}"
 
 
 # -- starting and stopping one ------------------------------------------------------------------------------
@@ -484,14 +878,16 @@ def running(desk: Desk, key: str):
     return st if st.get("pid") and not st.get("ended") and alive(st["pid"], st.get("start", "")) else None
 
 
-def start(desk: Desk, sess: dict, sock: str, name: str = "", wait: bool = True) -> str:
-    """Start the follower of this session: 'started', 'already' (one runs), or 'unknown' (it has not said yet)."""
+def start(desk: Desk, sess: dict, sock: str, name: str = "", wait: bool = True, clear: str = "") -> str:
+    """Start the follower of this session: 'started', 'already' (one runs), or 'unknown' (it has not said yet).
+    clear: the window of its daily clear, if any."""
     key = key_of(sess)
     if running(desk, key):
         return "already"
     nonce = uuid.uuid4().hex
     spawn(desk, ["notify-follow", "--key", key, "--pid", str(sess["pid"]), "--start", sess.get("start") or "",
-                 "--socket", sock, "--nonce", nonce, "--name", name], private_dir(desk) / f"{key}.log")
+                 "--socket", sock, "--nonce", nonce, "--name", name, *(["--clear-daily", clear] if clear else [])],
+          private_dir(desk) / f"{key}.log")
     end = time.time() + (10 if wait else 0)
     while time.time() < end:
         st = running(desk, key)
@@ -532,24 +928,45 @@ def socket_path(pid: int) -> str:
     raise RuntimeError("there is no short folder only this account can open for the session's inbox")
 
 
-def turn_on(desk: Desk) -> str:
+def clear_said(pid: int, window: str, running: bool = False) -> str:
+    """What starting a daily clear for this session says: when it clears, or why it cannot. running: the session
+    already runs (hansa notify on), so it has no hook that shows it the desk after a clear."""
+    pane, why = clear_pane(pid)
+    a, b = parse_window(window)
+    if why:
+        return f"The daily clear is off: {why}. Notices still go out."
+    return (f"Once a day between {a:02d}:00 and {b % 24:02d}:00, when this session is idle, nobody is typing and its "
+            f"input box is empty, hansa types /clear into tmux pane {pane}."
+            + ("\nhansa cannot add a hook to a session that is already running, so after a clear this one does not "
+               "read hansa status by itself (a session started with hansa coordinator --clear-daily does)."
+               if running else ""))
+
+
+def turn_on(desk: Desk, clear: str = "") -> str:
     sess, sock = session_here(), os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", "")
+    if clear:
+        try:
+            parse_window(clear)
+        except ValueError as e:
+            raise SystemExit(f"hansa: {e}; nothing was started")
     if os.environ.get("HANSA_TASK"):
         raise SystemExit("hansa: notify is for the coordinator's session, not a worker's; nothing was started")
     if not sess or not sock:
         raise SystemExit("hansa: notify on starts hansa posting to the Claude Code session it is run from, and this "
                          "is not run from one (CLAUDE_PID and CLAUDE_CODE_MESSAGING_SOCKET are not set); nothing was "
                          "started. Run it with the coordinator session's Bash tool")
-    how = start(desk, sess, sock)
+    how = start(desk, sess, sock, clear=clear)
     if how == "already":
         return (f"hansa already notifies this session (pid {sess['pid']}); nothing was started. hansa notify lists "
-                "the desk's followers")
+                "the desk's followers" + ("; for a daily clear, hansa notify off, then on again with --clear-daily"
+                                          if clear else ""))
     if how == "unknown":
         raise SystemExit(f"hansa: the follower did not say it started within 10 s; see "
                          f"{private_dir(desk) / (key_of(sess) + '.log')}")
-    return (f"hansa now posts to this session (pid {sess['pid']}) through its inbox: its own tasks and requests, and "
+    said = (f"hansa now posts to this session (pid {sess['pid']}) through its inbox: its own tasks and requests, and "
             "those no other session hears. Do not keep hansa wait running in the background meanwhile. "
             "Stop it with hansa notify off")
+    return said + ("\n" + clear_said(sess["pid"], clear, running=True) if clear else "")
 
 
 def turn_off(desk: Desk) -> str:
@@ -586,6 +1003,8 @@ def list_text(desk: Desk) -> str:
         out.append(f"  {r.get('name') or 'session'} · pid {(r.get('session') or {}).get('pid')} · since "
                    f"{when(r.get('since'))} · last post: " + (f"{when(lp.get('at'))} {lp.get('text', '')}" if lp
                                                                else "none yet"))
+        if clear_text(r.get("clear")):
+            out.append(f"    {clear_text(r.get('clear'))}")
     return "\n".join(out)
 
 

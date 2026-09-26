@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shlex
+import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -23,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hansa import account, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
-from hansa.desk import Desk, public_settings, validate  # noqa: E402
+from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa: E402
 from hansa.run import Dispatcher, join_command, provider_problem, tmux_bin, tmux_socket, waiting_reason  # noqa: E402
 from hansa.web import start_web  # noqa: E402
 
@@ -1621,7 +1623,12 @@ class DeskTest(unittest.TestCase):
             self.hansa_out("notify", "on")
         first = self.soon(lambda: self.posts(sb))
         self.assertEqual(len(first), 1, first)
-        self.assertIn("what changed meanwhile, as it is now", first[0])
+        # whose it is: the session that ended and when, not "no session heard" (another may have heard all along)
+        head = first[0].splitlines()[0]
+        self.assertRegex(head, rf": session {a.pid} ended at \d\d:\d\d; since then, for its tasks and requests:$")
+        self.assertEqual(notify.missed_head({"pid": 16686, "name": "ntA", "session_ended": True,
+                                             "at": time.mktime((2026, 9, 26, 22, 55, 0, 0, 0, -1))}),
+                         "session 16686 (ntA) ended at 22:55; since then, for its tasks and requests:")
         self.assertIn("- t0001 done: Added while nobody listened", first[0])
         self.hansa_out("add", "Added after")  # then it carries on from the end of the log
         self.settle(Dispatcher(self.desk), "t0002")
@@ -1629,6 +1636,243 @@ class DeskTest(unittest.TestCase):
         self.assertIn("- t0002 done: Added after", later[0])
         self.assertNotIn("t0001", later[0])
         self.assertEqual(self.posts(sa), [])
+
+    def test_what_an_ended_session_missed_is_posted_once(self):
+        a, sa = self.session()
+        with self.in_session(a, sa):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        a.kill()
+        a.wait()
+        self.soon(lambda: all(r.get("ended") for r in notify.records(self.desk)))
+        self.hansa_out("add", "Added while nobody listened")
+        self.settle(Dispatcher(self.desk), "t0001")
+        b, sb = self.session()
+        with self.in_session(b, sb):
+            self.hansa_out("notify", "on")
+        self.assertIn("t0001 done", self.soon(lambda: self.posts(sb))[0])
+        ended = self.soon(lambda: [r for r in notify.records(self.desk) if r["session"]["pid"] == a.pid
+                                   and r.get("caught_up")])
+        self.assertTrue(ended[0]["ended"])
+        c, sc = self.session()  # a third session: B told it already, and has heard everything since
+        with self.in_session(c, sc):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: [r for r in notify.live_records(self.desk) if r["session"]["pid"] == c.pid])
+        time.sleep(1)
+        self.assertEqual(self.posts(sc), [])
+        self.assertEqual(len(self.posts(sb)), 1)
+
+    def test_a_follower_killed_outright_counts_as_ended_when_the_next_one_starts(self):
+        a, sa = self.session()
+        with self.in_session(a, sa):
+            self.hansa_out("notify", "on")
+        live = self.soon(lambda: notify.live_records(self.desk))
+        follower = notify.running(self.desk, live[0]["key"])
+        self.assertEqual(live[0]["follower"], {"pid": follower["pid"], "start": follower["start"]})
+        os.kill(follower["pid"], signal.SIGKILL)
+        self.soon(lambda: not notify.alive(follower["pid"], follower["start"]))
+        self.assertTrue(notify.live_records(self.desk))  # seen seconds ago: it would count as live for 30 s
+        self.hansa_out("add", "Added while its follower was dead")
+        self.settle(Dispatcher(self.desk), "t0001")
+        with self.in_session(a, sa):
+            self.assertIn("now posts to this session", self.hansa_out("notify", "on"))
+        first = self.soon(lambda: self.posts(sa))
+        self.assertIn(f"hansa stopped posting to session {a.pid} at ", first[0])
+        self.assertIn("- t0001 done: Added while its follower was dead", first[0])
+
+    def test_srt_that_cannot_run_is_posted_once_until_it_runs_again(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "true"  # a lane that needs srt
+        self.assertEqual(self.desk.save_settings(s), [])
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+
+        def tried(ran):  # a try of srt, as before each setup or check: its record, and the event
+            said = "" if ran else "env: node: No such file or directory (exit 127)"
+            write_json(self.desk.state_dir / "srt.json", {"found": True, "path": "/x/srt", "ran": ran, "said": said,
+                                                          "at": now()})
+            self.desk.event("srt_tried", found=True, path="/x/srt", ran=ran, said=said)
+
+        def told():
+            return [x for x in self.posts(sock) if "could not run srt" in x]
+        tried(False)
+        self.soon(told)
+        tried(False)
+        tried(False)
+        time.sleep(1.5)
+        self.assertEqual(len(told()), 1)
+        tried(True)
+        time.sleep(1)
+        tried(False)  # it ran in between: this is news again
+        self.soon(lambda: len(told()) == 2)
+
+    def test_a_follower_restarts_on_new_code_and_keeps_its_position(self):
+        code = self.tmp / "code"  # hansa's code as installed: a copy, so the test can upgrade it
+        shutil.copytree(Path(__file__).resolve().parent.parent / "hansa", code / "hansa",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        p, sock = self.session()
+        r = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(self.desk.root), "notify", "on"], cwd=self.tmp,
+                           env={**os.environ, "PYTHONPATH": str(code), "CLAUDE_PID": str(p.pid),
+                                "CLAUDE_CODE_MESSAGING_SOCKET": sock}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        live = self.soon(lambda: notify.live_records(self.desk))
+        follower = notify.running(self.desk, live[0]["key"])
+        log = notify.private_dir(self.desk) / f"{live[0]['key']}.log"
+        self.hansa_out("add", "Before the upgrade")
+        self.settle(Dispatcher(self.desk), "t0001")
+        self.soon(lambda: self.posts(sock))
+        f = code / "hansa" / "notify.py"
+        old = f.read_text()
+        f.write_text(old.replace('f"[hansa] desk {desk_root}"', 'f"[hansa, upgraded] desk {desk_root}"'))
+        self.assertNotEqual(f.read_text(), old)
+        self.soon(lambda: "restarted on hansa's new code" in log.read_text())
+        at = re.search(r"restarting on it from byte (\d+)", log.read_text())[1]
+        self.assertIn(f"restarted on hansa's new code; following desk {self.desk.root} for session {p.pid} at {sock}, "
+                      f"from byte {at}", log.read_text())
+        self.assertEqual(notify.running(self.desk, live[0]["key"])["pid"], follower["pid"])  # the same process
+        self.hansa_out("add", "After the upgrade")
+        self.settle(Dispatcher(self.desk), "t0002")
+        later = self.soon(lambda: [x for x in self.posts(sock) if "t0002" in x])
+        self.assertTrue(later[0].startswith(f"[hansa, upgraded] desk {self.desk.root}\n"), later[0])
+        self.assertEqual(sum("t0001" in x for x in self.posts(sock)), 1)  # nothing said twice, no catch-up
+
+    # the daily clear: a stand-in tmux answers capture-pane from a file and records send-keys; a stand-in claude
+    # answers agents --json from a file
+    RULE = "\x1b[38;5;244m" + "─" * 60 + "\x1b[39m"
+    BOX_EMPTY = "\x1b[39m❯\xa0"
+    BOX_TYPED = "\x1b[39m❯\xa0\x1b[38;5;153m/clear\x1b[39m"
+
+    def pane(self, *box) -> str:
+        """A capture of the session's pane: the conversation, then the input box (these lines), and the footer."""
+        return "\n".join(["\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231mUse the scout on lane a\x1b[0m",
+                          "\x1b[39m⏺ Done: the scout reported.", "", *box, "  \x1b[2m? for shortcuts\x1b[0m", "", ""])
+
+    def clearing(self, *, status="idle", waiting=None, listed=True, fails=False, box=None, typed=None,
+                 keys_ago=None, window="00-24", pane_pid=None):
+        """A session in a stand-in tmux pane, and hansa notify on --clear-daily from it: (what it said, the
+        stand-ins' folder, the follower's log)."""
+        d = self.tmp / f"clear-{uuid.uuid4().hex[:6]}"
+        (d / "bin").mkdir(parents=True)
+        (d / "bin" / "tmux").write_text(
+            "#!/usr/bin/env python3\nimport json, os, sys, time\n"
+            f"D = {str(d)!r}\n"
+            "a = sys.argv[1:]\nf = lambda n: os.path.join(D, n)\n"
+            "open(f('calls.jsonl'), 'a').write(json.dumps(a) + '\\n')\n"
+            "sys.stdout.reconfigure(encoding='utf-8')\n"
+            "if a[0] == 'display-message':\n"
+            "    print(a[-1].replace('#{pane_pid}', open(f('pane_pid')).read()).replace('#{session_id}', '$3'))\n"
+            "elif a[0] == 'list-clients':\n"
+            "    print('\\n'.join(str(int(time.time()) - int(x)) for x in open(f('keys')).read().split()))\n"
+            "elif a[0] == 'capture-pane':\n"
+            "    sys.stdout.write(open(f('pane.txt'), encoding='utf-8').read())\n"
+            "elif a[0] == 'send-keys':\n"
+            "    if '-l' in a and os.path.exists(f('pane-typed.txt')):\n"
+            "        os.replace(f('pane-typed.txt'), f('pane.txt'))\n"
+            "    if a[-1] == 'Enter' and os.path.exists(f('agents-after.json')):\n"
+            "        os.replace(f('agents-after.json'), f('agents.json'))\n")
+        (d / "bin" / "claude").write_text(
+            "#!/usr/bin/env python3\nimport os, sys\n"
+            f"D = {str(d)!r}\n"
+            "if sys.argv[1:3] == ['agents', '--json']:\n"
+            "    if os.path.exists(os.path.join(D, 'fails')):\n"
+            "        sys.exit('agents: something broke')\n"
+            "    sys.stdout.write(open(os.path.join(D, 'agents.json')).read())\n")
+        for x in ("tmux", "claude"):
+            (d / "bin" / x).chmod(0o755)
+        p, sock = self.session()
+        row = {"pid": p.pid, "name": "ntA", "status": status, "sessionId": "s-before",
+               **({"waitingFor": waiting} if waiting else {})}
+        (d / "agents.json").write_text(json.dumps([row] if listed else []))
+        (d / "agents-after.json").write_text(json.dumps([{**row, "sessionId": "s-after"}]))
+        if fails:
+            (d / "fails").write_text("")
+        (d / "pane_pid").write_text(str(pane_pid or p.pid))
+        (d / "pane.txt").write_text(self.pane(*(box or [self.RULE, self.BOX_EMPTY, self.RULE])), encoding="utf-8")
+        if typed:
+            (d / "pane-typed.txt").write_text(self.pane(self.RULE, typed, self.RULE), encoding="utf-8")
+        (d / "keys").write_text("" if keys_ago is None else str(keys_ago))
+        env = {"PATH": f"{d / 'bin'}{os.pathsep}{os.environ['PATH']}", "HANSA_CLAUDE": str(d / "bin" / "claude"),
+               "TMUX_PANE": "%7", "TMUX": f"{d}/tmux-socket,1,0", "HANSA_CLEAR_EVERY": "0.3", "HANSA_CLEAR_QUIET": "0"}
+        with unittest.mock.patch.dict(os.environ, env), self.in_session(p, sock):
+            said = self.hansa_out("notify", "on", "--clear-daily", window)
+        key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
+        return said, d, notify.private_dir(self.desk) / f"{key}.log"
+
+    def keys_sent(self, d) -> list:
+        f = d / "calls.jsonl"
+        return [json.loads(x)[3:] for x in f.read_text().splitlines() if json.loads(x)[0] == "send-keys"] \
+            if f.exists() else []
+
+    def held(self, log, why, times=3):
+        """Wait until the follower's log holds the clear back for this reason a few times."""
+        self.soon(lambda: log.exists() and log.read_text().count(f"daily clear held: {why}") >= times)
+
+    def test_daily_clear_types_clear_then_enter_when_the_session_is_idle_and_nobody_types(self):
+        said, d, log = self.clearing(typed=self.BOX_TYPED, keys_ago=200)
+        self.assertIn("hansa types /clear into tmux pane %7", said)
+        self.assertIn("cannot add a hook to a session that is already running", said)
+        self.soon(lambda: "cleared the session (sessionId s-before -> s-after)" in log.read_text())
+        self.assertIn("daily clear held: idle on one reading", log.read_text())  # two readings, then it typed
+        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["Enter"]])
+        self.soon(lambda: re.search(r"daily clear 00-24: cleared at \d\d:\d\d", self.hansa_out("notify")))
+        time.sleep(1.5)  # once a day
+        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["Enter"]])
+
+    def test_daily_clear_types_nothing_unless_claude_agents_shows_the_session_idle(self):
+        for kw, why in (({"status": "busy"}, "the session is 'busy', not idle"),
+                        ({"status": "shell"}, "the session is 'shell', not idle"),
+                        ({"status": "waiting", "waiting": "input needed"}, "the session is 'waiting', not idle"),
+                        ({"status": "idle", "waiting": "input needed"}, "the session waits: input needed"),
+                        ({"listed": False}, "claude agents --json lists no session with pid"),
+                        ({"fails": True}, "claude agents --json ended with 1: agents: something broke")):
+            with self.subTest(**kw):
+                _, d, log = self.clearing(typed=self.BOX_TYPED, **kw)
+                self.held(log, why)
+                self.assertEqual(self.keys_sent(d), [])
+
+    def test_daily_clear_types_only_into_an_empty_input_box(self):
+        _, d, log = self.clearing(box=[self.RULE, '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m', self.RULE],
+                                  typed=self.BOX_TYPED)  # a dimmed placeholder: empty
+        self.soon(lambda: "cleared the session" in log.read_text())
+        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["Enter"]])
+        dialog = ["\x1b[38;5;244m Do you want to make this edit?\x1b[39m",
+                  "\x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m1.\x1b[39m \x1b[38;5;153mYes\x1b[39m",
+                  "  \x1b[38;5;246m2.\x1b[39m No"]
+        for name, box, why in (
+                ("typed text", [self.RULE, "\x1b[39m❯\xa0half-typed words", self.RULE], "there are words in the input box"),
+                ("a dialog", [self.RULE, *dialog], "no input box alone at the bottom of the pane"),
+                ("a box of lines", [self.RULE, "\x1b[39m❯\xa0first line", "  second line", self.RULE],
+                 "no input box alone at the bottom of the pane")):
+            with self.subTest(name):
+                _, d, log = self.clearing(box=box, typed=self.BOX_TYPED)
+                self.held(log, why)
+                self.assertEqual(self.keys_sent(d), [])
+
+    def test_daily_clear_waits_while_someone_pressed_a_key_lately(self):
+        _, d, log = self.clearing(typed=self.BOX_TYPED, keys_ago=30)
+        self.held(log, "a key was pressed in a terminal on the session's tmux session 30 s ago")
+        self.assertEqual(self.keys_sent(d), [])
+
+    def test_daily_clear_takes_its_clear_back_when_the_box_reads_more_than_that(self):
+        _, d, log = self.clearing(typed="\x1b[39m❯\xa0half-typed words\x1b[38;5;153m/clear\x1b[39m")
+        self.soon(lambda: "the /clear was taken back" in log.read_text())
+        self.held(log, "there are words in the input box", 2)  # the next checks find the words and wait
+        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["BSpace"] * 6])
+
+    def test_daily_clear_types_nothing_outside_its_window_or_outside_the_sessions_pane(self):
+        h = time.localtime().tm_hour
+        said, d, log = self.clearing(typed=self.BOX_TYPED, window=f"{(h + 2) % 24:02d}-{(h + 3) % 24:02d}")
+        self.soon(lambda: f"outside the window {(h + 2) % 24:02d}-" in log.read_text())
+        time.sleep(1)
+        self.assertEqual(self.keys_sent(d), [])
+        said, d, log = self.clearing(typed=self.BOX_TYPED, pane_pid=1)  # the pane runs something else
+        self.assertIn("The daily clear is off: the session (pid ", said)
+        self.soon(lambda: "daily clear 00-24: off: the session" in log.read_text())
+        self.assertRegex(self.hansa_out("notify"), r"daily clear 00-24: off \(the session \(pid \d+\) does not run in")
+        time.sleep(1)
+        self.assertEqual(self.keys_sent(d), [])
 
     def test_notify_on_twice_from_one_session_starts_one_follower(self):
         with self.assertRaises(SystemExit) as e:  # not from a Claude Code session: it says why, starts nothing
@@ -1787,6 +2031,31 @@ class DeskTest(unittest.TestCase):
                            text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)}, timeout=30)
         self.assertEqual(r.stdout.split().count("--messaging-socket-path"), 1)  # the path given is the one followed
         self.soon(lambda: [x for x in notify.records(self.desk) if x["socket"] == str(self.tmp / "mine.sock")])
+
+    def test_coordinator_takes_clear_daily_for_itself_and_gives_the_session_a_hook_after_a_clear(self):
+        show = self.tmp / "argv-claude"  # the session: its options, one per line
+        show.write_text("#!/bin/sh\nfor x in \"$@\"; do echo \"$x\"; done\nsleep 1\n")
+        show.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "coordinator", "--clear-daily", "04-09", "--permission-mode", "dontAsk"], capture_output=True,
+                           text=True, env={**env, "HANSA_CLAUDE": str(show)}, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = r.stdout.splitlines()
+        self.assertNotIn("--clear-daily", argv)
+        self.assertNotIn("04-09", argv)
+        self.assertIn("dontAsk", argv)
+        self.assertIn("The daily clear is off: the session does not run in tmux", r.stderr)  # notices still go out
+        hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["SessionStart"][0]
+        self.assertEqual(hook["matcher"], "clear")
+        code = Path(__file__).resolve().parent.parent
+        self.assertEqual(shlex.split(hook["hooks"][0]["command"]),
+                         [str(code / "bin" / "hansa"), "--desk", str(self.desk.root), "status"])  # hansa's own code
+        rec = self.soon(lambda: [x for x in notify.records(self.desk) if (x.get("clear") or {}).get("window") == "04-09"])
+        self.assertIn("does not run in tmux", rec[0]["clear"]["off"])
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "coordinator", "--clear-daily", "9am"])
+        self.assertIn("such as 04-09", str(e.exception.code))
 
     # -- a Linux server: the desk belongs to an account, the coordinator is root ---------------------
     # Tests cannot run as root, so the lookups that decide it are replaced: hansa "runs as root" on
