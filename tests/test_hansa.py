@@ -544,6 +544,18 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(pids_with_arg(word), [p.pid])
         self.assertEqual(pids_with_arg(f"HANSA_TEST_WORD={word}"), [])  # the same word, in its environment
 
+    def test_off_macos_an_unreadable_proc_gives_an_unknown_start_and_state(self):
+        import ctypes
+        from hansa import run
+        p = self.sleeper()
+        with unittest.mock.patch.object(run, "_ON_MAC", False), \
+                unittest.mock.patch.object(Path, "read_text", side_effect=OSError("gone")), \
+                unittest.mock.patch.object(run, "_sysctl", side_effect=AssertionError("sysctl off macOS")):
+            self.assertEqual(run.proc_start(p.pid), "")
+            self.assertEqual(run._state(p.pid), "")
+        with unittest.mock.patch.object(ctypes, "CDLL", return_value=object()):  # a libc without sysctl
+            self.assertIsNone(run._sysctl(1, 14, 1, p.pid))
+
     def test_the_lane_setup_runs_before_every_task_without_provider_keys(self):
         trace = self.tmp / "setup-trace.txt"
         s = self.desk.settings()

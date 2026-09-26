@@ -424,23 +424,30 @@ _KINFO_PROC_SIZE, _SZOMB = 648, 5
 _MAC_STATES = {1: "I", 2: "R", 3: "S", 4: "T", _SZOMB: "Z"}
 
 
+_ON_MAC = sys.platform == "darwin"
+
+
 def _sysctl(*mib: int, slack: int = 0):
-    """What sysctl gives for this name, or None when it cannot be read."""
-    import ctypes
-    import ctypes.util
+    """What sysctl gives for this name, or None when it cannot be read (also where libc has no
+    sysctl, as glibc 2.32 and later)."""
+    try:
+        import ctypes
+        import ctypes.util
+    except ImportError:
+        return None
     try:
         libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-    except OSError:
+        name = (ctypes.c_int * len(mib))(*mib)
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(name, len(mib), None, ctypes.byref(size), None, 0) != 0:
+            return None
+        size.value += slack  # room for a list that grows between the two calls
+        buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(name, len(mib), buf, ctypes.byref(size), None, 0) != 0:
+            return None
+        return buf.raw[:size.value]
+    except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError):
         return None
-    name = (ctypes.c_int * len(mib))(*mib)
-    size = ctypes.c_size_t(0)
-    if libc.sysctl(name, len(mib), None, ctypes.byref(size), None, 0) != 0:
-        return None
-    size.value += slack  # room for a list that grows between the two calls
-    buf = ctypes.create_string_buffer(size.value)
-    if libc.sysctl(name, len(mib), buf, ctypes.byref(size), None, 0) != 0:
-        return None
-    return buf.raw[:size.value]
 
 
 def _mac_procs(*mib: int) -> list:
@@ -952,7 +959,7 @@ def proc_start(pid) -> str:
         return boot + ":" + Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         pass
-    return _mac_start(pid)
+    return _mac_start(pid) if _ON_MAC else ""
 
 
 def alive(pid, start: str = "") -> bool:
@@ -975,7 +982,7 @@ def _state(pid) -> str:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
     except (OSError, IndexError):
         pass
-    return _mac_state(pid)
+    return _mac_state(pid) if _ON_MAC else ""
 
 
 def has_ended(proc) -> bool:
