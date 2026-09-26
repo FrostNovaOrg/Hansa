@@ -113,6 +113,10 @@ if os.environ.get("FAKE_WRITE_BINARY"):
 if os.environ.get("FAKE_LEAVE_CHILD"):  # something it started and left running, in its process group
     c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     open(os.environ["FAKE_LEAVE_CHILD"], "w").write(str(c.pid))
+if os.environ.get("FAKE_LEAVE_DETACHED"):  # the same, in a session of its own: out of hansa's process group
+    c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "left-behind"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    open(os.environ["FAKE_LEAVE_DETACHED"], "w").write(str(c.pid))
 if os.environ.get("FAKE_WRITE"):
     open("notes.txt", "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git folder with a hook of its own
@@ -401,6 +405,47 @@ class DeskTest(unittest.TestCase):
         while alive(child) and time.time() < end:
             time.sleep(0.1)
         self.assertFalse(alive(child))
+
+    def leave_detached(self):
+        """Have the stand-in worker leave a process running in a session of its own; the file that gets its pid."""
+        from hansa.run import alive
+        pidfile = self.tmp / "detached.pid"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_LEAVE_DETACHED": str(pidfile)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.addCleanup(lambda: pidfile.exists() and alive(int(pidfile.read_text())) and
+                        os.kill(int(pidfile.read_text()), 9))
+        return pidfile
+
+    def test_what_a_worker_leaves_running_in_a_session_of_its_own_is_stopped_and_listed(self):
+        from hansa.run import alive
+        pidfile = self.leave_detached()
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        child = int(pidfile.read_text())
+        self.assertFalse(alive(child))  # stopped before the task was recorded as ended
+        [x] = m["left_running"]
+        self.assertEqual(x["pid"], child)
+        self.assertIn("python", x["command"].lower())
+        self.assertLessEqual(len(x["command"]), 120)
+        self.assertIn(f"pid {child}: ", views.show_text(self.desk, tid))
+        [e] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+               if e["event"] == "left_running_stopped"]
+        self.assertEqual((e["task"], len(e["processes"])), (tid, 1))
+
+    def test_a_process_naming_another_task_or_only_like_this_one_is_left_alone(self):
+        from hansa.run import task_processes
+        pidfile = self.leave_detached()
+        tid = self.desk.new_task("Add hello.txt")
+        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        others = [self.sleeper(env={**bare, "HANSA_TASK": "t9999"}),
+                  self.sleeper(env={**bare, "HANSA_TASK": tid + "0"}),
+                  self.sleeper(env={**bare, "OLD_HANSA_TASK": tid, "HANSA_TASKS": tid})]
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
+        self.assertEqual([p.poll() for p in others], [None, None, None])
+        self.assertEqual([p for p, _ in task_processes("t9999")], [others[0].pid])  # found, when it is that task's
 
     def test_git_behind_a_wrapper_is_still_git(self):
         from hansa.run import lane_allow
@@ -1943,6 +1988,17 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", m["id"]])
         main(["--desk", str(self.desk.root), "merge", m["id"], "--despite-check"])
         self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
+
+    def test_the_check_runs_to_its_end_and_what_the_worker_left_running_is_stopped_after_it(self):
+        from hansa.run import alive
+        pidfile = self.leave_detached()
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = "sleep 1; test -f hello.txt"
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+        self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
+        self.assertFalse(alive(int(pidfile.read_text())))
 
     def test_a_check_that_fails_printing_nothing_says_nothing_came_out(self):
         s = self.desk.settings()
