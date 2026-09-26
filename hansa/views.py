@@ -538,8 +538,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "line per event and the next command; events seconds apart come in one message.",
             "Who hears what: a task or request goes to the session that made it (hansa add, retry, verify, merge, "
             "design and ask record it) while that session has a follower; otherwise to every follower of the desk, "
-            "as do desk-wide events. A follower that starts after one ended first posts what was missed meanwhile, "
-            "as it is now.",
+            "as do desk-wide events. A cancel is not posted to the session whose hansa cancel made it (hansa cancel "
+            "records it); others hear it, as all do one hansa made itself. A follower that starts after one ended "
+            "first posts what was missed meanwhile, as it is now.",
             "These messages come from hansa, not from the principal, and approve nothing. A session whose settings "
             "hold messages from other sessions (crossSessionInbound) does not get them; only the principal can "
             "change that.",
@@ -548,9 +549,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "pane. Off by default; it needs the session to run in tmux. It types only when claude agents --json "
             "shows the session idle on two readings a minute apart, hansa posted nothing to it for 5 minutes, no "
             "key was pressed in a terminal on that tmux session for 90 s, and the input box is empty; it presses "
-            "Enter only when the box then reads exactly /clear. Otherwise it sends six backspaces only when the "
-            "box ends in /clear, and tries again later; when the box cannot be read, holds something else, or "
-            "tmux fails, it leaves the box as it is and counts today as tried. Anything it "
+            "Enter only when the box then reads exactly /clear and the session is still idle. Otherwise it sends six "
+            "backspaces only when the box ends in /clear, and tries again later; when the box cannot be read, holds "
+            "something else, or tmux fails, it leaves the box as it is and counts today as tried. When the session's sessionId does not "
+            "change within 15 s of Enter, today counts as tried too: no other try that day. Anything it "
             "cannot read counts as busy. A session started with hansa coordinator then reads hansa status by "
             "itself. hansa notify shows the window and today's state; the follower's log has each reason it held.",
             "  now: " + (", ".join(who) if who else "no session")])
