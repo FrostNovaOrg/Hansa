@@ -926,7 +926,8 @@ def publish(desk: Desk, tid: str, *names: str) -> None:
 # macOS has no /proc, and Claude Code's sandbox there will not start ps: these ask the kernel with
 # sysctl instead. A struct kinfo_proc is 648 bytes; at offset 0 is its start time (a timeval: a long
 # of seconds, then an int of microseconds at 8), at 36 its state p_stat (a char), at 40 its pid, and
-# at 392 its real user id. The sandbox refuses a list by user (KERN_PROC_UID), not the full list.
+# at 392 its real user id, at 420 its effective user id (e_ucred.cr_uid). The sandbox refuses a list by
+# user (KERN_PROC_UID), not the full list.
 _CTL_KERN, _KERN_PROC, _KERN_PROCARGS2 = 1, 14, 49
 _KERN_PROC_ALL, _KERN_PROC_PID, _KERN_PROC_PGRP = 0, 1, 2
 _KINFO_PROC_SIZE, _SZOMB = 648, 5
@@ -1026,11 +1027,13 @@ def _may_lead(pid: int) -> bool:
         return True
 
 
-def _mac_pids_with_arg(token: str) -> list:
+def _mac_pids_with_arg(token: str, since=None) -> list:
     """As pids_with_arg. A process of this account whose arguments cannot be read is read again a few
     times; one that still cannot be, and leads its own process group as hansa's processes do, may be
-    the one looked for: CannotLook. (One that does not lead its group is not: some of the account's
-    processes never let their arguments be read.)"""
+    the one looked for: CannotLook. Not read at all: one that started before `since` (the launch word
+    was made then), and one whose effective user is not its real user (a setuid program such as sudo,
+    which hansa never starts, and whose arguments cannot be read). (One that does not lead its group
+    is not the one looked for either: some of the account's processes never let their arguments be read.)"""
     for i in range(LOOK_TRIES):
         data = _sysctl(_CTL_KERN, _KERN_PROC, _KERN_PROC_ALL, 0, slack=_KINFO_PROC_SIZE * 16)
         if data:
@@ -1042,7 +1045,10 @@ def _mac_pids_with_arg(token: str) -> list:
     for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
         k = data[i:i + _KINFO_PROC_SIZE]
         pid = struct.unpack_from("@i", k, 40)[0]
-        if pid <= 0 or k[36] == _SZOMB or struct.unpack_from("@I", k, 392)[0] != os.getuid():
+        if pid <= 0 or k[36] == _SZOMB or struct.unpack_from("@I", k, 392)[0] != os.getuid() or \
+                struct.unpack_from("@I", k, 420)[0] != os.getuid():
+            continue
+        if since and struct.unpack_from("@l", k, 0)[0] < since - 2:  # 2 s for the rounding of both clocks
             continue
         got = _mac_procargs(pid)
         if got is None:
@@ -1066,10 +1072,11 @@ def _mac_pids_with_arg(token: str) -> list:
     return found
 
 
-def pids_with_arg(token: str) -> list:
+def pids_with_arg(token: str, since=None) -> list:
     """Processes whose command line holds this word: hansa puts one on each process it starts, so a
-    restarted server can find one whose number it never recorded. CannotLook when the process list
-    cannot be read: not the same as an empty list, which says the word is on no process."""
+    restarted server can find one whose number it never recorded; `since`, when given, is the time
+    the word was made, and no older process is looked at. CannotLook when the process list cannot be
+    read: not the same as an empty list, which says the word is on no process."""
     if not token:
         return []
     found = []
@@ -1085,7 +1092,7 @@ def pids_with_arg(token: str) -> list:
             except OSError:
                 pass
     else:
-        found = _mac_pids_with_arg(token)
+        found = _mac_pids_with_arg(token, since)
     return [p for p in found if p != os.getpid()]
 
 
@@ -2161,12 +2168,12 @@ class Dispatcher:
         else:
             finish(self.desk, tid, returncode)
 
-    def look(self, tid: str, launch: str, since, what: str):
-        """The process an earlier server started with this launch word: (pid or None, None) when hansa
-        could look; (None, since) when it could not, with since the time it first could not, which the
-        caller keeps. Each time it could not is in the event log."""
+    def look(self, tid: str, launch: str, launched, since, what: str):
+        """The process an earlier server started with this launch word, made at the time `launched`:
+        (pid or None, None) when hansa could look; (None, since) when it could not, with since the time
+        it first could not, which the caller keeps. Each time it could not is in the event log."""
         try:
-            return leader(pids_with_arg(launch)), None
+            return leader(pids_with_arg(launch, launched)), None
         except CannotLook as e:
             since = since or now()
             self.desk.event("process_lookup_failed", task=tid, looking_for=what, error=str(e),
@@ -2184,7 +2191,8 @@ class Dispatcher:
         """A task an earlier server claimed but did not record as started: a worker it did start
         is taken over; otherwise the task goes back to the queue, or ends there if cancelled. While
         hansa cannot look for that worker, the task stays as it is, and fails after LOOK_LIMIT."""
-        found, since = self.look(m["id"], m.get("launch", ""), m.get("lookup_failing_since"), "worker") \
+        found, since = self.look(m["id"], m.get("launch", ""), m.get("started"), m.get("lookup_failing_since"),
+                                  "worker") \
             if m.get("kind") != "design" else (None, None)
         if since:
             why = self.gave_up(since)
@@ -2212,7 +2220,8 @@ class Dispatcher:
         """Run the lane's check on a task whose worker is done: or take over the one an earlier
         server started, or finish the one it left finished."""
         desk, tid = self.desk, m["id"]
-        found, since = self.look(tid, m.get("launch", ""), m.get("lookup_failing_since"), "check")
+        found, since = self.look(tid, m.get("launch", ""), m.get("check_started"), m.get("lookup_failing_since"),
+                                "check")
         if since:  # not run a second time beside one that may still run: looked for again next tick
             why = self.gave_up(since)
             desk.change(tid, lambda x: None if x["state"] != "running" or x.get("phase") != "checking" or x.get("pid")
@@ -2272,7 +2281,8 @@ class Dispatcher:
             mc = m.get("merge_check") or {}
             if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
                 continue
-            found, since = self.look(m["id"], mc.get("launch", ""), mc.get("lookup_failing_since"), "merge check")
+            found, since = self.look(m["id"], mc.get("launch", ""), mc.get("started"),
+                                     mc.get("lookup_failing_since"), "merge check")
             if since and mc.get("phase") == "starting":  # not started a second time: looked for again next tick
                 why = self.gave_up(since)
                 if why:

@@ -7,6 +7,7 @@ import re
 import shlex
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -345,10 +346,11 @@ class DeskTest(unittest.TestCase):
     def orphan_starting(self, **fields):
         """A worker an earlier server started, and a task it left in `starting`: (task, worker)."""
         token = f"hansa-launch-test-{uuid.uuid4().hex[:8]}"  # another suite running meanwhile has its own
+        claimed = time.time()  # as a server claims a task before it starts the worker
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
         self.addCleanup(lambda: orphan.poll() is None and (orphan.kill(), orphan.wait()))
         tid = self.desk.new_task("Add hello.txt")
-        self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=time.time(),
+        self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=claimed,
                          pid=None, launch=token, **fields)
         return tid, orphan
 
@@ -418,6 +420,54 @@ class DeskTest(unittest.TestCase):
                 unittest.mock.patch.object(run.time, "sleep"), self.assertRaises(run.CannotLook):
             run.pids_with_arg(self.desk.meta(tid)["launch"])
         self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
+
+    def unreadable_beside(self, change):
+        """On macOS: a worker left in `starting`, and beside it a process of this account that leads its
+        own group and never lets its arguments be read, whose kinfo_proc record `change` alters as it is
+        read: (launch word, claim time, worker)."""
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        other = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        tid, orphan = self.orphan_starting()
+        real_sysctl, real_args = run._sysctl, run._mac_procargs
+
+        def sysctl(*mib, **kw):
+            data = real_sysctl(*mib, **kw)
+            if data and mib[1:3] == (run._KERN_PROC, run._KERN_PROC_ALL):
+                size, recs = run._KINFO_PROC_SIZE, bytearray(data)
+                for i in range(0, len(recs) - size + 1, size):
+                    if struct.unpack_from("@i", recs, i + 40)[0] == other.pid:
+                        change(recs, i)
+                data = bytes(recs)
+            return data
+        patches = [unittest.mock.patch.object(run, "_sysctl", side_effect=sysctl),
+                   unittest.mock.patch.object(run, "_mac_procargs", side_effect=lambda p: None if p == other.pid else real_args(p)),
+                   unittest.mock.patch.object(run.time, "sleep")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        m = self.desk.meta(tid)
+        return m["launch"], m["started"], orphan
+
+    def test_an_unreadable_process_older_than_the_claim_does_not_stop_the_lookup(self):
+        from hansa import run
+        token, claimed, orphan = self.unreadable_beside(lambda recs, i: struct.pack_into("@l", recs, i, int(claimed) - 60))
+        with self.assertRaises(run.CannotLook):  # were it as new as the claim, it might be the worker
+            run.pids_with_arg(token)
+        self.assertEqual(run.pids_with_arg(token, claimed), [orphan.pid])
+
+    def test_an_unreadable_setuid_process_does_not_stop_the_lookup(self):
+        from hansa import run
+        token, claimed, orphan = self.unreadable_beside(lambda recs, i: struct.pack_into("@I", recs, i + 420, 0))
+        self.assertEqual(run.pids_with_arg(token, claimed), [orphan.pid])  # root as its effective user: sudo, say
+
+    def test_an_unreadable_process_as_new_as_the_claim_still_stops_the_lookup(self):
+        from hansa import run
+        token, claimed, orphan = self.unreadable_beside(lambda recs, i: None)
+        with self.assertRaises(run.CannotLook):
+            run.pids_with_arg(token, claimed)
 
     def test_a_check_an_earlier_server_finished_is_not_run_again(self):
         marker = self.tmp / "checked"
