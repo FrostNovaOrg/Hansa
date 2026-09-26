@@ -42,7 +42,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
-| `hansa concurrency [N]` | show, or set, how many tasks run at once |
+| `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
 | `hansa ask "<request>"` | put a request on the principal's page |
 | `hansa help` | this card |
@@ -226,11 +226,20 @@ here; work that needs code changed or a browser goes to a worker.
   (preview), the one that installs dependencies before each task (setup), and
   its limits of turns and minutes) and how many tasks run at once. hansa checks
   each change as it checks the principal's; a change it refuses changes nothing.
+- How work spreads over lanes: a lane runs one task at a time, and each lane has
+  its own full worktree, so each lane takes the repository's disk space again.
+  To run several tasks at once, add lanes on the same repository and base;
+  `hansa concurrency` caps how many run in all. A lane's provider order decides
+  which provider does its tasks, so to split work among providers, give each
+  its own lane.
 - A lane's setup, check and preview run outside the worker: hansa runs them
   itself, not a worker's or a design session's rules. The setup and
   check run in the lane's sandbox (its network and write lists apply); the
   preview does not. So each change to them is recorded, and you tell the
-  principal in the conversation what you changed and why.
+  principal in the conversation what you changed and why. The setup and check
+  run with `/bin/sh -c`: POSIX shell only, no bash syntax (`[[ ]]`, arrays,
+  `source`). The preview is started by a design session's Bash tool; write it
+  the same way.
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
   lane's setup and check. Before each setup or check, hansa looks for it on the
   lane's own PATH first (a PATH in the lane's env, else the server's), then on

@@ -2,6 +2,7 @@
 Each view returns plain data; the *_text helpers turn it into short lines."""
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -217,8 +218,11 @@ def status_text(st: dict) -> str:
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out.append("lanes:")
-    for ln in st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]:
-        out.append(f"  {ln['name']:<8} {' > '.join(ln['providers']):<24} {ln['task'] or ('held by a try (hansa lane try)' if ln.get('trying') else 'free')}")
+    lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
+    wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
+    for ln in lanes:
+        out.append(f"  {ln['name']:<{wn}}  {' > '.join(ln['providers']):<{wp}}  "
+                   + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else "free")))
     if st["running"]:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
@@ -259,8 +263,9 @@ def status_text(st: dict) -> str:
         out.append("failed (latest):")
         out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
     out.append("providers:")
+    wn, wm = (max((len(p[k]) for p in st["providers"]), default=0) for k in ("name", "model"))
     for p in st["providers"]:
-        out.append(f"  {p['name']:<8} {p['kind']:<12} {p['model']:<22} {p['problem'] or 'ready'}")
+        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {p['problem'] or 'ready'}")
     if st["asks"]:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" for a in st["asks"]]
@@ -461,6 +466,32 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     return "\n".join(out)
 
 
+def lane_origin(desk: Desk, name: str) -> str:
+    """Which command made the lane, and which last changed it, as the event log has them."""
+    made, last = "", ""
+    try:
+        lines = desk.events_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        if f'"{name}"' not in line:  # most lines are about something else: not parsed
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("lane") != name:
+            continue
+        if e.get("event") == "lane_set" and not last:
+            last = f"hansa lane set {name} {e.get('field', '')}".strip()
+        elif e.get("event") in ("lane_added", "desk_created"):
+            made = "hansa lane add" if e["event"] == "lane_added" else "hansa init"
+            break
+    if not made and not last:  # a desk from before hansa recorded either
+        return "set by the coordinator with hansa lane add or hansa lane set"
+    return "; ".join(x for x in (made and f"made with {made}", last and f"last changed with {last}") if x)
+
+
 def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
     s = desk.settings()
     if what == "lane":
@@ -470,7 +501,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         wt = desk.worktrees_dir / name
         brief = desk.lanes_dir / name / "brief.md"
         return "\n".join([
-            f"lane {name} (set by the coordinator with hansa lane set, not by the principal on the web page)",
+            f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             f"  read them with hansa git {name} log|show|diff|grep ... (--worktree: the worktree), git commands that"
             " read only, run as the desk's account",

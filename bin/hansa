@@ -1,4 +1,9 @@
 #!/bin/sh
-# hansa: run the desk CLI from this checkout.
+# hansa: run the desk CLI from this checkout, whatever the current directory. `python3 -m` would put the
+# current directory first on Python's path, so a hansa package there (another checkout) would run instead;
+# here this checkout's folder takes that place. Python 3.9 has no -P or PYTHONSAFEPATH to do it.
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m hansa "$@"
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -c '
+import runpy, sys
+sys.path[0] = sys.argv.pop(1)
+runpy.run_module("hansa", run_name="__main__", alter_sys=True)' "$HERE" "$@"

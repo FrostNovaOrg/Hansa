@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -670,10 +671,17 @@ def cmd_serve(a):
     if not held:
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
-    start_web(desk, a.host, a.port)
+    try:
+        port = start_web(desk, a.host, a.port).server_address[1]
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
+                         f"server on a free port with hansa serve --port N (hansa web then finds it)")
+    (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
     d = Dispatcher(desk)
-    desk.event("server_started", port=a.port)
-    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{a.port} (run `hansa web` for the address)", flush=True)
+    desk.event("server_started", port=port)
+    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port} (run `hansa web` for the address)", flush=True)
     srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks
     desk.event("srt_tried", found=srt.get("found"), path=srt.get("path"), ran=srt.get("ran"), said=srt.get("said"))
     problem = views.srt_problem(desk, desk.settings())
@@ -691,11 +699,19 @@ def cmd_serve(a):
         desk.event("server_stopped")
 
 
+def web_port(desk: Desk) -> int:
+    """The port this desk's hansa serve last served the page on: another desk's server may hold the default."""
+    try:
+        return int((desk.state_dir / "web-port").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 8765
+
+
 def cmd_web(a):
     if os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK"):
         raise SystemExit("hansa: the web page is for the principal; agents use the other commands")
     desk = Desk.find(a.desk)
-    print(f"Open http://127.0.0.1:{a.port}/?t={desk.web_token()}", flush=True)
+    print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/?t={desk.web_token()}", flush=True)
     print("Keep this window open while you use the page; close it or press Ctrl+C when you are done.", flush=True)
     # This holds an ssh tunnel to the page open. Its input ends when the connection does (a closed
     # window, a laptop gone to sleep), and then it ends too instead of staying on the server.
@@ -799,8 +815,9 @@ def _notified(desk: Desk, rest: list, clear: str = "") -> list:
         sock = given or notify.socket_path(os.getpid())
         if clear:  # the follower finds the same; said here, before the session takes the screen
             print(f"hansa: {notify.clear_said(os.getpid(), clear)}", file=sys.stderr)
-        notify.start(desk, {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}, sock, "coordinator",
-                     wait=False, clear=clear)
+        # no name of hansa's own: the session is named by its pid until Claude Code gives it one (notify.who)
+        notify.start(desk, {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}, sock, wait=False,
+                     clear=clear)
     except (OSError, RuntimeError) as e:
         print(f"hansa: this session will not hear from hansa by itself ({e}); run hansa wait in the background, "
               f"or hansa notify on from the session", file=sys.stderr)
@@ -918,6 +935,7 @@ def cmd_lane(a):
             new["lanes"][a.name] = ln = default_lane(repo, base, providers)
             ln.update({k: v for k, v in (("check", a.check), ("setup", a.setup), ("allow", a.allow)) if v})
             _save(desk, new)
+            desk.event("lane_added", lane=a.name)
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
             if not brief.exists():
@@ -971,6 +989,7 @@ def cmd_lane(a):
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
         new["lanes"][a.name][a.field] = value
         _save(desk, new)
+        desk.event("lane_set", lane=a.name, field=a.field)
     print(f"lane {a.name} {a.field}: {_shown(old)} -> {_shown(value)}")
     if a.field in OUTSIDE_WORKER and old != value:
         desk.event("lane_command_changed", lane=a.name, field=a.field, old=old, new=value)
@@ -1191,13 +1210,19 @@ def main(argv=None):
     p.add_argument("name", nargs="?")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
     lane = p.add_subparsers(dest="action", metavar="add | set | brief | remove | try")
-    q = lane.add_parser("add", help="a new lane on a git checkout")
+    q = lane.add_parser("add", help="a new lane on a git checkout", description=(
+        "A new lane on a git checkout. A lane runs one task at a time, in its own full worktree (the repository's "
+        "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
+        "concurrency in all, and to split work among providers give each its own lane with its provider order. "
+        "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax; so write its preview "
+        "(started by a design session's Bash tool) the same way."))
     q.add_argument("name")
     q.add_argument("--repo", required=True, help="the git checkout the lane works on")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
-    q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved")
-    q.add_argument("--setup", help="the command that installs dependencies before each task")
+    q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
+                   "(/bin/sh -c)")
+    q.add_argument("--setup", help="the command that installs dependencies before each task (/bin/sh -c)")
     q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
                    "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
     q = lane.add_parser("set", help="change one field of a lane", description=(
@@ -1230,10 +1255,11 @@ def main(argv=None):
     p.add_argument("provider", nargs="?")
     p = add("serve", cmd_serve, "run the dispatcher and the web page (keep it running)")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--port", type=int, default=8765, help="the web page's port (default 8765); another desk's server "
+                   "on this machine needs another one")
     p.add_argument("--every", type=float, default=3.0, help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--port", type=int, help="default: the port this desk's hansa serve serves the page on")
     add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
         "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "
         "window of hours, local time, when it is idle and nobody is typing (it needs tmux)")
