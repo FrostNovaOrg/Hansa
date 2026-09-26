@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -215,7 +216,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
                 return f"{st['reason']}; saving a new key brings it back, or `hansa check {name}` once it arrives"
             # start Claude Code exactly as the worker does: on macOS a login made with
             # CLAUDE_CONFIG_DIR set, even to ~/.claude, may land in another keychain entry
-            login = f"CLAUDE_CONFIG_DIR={p['config_dir']} claude" if p.get("config_dir") else "claude"
+            login = f"CLAUDE_CONFIG_DIR={shlex.quote(p['config_dir'])} claude" if p.get("config_dir") else "claude"
             return f"{st['reason']}; log in with `{login}`, then `hansa check {name}` brings it back"
         return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
     return ""

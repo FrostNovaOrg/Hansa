@@ -137,6 +137,9 @@ def validate(s: dict) -> list:
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
             p.append(f"{at}: the endpoint address must start with https://")
+        cdir = pv.get("config_dir", "")
+        if cdir and not str(cdir).startswith("/"):  # nothing expands ~ for a worker
+            p.append(f"{at}: config_dir must be a full path starting with /")
 
     lanes = s.get("lanes")
     if not isinstance(lanes, dict):
