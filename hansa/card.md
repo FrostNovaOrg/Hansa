@@ -26,8 +26,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `hansa show <id>` | report, changed files, refused commands, usage, and what to do next |
 | `hansa diff <id> [--stat]` | the task branch against its base |
-| `hansa merge <id> [--despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below) |
-| `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Options may come before or after the note |
+| `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
+| `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `hansa verify <id> ["what to look at"] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged |
 | `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |
@@ -82,8 +82,13 @@ task needs it (then add it with `hansa lane set L allow ...`) or should be rewri
 A command the worker says was refused, or a network call that failed, is usually
 the sandbox doing its job: fix it in the task (ask for less, or leave the
 download to the setup) or in the lane, never by switching the sandbox off. A failed check shows its last
-lines; send the task back with `hansa retry`, or, if the failure is not the
-task's doing, merge with `--despite-check` and say why. If the lane's setup
+lines; send the task back with `hansa retry`. A check that "could not run" never
+ran: the machine could not start `srt`, and the task is not judged on it; a check
+that failed printing nothing at all usually could not start either. That is the
+machine's problem, not the task's (`hansa explain server` says what the server
+sees and how to fix it); once it is fixed, `hansa merge <id> --recheck` runs the
+check again and merges if it passes. Merge with `--despite-check` only when the
+failure is not the task's doing and cannot be run again, and say why. If the lane's setup
 command failed, the worker never started: `hansa show` has the setup's last lines;
 fix the command with `hansa lane set L setup "<command>"` (and tell the principal,
 as below), then `hansa retry` the task.
@@ -117,6 +122,11 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   move it stops and says so. `hansa cancel <id>` stops a merge check and puts
   the task back in review. `--despite-check` merges at once without it
   (recorded).
+- `hansa merge <id> --recheck` goes the same way whether or not the base has
+  moved: the task merged onto the base's tip, the lane's setup and check run
+  there when the lane is free, and exactly that merged if the check passes. Use
+  it for a task whose check failed or could not run for the machine's sake, once
+  that is fixed. The event log records that the check was run again, and by whom.
 - A conflict lists each conflicting file and the lines where the two sides
   meet. Settle it with `hansa retry <id> --update "<how to settle it>"`: the
   follow-up continues from the task's branch with the current base merged in;
@@ -199,8 +209,11 @@ here; work that needs code changed or a browser goes to a worker.
   preview does not. So each change to them is recorded, and you tell the
   principal in the conversation what you changed and why.
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
-  lane's setup and check. Without it a task in a lane that has either fails,
-  and `hansa status` says so; you may install it.
+  lane's setup and check, found on the PATH of `hansa serve` together with node
+  (srt is a node script). The server tries it when it starts and before each
+  setup or check; `hansa status` reports what the server saw. When it cannot run,
+  a task's setup fails it before its worker starts, and its check reads "could
+  not run" without judging the task; you may install srt.
 - A lane's network list (`hansa lane set L network HOST ...`, such as
   `registry.npmjs.org`, `*.pypi.org` or `localhost`) is what its workers may
   reach during a task, and what its setup and check may reach. Add a host only
