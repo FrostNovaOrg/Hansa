@@ -7,8 +7,8 @@ from pathlib import Path
 
 from . import build, cost
 from .desk import Desk, is_git_rule, read_json
-from .run import (join_command, lane_occupied, progress_of, provider_problem, server_up, srt_needed, srt_problem,
-                  srt_record, waiting_reason)
+from .run import (join_command, lane_occupied, markers_text, progress_of, provider_problem, server_up, srt_needed,
+                  srt_problem, srt_record, waiting_reason)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -55,6 +55,12 @@ def _mins(since) -> int:
     return int((time.time() - (since or time.time())) // 60)
 
 
+def merge_check_busy_with(desk: Desk, m: dict, tasks: list | None = None):
+    """The task that holds the lane a merging task's check waits for; None when the lane is free."""
+    return next((x["id"] for x in (tasks if tasks is not None else desk.tasks())
+                 if x.get("lane") == m.get("lane") and lane_occupied(x) and x["id"] != m["id"]), None)
+
+
 def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
     """Where a merging task's merge check is, in one line."""
     mc = m.get("merge_check") or {}
@@ -65,9 +71,8 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
         return (f"merge check running for {_mins(mc.get('started'))} min{again}: {m['id']} merged onto {base} at "
                 f"{mc.get('onto', '')[:10]}, then " + ("the lane's setup and " if mc.get("setup") else "")
                 + f"check: {mc.get('command', '')}")
-    other = [x["id"] for x in (tasks if tasks is not None else desk.tasks())
-             if x.get("lane") == lane and lane_occupied(x) and x["id"] != m["id"]]
-    return (f"merge check queued{again}: " + (f"waits for lane {lane}, busy with {other[0]}" if other
+    other = merge_check_busy_with(desk, m, tasks)
+    return (f"merge check queued{again}: " + (f"waits for lane {lane}, busy with {other}" if other
                                               else "starts when `hansa serve` next looks (within seconds)"
                                               if server_up(desk) else "`hansa serve` is not running"))
 
@@ -153,9 +158,13 @@ def status(desk: Desk) -> dict:
                     "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
         "merging": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
+                     "minutes": _mins((m.get("merge_check") or {}).get("started")),
+                     "busy_with": merge_check_busy_with(desk, m, tasks),
+                     "again": bool((m.get("merge_check") or {}).get("moves")),
                      "where": merge_check_text(desk, m, tasks)} for m in merging],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),
                     "commits": m.get("commits", 0), "denied": len(m.get("denials", [])), "leaked": m.get("leaked", []),
+                    "markers": sorted(m.get("markers") or {}),
                     "check": None if not m.get("check") else m["check"]["ok"],
                     "check_could_not_run": bool((m.get("check") or {}).get("could_not_run")), "verify": verification(desk, m),
                     "merge_check": (m.get("merge_check_result") or {}).get("ok"),
@@ -211,6 +220,8 @@ def status_text(st: dict) -> str:
                 + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
                 + (f"; {m['denied']} command(s) refused" if m["denied"] else "")
                 + (f"; holds the key of {', '.join(m['leaked'])}: cannot be merged" if m.get("leaked") else "")
+                + (f"; holds conflict markers in {', '.join(m['markers'])}: cannot be merged"
+                   if m.get("markers") else "")
                 + "]" for m in st["review"]]
     if st["failed"]:
         out.append("failed (latest):")
@@ -267,6 +278,9 @@ def show_text(desk: Desk, tid: str) -> str:
         out += ["  " + f for f in m.get("files", [])[:30]]
     if m.get("leaked"):
         out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so hansa will not merge it")
+    if m.get("markers"):
+        out.append(f"CONFLICT MARKERS IN THE CHANGE: git's <<<<<<< / ======= / >>>>>>> lines, left from a conflict, "
+                   f"in {markers_text(m['markers'])}; hansa will not merge it until they are settled")
     if m.get("setup_exit") is not None and (d / "setup.log").exists():
         tail = (d / "setup.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
         out += [f"setup (the lane's command that installs dependencies) failed with exit {m['setup_exit']}; "
@@ -344,6 +358,8 @@ def show_text(desk: Desk, tid: str) -> str:
                        f"hansa merge {tid} again (it checks the merge again) · hansa merge {tid} --despite-check")
     nxt["merging"] = (f"hansa wait {tid}: it merges by itself if the check passes, and comes back for review if not "
                       f"· hansa cancel {tid} stops it")
+    if m.get("markers") and m["state"] == "done":
+        nxt["done"] = f"hansa retry {tid} --update \"settle the markers in {', '.join(m['markers'])}\""
     if m.get("leaked") and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
                        f"hansa ask (they may want to change that key) · hansa cancel {tid}")

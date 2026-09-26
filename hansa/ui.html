@@ -88,7 +88,11 @@ const T = ZH ? {
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
-  noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并"
+  noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
+  merging:"正在合并验收（跟基础分支现在的样子合在一起再跑一遍验收，通过就自动合并，不通过就回到待审）", mergeCheck:"合并验收",
+  mcRunning:n => `合并验收已跑了 ${n} 分钟`, mcQueuedBusy:(lane, id) => `合并验收在排队：等线 ${lane} 空出来（现在在做 ${id}）`,
+  mcQueuedSoon:"合并验收在排队：线空着，几秒内开始", mcQueuedNoServer:"合并验收在排队：后台没在运行，开始不了",
+  mcAgain:"（又一次：验收期间基础分支变了）"
 } : {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
@@ -123,7 +127,11 @@ const T = ZH ? {
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
-  noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged"
+  noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
+  merging:"Merging (checked together with the base as it is now; each merges by itself if that passes, and comes back for review if not)", mergeCheck:"Merge check",
+  mcRunning:n => `merge check running for ${n} min`, mcQueuedBusy:(lane, id) => `merge check queued: waits for lane ${lane}, busy with ${id}`,
+  mcQueuedSoon:"merge check queued: starts within seconds", mcQueuedNoServer:"merge check queued: the server is not running",
+  mcAgain:" (again: the base moved while it was checked)"
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
@@ -206,12 +214,17 @@ async function loadStatus() {
     designs.length ? section(T.design, designs) : null,
     st.queued.length ? section(T.queued, table([T.task, T.lane, T.titleCol, T.waiting],
       st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : null,
-    st.review.length ? section(T.review, table([T.task, T.lane, T.titleCol, T.changes, T.checkCol, T.verifyCol, T.refused],
-      st.review.map(m => [taskLink(m.id), m.lane, m.title, [m.stat || T.none, (m.leaked || []).length ? h("span", {class:"bad"}, " · " + T.keyInChange) : null],
+    st.review.length || (st.merging || []).length ? section(T.review, (st.merging || []).length ? [h("h3", {}, T.merging),
+      table([T.task, T.lane, T.titleCol, T.mergeCheck], st.merging.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"},
+        (["starting", "running"].includes(m.phase) ? T.mcRunning(m.minutes) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)
+          : st.server_up ? T.mcQueuedSoon : T.mcQueuedNoServer) + (m.again ? T.mcAgain : ""))]))] : null,
+      st.review.length ? table([T.task, T.lane, T.titleCol, T.changes, T.checkCol, T.verifyCol, T.refused],
+      st.review.map(m => [taskLink(m.id), m.lane, m.title, [m.stat || T.none, (m.leaked || []).length ? h("span", {class:"bad"}, " · " + T.keyInChange) : null,
+        (m.markers || []).length ? h("span", {class:"bad"}, " · " + T.markersInChange) : null],
         m.check_could_not_run ? h("span", {class:"warn"}, T.couldNotRun) : m.check == null ? "—" : h("span", {class: m.check ? "ok" : "bad"}, m.check ? T.passed : T.notPassed),
         !m.verify ? "—" : ["queued", "running"].includes(m.verify.state) ? h("span", {class:"muted"}, T.v_running)
           : h("span", {class: {holds:"ok", "does not hold":"bad"}[m.verify.verdict] || "warn"}, T["v_" + m.verify.verdict] || T.v_none),
-        m.denied ? h("span", {class:"warn"}, m.denied) : "0"]))) : null,
+        m.denied ? h("span", {class:"warn"}, m.denied) : "0"])) : null) : null,
     st.failed.length ? section(T.failed, table([T.task, T.lane, T.titleCol, T.error],
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, m.error)]))) : null,
     st.asks.length ? section(T.asks, st.asks.map(a => {

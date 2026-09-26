@@ -792,6 +792,42 @@ def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
     return desk.keys_in(r.stdout.decode("utf-8", "replace"))
 
 
+MARKER_LINE = re.compile(r"^(.*):(\d+): leftover conflict marker$", re.M)
+
+
+def markers_in_change(cwd, base: str, head: str) -> dict:
+    """Git's conflict markers a change adds, as {file: [line numbers at head]}: the lines `git diff --check`
+    calls a leftover conflict marker, less a ======= (or |||||||) line outside a <<<<<<< ... >>>>>>> block,
+    such as a Markdown heading's underline."""
+    r = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--check", base, head], cwd=str(cwd),
+                       capture_output=True, text=True, errors="replace")
+    flagged = {}
+    for f, n in MARKER_LINE.findall(r.stdout):
+        flagged.setdefault(f, []).append(int(n))
+    out = {}
+    for f, lines in flagged.items():
+        shown = subprocess.run(["git", "show", f"{head}:{f}"], cwd=str(cwd), capture_output=True)
+        text = shown.stdout.decode("utf-8", "replace").splitlines()
+        blocks, top = [], None
+        for n, x in enumerate(text, 1):
+            if x.startswith("<<<<<<<"):
+                top = n
+            elif x.startswith(">>>>>>>") and top is not None:
+                blocks.append((top, n))
+                top = None
+        found = [n for n in lines if n <= len(text) and (text[n - 1][:1] in "<>"
+                                                         or any(a < n < b for a, b in blocks))]
+        if found:
+            out[f] = found
+    return out
+
+
+def markers_text(markers: dict) -> str:
+    """Where a change's conflict markers are, in words: `a.txt lines 1, 3, 5; b.txt line 2`."""
+    return "; ".join(f"{f} line{'s' if len(ns) > 1 else ''} {', '.join(map(str, ns[:12]))}"
+                     + (" ..." if len(ns) > 12 else "") for f, ns in markers.items())
+
+
 def publish(desk: Desk, tid: str, *names: str) -> None:
     """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
@@ -1373,6 +1409,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields["leaked"] = keys_in_change(desk, wt, meta["base"], head)  # it would travel with the merge
         if fields["leaked"]:
             desk.event("key_in_change", task=tid, providers=fields["leaked"])
+        fields["markers"] = markers_in_change(wt, meta["base"], head)  # a conflict left unsettled
+        if fields["markers"]:
+            desk.event("conflict_markers_in_change", task=tid, files=sorted(fields["markers"]))
     except GitFileChanged as e:
         changed = git_file_changed(desk, tid, e)
         fields.update(head="", commits=0, files=[], stat="")
