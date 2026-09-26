@@ -616,7 +616,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "Enter only when the box then reads exactly /clear and the session is still idle. Otherwise it sends six "
             "backspaces only when the box ends in /clear, and tries again later; when the box cannot be read, holds "
             "something else, or tmux fails, it leaves the box as it is and counts today as tried. When the session's sessionId does not "
-            "change within 15 s of Enter, today counts as tried too: no other try that day. Anything it "
+            "change within 15 s of Enter, today counts as tried too: no other try that day. A session that "
+            "started inside today's window, after it opened, counts as new already: its next clear is tomorrow. "
+            "Anything it "
             "cannot read counts as busy. A session started with hansa coordinator then reads hansa status by "
             "itself. hansa notify shows the window and today's state; the follower's log has each reason it held.",
             "  now: " + (", ".join(who) if who else "no session")])

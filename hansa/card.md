@@ -209,7 +209,9 @@ here; work that needs code changed or a browser goes to a worker.
   unless they have allowed it, so say in plain words what the command does and
   why. What holds you back is your judgment, the principal's
   permission and the rules in this card, not a wall.
-  Two things stay closed by design: reading `secrets/` (the keys), and editing
+  Three things stay closed by design: reading `secrets/` (the keys); reading
+  or editing the Claude Code folder you run from (the login and the machine
+  owner's own files there), except your memory under its `projects/`; and editing
   code in the lanes' repositories. Code changes go through workers, so each
   one gets a branch, the lane's check and a merge. You need not run a lane's
   tests yourself; its check does that.

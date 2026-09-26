@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hansa import account, cost, notify, views  # noqa: E402
+from hansa import account, cli, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa: E402
 from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
@@ -2419,6 +2419,7 @@ class DeskTest(unittest.TestCase):
         (d / "keys").write_text("" if keys_ago is None else str(keys_ago))
         env = {"PATH": f"{d / 'bin'}{os.pathsep}{os.environ['PATH']}", "HANSA_CLAUDE": str(d / "bin" / "claude"),
                "TMUX_PANE": "%7", "TMUX": f"{d}/tmux-socket,1,0", "HANSA_CLEAR_EVERY": "0.3",
+               "HANSA_CLEAR_STARTED": "1",  # a session of long ago: today's clear is due
                **({"HANSA_CLEAR_QUIET": quiet} if quiet is not None else {})}
         with unittest.mock.patch.dict(os.environ, env), self.in_session(p, sock):
             if quiet is None:
@@ -2562,6 +2563,65 @@ class DeskTest(unittest.TestCase):
             for clock[0] in (0, 1, 30, 59.9, 60, 61, 100, 120.5):
                 c.tick(0, False)
         self.assertEqual(reading.call_count, 3)  # at 0, 60 and 120.5
+
+    def fresh_clear(self, window, now, began, rec=None):
+        """A DailyClear with no record carried over (unless rec), made at local time now ("2026-09-27 06:27") for a
+        session that started at began (the same form, or None when that cannot be read); and the fake time."""
+        at = lambda x: time.mktime(time.strptime(x, "%Y-%m-%d %H:%M"))
+        clock = [at(now)]
+        fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0])
+        say = unittest.mock.patch.object(notify, "_say")
+        say.start()
+        self.addCleanup(say.stop)
+        with unittest.mock.patch.object(notify, "time", fake), \
+                unittest.mock.patch.object(notify, "clear_pane", return_value=("%7", "")), \
+                unittest.mock.patch.object(notify, "started_at", return_value=began and at(began)):
+            return notify.DailyClear(window, 1, rec), fake, clock, at
+
+    def test_daily_clear_leaves_alone_a_session_that_started_inside_todays_window(self):
+        c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 06:27", "2026-09-27 05:56")
+        self.assertEqual((c.rec["day"], c.rec["state"]), ("2026-09-27", "new"))
+        self.assertEqual(notify.clear_text(c.rec, clock[0]),
+                         "daily clear 04-09: started 05:56, inside today's window; next clear tomorrow")
+        reading = unittest.mock.Mock(return_value=(True, "s-before"))
+        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(notify, "idle_reading", reading):
+            for clock[0] in (at("2026-09-27 06:27"), at("2026-09-27 07:30"), at("2026-09-27 08:59")):
+                c.tick(0, False)
+            self.assertEqual(reading.call_count, 0)  # today is done for it
+            c.next, clock[0] = 0, at("2026-09-28 04:10")
+            c.tick(0, False)  # tomorrow: cleared as any other
+        self.assertEqual(reading.call_count, 1)
+        self.assertEqual(c.rec["day"], "2026-09-28")
+        self.assertIsNone(c.rec["state"])
+        c, *_ = self.fresh_clear("22-03", "2026-09-28 01:00", "2026-09-27 23:30")  # a window past midnight
+        self.assertEqual((c.rec["day"], c.rec["state"]), ("2026-09-27", "new"))
+
+    def test_daily_clear_goes_on_for_a_session_older_than_todays_window_or_of_unknown_start(self):
+        for name, window, now, began, rec in (
+                ("started before the window opened", "04-09", "2026-09-27 06:27", "2026-09-27 03:59", None),
+                ("started yesterday", "04-09", "2026-09-27 06:27", "2026-09-26 05:00", None),
+                ("before a window past midnight", "22-03", "2026-09-28 01:00", "2026-09-27 21:30", None),
+                ("start cannot be read", "04-09", "2026-09-27 06:27", None, None),
+                ("follower started outside the window", "04-09", "2026-09-27 10:00", "2026-09-27 05:56", None),
+                ("record carried over", "04-09", "2026-09-27 06:27", "2026-09-27 05:56",
+                 {"window": "04-09", "pane": "%7", "off": None})):
+            with self.subTest(name):
+                c, *_ = self.fresh_clear(window, now, began, rec)
+                self.assertIsNone(c.rec.get("state"))
+        c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 10:00", "2026-09-27 05:56")
+        reading = unittest.mock.Mock(return_value=(False, "the session is 'busy', not idle"))
+        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(notify, "idle_reading", reading):
+            clock[0] = at("2026-09-28 04:30")
+            c.tick(0, False)
+        self.assertEqual(reading.call_count, 1)  # its next window: checked as always
+
+    def test_a_sessions_start_is_read_from_its_process(self):
+        began = notify.started_at(os.getpid())
+        if began is None:
+            self.skipTest("this process's start cannot be read here")
+        self.assertLessEqual(began, time.time())
+        self.assertGreater(began, time.time() - 86400)
+        self.assertIsNone(notify.started_at(2 ** 22 + 12345))  # no such process
 
     def test_daily_clear_needs_two_idle_readings_a_minute_apart(self):
         c, t0 = self.daily(), time.time()
@@ -2750,6 +2810,60 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"Edit(//{str(self.repo.resolve()).lstrip('/')}/**)", r.stdout)
         deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
         self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", deny)
+
+    @staticmethod
+    def covered(rules, tool, path) -> bool:
+        """Whether a rule of hansa's covers the path, in the two forms hansa's rules use: an exact path, and
+        DIR/** for all under DIR at any depth (names starting with a dot too)."""
+        for r in rules:
+            if not r.startswith(f"{tool}(//"):
+                continue
+            p = "/" + r[len(tool) + 3:-1]
+            if p == path or (p.endswith("/**") and path.startswith(p[:-2])):
+                return True
+        return False
+
+    def own_folder(self, cc=None):
+        cc = cc or self.tmp / "own-claude"
+        for f in ("settings.json", ".credentials.json", "history.jsonl", "sessions/4242.json",
+                  "projects/-desk/memory/MEMORY.md", "projects/-desk/s.jsonl"):
+            (cc / f).parent.mkdir(parents=True, exist_ok=True)
+            (cc / f).write_text("{}")
+        return cc
+
+    def assert_own_folder_closed(self, rules, cc, dot=None):
+        for tool in ("Read", "Edit"):
+            for f in ("settings.json", ".credentials.json", "history.jsonl", "settings.local.json",
+                      "sessions/4242.json", "sessions/a/b.json", *([] if dot else [".claude.json"])):
+                self.assertTrue(self.covered(rules, tool, f"{cc}/{f}"), (tool, f))
+            if dot:
+                self.assertTrue(self.covered(rules, tool, str(dot)), (tool, dot))
+            for f in ("projects/-desk/memory/MEMORY.md", "projects/-desk/s.jsonl", "projects"):
+                self.assertFalse(self.covered(rules, tool, f"{cc}/{f}"), (tool, f))  # the session's memory: its own
+        # hansa relies on no other form: a lone * is not in them
+        self.assertEqual([r for r in rules if "*" in r.replace("/**)", ")")], [])
+
+    def test_the_coordinator_neither_reads_nor_edits_its_own_claude_code_folder(self):
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\nfor x in \"$@\"; do echo \"$x\"; done\n")
+        echo.chmod(0o755)
+        cc = self.own_folder()
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(cc)
+        self.assertEqual(self.desk.save_settings(s), [])
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = r.stdout.splitlines()
+        deny = json.loads(argv[argv.index("--settings") + 1])["permissions"]["deny"]
+        self.assert_own_folder_closed(deny, cc.resolve())
+        self.assertFalse(self.covered(deny, "Read", str(Path.home() / ".claude.json")))  # not the folder it runs from
+        home = self.tmp / "own-home"  # no CLAUDE_CONFIG_DIR: ~/.claude, and ~/.claude.json beside it
+        self.own_folder(home / ".claude")
+        (home / ".claude" / "stats.json").write_text("{}")
+        rules = cli.own_folder_rules({"HOME": str(home)})
+        self.assert_own_folder_closed(rules, home.resolve() / ".claude", dot=home.resolve() / ".claude.json")
+        self.assertTrue(self.covered(rules, "Read", f"{home.resolve()}/.claude/stats.json"))
 
     def test_coordinator_start_brings_the_desks_permissions_up_to_date(self):
         echo = self.tmp / "echo-claude"
@@ -2958,6 +3072,8 @@ class DeskTest(unittest.TestCase):
     def test_the_coordinator_stays_root_leaves_the_desk_to_the_account_and_uses_roots_claude_folder(self):
         self.as_root()
         log, _ = self.stand_in_runuser()
+        self.own_folder(self.tmp / "root-claude")
+        self.own_folder(self.tmp / "root-home" / ".claude")
         s = self.desk.settings()
         s["providers"]["claude"]["config_dir"] = str(self.tmp / "account-claude")
         self.assertEqual(self.desk.save_settings(s), [])
@@ -2983,10 +3099,16 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(started["argv"][i + 1], "user")
         rules = json.loads(started["argv"][started["argv"].index("--settings") + 1])["permissions"]
         self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", rules["deny"])
+        # root's own Claude Code folder, the one this session runs from, is closed to it; the account's is not
+        self.assert_own_folder_closed(rules["deny"], self.tmp / "root-claude")
+        self.assertFalse(self.covered(rules["deny"], "Read", str(self.tmp / "account-claude" / "settings.json")))
         without = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
-        with unittest.mock.patch.dict(os.environ, without, clear=True):
+        with unittest.mock.patch.dict(os.environ, {**without, "HOME": str(self.tmp / "root-home")}, clear=True):
             started = self.coordinator_as_root({})
         self.assertNotIn("CLAUDE_CONFIG_DIR", started["env"])  # root's ~/.claude, as root starts Claude Code
+        rules = json.loads(started["argv"][started["argv"].index("--settings") + 1])["permissions"]
+        root_home = (self.tmp / "root-home").resolve()
+        self.assert_own_folder_closed(rules["deny"], root_home / ".claude", dot=root_home / ".claude.json")
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x.invalid"}
         s["coordinator"]["provider"] = "mimo"
         self.assertEqual(self.desk.save_settings(s), [])
