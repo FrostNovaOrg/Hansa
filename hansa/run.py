@@ -1231,20 +1231,43 @@ def leader(pids: list):
     return None
 
 
-def task_processes(tid: str) -> list:
-    """This account's processes whose environment gives HANSA_TASK as this task, and no other task:
-    [(pid, arguments)]. One that cleared its environment is not found."""
-    want, found = f"HANSA_TASK={tid}".encode(), []
+def _names_folder(folders: list):
+    """A test of one argument, or a TMPDIR's value: whether it names one of these folders, or a path inside one,
+    as a whole path part (/tmp/hansa-t1-abc names neither /tmp/hansa-t1-abc2 nor /x/tmp/hansa-t1-abc). A folder
+    counts under its own path and its real one (on macOS /tmp is /private/tmp)."""
+    paths = sorted({os.path.normpath(x) for f in folders if f for x in (f, os.path.realpath(f))}, key=len, reverse=True)
+    if not paths:
+        return lambda arg: False, lambda value: False
+    word = re.compile((r"(?<![\w.~/-])(?:" + "|".join(map(re.escape, paths)) + r")(?![^/\s'\";:,=)])").encode())
 
-    def ours(env: list) -> bool:
+    def in_tmpdir(value: bytes) -> bool:
+        v = os.path.normpath(value.decode(errors="replace")) if value else ""
+        return any(v == x or v.startswith(x + "/") for x in paths)
+    return lambda arg: bool(word.search(arg)), in_tmpdir
+
+
+def task_processes(tid: str, folders: list = ()) -> list:
+    """This account's processes whose environment gives HANSA_TASK as this task, and no other task, or that name
+    one of `folders` (the task's own run folders, worker_tmps) in an argument or as their TMPDIR, whatever their
+    environment says: [(pid, arguments)]. One that cleared its environment, and names no such folder, is not found."""
+    want, found = f"HANSA_TASK={tid}".encode(), []
+    in_args, in_tmpdir = _names_folder(list(folders))
+
+    def ours(args: list, env: list) -> bool:
         named = [x for x in env if x.startswith(b"HANSA_TASK=")]
-        return bool(named) and all(x == want for x in named)
+        return (bool(named) and all(x == want for x in named)) or any(map(in_args, args)) or \
+            any(in_tmpdir(x[7:]) for x in env if x.startswith(b"TMPDIR="))
     if Path("/proc").is_dir():
         for p in Path("/proc").iterdir():
             try:
-                if p.name.isdigit() and p.stat().st_uid == os.getuid() and \
-                        ours((p / "environ").read_bytes().split(b"\0")):
-                    found.append((int(p.name), (p / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")))
+                if p.name.isdigit() and p.stat().st_uid == os.getuid():
+                    args = (p / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+                    try:
+                        env = (p / "environ").read_bytes().split(b"\0")
+                    except OSError:  # its arguments may still name a folder
+                        env = []
+                    if ours(args, env):
+                        found.append((int(p.name), args))
             except OSError:
                 pass
     else:
@@ -1252,7 +1275,7 @@ def task_processes(tid: str) -> list:
             pid = struct.unpack_from("@i", k, 40)[0]
             if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
                 args, env, _ = _mac_procargs(pid) or ([], [], True)
-                if ours(env):
+                if ours(args, env):
                     found.append((pid, args))
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
 
@@ -1263,7 +1286,9 @@ SWEEP_GRACE = 5  # seconds between the polite signal and the one that cannot be 
 def sweep(desk: Desk, tid: str) -> list:
     """Stop what a task's processes left running once nothing of the task should run any more: a server or
     watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor
-    the command doing this. What was stopped goes on the task (left_running) and in the event log."""
+    the command doing this. Found by HANSA_TASK in their environment, or by one of the task's run folders
+    (worker_tmps) in their arguments or TMPDIR: a process started without HANSA_TASK still names its run's folder.
+    What was stopped goes on the task (left_running) and in the event log."""
     keep = {os.getpid(), os.getppid()}
     try:
         keep.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
@@ -1272,7 +1297,8 @@ def sweep(desk: Desk, tid: str) -> list:
 
     def running(p, start):
         return alive(p, start) and _state(p) != "Z"
-    found = [(p, args, proc_start(p)) for p, args in task_processes(tid) if p not in keep]
+    folders = [r["path"] for r in desk.meta(tid).get("worker_tmps") or [] if r.get("path")]
+    found = [(p, args, proc_start(p)) for p, args in task_processes(tid, folders) if p not in keep]
     found = [(p, args, s) for p, args, s in found if running(p, s)]
     if not found:
         return []
@@ -1558,10 +1584,12 @@ def design_command(desk: Desk, tid: str):
     if lane.get("check"):  # it is told to keep the checks passing, so it may run them
         extra += command_rules(lane["check"])
     argv += isolated(wt)
+    tmp = make_worker_tmp(desk, tid)  # its own, as a worker's: what it leaves running there is found at its end (sweep)
     argv += ["--append-system-prompt", system,
              "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
-             "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW]
-    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
+             "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
+             *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}

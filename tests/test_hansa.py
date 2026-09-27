@@ -183,6 +183,18 @@ if os.environ.get("FAKE_LEAVE_DETACHED"):  # the same, in a session of its own: 
     c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "left-behind"], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     open(os.environ["FAKE_LEAVE_DETACHED"], "w").write(str(c.pid))
+if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_TASK, naming folders: its run's, and others
+    tmp, bare = os.environ["CLAUDE_CODE_TMPDIR"], {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "TMPDIR")}
+    open(os.path.join(tmp, "load.sh"), "w").write("while :; do sleep 1; done\n")
+    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+    near, other = tmp + "2", os.path.join(os.path.dirname(tmp), "hansa-t9999-abcdefgh")
+    for name, argv, env in (("script", ["/bin/sh", os.path.join(tmp, "load.sh")], bare),
+                            ("tmpdir", sleep, {**bare, "TMPDIR": os.path.join(tmp, "claude-501")}),
+                            ("near", sleep + [near + "/load.sh"], {**bare, "TMPDIR": near}),
+                            ("other", sleep + [other + "/load.sh"], {**bare, "TMPDIR": other + "/claude-501"})):
+        c = subprocess.Popen(argv, env=env, start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        open(os.path.join(os.environ["FAKE_LEAVE_IN_TMP"], name + ".pid"), "w").write(str(c.pid))
 if os.environ.get("FAKE_SANDBOX_LEFT"):  # what a sandbox on Linux leaves in the worktree: empty placeholders
     os.makedirs(".claude", exist_ok=True)
     for f in (".claude/.cc-writes", ".claude/settings.json"):
@@ -1027,6 +1039,52 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
         self.assertEqual([p.poll() for p in others], [None, None, None])
         self.assertEqual([p for p, _ in task_processes("t9999")], [others[0].pid])  # found, when it is that task's
+
+    def test_what_is_left_running_without_hansa_task_is_found_by_its_runs_own_folder(self):
+        from hansa.run import alive
+        pids = self.tmp / "left"
+        pids.mkdir()
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_LEAVE_IN_TMP": str(pids)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.addCleanup(lambda: [alive(int(f.read_text())) and os.kill(int(f.read_text()), 9) for f in pids.iterdir()])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        pid = {f.stem: int(f.read_text()) for f in pids.iterdir()}
+        self.assertEqual(sorted(x["pid"] for x in m["left_running"]), sorted([pid["script"], pid["tmpdir"]]))
+        self.assertFalse(alive(pid["script"]) or alive(pid["tmpdir"]))
+        self.assertTrue(alive(pid["near"]) and alive(pid["other"]))  # /tmp/hansa-<id>-<random>2, another run's
+        [x] = [x for x in m["left_running"] if x["pid"] == pid["script"]]
+        self.assertIn(f"{m['worker_tmps'][0]['path']}/load.sh", x["command"])
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"pid {pid['script']}: ", shown)
+        self.assertIn(f"pid {pid['tmpdir']}: ", shown)
+
+    def test_a_verification_and_a_design_session_are_swept_at_their_end_too(self):
+        from hansa import run
+        tid = self.desk.new_task("Make the badge bigger")
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+                         model_asked="sonnet", kind="design")
+        _, env, _ = run.design_command(self.desk, tid)
+        tmp = self.desk.meta(tid)["worker_tmp"]
+        self.assertEqual(env["CLAUDE_CODE_TMPDIR"], tmp)  # a folder of its own, as a worker's
+        self.assertEqual([r["path"] for r in self.desk.meta(tid)["worker_tmps"]], [tmp])
+        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        left = self.sleeper(env={**bare, "TMPDIR": os.path.join(tmp, "claude-501")})
+        other = self.sleeper(env={**bare, "TMPDIR": tmp + "2"})
+        with unittest.mock.patch("hansa.run.end_design"):
+            m = run.finish(self.desk, tid, 0)
+        self.assertEqual([x["pid"] for x in m["left_running"]], [left.pid])
+        self.assertIsNotNone(left.poll())
+        self.assertIsNone(other.poll())
+        self.assertFalse(os.path.exists(tmp))
+        vid = self.desk.new_task("Check the badge")
+        self.desk.update(vid, lane="a", provider="claude", worktree=str(self.repo), kind="verify",
+                         worker_tmps=[{"path": tmp + "v", "removed": True}])
+        left = self.sleeper(tmp + "v/load.sh", env=bare)
+        m = run.finish(self.desk, vid, 0)
+        self.assertEqual([x["pid"] for x in m["left_running"]], [left.pid])
 
     def test_git_behind_a_wrapper_is_still_git(self):
         from hansa.run import lane_allow
