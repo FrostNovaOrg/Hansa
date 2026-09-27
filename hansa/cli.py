@@ -18,7 +18,7 @@ from . import account, build, cost, notify, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
-                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, proc_start, provider_env, pulse,
+                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, not_looking, proc_start, provider_env, pulse,
                   quiet_text, read_try, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
 
 CARD = Path(__file__).with_name("card.md")
@@ -168,7 +168,10 @@ def cmd_design(a):
                              f"(hansa show {open_[0]})")
         tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "",
                             browser=bool(s.get("browser")) or None, **notify.recorded(notify.session_here()))
-    print(f"{tid} queued: hansa opens the design session in seconds and asks the principal to join it. "
+    why_not = not_looking(desk)  # as the waiting lines say it (run.waiting_reason)
+    opens = (f"hansa opens the design session once `hansa serve` gets through its rounds; {why_not}. Then it"
+             if why_not else "hansa opens the design session in seconds and")
+    print(f"{tid} queued: {opens} asks the principal to join it. "
           f"It comes back for review when they are done: {notify.wait_step(desk, tid)}")
 
 
@@ -511,10 +514,12 @@ def cmd_cancel(a):
         desk.event("merge_check_cancel", task=a.id)
         print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
         return
-    desk.event("task_cancel", task=a.id)
-    if m["state"] == "done" and m.get("kind") == "verify":
+    if m["state"] == "done" and m.get("kind") == "verify":  # not cancelled: closed, or already closed before
+        if not m.get("closed"):
+            desk.event("verification_closed", task=a.id, by="hansa cancel")
         print(f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else ""))
         return
+    desk.event("task_cancel", task=a.id)
     print(f"{a.id} cancelled")
 
 
@@ -666,19 +671,23 @@ def cmd_check(a):
         print(f"{n}: {'ok' if r['ok'] else 'NOT ok'} - {r['detail']}")
 
 
+LOCK_WAIT = 2.0  # seconds hansa serve waits for serve.lock before it says another server holds it
+
+
 def hold_server_lock(desk: Desk):
     """One hansa serve per desk: it holds this lock while it runs. None when another server holds it."""
     desk.state_dir.mkdir(exist_ok=True)
     f = open(desk.state_dir / "serve.lock", "a")  # not emptied before it is held: it names the server holding it
-    for _ in range(40):  # asking whether a server runs holds it shared for a moment (run.lock_held): not a server
+    end = time.monotonic() + LOCK_WAIT  # by the clock: on macOS short sleeps overshoot, so counting them waits long
+    while True:  # asking whether a server runs holds it shared for a moment (run.lock_held): not a server
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except OSError:
+            if time.monotonic() >= end:
+                f.close()
+                return None
             time.sleep(0.05)
-    else:
-        f.close()
-        return None
     f.truncate(0)
     f.write(f"{os.getpid()} {proc_start(os.getpid())}")  # what hansa never stops when it stops what a task left
     # running (run.sweep), and whose being alive says hansa serve runs (run.server_state)

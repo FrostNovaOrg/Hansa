@@ -378,11 +378,16 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if m.get("denials"):
         out.append(f"calls the worker had no permission for ({len(m['denials'])}):")
         reasons = m.get("denial_reasons") or []
-        for i, x in enumerate(m["denials"][:8]):
+        for i, x in enumerate(m["denials"] if full else m["denials"][:8]):
             first, *more = x.splitlines() or [""]
             why = reasons[i] if i < len(reasons) else ""
+            if full:  # whole, so that which part was refused can be seen
+                out.append("  " + "\n    ".join([first, *more]) + (f"\n    Claude Code said: {plain(why)}" if why else ""))
+                continue
             out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else "")
                        + (f"; Claude Code said: {plain(why)[:200]}" if why else ""))
+        if not full and (len(m["denials"]) > 8 or any(len(x) > 160 or "\n" in x for x in m["denials"][:8])):
+            out.append(f"  (whole: hansa show {tid} --full)")
     tmps = m.get("worker_tmps") or []
     for i, r in enumerate(tmps):
         how = ("removed when the run ended" if r.get("removed") else "still there: removing it failed"
