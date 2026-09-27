@@ -694,6 +694,11 @@ def in_window(window: str, t: float) -> tuple:
     return h >= a or h < b, day, b <= h < a
 
 
+def window_opened(window: str, day: str) -> float:
+    """When the window opened on this day (in_window's day), in seconds since the epoch."""
+    return time.mktime(time.strptime(f"{day} {parse_window(window)[0]:02d}", "%Y-%m-%d %H"))
+
+
 def tmux(*args) -> str:
     """What a tmux command printed. RuntimeError when it could not run or failed."""
     try:
@@ -792,8 +797,9 @@ def idle_reading(pid: int) -> tuple:
 
 class DailyClear:
     """A follower's daily /clear of its session. Its record (rec) goes into the register, for hansa notify:
-    window, pane, off (why it cannot be done), day, state (cleared / unconfirmed / left), at, held (the last reason),
-    left (what hansa met when it typed /clear and left it)."""
+    window, pane, off (why it cannot be done), began (when the session started; None when that cannot be read), day,
+    state (cleared / unconfirmed / left), at, held (the last reason), left (what hansa met when it typed /clear and
+    left it)."""
 
     def __init__(self, window: str, pid: int, rec=None):
         self.window, self.pid = window, pid
@@ -801,9 +807,11 @@ class DailyClear:
         self.quiet = float(os.environ.get("HANSA_CLEAR_QUIET") or CLEAR_QUIET)
         if isinstance(rec, dict) and rec.get("window") == window:  # restarted on new code: as it was
             self.rec = rec
+            if "began" not in rec:  # a record from before hansa kept the session's start
+                rec["began"] = started_at(pid)
         else:
             pane, why = clear_pane(pid)
-            self.rec = {"window": window, "pane": pane, "off": why or None}
+            self.rec = {"window": window, "pane": pane, "off": why or None, "began": None if why else started_at(pid)}
             _say(f"daily clear {window}: " + (f"off: {why}" if why else f"on, through tmux pane {pane}"))
             if not why:
                 self.new_today(time.time())
@@ -813,11 +821,10 @@ class DailyClear:
         """A session this follower has no record of the day for, started inside today's window after it opened:
         its principal has just told it what to do, so today counts as done. Unknown start: the clear goes on."""
         inside, day, _ = in_window(self.window, t)
-        began = started_at(self.pid)
+        began = self.rec.get("began")
         if not inside or began is None:
             return
-        opened = time.mktime(time.strptime(f"{day} {parse_window(self.window)[0]:02d}", "%Y-%m-%d %H"))
-        if opened <= began <= t:
+        if window_opened(self.window, day) <= began <= t:
             self.rec.update(day=day, state="new", at=began)
             _say(f"daily clear {self.window}: the session started at {time.strftime('%H:%M', time.localtime(began))}, "
                  "inside today's window; next clear tomorrow")
@@ -963,6 +970,12 @@ def clear_text(c, t: float = 0) -> str:
         today = f"Enter pressed at {hm}, but no new session was seen"
     elif inside:
         today = held or "in the window, not checked yet"
+    elif passed and c.get("began") and c["began"] >= window_opened(c["window"], day):
+        # started inside the window (with its follower started after it) or after it: nothing was due today
+        a, b = parse_window(c["window"])
+        after = c["began"] >= window_opened(c["window"], day) + ((b - a) % 24) * 3600
+        today = (f"started {time.strftime('%H:%M', time.localtime(c['began']))}, "
+                 f"{'after' if after else 'inside'} today's window; next clear tomorrow")
     elif passed:
         today = "window passed without a clear" + (f" (last {held})" if held else "")
     else:

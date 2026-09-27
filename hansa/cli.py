@@ -19,7 +19,8 @@ from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now,
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, not_looking, proc_start, provider_env, pulse,
-                  quiet_text, read_try, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try)
+                  quiet_text, read_try, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -27,6 +28,7 @@ RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, repla
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
 BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
+ON_MAC = sys.platform == "darwin"
 
 
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> Desk:
@@ -946,6 +948,8 @@ def _save(desk: Desk, new: dict) -> None:
 
 
 def _lane_value(field: str, values: list):
+    if values == ["none"]:  # the help's word for empty: what no value gives
+        values = []
     if field in LANE_LISTS:
         return [x for v in values for x in (v.split(",") if field == "providers" else [v]) if x]
     if field == "env":
@@ -966,6 +970,33 @@ def _lane_value(field: str, values: list):
     if field == "base" and not "".join(values).strip():
         raise SystemExit("hansa: base takes the name of a branch. Nothing was changed")
     return values[0] if values else ""
+
+
+def _loopback_warning(name: str, hosts: list) -> str:
+    """What localhost on a lane's network list opens on macOS, where it lets the sandbox reach the whole
+    loopback: the servers listening there now, one line each. '' on Linux, where a worker's sandbox has
+    a loopback of its own, and for a list without localhost."""
+    if not ON_MAC or not any(is_local(h) for h in hosts):
+        return ""
+    head = (f"Warning: on macOS, localhost on lane {name}'s network list lets its workers, setup and check bind "
+            "ports and connect to every server listening on this machine's loopback, not only their own: a local "
+            "proxy among them reaches the internet whatever the network list says. Keep it only if this Mac's "
+            "loopback holds nothing a worker must not reach; otherwise remove it (hansa lane set "
+            f"{name} network ...).")
+    got = mac_loopback_listeners()
+    if got is None:
+        return head + "\nWhat listens on the loopback now could not be read here."
+    found, unread = got
+    servers = {}
+    for prog, pid, acct, addr, port in found:
+        servers.setdefault((prog, pid, acct, port), []).append(f"{addr}:{port}")
+    lines = [f"  {prog} (pid {pid}, {acct}): {', '.join(addrs)}" for (prog, pid, acct, _), addrs in servers.items()]
+    text = head + "\n" + ("What listens on this machine's loopback now; a worker can reach every one:\n"
+                          + "\n".join(lines) if lines else "Nothing that hansa can look at listens on the loopback now.")
+    if unread:
+        text += (f"\n{unread} processes of other accounts could not be looked at (only root can); what they listen "
+                 "on (sshd, a database run as its own user) a worker can reach too.")
+    return text
 
 
 SIBLING_FIELDS = ("network", "write", "env", "max_turns", "timeout_min")  # what a lane's tasks can reach and how long
@@ -1015,7 +1046,8 @@ def cmd_lane(a):
                 raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
             providers = [x for x in (a.providers or "").split(",") if x] or None
             new["lanes"][a.name] = ln = default_lane(repo, base, providers)
-            ln.update({k: v for k, v in (("check", a.check), ("setup", a.setup), ("allow", a.allow)) if v})
+            ln.update({k: v for k, v in (("check", a.check), ("setup", a.setup), ("allow", a.allow),
+                                         ("network", [h for h in a.network or [] if h != "none"])) if v})
             _save(desk, new)
             desk.event("lane_added", lane=a.name)
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
@@ -1024,10 +1056,17 @@ def cmd_lane(a):
                 brief.write_text("", encoding="utf-8")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
-                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "setup", "check") if ln.get(f)))
+                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check") if ln.get(f)))
             for f in OUTSIDE_WORKER:
                 if ln.get(f):
                     desk.event("lane_command_changed", lane=a.name, field=f, old="", new=ln[f])
+            if ln["network"]:
+                desk.event("lane_network_changed", lane=a.name, old=[], new=ln["network"])
+                print(f"The hosts the lane's workers may reach during a task are recorded: {_shown(ln['network'])}. "
+                      f"Tell the principal, in the conversation, what you listed and why.")
+                warning = _loopback_warning(a.name, ln["network"])
+                if warning:
+                    print(desk.redact(warning))
             if ln.get("setup") or ln.get("check"):
                 print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
                       "in the conversation, what they run and why.")
@@ -1087,6 +1126,10 @@ def cmd_lane(a):
         desk.event("lane_network_changed", lane=a.name, old=old, new=value)
         print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "
               f"this change is recorded. Tell the principal, in the conversation, what you changed and why.")
+    if a.field == "network":
+        warning = _loopback_warning(a.name, value)
+        if warning:
+            print(desk.redact(warning))
     if a.field == "write" and set(old) != set(value):
         desk.event("lane_write_changed", lane=a.name, old=old, new=value)
         print(f"The folders the lane's workers may write besides the worktree changed: {_shown(old)} -> "
@@ -1316,7 +1359,14 @@ def main(argv=None):
         "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
         "concurrency in all, and to split work among providers give each its own lane with its provider order. "
         "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax; so write its preview "
-        "(started by a design session's Bash tool) the same way."))
+        "(started by a design session's Bash tool) the same way. " +
+        "The network list is the hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
+        "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
+        "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
+        "a program told to use the sandbox's proxy for localhost reaches this machine's loopback through it, so "
+        "leave it off. On macOS local servers "
+        "need localhost, and it opens every service on the machine's loopback, local proxies among them, which "
+        "reach the internet: list it only on a Mac whose loopback holds nothing a worker must not reach."))
     q.add_argument("name")
     q.add_argument("--repo", required=True, help="the git checkout the lane works on")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
@@ -1324,13 +1374,22 @@ def main(argv=None):
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
                    "(/bin/sh -c)")
     q.add_argument("--setup", help="the command that installs dependencies before each task (/bin/sh -c)")
+    q.add_argument("--network", nargs="+", metavar="HOST", help="the hosts its workers, setup and check may reach "
+                   "(default: none)")
     q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
                    "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
-        "timeout_min take one whole number"))
+        "timeout_min take one whole number. " +
+        "network is the list is the hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
+        "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
+        "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
+        "a program told to use the sandbox's proxy for localhost reaches this machine's loopback through it, so "
+        "leave it off. On macOS local servers "
+        "need localhost, and it opens every service on the machine's loopback, local proxies among them, which "
+        "reach the internet: list it only on a Mac whose loopback holds nothing a worker must not reach."))
     q.add_argument("name")
     q.add_argument("field", choices=LANE_FIELDS)
     q.add_argument("values", nargs="*", metavar="value")

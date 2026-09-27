@@ -864,7 +864,9 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> d
     hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
-        network["allowLocalBinding"] = True  # a worker may run a local server and reach it
+        # macOS: a worker may bind ports and reach the whole loopback (Seatbelt allows outbound to localhost:*,
+        # every service there). Linux ignores it: bubblewrap gives each sandbox a loopback of its own.
+        network["allowLocalBinding"] = True
     if not fs["allowWrite"]:
         del fs["allowWrite"]
     return {"sandbox": {
@@ -1130,6 +1132,78 @@ def _mac_procargs(pid: int):
     None when they cannot be read (a process of another account, one in the middle of an exec, one that
     ended meanwhile)."""
     return _mac_parse_args(_sysctl(_CTL_KERN, _KERN_PROCARGS2, pid))
+
+
+# What listens on the machine's loopback, read as lsof does, through libproc: a process's descriptors
+# (PROC_PIDLISTFDS, 8 bytes each: the descriptor, then its type), and for a socket its struct
+# socket_fdinfo (PROC_PIDFDSOCKETINFO, 792 bytes): at 256 soi_kind, at 264 its in_sockinfo (the local
+# port at 4, network order; the version flag at 24; the local address at 48, an IPv4 one in its last 4
+# bytes), and at 344 the TCP state. The kinfo_proc's p_comm is at 243. The sandbox refuses the kernel's
+# socket lists (net.inet.tcp.pcblist_n, what netstat reads), and libproc reads other accounts'
+# processes only as root.
+_PROC_PIDLISTFDS, _PROC_PIDFDSOCKETINFO, _PROX_FDTYPE_SOCKET = 1, 3, 2
+_SOCKET_FDINFO_SIZE, _SOCKINFO_TCP, _TCPS_LISTEN = 792, 2, 1
+
+
+def _loopback_address(vflag: int, raw: bytes) -> str:
+    """The local address of a socket, when a connection to the loopback reaches it: '127.0.0.1', '::1'
+    or '*' (every address); '' when it listens elsewhere only."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(raw[12:16] if vflag & 1 else raw)
+    except ValueError:
+        return ""
+    if ip.is_unspecified:
+        return "*"
+    return (f"[{ip}]" if ip.version == 6 else str(ip)) if ip.is_loopback else ""
+
+
+def mac_loopback_listeners():
+    """The TCP servers on this Mac that a connection to its loopback reaches, as (listeners, unread):
+    listeners a sorted list of (program, pid, account, address, port), address '*' for one listening on
+    every address; unread how many processes of other accounts could not be looked at (all of them
+    unless hansa runs as root). None when they cannot be read at all."""
+    try:
+        import ctypes
+        import pwd
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    except (ImportError, OSError):
+        return None
+    data = _sysctl(_CTL_KERN, _KERN_PROC, _KERN_PROC_ALL, 0, slack=_KINFO_PROC_SIZE * 16)
+    if not data:
+        return None
+    found, unread, me = set(), 0, os.getuid()
+    info = ctypes.create_string_buffer(_SOCKET_FDINFO_SIZE)
+    for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
+        k = data[i:i + _KINFO_PROC_SIZE]
+        pid, uid = struct.unpack_from("@i", k, 40)[0], struct.unpack_from("@I", k, 392)[0]
+        if pid <= 0 or k[36] == _SZOMB:
+            continue
+        n = lib.proc_pidinfo(pid, _PROC_PIDLISTFDS, 0, None, 0)
+        buf = ctypes.create_string_buffer(max(n, 0) + 8 * 32)  # room for descriptors opened meanwhile
+        n = lib.proc_pidinfo(pid, _PROC_PIDLISTFDS, 0, buf, len(buf)) if n > 0 else n
+        if n <= 0:
+            unread += uid != me
+            continue
+        for j in range(0, n - 7, 8):
+            fd, kind = struct.unpack_from("@iI", buf.raw, j)
+            if kind != _PROX_FDTYPE_SOCKET or \
+                    lib.proc_pidfdinfo(pid, fd, _PROC_PIDFDSOCKETINFO, info, _SOCKET_FDINFO_SIZE) != _SOCKET_FDINFO_SIZE:
+                continue
+            raw = info.raw
+            if struct.unpack_from("@i", raw, 256)[0] != _SOCKINFO_TCP or \
+                    struct.unpack_from("@i", raw, 344)[0] != _TCPS_LISTEN:
+                continue
+            addr = _loopback_address(raw[288], raw[312:328])
+            if not addr:
+                continue
+            try:
+                account = pwd.getpwuid(uid).pw_name
+            except KeyError:
+                account = str(uid)
+            port = int.from_bytes(raw[268:270], "big")  # the low 2 bytes of an int, in network order
+            found.add((k[243:260].split(b"\0")[0].decode(errors="replace"), pid, account, addr, port))
+    return sorted(found, key=lambda x: (x[4], x[0], x[1], x[3])), unread
 
 
 class CannotLook(Exception):

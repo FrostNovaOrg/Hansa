@@ -34,6 +34,18 @@ from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tm
 from hansa.web import start_web  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 
+def skip_unless_ports(test):
+    """Skip a test that binds a local port where the sandbox refuses to (macOS's, with no localhost on the
+    lane's network list), as tests that make a Unix socket skip where one is refused."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+    except PermissionError as e:
+        test.skipTest(f"cannot bind a local port here ({e}; a sandbox refuses to)")
+    finally:
+        s.close()
+
+
 # What Claude Code writes when a worker starts work in the background: the tool result's text and the row's
 # toolUseResult, used to pair background launches with completion notices.
 BG_SHAPES = r'''
@@ -1823,6 +1835,7 @@ class DeskTest(unittest.TestCase):
         self.assertLess(took, cli.LOCK_WAIT + 1)  # counting 40 sleeps of 0.15 s would take 6 s
 
     def test_a_server_on_a_port_another_holds_says_so_in_one_line(self):
+        skip_unless_ports(self)
         busy = socket.socket()
         self.addCleanup(busy.close)
         busy.bind(("127.0.0.1", 0))
@@ -1838,6 +1851,7 @@ class DeskTest(unittest.TestCase):
             f"port with hansa serve --port N (hansa web then finds it)"])
 
     def test_the_web_command_opens_the_port_this_desks_server_serves_on(self):
+        skip_unless_ports(self)
         env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
         bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
         (self.tmp / "t").mkdir()  # where the server tries srt when it starts: in the test's folder, gone with it
@@ -3008,6 +3022,27 @@ class DeskTest(unittest.TestCase):
         c, *_ = self.fresh_clear("22-03", "2026-09-28 01:00", "2026-09-27 23:30")  # a window past midnight
         self.assertEqual((c.rec["day"], c.rec["state"]), ("2026-09-27", "new"))
 
+    def test_notify_says_the_next_clear_is_tomorrow_for_a_session_that_started_after_todays_window(self):
+        for window, now, began, said in (
+                ("04-09", "2026-09-27 10:00", "2026-09-27 09:30", "started 09:30, after today's window"),
+                ("04-09", "2026-09-27 10:00", "2026-09-27 05:56", "started 05:56, inside today's window"),
+                ("22-03", "2026-09-28 10:00", "2026-09-28 04:00", "started 04:00, after today's window"),
+                ("22-03", "2026-09-28 10:00", "2026-09-27 23:30", "started 23:30, inside today's window")):
+            with self.subTest(window=window, began=began):
+                c, fake, clock, at = self.fresh_clear(window, now, began)
+                self.assertIsNone(c.rec.get("state"))  # its follower started after the window: nothing done today
+                self.assertEqual(notify.clear_text(c.rec, clock[0]),
+                                 f"daily clear {window}: {said}; next clear tomorrow")
+        for began in ("2026-09-27 03:59", None):  # it was due, or it may have been: said as before
+            c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 10:00", began)
+            self.assertEqual(notify.clear_text(c.rec, clock[0]), "daily clear 04-09: window passed without a clear")
+        c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 10:00", "2026-09-27 09:30")
+        self.assertEqual(notify.clear_text(c.rec, at("2026-09-28 10:00")),  # the next day's window passed: as before
+                         "daily clear 04-09: window passed without a clear")
+        with unittest.mock.patch.object(notify, "started_at", return_value=at("2026-09-27 09:30")):
+            old = notify.DailyClear("04-09", 1, {"window": "04-09", "pane": "%7", "off": None})  # kept no start
+        self.assertEqual(old.rec["began"], at("2026-09-27 09:30"))
+
     def test_daily_clear_goes_on_for_a_session_older_than_todays_window_or_of_unknown_start(self):
         for name, window, now, began, rec in (
                 ("started before the window opened", "04-09", "2026-09-27 06:27", "2026-09-27 03:59", None),
@@ -3130,6 +3165,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("notifies no session", self.hansa_out("notify"))
 
     def test_a_request_answered_on_the_page_reaches_the_session_that_asked_with_the_answer(self):
+        skip_unless_ports(self)
         (a, sa), (b, sb) = self.session(), self.session()
         for p, sock in ((a, sa), (b, sb)):
             with self.in_session(p, sock):
@@ -4588,6 +4624,39 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(unverified_note(self.desk, self.desk.meta(t4)), "")  # v4's verdict still counts
         self.assertEqual([m["id"] for m in views.status(self.desk)["review"]], [t4])
 
+    def test_a_verification_closed_the_old_way_shows_as_the_rule_has_it_now(self):
+        d = Dispatcher(self.desk)
+        t = self.desk.new_task("Add hello.txt")
+        self.settle(d, t)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", t])
+        v = self.desk.meta(t)["verify"]
+        self.settle(d, v)
+        # as hansa recorded an ended verification when its task closed, before it kept one as it ended
+        self.desk.update(v, state="cancelled", error=f"closed: {t} was merged")
+        before = (self.desk.tasks_dir / v / "meta.json").read_text()
+        shown = views.show_text(self.desk, v)
+        self.assertTrue(shown.startswith(f"{v} · done · "), shown)
+        self.assertIn(f"\nclosed: {t} was merged\n", shown)
+        self.assertIn("verdict: holds", shown)
+        self.assertNotIn("error:", shown)
+        self.assertNotIn("cancelled", shown)
+        self.assertNotIn("next:", shown)  # nothing is left to do with it
+        self.assertIn(f"verification (a worker ran the change): {v}: holds", views.show_text(self.desk, t))
+        self.assertEqual((self.desk.tasks_dir / v / "meta.json").read_text(), before)  # the record stays
+        t2 = self.desk.new_task("Add hello.txt 2")  # one closed while still queued was never done: as it is
+        self.settle(d, t2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", t2])
+            main(["--desk", str(self.desk.root), "cancel", t2])
+        v2 = self.desk.meta(t2)["verify"]
+        shown = views.show_text(self.desk, v2)
+        self.assertTrue(shown.startswith(f"{v2} · cancelled · "), shown)
+        self.assertIn(f"error: closed: {t2} was cancelled", shown)
+
     def test_add_verify_retry_and_show_tell_a_session_that_hears_from_hansa_it_will_be_told(self):
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
@@ -5087,6 +5156,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(tools, mine.get(f.name, "tools: Read, Bash"), f.name)
 
     def test_the_page_only_shows_tasks_by_their_id(self):
+        skip_unless_ports(self)
         (self.desk.root / "x").mkdir()
         (self.desk.root / "x" / "meta.json").write_text(json.dumps({"id": "x", "title": "not a task", "state": "done"}))
         httpd = start_web(self.desk, "127.0.0.1", 0)
@@ -5100,6 +5170,7 @@ class DeskTest(unittest.TestCase):
             httpd.server_close()
 
     def test_the_page_shows_merge_checks_with_what_they_wait_for(self):
+        skip_unless_ports(self)
         d, t1, t2 = self.two_lanes(check="test -f README.md")
         t3 = self.desk.new_task("Add b.txt again", lane="b")
         self.settle(d, t3)
@@ -5136,6 +5207,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("合并验收在排队：等工作线 ${lane} 空出来", page)
 
     def test_the_page_shows_how_long_the_check_itself_has_run(self):
+        skip_unless_ports(self)
         tid = self.desk.new_task("Add hello.txt")
         self.desk.update(tid, state="running", lane="a", phase="checking", started=time.time() - 8 * 60 - 5,
                          check_started=time.time() - 60 - 5)
@@ -5157,6 +5229,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("checkMinutes:(c, n) => `验收已跑 ${c} 分钟（一共 ${n} 分钟）`", page)
 
     def test_web_needs_token_and_header(self):
+        skip_unless_ports(self)
         httpd = start_web(self.desk, "127.0.0.1", 0)
         port = httpd.server_address[1]
         base = f"http://127.0.0.1:{port}"
@@ -5180,6 +5253,7 @@ class DeskTest(unittest.TestCase):
             httpd.server_close()
 
     def test_the_page_cannot_change_lanes_or_concurrency(self):
+        skip_unless_ports(self)
         s = self.desk.settings()
         s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
         self.assertEqual(self.desk.save_settings(s), [])
@@ -5335,6 +5409,90 @@ class DeskTest(unittest.TestCase):
         self.assertIn('["registry.npmjs.org", "*.pypi.org", "localhost:3000"] -> []', out)
         self.assertIn("Tell the principal", out)
         self.assertEqual(self.events("lane_network_changed")[-1]["new"], [])
+
+    def test_none_empties_a_lane_field_as_the_help_says(self):
+        self.hansa("lane", "set", "a", "network", "registry.npmjs.org")
+        self.hansa("lane", "set", "a", "check", "make test")
+        self.hansa("lane", "set", "a", "env", "A=1")
+        out = self.hansa("lane", "set", "a", "network", "none")
+        self.assertIn('network: ["registry.npmjs.org"] -> []', out)
+        self.assertEqual(self.events("lane_network_changed")[-1]["new"], [])
+        self.hansa("lane", "set", "a", "check", "none")
+        self.hansa("lane", "set", "a", "env", "none")
+        ln = self.desk.settings()["lanes"]["a"]
+        self.assertEqual((ln["network"], ln["check"], ln["env"]), ([], "", {}))
+        self.assertIn("network during a task: none", views.explain_text(self.desk, "lane", "a"))
+        for field, said in (("max_turns", "takes one whole number"), ("base", "takes the name of a branch"),
+                            ("providers", "list at least one provider")):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", field, "none"])
+            self.assertIn(said, str(e.exception.code))
+
+    def test_localhost_on_a_lanes_network_list_on_macos_prints_what_listens_on_the_loopback(self):
+        found = ([("postgres", 552, "me", "127.0.0.1", 5432), ("postgres", 552, "me", "[::1]", 5432),
+                  ("NimbusProxy", 1846, "me", "127.0.0.1", 2086), ("rapportd", 561, "me", "*", 49185)], 3)
+        found[0].sort(key=lambda x: x[4])
+        listeners = unittest.mock.Mock(return_value=found)
+        with unittest.mock.patch.object(cli, "ON_MAC", True), \
+                unittest.mock.patch.object(cli, "mac_loopback_listeners", listeners):
+            out = self.hansa("lane", "set", "a", "network", "registry.npmjs.org", "localhost")
+            self.assertIn("Warning: on macOS, localhost on lane a's network list", out)
+            self.assertIn("a local proxy among them reaches the internet", out)
+            self.assertIn("What listens on this machine's loopback now; a worker can reach every one:\n"
+                          "  NimbusProxy (pid 1846, me): 127.0.0.1:2086\n"
+                          "  postgres (pid 552, me): 127.0.0.1:5432, [::1]:5432\n"
+                          "  rapportd (pid 561, me): *:49185\n"
+                          "3 processes of other accounts could not be looked at (only root can)", out)
+            self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "registry.npmjs.org"))
+            self.assertEqual(listeners.call_count, 1)
+            listeners.return_value = None
+            self.assertIn("What listens on the loopback now could not be read here.",
+                          self.hansa("lane", "set", "a", "network", "localhost:3000"))
+            listeners.return_value = ([], 0)
+            other = self.tmp / "other"
+            other.mkdir()
+            sh("git", "init", "-q", "-b", "dev", cwd=other)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i", cwd=other)
+            out = self.hansa("lane", "add", "b", "--repo", str(other), "--network", "127.0.0.1")
+            self.assertIn('network ["127.0.0.1"]', out)
+            self.assertIn("Tell the principal", out)
+            self.assertIn("Warning: on macOS, localhost on lane b's network list", out)
+            self.assertIn("Nothing that hansa can look at listens on the loopback now.", out)
+            self.assertEqual(self.events("lane_network_changed")[-1]["new"], ["127.0.0.1"])
+            self.assertEqual(self.desk.settings()["lanes"]["b"]["network"], ["127.0.0.1"])
+            self.assertIn("they need localhost on the list", views.explain_text(self.desk, "lane", "b"))
+        with unittest.mock.patch.object(cli, "ON_MAC", False), \
+                unittest.mock.patch.object(cli, "mac_loopback_listeners", listeners):
+            out = self.hansa("lane", "set", "a", "network", "localhost")  # Linux: nothing more
+            self.assertNotIn("Warning", out)
+            self.assertNotIn("listens", out)
+        self.assertEqual(listeners.call_count, 3)
+        with unittest.mock.patch.object(views.sys, "platform", "linux"):
+            self.assertIn("local servers a worker starts (on Linux): they need nothing on the list",
+                          views.explain_text(self.desk, "lane", "a"))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS reads listeners through libproc")
+    def test_the_servers_listening_on_the_loopback_are_read_through_libproc(self):
+        import pwd
+        from hansa import run
+        self.assertEqual(run._loopback_address(1, bytes(12) + bytes([127, 0, 0, 1])), "127.0.0.1")
+        self.assertEqual(run._loopback_address(1, bytes(16)), "*")
+        self.assertEqual(run._loopback_address(1, bytes(12) + bytes([10, 0, 0, 2])), "")
+        self.assertEqual(run._loopback_address(2, bytes(15) + b"\1"), "[::1]")
+        self.assertEqual(run._loopback_address(2, bytes(16)), "*")
+        skip_unless_ports(self)
+        srv = socket.socket()
+        self.addCleanup(srv.close)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        port = srv.getsockname()[1]
+        got = run.mac_loopback_listeners()
+        self.assertIsNotNone(got)
+        mine = [x for x in got[0] if x[1] == os.getpid()]
+        self.assertIn(("127.0.0.1", port), [(x[3], x[4]) for x in mine])
+        self.assertTrue(all(x[2] == pwd.getpwuid(os.getuid()).pw_name for x in mine))
+        srv.close()
+        self.assertNotIn(port, [x[4] for x in run.mac_loopback_listeners()[0] if x[1] == os.getpid()])
 
     def test_a_setup_change_is_recorded_for_the_principal(self):
         out = self.hansa("lane", "set", "a", "setup", "pnpm install --frozen-lockfile")

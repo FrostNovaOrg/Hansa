@@ -260,6 +260,16 @@ here; work that needs code changed or a browser goes to a worker.
   when the lane's work needs it (a setup that installs dependencies needs its
   registry, a build that downloads, say); and tell the principal what you added
   and why.
+- `localhost` on that list differs by system. On Linux each sandbox has a
+  loopback of its own: workers' own local servers (a test that starts an HTTP
+  server, say) need nothing on the list, and `localhost` adds nothing for them;
+  it only lets a program told to use the sandbox's proxy for localhost reach
+  the machine's loopback through it, so leave it off. On macOS local servers
+  need `localhost`, and it opens every service on the machine's loopback, local
+  proxies among them, which reach the internet whatever the list says. List it
+  only on a Mac whose loopback holds nothing a worker must not reach; `hansa
+  lane set` then prints what listens there. `hansa explain lane L` says which
+  holds on this machine.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/.m2`) is the folders its workers, setup and check may write besides
   the worktree and their temporary folder. Use it when a build or test tool needs its cache folder
