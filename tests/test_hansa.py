@@ -416,6 +416,16 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), m["head"])
         self.assertIn("sandbox's placeholders", run.PROTOCOL)
 
+    def test_workers_are_told_git_stash_is_refused_and_background_work_ends_in_its_command(self):
+        from hansa import run
+        for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):
+            flat = " ".join(text.split())
+            self.assertIn("`git stash` is refused, `git stash list` too, and one refused part refuses the whole "
+                          "command line", flat)
+            self.assertIn("`git show HEAD:path`", flat)
+            self.assertIn("stop background work within the command that started it, or wait for it there", flat)
+            text.format(tid="t1", lane="a")  # still a template with nothing else to fill
+
     def test_a_change_holding_a_stored_key_is_never_merged_and_the_key_is_never_shown(self):
         key = "sk-test-0123456789"
         self.desk.write_key("mimo", key)
@@ -1800,6 +1810,17 @@ class DeskTest(unittest.TestCase):
                             "serve", "--port", "0"], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("another hansa serve", r.stdout + r.stderr)
+
+    def test_a_second_server_waits_for_the_lock_by_the_clock_not_by_counting_sleeps(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        real = time.sleep
+        with unittest.mock.patch.object(cli.time, "sleep", lambda s: real(s * 3)):  # as macOS overshoots short sleeps
+            t0 = time.monotonic()
+            self.assertIsNone(cli.hold_server_lock(self.desk))
+            took = time.monotonic() - t0
+        self.assertGreaterEqual(took, cli.LOCK_WAIT)
+        self.assertLess(took, cli.LOCK_WAIT + 1)  # counting 40 sleeps of 0.15 s would take 6 s
 
     def test_a_server_on_a_port_another_holds_says_so_in_one_line(self):
         busy = socket.socket()
@@ -3871,6 +3892,23 @@ class DeskTest(unittest.TestCase):
         self.assertIn('Bash: B="${TMPDIR:-/tmp}/x" && make; Claude Code said: Contains expansion', shown)
         self.assertNotIn("allowed commands", shown)
 
+    def test_show_full_gives_a_long_refused_call_whole(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        long = "cd sub && " + " && ".join(f"echo step{i:03d}" for i in range(40)) + " && git stash list"
+        self.assertGreater(len(long), 400)
+        s["lanes"]["a"]["env"] = {"FAKE_REFUSED": long}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Build it"))
+        self.assertEqual(m["denials"], [f"Bash: {long}"])  # kept whole on the task
+        short = views.show_text(self.desk, m["id"])
+        self.assertNotIn("git stash list", short)  # cut, as before
+        self.assertIn(f"(whole: hansa show {m['id']} --full)", short)
+        full = views.show_text(self.desk, m["id"], full=True)
+        self.assertIn(f"  Bash: {long}\n    Claude Code said: Contains expansion", full)
+
     def test_the_sandbox_keeps_workers_from_the_worktrees_git_file(self):
         from hansa import run
         wt = self.tmp / "wt"
@@ -4541,6 +4579,10 @@ class DeskTest(unittest.TestCase):
             shown = views.show_text(self.desk, v)
             self.assertIn(f"\n{why}\n", shown)
             self.assertNotIn("error:", shown)
+        evs = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines()) if e.get("task") in (v1, v4)]
+        self.assertEqual([e["event"] for e in evs if e["event"] in ("task_cancel", "verification_closed")],
+                         ["verification_closed"])  # v4, which it closed; v1 was closed already, and neither cancelled
+        self.assertEqual(evs[-1]["task"], v4)
         self.assertEqual(self.desk.meta(t4)["state"], "done")  # its task still waits for review, verified
         from hansa.run import unverified_note
         self.assertEqual(unverified_note(self.desk, self.desk.meta(t4)), "")  # v4's verdict still counts
@@ -4624,6 +4666,29 @@ class DeskTest(unittest.TestCase):
         self.settle(d, t6)
         self.assertIn(f"neither it nor {t5}, the attempt it retries, has a verification that holds",
                       self.hansa("merge", t6))
+        t8 = done("e.py")  # verified; retried twice: the verification of the first attempt still counts, named
+        v8 = verified(t8)
+        self.hansa("retry", t8, "more")
+        t9 = self.desk.meta(t8)["replaced_by"]
+        self.settle(d, t9)
+        self.hansa("retry", t9, "more again")
+        t10 = self.desk.meta(t9)["replaced_by"]
+        self.settle(d, t10)
+        out = self.hansa("merge", t10)
+        self.assertIn(f"{t10} merged into main", out)
+        self.assertIn(f"note: {t10} changed e.py, and no verification of {t10} held; {v8} verified {t8}, an earlier "
+                      f"attempt of this change, not this one: what came after that verification (a conflict settled, "
+                      f"code changed) is not the code it checked", out)
+        self.assertNotIn("nothing verified", out)
+        t11 = done("f.py")  # retried twice, never verified: every attempt is named
+        self.hansa("retry", t11, "more")
+        t12 = self.desk.meta(t11)["replaced_by"]
+        self.settle(d, t12)
+        self.hansa("retry", t12, "more again")
+        t13 = self.desk.meta(t12)["replaced_by"]
+        self.settle(d, t13)
+        self.assertIn(f"nothing verified this change: {t13} changed f.py, and neither it nor any attempt it retries "
+                      f"({t12}, {t11}) has a verification that holds", self.hansa("merge", t13))
         t7 = done("guide.md")
         out = self.hansa("merge", t7)
         self.assertIn(f"{t7} merged into main", out)
@@ -4810,6 +4875,24 @@ class DeskTest(unittest.TestCase):
         held.close()
         why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
         self.assertIn("but `hansa serve` is not running", why)
+
+    def test_hansa_design_says_what_the_waiting_lines_say_when_the_server_does_not_look(self):
+        from hansa import run
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        for quiet, said in ((0, "hansa opens the design session in seconds and asks the principal to join it."),
+                            (run.STUCK_AFTER + 60, "hansa opens the design session once `hansa serve` gets through its "
+                                                   "rounds; `hansa serve` is busy or stuck: no round finished for 6 "
+                                                   "minutes. Then it asks the principal to join it.")):
+            (self.desk.state_dir / "heartbeat").write_text(str(time.time() - quiet))
+            out = self.hansa("design", "Talk it over", "--lane", "a")
+            self.assertIn(said, out)
+            self.hansa("cancel", out.split()[0])
+        held.close()
+        out = self.hansa("design", "Talk it over", "--lane", "a")
+        self.assertIn("hansa opens the design session once `hansa serve` gets through its rounds; `hansa serve` is "
+                      "not running. Then it asks the principal to join it.", out)
+        self.assertNotIn("in seconds", out)
 
     def test_add_retry_and_verify_say_when_no_provider_of_the_lane_can_start_the_task(self):
         d = Dispatcher(self.desk)

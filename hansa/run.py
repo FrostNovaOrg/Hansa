@@ -125,6 +125,10 @@ on branch task/{tid}, which was made for this task.
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
 - If a command you need is refused, say which one and why you need it in your report;
   do not look for a way around the refusal.
+- `git stash` is refused, `git stash list` too, and one refused part refuses the whole command
+  line. To see a file as it was before your changes: `git show HEAD:path`.
+- A later command cannot stop a background process an earlier one started (kill is refused):
+  stop background work within the command that started it, or wait for it there.
 - End with a short report: what you changed, how you checked it, and anything left undone.
   Stop or wait for any background work you started before you write it: your last message
   is taken as your report.
@@ -143,6 +147,11 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
+- `git stash` is refused, `git stash list` too, and one refused part refuses the whole command
+  line. To see a file as it was before your changes: `git show HEAD:path` (before the task's, the
+  base commit the task names: `git show <base>:path`).
+- A later command cannot stop a background process an earlier one started (kill is refused):
+  stop background work within the command that started it, or wait for it there.
 - Stop or wait for any background work you started before you write your report: your last
   message is taken as your report.
 - Nobody will wake you later or answer questions: wait for your own work before you report.
@@ -1685,12 +1694,18 @@ def usage_from_record(home: Path, sid: str) -> dict:
     return out
 
 
+DENIAL_KEPT = 20000  # characters of a refused call kept on the task: whole, but for a file written by a heredoc
+
+
 def denial_of(d) -> str:
+    """A refused call as the task keeps it: whole, so that hansa show --full can say which part was refused
+    (hansa show alone gives its first line, cut)."""
     if not isinstance(d, dict):
-        return str(d)[:160]
-    inp = d.get("tool_input") or {}
-    what = inp.get("command") or inp.get("file_path") or inp.get("pattern") or ""
-    return f"{d.get('tool_name', '?')}: {str(what)[:140]}"
+        what = str(d)
+    else:
+        inp = d.get("tool_input") or {}
+        what = f"{d.get('tool_name', '?')}: {inp.get('command') or inp.get('file_path') or inp.get('pattern') or ''}"
+    return what if len(what) <= DENIAL_KEPT else what[:DENIAL_KEPT] + f" ... (cut at {DENIAL_KEPT} characters)"
 
 
 def refusal_reasons(home: Path, sid: str) -> dict:
@@ -1707,7 +1722,7 @@ def refusal_reasons(home: Path, sid: str) -> dict:
                 said = " ".join(x.get("text", "") for x in said if isinstance(x, dict))
             said = " ".join(str(said or "").replace("<tool_use_error>", "").replace("</tool_use_error>", "").split())
             if said:
-                out[c["tool_use_id"]] = said[:300]
+                out[c["tool_use_id"]] = said[:DENIAL_KEPT]
     return out
 
 
@@ -1970,7 +1985,8 @@ def text_only(path: str) -> bool:
 
 def unverified_note(desk: Desk, m: dict) -> str:
     """For a merge: that nothing verified a change beyond text and documentation, without the leading 'note: ';
-    '' when its verification holds, or it changed only text."""
+    '' when its verification holds, or it changed only text. It looks back along the whole chain of attempts this
+    one retries (parent, its parent, ...): the nearest one whose verification held is named, as not this code."""
     def holds(t):
         v = desk.meta(t["verify"]) if t and t.get("verify") else None
         return v if v and v.get("verdict") == "holds" else None
@@ -1978,17 +1994,29 @@ def unverified_note(desk: Desk, m: dict) -> str:
     if not code or holds(m):
         return ""
     what = f"{m['id']} changed {', '.join(code[:3])}" + (f" and {len(code) - 3} more" if len(code) > 3 else "")
-    try:
-        pm = desk.meta(m["parent"]) if m.get("parent") else None
-    except SystemExit:
-        pm = None
-    pv = holds(pm)
-    if pv:
-        return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {pm['id']}, the attempt it "
-                f"retries, not this one")
-    return (f"nothing verified this change: {what}, and "
-            + (f"neither it nor {pm['id']}, the attempt it retries, has a verification that holds" if pm
-               else "no verification of it holds"))
+    earlier, seen, at = [], {m["id"]}, m  # the attempts it retries, nearest first
+    while at.get("parent") and at["parent"] not in seen and at.get("kind") != "verify":
+        try:
+            at = desk.meta(at["parent"])
+        except SystemExit:
+            break
+        if at.get("kind") == "verify":
+            break
+        seen.add(at["id"])
+        earlier.append(at)
+        pv = holds(at)
+        if pv:
+            which = "the attempt it retries" if len(earlier) == 1 else "an earlier attempt of this change"
+            return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, not "
+                    f"this one: what came after that verification (a conflict settled, code changed) is not the code "
+                    f"it checked")
+    if not earlier:
+        return f"nothing verified this change: {what}, and no verification of it holds"
+    if len(earlier) == 1:
+        return (f"nothing verified this change: {what}, and neither it nor {earlier[0]['id']}, the attempt it "
+                f"retries, has a verification that holds")
+    return (f"nothing verified this change: {what}, and neither it nor any attempt it retries "
+            f"({', '.join(x['id'] for x in earlier)}) has a verification that holds")
 
 
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:

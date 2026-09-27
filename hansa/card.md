@@ -212,9 +212,11 @@ here; work that needs code changed or a browser goes to a worker.
   why. What holds you back is your judgment, the principal's
   permission and the rules in this card, not a wall.
   Three things stay closed by design: reading `secrets/` (the keys); reading
-  or editing the Claude Code folder you run from (the login and the machine
-  owner's own files there), except your memory under its `projects/`; and editing
-  code in the lanes' repositories. Code changes go through workers, so each
+  or editing the files directly in the Claude Code folder you run from (the
+  login and the machine owner's own files) and its `sessions/`; and editing
+  code in the lanes' repositories. That folder's other folders stay open,
+  your memory under its `projects/` among them; a file that appears directly
+  in it after your session starts is closed from the next start. Code changes go through workers, so each
   one gets a branch, the lane's check and a merge. You need not run a lane's
   tests yourself; its check does that.
 - On a server the desk may belong to an ordinary account while you run as root.
