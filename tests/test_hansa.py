@@ -4563,6 +4563,61 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("next:", shown)  # nothing left to do with it
         self.assertNotIn(vid, [m["id"] for m in views.status(self.desk)["review"]])
 
+    def test_verify_on_another_lane_runs_there_and_stays_a_verification(self):
+        seen = self.tmp / "argv.jsonl"
+        d, t1, t2 = self.two_lanes()
+        s = self.desk.settings()
+        s["providers"]["other"] = {**s["providers"]["claude"]}
+        s["lanes"]["b"].update(providers=["other"], check="exit 1",
+                               env={"FAKE_VERDICT": "holds", "FAKE_SHOW_ARGV": str(seen)})
+        other = self.tmp / "other"  # a lane on another repository cannot reach the change
+        shutil.copytree(self.repo, other)
+        s["lanes"]["c"] = {**json.loads(json.dumps(s["lanes"]["a"])), "repo": str(other)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        before = len(self.desk.tasks())
+        for lane, said in (("c", f"lane c cannot reach {t1}'s change: it is on {other}"), ("z", "there is no lane z")):
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "verify", t1, "--lane", lane])
+            self.assertIn(said, str(e.exception))
+            self.assertIn("nothing was queued", str(e.exception))
+        self.assertEqual((len(self.desk.tasks()), self.desk.meta(t1).get("verify")), (before, None))
+        with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
+            main(["verify", "--help"])
+        self.assertIn("By default it runs on the task's own lane", " ".join(helped.getvalue().split()))
+        self.assertIn("--lane LANE", helped.getvalue())
+        out = self.hansa("verify", t1, "--lane", "b")
+        vid = self.desk.meta(t1)["verify"]
+        self.assertIn(f"{vid} queued on lane b:", out)
+        v = self.settle(d, vid)
+        self.assertEqual((v["lane"], v["provider"], v["kind"], v["verdict"], v.get("check")),
+                         ("b", "other", "verify", "holds", None))  # b's provider; never checked
+        self.assertEqual((v["commits"], v["files"]), (0, []))  # its scratch changes are set aside
+        self.assertIn(vid, subprocess.run(["git", "stash", "list"], cwd=v["worktree"], capture_output=True,
+                                          text=True).stdout)
+        self.assertEqual(Path(v["worktree"]), self.desk.worktrees_dir / "b")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
+        shown = views.show_text(self.desk, vid)
+        self.assertIn(f"{vid} · done · lane b · other", shown)
+        self.assertIn(f"it ran on lane b, not {t1}'s own lane a", shown)
+        self.assertIn(f"verification (a worker ran the change): {vid}: holds; on lane b", views.show_text(self.desk, t1))
+        with self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "merge", vid])  # never merged, on any lane
+        with contextlib.redirect_stdout(io.StringIO()):  # verified again on its own lane: the first one is closed
+            main(["--desk", str(self.desk.root), "verify", t1])
+        v2 = self.desk.meta(t1)["verify"]
+        self.assertEqual(self.desk.meta(v2)["lane"], "a")
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {v2} verifies {t1} again")
+        self.assertNotIn("; on lane", views.show_text(self.desk, t1))
+        self.assertNotIn("own lane", views.show_text(self.desk, v2))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", t2, "--lane", "a"])
+        v3 = self.desk.meta(t2)["verify"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "cancel", t2])
+        self.assertEqual((self.desk.meta(v3)["lane"], self.desk.meta(v3)["state"], self.desk.meta(v3)["error"]),
+                         ("a", "cancelled", f"closed: {t2} was cancelled"))  # stopped with its task, from another lane
+
     def test_a_verification_that_ended_stays_as_it_ended_when_its_task_closes(self):
         d = Dispatcher(self.desk)
         t1, t2, t3 = (self.desk.new_task(f"Add hello.txt {n}") for n in (1, 2, 3))

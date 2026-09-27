@@ -47,12 +47,12 @@ def as_closed_now(m: dict) -> dict:
 
 
 def verification(desk: Desk, m: dict):
-    """The latest verification of a task: {task, state, verdict}, or None."""
+    """The latest verification of a task: {task, state, verdict, lane}, or None."""
     vid = m.get("verify")
     if not vid:
         return None
     v = as_closed_now(desk.meta(vid))
-    return {"task": vid, "state": v["state"], "verdict": v.get("verdict", "")}
+    return {"task": vid, "state": v["state"], "verdict": v.get("verdict", ""), "lane": v.get("lane", "")}
 
 
 def _verification_line(v) -> str:
@@ -347,6 +347,11 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     verifying = m.get("kind") == "verify"
     meaning = (f"a verification of {m.get('parent')}: a worker ran its change to see whether it holds; never merged"
                if verifying else STATES.get(m["state"], ""))
+    if verifying:
+        own = (read_json(desk.tasks_dir / str(m.get("parent")) / "meta.json", {}) or {}).get("lane") or ""
+        on = "runs" if m["state"] in ("queued", "running") else "ran"
+        meaning += (f"; it {on} on lane {m.get('lane') or 'any'}"
+                    + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
     if m.get("kind") == "design":
         meaning = ("a design session: the principal shapes this feature with it directly, on the real code; "
                    + ("it is open now" if m["state"] == "running" and m.get("phase") != "checking"
@@ -446,6 +451,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     v = verification(desk, m)
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"
+                   + (f"; on lane {v['lane']}" if v["lane"] and v["lane"] != m.get("lane") else "")
                    + ("" if v["state"] in ("queued", "running") else f"; hansa show {v['task']} says what it ran"))
     if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
         out.append(f"verdict: {m.get('verdict') or 'none given'}")
