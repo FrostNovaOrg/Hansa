@@ -9,6 +9,7 @@ worker ends. Nothing here needs the worker to know about hansa.
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import re
@@ -910,18 +911,22 @@ def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     m = desk.meta(tid)
     for t in [*m.get("sandbox_tmp", []), *([m["worker_tmp"]] if m.get("worker_tmp") else [])]:
         shutil.rmtree(t, ignore_errors=True)
-    desk.update(tid, sandbox_tmp=[], worker_tmp="")
+    gone = {t: not os.path.lexists(t) for t in [m.get("worker_tmp")] if t}
+    desk.change(tid, lambda x: {"sandbox_tmp": [], "worker_tmp": "", "worker_tmps": [
+        {**r, "removed": gone[r["path"]]} if r.get("path") in gone else r for r in x.get("worker_tmps") or []]})
 
 
 def make_worker_tmp(desk: Desk, tid: str) -> str:
     """A temporary folder for one worker run, its alone (mode 700), recorded as the task's worker_tmp so
-    remove_sandbox_tmp removes it however the run ends. Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
+    remove_sandbox_tmp removes it however the run ends, and in worker_tmps, which outlives the run: each run's
+    path, and whether it was removed (hansa show says). Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
     per-user folder (the TMPDIR of the worker's commands) and its sockets in it; and as TMPDIR, where its own
     sandbox makes its proxy sockets (srt-mux-*.sock, claude-http-*.sock) and, on Linux, the empty folders it
     mounts over paths it hides (claude-empty-*), which it leaves when it ends. So its path is kept short:
     under /tmp, not the server's TMPDIR (a long path under /var/folders on macOS)."""
     tmp = tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=WORKER_TMP_ROOT)
-    desk.update(tid, worker_tmp=tmp)
+    desk.change(tid, lambda x: {"worker_tmp": tmp,
+                                "worker_tmps": [*(x.get("worker_tmps") or []), {"path": tmp, "removed": None}]})
     return tmp
 
 
@@ -1261,8 +1266,8 @@ def sweep(desk: Desk, tid: str) -> list:
     the command doing this. What was stopped goes on the task (left_running) and in the event log."""
     keep = {os.getpid(), os.getppid()}
     try:
-        keep.add(int((desk.state_dir / "serve.lock").read_text().strip()))
-    except (OSError, ValueError):
+        keep.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
+    except (OSError, ValueError, IndexError):
         pass
 
     def running(p, start):
@@ -1910,15 +1915,18 @@ def lane_occupied(m: dict) -> bool:
 
 
 def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
-    """A verification belongs to the task it checks, and ends with it. by: the session whose hansa cancel closed
-    it, which hears nothing of it."""
+    """A verification belongs to the task it checks: one still queued or running is stopped with it. One that has
+    ended keeps its state and verdict, with why as a plain note (closed), not an error. by: the session whose
+    hansa cancel closed it, which hears nothing of it."""
     if not m.get("verify"):
         return
     v = desk.meta(m["verify"])
-    if v["state"] in ("queued", "done"):
+    if v["state"] == "queued":
         desk.update(v["id"], state="cancelled", error=why, cancel_by=by)
     elif v["state"] == "running":  # hansa serve stops it within seconds
         desk.update(v["id"], cancel=True, cancel_by=by)
+    else:
+        desk.update(v["id"], closed=why)
 
 
 TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc", ".org")
@@ -2271,6 +2279,11 @@ def alive(pid, start: str = "") -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
+    return same_start(pid, start)
+
+
+def same_start(pid, start: str) -> bool:
+    """Whether a process still has the start saved for it; True when either cannot be read."""
     if any(c.isspace() for c in start):  # ps's start text, saved before hansa read it with sysctl
         start = ""
     seen = proc_start(pid) if start else ""
@@ -2563,12 +2576,13 @@ class Dispatcher:
         desk = self.desk
         s = desk.settings()
         desk.state_dir.mkdir(exist_ok=True)
-        (desk.state_dir / "heartbeat").write_text(str(now()))
+        beat(desk)
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
                 del self.procs[tid]
                 stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
                 self.ended(tid, proc.returncode)
+                beat(desk)
         for m in desk.tasks():
             if m["state"] != "running" or m["id"] in self.procs:
                 continue
@@ -2589,6 +2603,7 @@ class Dispatcher:
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
         self.tries(s)
         self.merge_checks(s)
+        beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
         if desk.paused():
             return
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
@@ -2628,9 +2643,121 @@ class Dispatcher:
                 break
 
 
+ROUND_QUIET = 30  # seconds without a finished round after which hansa serve counts as busy
+STUCK_AFTER = 300  # seconds without a finished round after which it is said to be busy or stuck
+
+
+def server_holder(desk: Desk) -> tuple:
+    """The hansa serve that serve.lock names (pid, start); (None, '') when it names none."""
+    try:
+        words = (desk.state_dir / "serve.lock").read_text().split()
+        return int(words[0]), " ".join(words[1:])
+    except (OSError, ValueError, IndexError):
+        return None, ""
+
+
+def lock_held(desk: Desk):
+    """Whether a hansa serve holds serve.lock, asked of the lock itself (a non-blocking shared try): whatever
+    process its number now names, only a live server holds it. None when the lock cannot be asked."""
+    try:
+        f = open(desk.state_dir / "serve.lock", "r")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    with f:  # closing it lets the try go at once
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        return False
+
+
+def _exists(pid, start: str) -> bool:
+    """alive(), but a process of another account (not ours to signal) counts as there while its start, where it
+    can be read (/proc on Linux, for any process), is the one serve.lock names."""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return same_start(pid, start)
+    except OSError:
+        return False
+    return alive(pid, start)
+
+
+def beat(desk: Desk) -> None:
+    """hansa serve got through a round, or a step of one: the heartbeat server_state reads."""
+    desk.state_dir.mkdir(exist_ok=True)
+    (desk.state_dir / "heartbeat").write_text(str(now()))
+
+
+def pulse(desk: Desk, every: float = 5.0) -> None:
+    """hansa serve's process answers: written from a thread while it runs, apart from the rounds, so that a
+    server whose rounds stopped coming is still told from one whose process stopped (server_state)."""
+    import threading
+
+    def run():
+        while True:
+            try:
+                write_json(desk.state_dir / "pulse", {"pid": os.getpid(), "at": time.time()})
+            except OSError:
+                pass
+            time.sleep(every)
+    threading.Thread(target=run, name="hansa-pulse", daemon=True).start()
+
+
+def server_state(desk: Desk) -> dict:
+    """One rule for whether hansa serve runs. gone: no hansa serve holds serve.lock (lock_held), whatever
+    process the number in it names now; where the lock cannot be asked, the process it names is gone or is
+    another one started since, or it names none. up: alive, and it finished a round in the last ROUND_QUIET seconds. busy: alive, quiet for
+    longer (a round waiting on a worker to stop, say). stuck: alive, quiet for STUCK_AFTER seconds or more.
+    quiet: seconds since its last round; answers: whether its process still wrote its pulse lately (a
+    process stopped with Ctrl-Z, say, does not)."""
+    pid, start = server_holder(desk)
+    quiet = max(0, int(time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0)))
+    held = lock_held(desk)
+    if held is None:  # the lock cannot be asked: the process it names, and when that one started
+        held = bool(pid) and _exists(pid, start) and (bool(start) or quiet < ROUND_QUIET)  # a number alone:
+        # written by a server before the start was, so its rounds say whether it runs, as they did then
+    if not held:
+        return {"state": "gone", "pid": None, "quiet": None, "answers": False}
+    pulse = read_json(desk.state_dir / "pulse", {}) or {}
+    answers = pulse.get("pid") == pid and time.time() - (pulse.get("at") or 0) < ROUND_QUIET
+    return {"state": "up" if quiet < ROUND_QUIET else "busy" if quiet < STUCK_AFTER else "stuck",
+            "pid": pid, "quiet": quiet, "answers": answers}
+
+
 def server_up(desk: Desk) -> bool:
-    """Whether hansa serve has looked at the desk in the last half minute."""
-    return time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0) < 30
+    """Whether hansa serve runs: its process is alive, busy or not (server_state)."""
+    return server_state(desk)["state"] != "gone"
+
+
+def quiet_text(seconds: int) -> str:
+    mins = seconds // 60
+    return f"{mins} minute{'s' if mins != 1 else ''}" if mins else f"{seconds} seconds"
+
+
+def not_looking(desk: Desk) -> str:
+    """Why hansa serve will not look at the desk within seconds, in a clause; '' when it will (up or busy)."""
+    st = server_state(desk)
+    return ("`hansa serve` is not running" if st["state"] == "gone" else
+            f"`hansa serve` is busy or stuck: no round finished for {quiet_text(st['quiet'])}"
+            if st["state"] == "stuck" else "")
+
+
+def server_text(st: dict) -> str:
+    """What server_state says, in words, for hansa status and hansa explain server."""
+    if st["state"] == "gone":
+        return "server NOT running: start it with `hansa serve` (see hansa explain server)"
+    if st["state"] == "up":
+        return "server up"
+    quiet = quiet_text(st["quiet"])
+    return (f"server up (pid {st['pid']}) but busy: no round finished for {quiet}" if st["state"] == "busy" else
+            f"hansa serve (pid {st['pid']}) has not finished a round for {quiet}: busy or stuck"
+            + ("" if st["answers"] else "; its process does not answer either (stopped with Ctrl-Z?)")
+            + " · next: hansa explain server")
 
 
 def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
@@ -2640,8 +2767,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  and x.get("lane") == m.get("lane")]
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
-                else "opens when `hansa serve` next looks (within seconds)" if server_up(desk)
-                else "opens once `hansa serve` runs; `hansa serve` is not running")
+                else "opens when `hansa serve` next looks (within seconds)" if not not_looking(desk)
+                else f"opens once `hansa serve` gets through its rounds; {not_looking(desk)}")
     if desk.paused():
         return "dispatch is paused"
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
@@ -2659,8 +2786,9 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
                  for p in s["lanes"][ln]["providers"]}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
-            return (f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)"
-                    if server_up(desk) else f"ready for lane {ln} on {ready[0]}, but `hansa serve` is not running")
+            why_not = not_looking(desk)
+            return (f"ready for lane {ln} on {ready[0]}, but {why_not}" if why_not else
+                    f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)")
         why.append(f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})")
     return "; ".join(why) if why else "waiting for a free slot"
 

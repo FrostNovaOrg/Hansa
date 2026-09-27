@@ -143,7 +143,9 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 ## Hearing from hansa
 hansa posts to your session through its inbox when something needs you: a task
 ended (after its check) or failed, a verification or design session ended, a
-merge check ended, the principal answered a request, the server stopped. Each
+merge check ended, the principal answered a request, the server stopped (or,
+still running, finished no round for 5 minutes: busy or stuck), and then that it
+runs again. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next
 command. A session started with `hansa coordinator` is posted to by itself;
 otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
@@ -209,7 +211,9 @@ here; work that needs code changed or a browser goes to a worker.
   unless they have allowed it, so say in plain words what the command does and
   why. What holds you back is your judgment, the principal's
   permission and the rules in this card, not a wall.
-  Two things stay closed by design: reading `secrets/` (the keys), and editing
+  Three things stay closed by design: reading `secrets/` (the keys); reading
+  or editing the Claude Code folder you run from (the login and the machine
+  owner's own files there), except your memory under its `projects/`; and editing
   code in the lanes' repositories. Code changes go through workers, so each
   one gets a branch, the lane's check and a merge. You need not run a lane's
   tests yourself; its check does that.

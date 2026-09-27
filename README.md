@@ -89,8 +89,10 @@ page gives.
   plain words what the command does and why. It has three helpers: `scout`
   and `reviewer` only read; `operator` does one hands-on job on the machine
   (installing software, setting up a tool) with the coordinator's rights, each
-  command with the principal's permission. Two things stay closed by design:
-  reading `secrets/` (the keys) and editing code in the lanes' repositories;
+  command with the principal's permission. Three things stay closed by design:
+  reading `secrets/` (the keys), reading or editing the Claude Code folder it
+  runs from (but for its memory under `projects/`), and editing code in the
+  lanes' repositories;
   code changes go through workers, so each gets a branch, the lane's check and
   a merge. Its whole interface is `hansa/card.md`, copied into the desk as
   `CLAUDE.md`.
