@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import build, cost, notify
-from .desk import Desk, is_git_rule, read_json
+from .desk import Desk, is_git_rule, read_json, write_json
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, markers_in_change, markers_text,
                   not_looking, progress_of, provider_problem, server_state, server_text, srt_needed, srt_problem,
                   srt_record, srt_when, tried_lanes, waiting_reason)
@@ -158,17 +158,48 @@ def ready_now(desk: Desk, s: dict | None = None) -> list:
     return [n for n in sorted(s["providers"]) if not provider_problem(desk, s, n)]
 
 
-def ask_note(text: str, ready: list) -> str:
-    """For an open request whose text names a provider (as a whole word) that is ready now: a hint that it may be
-    done. hansa closes nothing itself."""
-    named = [n for n in ready if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", str(text), re.IGNORECASE)]
+def ask_names(a: dict, ready: list) -> list:
+    """The providers an open request names (as whole words) that were not ready when it was made and are ready
+    now. None for a request made before hansa recorded which were ready (it cannot tell)."""
+    return [n for n in ready if n in (a.get("not_ready") or [])
+            and re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", str(a.get("text", "")), re.IGNORECASE)]
+
+
+def ask_note(a: dict, ready: list) -> str:
+    """For an open request that may be done by now (ask_names): a hint saying so. hansa closes nothing itself."""
+    named = ask_names(a, ready)
     return f"{', '.join(named)} {'is' if len(named) == 1 else 'are'} ready now: done?" if named else ""
+
+
+def ready_news(desk: Desk) -> None:
+    """After a provider's key or settings changed or its check ended: for each open request, the providers it
+    names that became ready since it was made (ask_names) and it was not told of yet, as an ask_ready event the
+    follower posts. Each is told once; again only after the provider stopped being ready and became ready again."""
+    ready = ready_now(desk)
+    news, changed = {}, False
+    with desk.lock():
+        asks = desk.asks()
+        for a in asks:
+            if a.get("closed") or "not_ready" not in a:
+                continue
+            told = [n for n in a.get("told_ready") or [] if n in ready]  # stopped being ready: may be told again
+            for n in ask_names(a, ready):
+                if n not in told:
+                    told.append(n)
+                    news.setdefault(n, []).append(a["id"])
+            if told != (a.get("told_ready") or []):
+                a["told_ready"], changed = told, True
+        if changed:
+            write_json(desk.asks_path, asks)
+    for n, ids in news.items():
+        desk.event("ask_ready", provider=n, ids=ids)
 
 
 def status(desk: Desk) -> dict:
     s = desk.settings()
     tasks = desk.tasks()
     pst = desk.provider_state()
+    ready = ready_now(desk, s)
     designing = [m for m in tasks if m["state"] == "running" and m.get("kind") == "design"]
     running = [m for m in tasks if m["state"] == "running" and m.get("kind") != "design"]
     merging = [m for m in tasks if m["state"] == "merging"]
@@ -228,7 +259,7 @@ def status(desk: Desk) -> dict:
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
-        "asks": [{**a, "note": ask_note(a.get("text", ""), ready_now(desk, s))} for a in desk.asks() if not a.get("closed")],
+        "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         "today": {"finished": len(today), "merged": sum(m["state"] == "merged" for m in today),
                   "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
                   "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
@@ -665,7 +696,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
             "could not start), a verification's verdict, a design session that ended, a queued merge check that "
             "ended, a request the principal answered or closed (with the answer), a provider that an open request names "
-            "becoming ready (its key saved or its check passed: the request may be done), hansa serve stopping or "
+            "becoming ready when it was not as the request was made (once; the request may be done), hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
             "line per event and the next command; events seconds apart come in one message.",

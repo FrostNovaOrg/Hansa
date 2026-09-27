@@ -2990,4 +2990,5 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
             minutes = s.get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
             desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
+    desk.ready_news()
     return result

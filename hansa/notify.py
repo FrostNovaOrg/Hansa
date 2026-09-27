@@ -41,6 +41,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -241,15 +242,13 @@ def _item(desk: Desk, e: dict):
             return None
         return (("ask", x["id"]), f"request #{x['id']} answered: {x.get('answer') or '(closed without a note)'}"
                                   f" (you asked: {str(x.get('text', ''))[:120]})", x.get("session"), False, None)
-    if kind == "key_set" or (kind == "provider_checked" and e.get("ok")):  # a provider an open request names may be ready
-        from .views import ask_note, ready_now
-        ready = [n for n in ready_now(desk) if n == e.get("provider")]
-        named = [a for a in desk.asks() if not a.get("closed") and ask_note(a.get("text", ""), ready)]
+    if kind == "ask_ready":  # a provider open requests name became ready since they were made (views.ready_news)
+        named = [a for a in desk.asks() if a.get("id") in (e.get("ids") or []) and not a.get("closed")]
         if not named:
             return None
         sessions = [a.get("session") for a in named]
         return (("ready", e.get("provider")),
-                f"{ask_note(named[0].get('text', ''), ready)} Still open: "
+                f"{e.get('provider')} is ready now: done? Still open: "
                 + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
                 + " (the principal closes a request on the page)",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
@@ -434,11 +433,11 @@ def message(desk_root: str, lines: list, head: str = "") -> str:
 
 
 # -- the follower ---------------------------------------------------------------------------------------
-def agents_rows() -> list:
+def agents_rows(timeout: float = 15) -> list:
     """The live sessions as `claude agents --json` lists them. RuntimeError when it cannot say."""
     try:
         r = subprocess.run([claude_bin(), "agents", "--json"], capture_output=True, text=True, errors="replace",
-                           timeout=15, stdin=subprocess.DEVNULL)
+                           timeout=timeout, stdin=subprocess.DEVNULL)
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:
         raise RuntimeError(f"claude agents --json could not run ({e})") from None
     if r.returncode:
@@ -454,17 +453,51 @@ def agents_rows() -> list:
     return [x for x in rows if isinstance(x, dict)]
 
 
-def session_row(pid: int):
+def session_row(pid: int, timeout: float = 15):
     """The session's entry in `claude agents --json`, or None when it has none. RuntimeError when it cannot say."""
-    return next((x for x in agents_rows() if str(x.get("pid")) == str(pid)), None)
+    return next((x for x in agents_rows(timeout) if str(x.get("pid")) == str(pid)), None)
 
 
-def session_name(pid: int) -> str:
+def session_name(pid: int, timeout: float = 15) -> str:
     """The session's name as `claude agents --json` lists it; '' when it cannot say."""
     try:
-        return str((session_row(pid) or {}).get("name") or "")[:80]
+        return str((session_row(pid, timeout) or {}).get("name") or "")[:80]
     except RuntimeError:
         return ""
+
+
+NAME_FIRST, NAME_MOST, NAME_LIMIT = 15.0, 300.0, 10.0  # seconds: the first wait, the longest, one lookup's limit
+
+
+class Namer:
+    """The follower's lookups of its session's name (only the follower looks it up; status and notify show what
+    it recorded). A lookup runs in a thread of its own, with a time limit, so posting never waits for it. While
+    the name is missing it looks again after NAME_FIRST seconds, then waits twice as long each time, up to
+    NAME_MOST; once named, every NAME_MOST (Claude Code may rename it). look: the lookup, for tests."""
+
+    def __init__(self, pid: int, name: str = "", first: float = 5.0, look=None):
+        self.name, self.look = name, look or (lambda: session_name(pid, NAME_LIMIT))
+        self.wait, self.next, self.thread, self.found = NAME_FIRST, time.time() + first, None, ""
+
+    def _run(self) -> None:
+        try:
+            self.found = self.look() or ""
+        except Exception:  # noqa: BLE001 - it cannot say; the next lookup may
+            self.found = ""
+
+    def tick(self) -> str:
+        """The name as known now; starts a lookup when one is due, never waits for one."""
+        if self.thread and not self.thread.is_alive():
+            self.thread = None
+            if self.found:
+                self.name, self.wait = self.found, NAME_FIRST
+            self.next = time.time() + (NAME_MOST if self.name else self.wait)
+            if not self.found:
+                self.wait = min(self.wait * 2, NAME_MOST)
+        if not self.thread and time.time() >= self.next:
+            self.found, self.thread = "", threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+        return self.name
 
 
 def _say(text: str) -> None:
@@ -565,15 +598,14 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 ask({"op": "caught_up", "me": me, "of": (r.get("missed") or {}).get("key")})
             except Exception as e:  # noqa: BLE001 - the next follower may then say it again
                 _say(f"could not record that what was missed is told: {e}")
-        pending, first, last, errors, named = [], 0.0, 0.0, 0, time.time() + 5
+        pending, first, last, errors = [], 0.0, 0.0, 0
+        namer = Namer(sess["pid"], me["name"])
         mark, changed = code_mark(), 0.0
         while True:
             if gone(sess):
                 _say("the session's process ended; so does this follower")
                 return 0
-            if time.time() >= named:
-                me["name"] = session_name(sess["pid"]) or me["name"]
-                named = time.time() + (300 if me["name"] else 15)  # until Claude Code names it, look again soon
+            me["name"] = namer.tick()  # recorded with the next feed, for hansa status and hansa notify
             new_mark = code_mark()
             if new_mark != mark:  # an upgrade: a module imported from now on would come from the new files
                 mark, changed = new_mark, time.time()
@@ -1106,8 +1138,8 @@ def turn_on(desk: Desk, clear: str = "") -> str:
         raise SystemExit("hansa: notify on starts hansa posting to the Claude Code session it is run from, and this "
                          "is not run from one (CLAUDE_PID and CLAUDE_CODE_MESSAGING_SOCKET are not set); nothing was "
                          "started. Run it with the coordinator session's Bash tool")
-    name = session_name(sess["pid"])
-    how = start(desk, sess, sock, name=name, clear=clear)
+    how = start(desk, sess, sock, clear=clear)  # its follower looks the name up; this command starts no claude
+    name = next((r.get("name") or "" for r in records(desk) if same(r.get("session"), sess)), "")
     if how == "already":
         return (f"hansa already notifies this session, {who(sess['pid'], name)}; nothing was started. hansa notify lists "
                 "the desk's followers" + ("; for a daily clear, hansa notify off, then on again with --clear-daily"
@@ -1145,7 +1177,7 @@ def when(t) -> str:
 
 
 def list_text(desk: Desk) -> str:
-    rows = with_names(source(desk)({"op": "list"})["followers"])
+    rows = source(desk)({"op": "list"})["followers"]
     if not rows:
         return ("hansa notifies no session of this desk. From the coordinator's session: hansa notify on (a session "
                 "started with hansa coordinator is notified by itself)")
@@ -1161,23 +1193,10 @@ def list_text(desk: Desk) -> str:
 
 
 def who(pid, name: str = "") -> str:
-    """A session as hansa names it everywhere: its pid, and its name once Claude Code has given it one."""
-    return f"pid {pid}" + (f" ({name})" if name else "")
-
-
-def with_names(rows: list) -> list:
-    """Followers' records, each with its session's name: the one its follower learned, or else, when Claude Code
-    has named the session since, the name `claude agents --json` gives it now (one call for all)."""
-    if all(r.get("name") for r in rows):
-        return rows
-    try:
-        now_named = {str(x.get("pid")): str(x.get("name") or "")[:80] for x in agents_rows()}
-    except RuntimeError:
-        return rows
-    return [r if r.get("name") else {**r, "name": now_named.get(str((r.get("session") or {}).get("pid")), "")}
-            for r in rows]
+    """A session as hansa names it everywhere: its pid, and its name as its follower last recorded it."""
+    return f"pid {pid} ({name or 'no name yet'})"
 
 
 def names(desk: Desk) -> list:
     """The sessions hansa notifies, for hansa status, in the form hansa names a session everywhere."""
-    return [who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in with_names(live_records(desk))]
+    return [who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in live_records(desk)]
