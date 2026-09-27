@@ -322,7 +322,8 @@ class DeskTest(unittest.TestCase):
         for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "HANSA_TASK"):
             os.environ.pop(k, None)
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
-                          HANSA_NOTIFY_GATHER="0.5")
+                          HANSA_NOTIFY_GATHER="0.5",
+                          XDG_RUNTIME_DIR=str(self.tmp))  # the inboxes' folder (notify.socket_path), not the account's
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
         if not tmp_writable():  # inside a sandbox that keeps /tmp closed: the workers' folders go in the test's own
             root = unittest.mock.patch("hansa.run.WORKER_TMP_ROOT", str(self.tmp))
@@ -3866,6 +3867,7 @@ class DeskTest(unittest.TestCase):
         self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
         self.assertNotIn("Bash", self.allowed_by(argv))  # outside the sandbox: the lane's rules and its own git
         self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
 
@@ -4205,6 +4207,7 @@ class DeskTest(unittest.TestCase):
         self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
         self.assertIsNone(self.sandbox_of(argv))
         self.assertFalse([r for r in self.denied_by(argv) if r.startswith("Bash(git")])
         seen = {}
@@ -4495,6 +4498,7 @@ class DeskTest(unittest.TestCase):
         self.desk.update(did, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, did)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, did)  # the run folder it made for the session
         for t in tools:
             self.assertNotIn(t, self.denied_by(argv))
 
@@ -5522,6 +5526,30 @@ class DeskTest(unittest.TestCase):
                 main(["--desk", str(self.desk.root), "lane", "set", "a", field, "none"])
             self.assertIn(said, str(e.exception.code))
 
+    def test_none_with_other_values_is_refused_by_lane_set_and_lane_add_alike(self):
+        self.hansa("lane", "set", "a", "network", "*.pypi.org")
+        before = self.desk.settings_path.read_text()
+        for field, values in (("network", ["none", "registry.npmjs.org"]), ("allow", ["Bash(ls)", "none"]),
+                              ("write", ["none", "/x"]), ("providers", ["none,claude"]), ("env", ["A=1", "none"]),
+                              ("check", ["none", "make"]), ("note", ["x", "none"]), ("max_turns", ["none", "3"])):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", field, *values])
+            self.assertIn(f"none means an empty {field}, so it cannot come with other values", str(e.exception.code))
+            self.assertEqual(self.desk.settings_path.read_text(), before)
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "dev", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i", cwd=other)
+        for extra in (["--network", "none", "registry.npmjs.org"], ["--allow", "none", "Bash(ls)"],
+                      ["--providers", "claude,none"]):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(other), *extra])
+            self.assertIn("none means an empty", str(e.exception.code))
+            self.assertEqual(self.desk.settings_path.read_text(), before)
+        self.hansa("lane", "add", "b", "--repo", str(other), "--network", "none", "--check", "none", "--allow", "none")
+        ln = self.desk.settings()["lanes"]["b"]
+        self.assertEqual((ln["network"], ln.get("check", ""), ln.get("allow", [])), ([], "", []))
+
     def test_localhost_on_a_lanes_network_list_on_macos_prints_what_listens_on_the_loopback(self):
         found = ([("postgres", 552, "me", "127.0.0.1", 5432), ("postgres", 552, "me", "[::1]", 5432),
                   ("NimbusProxy", 1846, "me", "127.0.0.1", 2086), ("rapportd", 561, "me", "*", 49185)], 3)
@@ -5537,6 +5565,10 @@ class DeskTest(unittest.TestCase):
                           "  postgres (pid 552, me): 127.0.0.1:5432, [::1]:5432\n"
                           "  rapportd (pid 561, me): *:49185\n"
                           "3 processes of other accounts could not be looked at (only root can)", out)
+            # localhost already on the list, the list the same or changed around it: told once is enough
+            self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "registry.npmjs.org", "localhost"))
+            self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "localhost", "*.pypi.org"))
+            self.assertNotIn("Warning", self.hansa("lane", "set", "a", "note", "x"))
             self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "registry.npmjs.org"))
             self.assertEqual(listeners.call_count, 1)
             listeners.return_value = None
