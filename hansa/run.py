@@ -2060,14 +2060,22 @@ def text_only(path: str) -> bool:
 def unverified_note(desk: Desk, m: dict) -> str:
     """For a merge: that nothing verified a change beyond text and documentation, without the leading 'note: ';
     '' when its verification holds, or it changed only text. It looks back along the whole chain of attempts this
-    one retries (parent, its parent, ...): the nearest one whose verification held is named, as not this code."""
-    def holds(t):
+    one retries (parent, its parent, ...) and names the nearest verdict there, whether it held or not: an older
+    one that held says nothing of the code after a later one that did not."""
+    def verdict(t):
         v = desk.meta(t["verify"]) if t and t.get("verify") else None
-        return v if v and v.get("verdict") == "holds" else None
+        return v if v and v.get("verdict") else None
+
+    def found(v):
+        return {"does not hold": "found it does not hold",
+                "unsure": "could not tell whether it holds"}.get(v["verdict"], f"said: {v['verdict']}")
     code = [f for f in m.get("files") or [] if not text_only(f)]
-    if not code or holds(m):
+    own = verdict(m)
+    if not code or (own and own["verdict"] == "holds"):
         return ""
     what = f"{m['id']} changed {', '.join(code[:3])}" + (f" and {len(code) - 3} more" if len(code) > 3 else "")
+    if own:
+        return f"{what}, and its verification {own['id']} {found(own)}"
     earlier, seen, at = [], {m["id"]}, m  # the attempts it retries, nearest first
     while at.get("parent") and at["parent"] not in seen and at.get("kind") != "verify":
         try:
@@ -2078,9 +2086,12 @@ def unverified_note(desk: Desk, m: dict) -> str:
             break
         seen.add(at["id"])
         earlier.append(at)
-        pv = holds(at)
+        pv = verdict(at)
         if pv:
             which = "the attempt it retries" if len(earlier) == 1 else "an earlier attempt of this change"
+            if pv["verdict"] != "holds":
+                return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, "
+                        f"and {found(pv)}")
             return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, not "
                     f"this one: what came after that verification (a conflict settled, code changed) is not the code "
                     f"it checked")
@@ -2979,4 +2990,5 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
             minutes = s.get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
             desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
+    desk.ready_news()
     return result

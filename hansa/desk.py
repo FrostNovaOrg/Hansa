@@ -377,6 +377,7 @@ class Desk:
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
             write_json(self.settings_path, new)
         self.event("settings_saved", by=by, changed=changed)
+        self.ready_news()
         return []
 
     # -- keys -------------------------------------------------------------
@@ -400,6 +401,7 @@ class Desk:
             with self.lock():
                 f.unlink(missing_ok=True)
             self.event("key_removed", provider=provider, by=by)
+            self.ready_news()
             return
         problem = key_problem(value.strip())
         if problem:
@@ -413,6 +415,7 @@ class Desk:
             self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
             self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
+        self.ready_news()
 
     PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
                  "merge-setup.log", "merge-check.err")
@@ -573,13 +576,22 @@ class Desk:
     def asks(self) -> list:
         return read_json(self.asks_path, []) or []
 
+    def ready_news(self) -> None:
+        """Tell the open requests' askers of the providers they name that became ready (views.ready_news)."""
+        from .views import ready_news
+        ready_news(self)
+
     def add_ask(self, text: str, by: str = "", session: dict | None = None) -> int:
-        """session: the Claude Code session that asked, which hears the answer (hansa/notify.py)."""
+        """session: the Claude Code session that asked, which hears the answer (hansa/notify.py). It records the
+        providers ready then; any other name (one not set up yet too) was not, and a request naming it may be done
+        once it is (views.ask_note)."""
+        from .views import ready_now
+        ready_then = ready_now(self)
         with self.lock():
             asks = self.asks()
             n = max((a["id"] for a in asks), default=0) + 1
             asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
-                         "answer": "", **({"session": session} if session else {})})
+                         "answer": "", "ready_then": ready_then, **({"session": session} if session else {})})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)
         return n

@@ -1454,6 +1454,11 @@ def main(argv=None):
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
     p.add_argument("n", nargs="?", type=int)
     p = add("cost", cmd_cost, "tokens and what they are worth")
+    p.description = ("Tokens and what they are worth: the workers' runs, and the coordinator's own session with its "
+                     "helpers. The coordinator is counted only when it runs with the workers' Claude login (the same "
+                     "config folder), because only then are its session records where hansa reads them. It has no "
+                     "lane or task, so in --by lane and --by task its usage is a row of its own, (coordinator): in "
+                     "every view the rows add up to the total.")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--since", help="HH:MM today, or YYYY-MM-DD HH:MM: count from then instead of --days")
     p.add_argument("--by", default="day", choices=["day", "seat", "lane", "task", "model", "provider"])

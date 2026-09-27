@@ -2400,20 +2400,122 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"since {time.strftime('%m-%d')}", self.hansa_out("notify"))
         self.assertIn("last post: ", self.hansa_out("notify"))
         self.assertIn("t0001 done", self.hansa_out("notify"))
-        self.assertIn(f"hansa posts to: pid {p.pid}\n", self.hansa_out("status"))
+        self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)\n", self.hansa_out("status"))
 
     def test_a_session_is_named_by_its_pid_and_then_also_by_the_name_claude_code_gave_it(self):
         p, _ = self.session()
         self.hearing(p)
         key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
-        self.assertIn(f"hansa posts to: pid {p.pid}\n", self.hansa_out("status"))
-        self.assertIn(f"  pid {p.pid} · since ", self.hansa_out("notify"))
+        self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)\n", self.hansa_out("status"))
+        self.assertIn(f"  pid {p.pid} (no name yet) · since ", self.hansa_out("notify"))
         rec = notify.records(self.desk)[0]
         notify._write_record(self.desk, key, {**rec, "name": "desk-b4"})
         self.assertIn(f"hansa posts to: pid {p.pid} (desk-b4)\n", self.hansa_out("status"))
         self.assertIn(f"  pid {p.pid} (desk-b4) · since ", self.hansa_out("notify"))
         self.assertIn(f"session pid {p.pid} (desk-b4) ended", notify.missed_head(
             {"pid": p.pid, "name": "desk-b4", "session_ended": True, "at": time.time()}))
+
+    def test_status_and_notify_start_no_claude_and_show_the_name_the_follower_recorded(self):
+        p, sock = self.session()
+        with unittest.mock.patch.object(notify, "agents_rows", side_effect=AssertionError("claude was started")), \
+                unittest.mock.patch.object(notify.subprocess, "run", side_effect=AssertionError("a program ran")):
+            with self.in_session(p, sock):
+                self.assertIn(f"now posts to this session, pid {p.pid} (no name yet), through",
+                              self.hansa_out("notify", "on"))
+            self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)\n", self.hansa_out("status"))
+            self.assertIn(f"  pid {p.pid} (no name yet) · since ", self.hansa_out("notify"))
+            key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
+            notify._write_record(self.desk, key, {**notify.records(self.desk)[0], "name": "desk-87"})
+            self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))
+            self.assertIn(f"  pid {p.pid} (desk-87) · since ", self.hansa_out("notify"))
+            with self.in_session(p, sock):
+                self.assertIn(f"already notifies this session, pid {p.pid} (desk-87);", self.hansa_out("notify", "on"))
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "off")
+
+    def test_a_follower_looks_a_missing_name_up_again_later_each_time_up_to_five_minutes(self):
+        clock, looked = [1000.0], []
+        with unittest.mock.patch.object(notify.time, "time", side_effect=lambda: clock[0]):
+            namer = notify.Namer(1, first=5, look=lambda: looked.append(clock[0]) or "")
+            for _ in range(2000):
+                namer.tick()
+                if namer.thread:
+                    namer.thread.join()
+                clock[0] += 1
+        self.assertEqual([b - a for a, b in zip(looked, looked[1:])][:8],
+                         [16, 31, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each
+        self.assertEqual(looked[0], 1005)
+        n = len(looked)
+        namer.look = lambda: looked.append(clock[0]) or "desk-87"
+        with unittest.mock.patch.object(notify.time, "time", side_effect=lambda: clock[0]):
+            for _ in range(700):
+                self.assertIn(namer.tick(), ("", "desk-87"))
+                if namer.thread:
+                    namer.thread.join()
+                clock[0] += 1
+        self.assertEqual(namer.name, "desk-87")
+        self.assertLessEqual(len(looked) - n, 3)  # once named, every five minutes: Claude Code may rename it
+
+    def test_posting_does_not_wait_for_a_name_lookup(self):
+        release = threading.Event()
+        namer = notify.Namer(1, "old", first=0, look=lambda: release.wait(10) and "desk-87")
+        t0 = time.time()
+        self.assertEqual(namer.tick(), "old")  # the lookup started, and runs on by itself
+        self.assertTrue(namer.thread.is_alive())
+        self.assertEqual(namer.tick(), "old")
+        self.assertLess(time.time() - t0, 1)
+        release.set()
+        namer.thread.join()
+        self.assertEqual(namer.tick(), "desk-87")
+        self.assertEqual(notify.NAME_LIMIT, 10)  # and a lookup that hangs is cut short
+        with unittest.mock.patch.object(notify.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 10)) \
+                as run:
+            self.assertEqual(notify.session_name(1, notify.NAME_LIMIT), "")
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
+
+    def test_a_follower_posts_while_its_name_lookup_hangs(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        p, sock = self.session()
+        sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+        key = notify.key_of(sess)
+        started, release, got, broke = threading.Event(), threading.Event(), {}, []
+
+        def look(pid, timeout=15):
+            started.set()
+            return release.wait(60) and "desk-87"
+
+        def meanwhile():  # the follower runs in this test's own thread; this plays the desk around it
+            try:
+                self.assertTrue(started.wait(30), "the follower never looked the name up")
+                self.desk.write_key("mimo", "sk-mimo-12345678")  # a line for the session, while the lookup hangs
+                got["posts"] = self.soon(lambda: self.posts(sock), timeout=10)
+                self.assertFalse(release.is_set())
+                release.set()
+                got["name"] = self.soon(lambda: [r.get("name") for r in notify.records(self.desk)
+                                                 if r.get("name")], timeout=10)
+            except BaseException as e:  # noqa: BLE001 - raised again once the follower ended
+                broke.append(e)
+            finally:
+                release.set()
+                p.kill()
+                p.wait()
+
+        was = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, was)
+        th = threading.Thread(target=meanwhile)
+        with unittest.mock.patch.object(notify, "session_name", look), \
+                unittest.mock.patch.object(notify, "Namer", functools.partial(notify.Namer, first=0)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            th.start()
+            self.assertEqual(notify.follow(self.desk, key, sess, sock, "n"), 0)
+        th.join()
+        if broke:
+            raise broke[0]
+        self.assertIn("- mimo is ready now: done? Still open: request #1", got["posts"][0])
+        self.assertEqual(got["name"], ["desk-87"])  # and what the lookup found is recorded once it ends
 
     def test_two_sessions_each_hear_their_own_tasks_and_both_hear_one_from_a_shell(self):
         (a, sa), (b, sb) = self.session(), self.session()
@@ -2483,7 +2585,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(first), 1, first)
         # whose it is: the session that ended and when, not "no session heard" (another may have heard all along)
         head = first[0].splitlines()[0]
-        self.assertRegex(head, rf": session pid {a.pid} ended at \d\d:\d\d; since then, for its tasks and requests:$")
+        self.assertRegex(head, rf": session pid {a.pid} \(no name yet\) ended at \d\d:\d\d; since then, for its tasks and requests:$")
         self.assertEqual(notify.missed_head({"pid": 16686, "name": "ntA", "session_ended": True,
                                              "at": time.mktime((2026, 9, 26, 22, 55, 0, 0, 0, -1))}),
                          "session pid 16686 (ntA) ended at 22:55; since then, for its tasks and requests:")
@@ -2535,7 +2637,7 @@ class DeskTest(unittest.TestCase):
         with self.in_session(a, sa):
             self.assertIn("now posts to this session", self.hansa_out("notify", "on"))
         first = self.soon(lambda: self.posts(sa))
-        self.assertIn(f"hansa stopped posting to session pid {a.pid} at ", first[0])
+        self.assertIn(f"hansa stopped posting to session pid {a.pid} (no name yet) at ", first[0])
         self.assertIn("- t0001 done: Added while its follower was dead", first[0])
 
     def test_srt_that_cannot_run_is_posted_once_until_it_runs_again(self):
@@ -3191,6 +3293,82 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("sk-mimo-12345678", heard[0])
         time.sleep(1)
         self.assertEqual(self.posts(sb), [])
+
+    def test_an_open_request_naming_a_provider_that_is_ready_now_asks_whether_it_is_done(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        self.desk.add_ask("Is mimosa a good lane name?")  # names no provider: mimo only as a whole word
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["", ""])  # mimo has no key yet
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        st = views.status(self.desk)
+        self.assertEqual([a["note"] for a in st["asks"]], ["mimo is ready now: done?", ""])
+        text = views.status_text(st)
+        self.assertIn("  #1: Please fill in mimo's key · mimo is ready now: done?\n", text)
+        self.assertIn("  #2: Is mimosa a good lane name?\n", text)
+        self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])  # hansa closes nothing itself
+        heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
+        self.assertEqual([x["line"] for x in heard], ["mimo is ready now: done? Still open: request #1 (Please fill in "
+                                                      "mimo's key) (the principal closes a request on the page)"])
+        self.desk.close_ask(1)
+        self.assertEqual(notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None}), [])
+
+    def test_the_ready_now_line_comes_once_and_again_only_after_the_provider_stopped_being_ready(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        self.desk.write_key("mimo", "sk-mimo-87654321")  # saved again: still ready, nothing new
+        self.desk.event("provider_checked", provider="mimo", ok=True, detail="")
+        self.desk.ready_news()  # as a passing check does
+        self.desk.save_settings(self.desk.settings())
+        self.assertEqual([e["ids"] for e in self.events("ask_ready")], [[1]])
+        self.assertEqual(len(notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})), 1)
+        self.desk.write_key("mimo", "")  # it stops being ready, then is ready again: said once more
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        self.desk.write_key("mimo", "sk-mimo-87654321")
+        self.assertEqual([e["ids"] for e in self.events("ask_ready")], [[1], [1]])
+        self.desk.close_ask(1)
+        self.desk.write_key("mimo", "")
+        self.desk.write_key("mimo", "sk-mimo-12345678")  # a closed request is not told
+        self.assertEqual(len(self.events("ask_ready")), 2)
+
+    def test_a_request_naming_a_provider_not_set_up_yet_gets_the_note_once_it_is_ready(self):
+        self.desk.add_ask("Please set up provider kimi and its key")
+        self.assertNotIn("kimi", self.desk.asks()[0]["ready_then"])
+        s = self.desk.settings()
+        s["providers"]["kimi"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], [""])  # no key yet
+        self.desk.write_key("kimi", "sk-kimi-12345678")
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["kimi is ready now: done?"])
+        self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("kimi", [1])])
+        asks = self.desk.asks()  # from the hansa that recorded only what was set up and not ready: still read
+        asks.append({"id": 2, "text": "Please fill in kimi's key", "by": "", "created": 0, "closed": None,
+                     "answer": "", "not_ready": ["kimi"]})
+        asks.append({"id": 3, "text": "kimi too?", "by": "", "created": 0, "closed": None, "answer": "",
+                     "not_ready": []})
+        write_json(self.desk.asks_path, asks)
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]],
+                         ["kimi is ready now: done?", "kimi is ready now: done?", ""])
+
+    def test_a_request_made_while_its_provider_was_ready_gets_no_note(self):
+        self.assertIn("claude", views.ready_now(self.desk))
+        self.desk.add_ask("claude login please, for the docs lane")
+        self.assertIn("claude", self.desk.asks()[0]["ready_then"])
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], [""])
+        self.desk.ready_news()
+        self.assertEqual(self.events("ask_ready"), [])
+        asks = self.desk.asks()  # a request from before hansa recorded what was ready: it cannot tell, so no note
+        asks.append({"id": 2, "text": "Please fill in claude's login", "by": "", "created": 0, "closed": None,
+                     "answer": ""})
+        write_json(self.desk.asks_path, asks)
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["", ""])
+        self.desk.ready_news()
+        self.assertEqual(self.events("ask_ready"), [])
+        self.assertIn('a.note ? h("span"', (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
 
     def test_a_post_reaches_a_real_inbox(self):
         path = str(self.tmp / "inbox.sock")
@@ -4861,6 +5039,30 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{t7} merged into main", out)
         self.assertNotIn("note:", out)  # only text: nothing to verify
 
+    def test_the_unverified_note_names_the_nearest_verdict_along_the_chain_even_one_that_did_not_hold(self):
+        from hansa.run import unverified_note
+        ids = []
+        for i, verdict in enumerate(("holds", "does not hold", None)):  # t1 verified; its retry t2 failed; t3 retries t2
+            tid = self.desk.new_task(f"Add a.py {i}", parent=ids[-1] if ids else None)
+            fields = {"state": "done", "files": ["a.py"]}
+            if verdict:
+                v = self.desk.new_task("Run it", kind="verify", parent=tid)
+                self.desk.update(v, state="done", verdict=verdict)
+                fields["verify"] = v
+            self.desk.update(tid, **fields)
+            ids.append(tid)
+        t1, t2, t3 = ids
+        v2 = self.desk.meta(t2)["verify"]
+        note = unverified_note(self.desk, self.desk.meta(t3))
+        self.assertEqual(note, f"{t3} changed a.py, and no verification of {t3} held; {v2} verified {t2}, the attempt "
+                               f"it retries, and found it does not hold")
+        self.assertNotIn(t1, note)  # the older verification that held says nothing of what came after
+        self.desk.update(self.desk.meta(t2)["verify"], verdict="unsure")
+        self.assertIn(f"{v2} verified {t2}, the attempt it retries, and could not tell whether it holds",
+                      unverified_note(self.desk, self.desk.meta(t3)))
+        self.assertEqual(unverified_note(self.desk, self.desk.meta(t2)),
+                         f"{t2} changed a.py, and its verification {v2} could not tell whether it holds")
+
     def test_a_merge_through_a_merge_check_says_when_nothing_verified_it(self):
         d, t1, t2 = self.two_lanes(check="true", names=("a.py", "b.py"))
         s = self.desk.settings()
@@ -5137,6 +5339,36 @@ class DeskTest(unittest.TestCase):
         self.assertAlmostEqual(rep["by"]["seat"]["coordinator"]["usd"], (100 * 5 + 10 * 25) / 1e6, places=6)
         self.assertEqual(rep["by"]["seat"]["worker"]["tokens"], 6300)
         self.assertEqual(rep["unpriced_models"], [])
+
+    def test_cost_rows_add_up_to_the_total_in_every_view(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text(json.dumps({"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "message": {"id": "msg_1", "model": "claude-opus-5", "usage": {"input_tokens": 100, "output_tokens": 10}}}) + "\n")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.desk.save_settings(s)
+        rep = cost.report(self.desk, 1)
+        self.assertEqual(rep["total"]["tokens"], 6300 + 110)
+        for key in ("day", "seat", "lane", "task", "model", "provider"):
+            rows = rep["by"][key].values()
+            self.assertEqual(sum(v["tokens"] for v in rows), rep["total"]["tokens"], key)
+            self.assertAlmostEqual(sum(v["usd"] for v in rows), rep["total"]["usd"], places=5, msg=key)
+        self.assertEqual({k: v["tokens"] for k, v in rep["by"]["task"].items()}, {tid: 6300, "(coordinator)": 110})
+        self.assertEqual(rep["by"]["lane"]["(coordinator)"]["tokens"], 110)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "cost", "--days", "1", "--by", "task"])
+        self.assertIn("  (coordinator) ", out.getvalue())
+        with contextlib.redirect_stdout(out := io.StringIO()):
+            main(["--desk", str(self.desk.root), "cost", "--days", "1", "--json"])
+        self.assertEqual(json.loads(out.getvalue())["by"]["task"]["(coordinator)"]["tokens"], 110)
+        with contextlib.redirect_stdout(out := io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "cost", "--help"])
+        self.assertIn("counted only when it runs with the workers' Claude login", " ".join(out.getvalue().split()))
 
     def test_verifications_are_their_own_seat_in_the_cost(self):
         tid = self.desk.new_task("Run the change", kind="verify", parent="t0000")
