@@ -177,6 +177,11 @@ def coordinator_uncounted(desk: Desk) -> str:
             f"where hansa, running as {account.name_of(account.uid())}, cannot read them.")
 
 
+def unassigned(r: dict) -> str:
+    """The row, in the lane and task views, for usage that belongs to no lane or task, so that the rows add up."""
+    return "(coordinator)" if r["seat"] == "coordinator" or r["seat"].startswith("helper") else "(none)"
+
+
 def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
               else f"last {days} day(s)")
@@ -186,9 +191,7 @@ def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     for key in ("day", "seat", "lane", "task", "model", "provider"):
         agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0})
         for r in rows:
-            if key in ("lane", "task") and not r[key]:
-                continue
-            a = agg[r[key]]
+            a = agg[r[key] or unassigned(r)]  # the coordinator's usage has no lane or task: a row of its own
             t = sum(r[k] for k in TOKEN_FIELDS)
             a["tokens"] += t
             if r["usd"] is None:

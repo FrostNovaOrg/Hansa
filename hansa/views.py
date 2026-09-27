@@ -152,6 +152,19 @@ def _midnight() -> float:
     return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
+def ready_now(desk: Desk, s: dict | None = None) -> list:
+    """The providers that can take work now."""
+    s = s or desk.settings()
+    return [n for n in sorted(s["providers"]) if not provider_problem(desk, s, n)]
+
+
+def ask_note(text: str, ready: list) -> str:
+    """For an open request whose text names a provider (as a whole word) that is ready now: a hint that it may be
+    done. hansa closes nothing itself."""
+    named = [n for n in ready if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", str(text), re.IGNORECASE)]
+    return f"{', '.join(named)} {'is' if len(named) == 1 else 'are'} ready now: done?" if named else ""
+
+
 def status(desk: Desk) -> dict:
     s = desk.settings()
     tasks = desk.tasks()
@@ -215,7 +228,7 @@ def status(desk: Desk) -> dict:
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
-        "asks": [a for a in desk.asks() if not a.get("closed")],
+        "asks": [{**a, "note": ask_note(a.get("text", ""), ready_now(desk, s))} for a in desk.asks() if not a.get("closed")],
         "today": {"finished": len(today), "merged": sum(m["state"] == "merged" for m in today),
                   "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
                   "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
@@ -282,7 +295,7 @@ def status_text(st: dict) -> str:
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {p['problem'] or 'ready'}")
     if st["asks"]:
         out.append("open asks to the principal:")
-        out += [f"  #{a['id']}: {a['text'][:100]}" for a in st["asks"]]
+        out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
     t = st["today"]
     out.append(f"today: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
                f" (worth ${t['worker_usd']:.2f}; hansa cost for everything)")
@@ -651,7 +664,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "it; hansa notify lists them.",
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
             "could not start), a verification's verdict, a design session that ended, a queued merge check that "
-            "ended, a request the principal answered or closed (with the answer), hansa serve stopping or "
+            "ended, a request the principal answered or closed (with the answer), a provider that an open request names "
+            "becoming ready (its key saved or its check passed: the request may be done), hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
             "line per event and the next command; events seconds apart come in one message.",

@@ -143,7 +143,8 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 ## Hearing from hansa
 hansa posts to your session through its inbox when something needs you: a task
 ended (after its check) or failed, a verification or design session ended, a
-merge check ended, the principal answered a request, the server stopped (or,
+merge check ended, the principal answered a request, a provider an open request
+names became ready (the request may be done), the server stopped (or,
 still running, finished no round for 5 minutes: busy or stuck), and then that it
 runs again. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next
@@ -314,6 +315,8 @@ here; work that needs code changed or a browser goes to a worker.
   table. With a subscription they show what the tokens are worth, not a bill.
   To say what one job cost, note the time `hansa status` shows when you start it
   and run `hansa cost --since HH:MM --by seat` when it is done.
+  Your own usage is counted only when you run with the workers' Claude login;
+  by lane or task it is a row of its own, (coordinator), so the rows add up.
 - When `hansa status` says cost audit on, the principal wants the cost in every
   report: end each report with what that round of work cost (as above), and
   point out anything unusual, such as one task costing far more than the others

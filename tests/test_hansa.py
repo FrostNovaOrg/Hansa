@@ -2414,6 +2414,26 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"session pid {p.pid} (desk-b4) ended", notify.missed_head(
             {"pid": p.pid, "name": "desk-b4", "session_ended": True, "at": time.time()}))
 
+    def test_status_names_a_session_claude_code_has_named_since_its_follower_last_looked(self):
+        p, _ = self.session()
+        self.hearing(p)  # its follower has not learned the name yet
+        with unittest.mock.patch.object(notify, "agents_rows", return_value=[{"pid": p.pid, "name": "desk-87"}]):
+            self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))
+            self.assertIn(f"  pid {p.pid} (desk-87) · since ", self.hansa_out("notify"))
+        with unittest.mock.patch.object(notify, "agents_rows", side_effect=RuntimeError("no claude")):
+            self.assertIn(f"hansa posts to: pid {p.pid}\n", self.hansa_out("status"))  # it cannot say: the pid
+        with unittest.mock.patch.object(notify, "agents_rows", side_effect=AssertionError("not asked")):
+            key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
+            notify._write_record(self.desk, key, {**notify.records(self.desk)[0], "name": "desk-87"})
+            self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))  # known: not asked
+
+    def test_notify_on_names_the_session_as_status_does(self):
+        p, sock = self.session()
+        with self.in_session(p, sock), unittest.mock.patch.object(notify, "session_name", return_value="desk-87"):
+            self.assertIn(f"now posts to this session, pid {p.pid} (desk-87), through", self.hansa_out("notify", "on"))
+            self.assertIn(f"already notifies this session, pid {p.pid} (desk-87);", self.hansa_out("notify", "on"))
+            self.hansa_out("notify", "off")
+
     def test_two_sessions_each_hear_their_own_tasks_and_both_hear_one_from_a_shell(self):
         (a, sa), (b, sb) = self.session(), self.session()
         for p, sock in ((a, sa), (b, sb)):
@@ -3190,6 +3210,27 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("sk-mimo-12345678", heard[0])
         time.sleep(1)
         self.assertEqual(self.posts(sb), [])
+
+    def test_an_open_request_naming_a_provider_that_is_ready_now_asks_whether_it_is_done(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        self.desk.add_ask("Is mimosa a good lane name?")  # names no provider: mimo only as a whole word
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["", ""])  # mimo has no key yet
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        st = views.status(self.desk)
+        self.assertEqual([a["note"] for a in st["asks"]], ["mimo is ready now: done?", ""])
+        text = views.status_text(st)
+        self.assertIn("  #1: Please fill in mimo's key · mimo is ready now: done?\n", text)
+        self.assertIn("  #2: Is mimosa a good lane name?\n", text)
+        self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])  # hansa closes nothing itself
+        heard = notify.items_for(self.desk, self.events("key_set"), {"key": "k", "session": None})
+        self.assertEqual([x["line"] for x in heard], ["mimo is ready now: done? Still open: request #1 (Please fill in "
+                                                      "mimo's key) (the principal closes a request on the page)"])
+        self.desk.close_ask(1)
+        self.assertEqual(notify.items_for(self.desk, self.events("key_set"), {"key": "k", "session": None}), [])
+        self.assertIn('a.note ? h("span"', (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
 
     def test_a_post_reaches_a_real_inbox(self):
         path = str(self.tmp / "inbox.sock")
@@ -4763,6 +4804,30 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{t7} merged into main", out)
         self.assertNotIn("note:", out)  # only text: nothing to verify
 
+    def test_the_unverified_note_names_the_nearest_verdict_along_the_chain_even_one_that_did_not_hold(self):
+        from hansa.run import unverified_note
+        ids = []
+        for i, verdict in enumerate(("holds", "does not hold", None)):  # t1 verified; its retry t2 failed; t3 retries t2
+            tid = self.desk.new_task(f"Add a.py {i}", parent=ids[-1] if ids else None)
+            fields = {"state": "done", "files": ["a.py"]}
+            if verdict:
+                v = self.desk.new_task("Run it", kind="verify", parent=tid)
+                self.desk.update(v, state="done", verdict=verdict)
+                fields["verify"] = v
+            self.desk.update(tid, **fields)
+            ids.append(tid)
+        t1, t2, t3 = ids
+        v2 = self.desk.meta(t2)["verify"]
+        note = unverified_note(self.desk, self.desk.meta(t3))
+        self.assertEqual(note, f"{t3} changed a.py, and no verification of {t3} held; {v2} verified {t2}, the attempt "
+                               f"it retries, and found it does not hold")
+        self.assertNotIn(t1, note)  # the older verification that held says nothing of what came after
+        self.desk.update(self.desk.meta(t2)["verify"], verdict="unsure")
+        self.assertIn(f"{v2} verified {t2}, the attempt it retries, and could not tell whether it holds",
+                      unverified_note(self.desk, self.desk.meta(t3)))
+        self.assertEqual(unverified_note(self.desk, self.desk.meta(t2)),
+                         f"{t2} changed a.py, and its verification {v2} could not tell whether it holds")
+
     def test_a_merge_through_a_merge_check_says_when_nothing_verified_it(self):
         d, t1, t2 = self.two_lanes(check="true", names=("a.py", "b.py"))
         s = self.desk.settings()
@@ -5039,6 +5104,36 @@ class DeskTest(unittest.TestCase):
         self.assertAlmostEqual(rep["by"]["seat"]["coordinator"]["usd"], (100 * 5 + 10 * 25) / 1e6, places=6)
         self.assertEqual(rep["by"]["seat"]["worker"]["tokens"], 6300)
         self.assertEqual(rep["unpriced_models"], [])
+
+    def test_cost_rows_add_up_to_the_total_in_every_view(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text(json.dumps({"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "message": {"id": "msg_1", "model": "claude-opus-5", "usage": {"input_tokens": 100, "output_tokens": 10}}}) + "\n")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.desk.save_settings(s)
+        rep = cost.report(self.desk, 1)
+        self.assertEqual(rep["total"]["tokens"], 6300 + 110)
+        for key in ("day", "seat", "lane", "task", "model", "provider"):
+            rows = rep["by"][key].values()
+            self.assertEqual(sum(v["tokens"] for v in rows), rep["total"]["tokens"], key)
+            self.assertAlmostEqual(sum(v["usd"] for v in rows), rep["total"]["usd"], places=5, msg=key)
+        self.assertEqual({k: v["tokens"] for k, v in rep["by"]["task"].items()}, {tid: 6300, "(coordinator)": 110})
+        self.assertEqual(rep["by"]["lane"]["(coordinator)"]["tokens"], 110)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "cost", "--days", "1", "--by", "task"])
+        self.assertIn("  (coordinator) ", out.getvalue())
+        with contextlib.redirect_stdout(out := io.StringIO()):
+            main(["--desk", str(self.desk.root), "cost", "--days", "1", "--json"])
+        self.assertEqual(json.loads(out.getvalue())["by"]["task"]["(coordinator)"]["tokens"], 110)
+        with contextlib.redirect_stdout(out := io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "cost", "--help"])
+        self.assertIn("counted only when it runs with the workers' Claude login", " ".join(out.getvalue().split()))
 
     def test_verifications_are_their_own_seat_in_the_cost(self):
         tid = self.desk.new_task("Run the change", kind="verify", parent="t0000")

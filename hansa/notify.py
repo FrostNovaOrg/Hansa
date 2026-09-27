@@ -4,7 +4,7 @@ Every interactive Claude Code session listens on a local Unix socket, its inbox:
 there arrives in the session as a message from another session. A follower is a small background process
 per session and desk. It reads the desk's event log from where it left off, picks what the coordinator
 waits for (a task ended, a verification or design session ended, a queued merge check ended, the principal
-answered a request, the server stopped), and posts it to that session's inbox. It ends when the session's
+answered a request, a provider an open request names became ready, the server stopped), and posts it to that session's inbox. It ends when the session's
 process does.
 
     `hansa coordinator`   starts one for the session it launches (--messaging-socket-path, a path it chose)
@@ -241,6 +241,18 @@ def _item(desk: Desk, e: dict):
             return None
         return (("ask", x["id"]), f"request #{x['id']} answered: {x.get('answer') or '(closed without a note)'}"
                                   f" (you asked: {str(x.get('text', ''))[:120]})", x.get("session"), False, None)
+    if kind == "key_set" or (kind == "provider_checked" and e.get("ok")):  # a provider an open request names may be ready
+        from .views import ask_note, ready_now
+        ready = [n for n in ready_now(desk) if n == e.get("provider")]
+        named = [a for a in desk.asks() if not a.get("closed") and ask_note(a.get("text", ""), ready)]
+        if not named:
+            return None
+        sessions = [a.get("session") for a in named]
+        return (("ready", e.get("provider")),
+                f"{ask_note(named[0].get('text', ''), ready)} Still open: "
+                + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
+                + " (the principal closes a request on the page)",
+                sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
                              "hansa explain server"), None, True, None
@@ -561,7 +573,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 return 0
             if time.time() >= named:
                 me["name"] = session_name(sess["pid"]) or me["name"]
-                named = time.time() + 300
+                named = time.time() + (300 if me["name"] else 15)  # until Claude Code names it, look again soon
             new_mark = code_mark()
             if new_mark != mark:  # an upgrade: a module imported from now on would come from the new files
                 mark, changed = new_mark, time.time()
@@ -1094,15 +1106,16 @@ def turn_on(desk: Desk, clear: str = "") -> str:
         raise SystemExit("hansa: notify on starts hansa posting to the Claude Code session it is run from, and this "
                          "is not run from one (CLAUDE_PID and CLAUDE_CODE_MESSAGING_SOCKET are not set); nothing was "
                          "started. Run it with the coordinator session's Bash tool")
-    how = start(desk, sess, sock, clear=clear)
+    name = session_name(sess["pid"])
+    how = start(desk, sess, sock, name=name, clear=clear)
     if how == "already":
-        return (f"hansa already notifies this session (pid {sess['pid']}); nothing was started. hansa notify lists "
+        return (f"hansa already notifies this session, {who(sess['pid'], name)}; nothing was started. hansa notify lists "
                 "the desk's followers" + ("; for a daily clear, hansa notify off, then on again with --clear-daily"
                                           if clear else ""))
     if how == "unknown":
         raise SystemExit(f"hansa: the follower did not say it started within 10 s; see "
                          f"{private_dir(desk) / (key_of(sess) + '.log')}")
-    said = (f"hansa now posts to this session (pid {sess['pid']}) through its inbox: its own tasks and requests, and "
+    said = (f"hansa now posts to this session, {who(sess['pid'], name)}, through its inbox: its own tasks and requests, and "
             "those no other session hears. Do not keep hansa wait running in the background meanwhile. "
             "Stop it with hansa notify off")
     return said + ("\n" + clear_said(sess["pid"], clear, running=True) if clear else "")
@@ -1132,7 +1145,7 @@ def when(t) -> str:
 
 
 def list_text(desk: Desk) -> str:
-    rows = source(desk)({"op": "list"})["followers"]
+    rows = with_names(source(desk)({"op": "list"})["followers"])
     if not rows:
         return ("hansa notifies no session of this desk. From the coordinator's session: hansa notify on (a session "
                 "started with hansa coordinator is notified by itself)")
@@ -1152,6 +1165,19 @@ def who(pid, name: str = "") -> str:
     return f"pid {pid}" + (f" ({name})" if name else "")
 
 
+def with_names(rows: list) -> list:
+    """Followers' records, each with its session's name: the one its follower learned, or else, when Claude Code
+    has named the session since, the name `claude agents --json` gives it now (one call for all)."""
+    if all(r.get("name") for r in rows):
+        return rows
+    try:
+        now_named = {str(x.get("pid")): str(x.get("name") or "")[:80] for x in agents_rows()}
+    except RuntimeError:
+        return rows
+    return [r if r.get("name") else {**r, "name": now_named.get(str((r.get("session") or {}).get("pid")), "")}
+            for r in rows]
+
+
 def names(desk: Desk) -> list:
-    """The sessions hansa notifies, for hansa status."""
-    return [who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in live_records(desk)]
+    """The sessions hansa notifies, for hansa status, in the form hansa names a session everywhere."""
+    return [who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in with_names(live_records(desk))]
