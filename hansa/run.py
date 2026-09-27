@@ -920,8 +920,10 @@ def make_worker_tmp(desk: Desk, tid: str) -> str:
     """A temporary folder for one worker run, its alone (mode 700), recorded as the task's worker_tmp so
     remove_sandbox_tmp removes it however the run ends, and in worker_tmps, which outlives the run: each run's
     path, and whether it was removed (hansa show says). Claude Code gets it as CLAUDE_CODE_TMPDIR, makes its
-    per-user folder (the worker's TMPDIR) and its sockets in it, so its path is kept short: under /tmp,
-    not the server's TMPDIR (a long path under /var/folders on macOS)."""
+    per-user folder (the TMPDIR of the worker's commands) and its sockets in it; and as TMPDIR, where its own
+    sandbox makes its proxy sockets (srt-mux-*.sock, claude-http-*.sock) and, on Linux, the empty folders it
+    mounts over paths it hides (claude-empty-*), which it leaves when it ends. So its path is kept short:
+    under /tmp, not the server's TMPDIR (a long path under /var/folders on macOS)."""
     tmp = tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=WORKER_TMP_ROOT)
     desk.change(tid, lambda x: {"worker_tmp": tmp,
                                 "worker_tmps": [*(x.get("worker_tmps") or []), {"path": tmp, "removed": None}]})
@@ -1095,10 +1097,11 @@ def _mac_group_running(pgid) -> bool:
     return any(k[36] != _SZOMB for k in _mac_procs(_KERN_PROC_PGRP, int(pgid)))
 
 
-def _mac_procargs(pid: int):
-    """A process's arguments and environment, as two lists; None when they cannot be read (a process
-    of another account, one in the middle of an exec, one that ended meanwhile)."""
-    data = _sysctl(_CTL_KERN, _KERN_PROCARGS2, pid)
+def _mac_parse_args(data):
+    """What KERN_PROCARGS2 gave, as (arguments, environment, whole); None when it holds nothing. The
+    executable's path comes first, then NULs up to the next multiple of 8 bytes, then the arguments. Read
+    in the middle of an exec it can be half written: all NULs, or a path with a NUL in it, so that the end
+    of the path is taken for the first argument and its padding for empty ones. Then `whole` is False."""
     if not data or len(data) < 4:
         return None
     argc = struct.unpack_from("@i", data, 0)[0]
@@ -1106,9 +1109,18 @@ def _mac_procargs(pid: int):
     end = rest.find(b"\0")  # the executable's path, then NULs up to the first argument
     if end < 0:
         return None
-    words = rest[end:].lstrip(b"\0").split(b"\0")
+    after = rest[end:].lstrip(b"\0")
+    words = after.split(b"\0")
     env = words[argc:]  # the environment ends at an empty string; the kernel's own strings follow it
-    return words[:argc], env[:env.index(b"")] if b"" in env else env
+    return words[:argc], env[:env.index(b"")] if b"" in env else env, \
+        end > 0 and len(rest) - len(after) == (end // 8 + 1) * 8
+
+
+def _mac_procargs(pid: int):
+    """A process's arguments and environment, as two lists, and whether they were read whole (_mac_parse_args);
+    None when they cannot be read (a process of another account, one in the middle of an exec, one that
+    ended meanwhile)."""
+    return _mac_parse_args(_sysctl(_CTL_KERN, _KERN_PROCARGS2, pid))
 
 
 class CannotLook(Exception):
@@ -1133,10 +1145,14 @@ def _may_lead(pid: int) -> bool:
 def _mac_pids_with_arg(token: str, since=None) -> list:
     """As pids_with_arg. A process of this account whose arguments cannot be read is read again a few
     times; one that still cannot be, and leads its own process group as hansa's processes do, may be
-    the one looked for: CannotLook. Not read at all: one that started before `since` (the launch word
-    was made then), and one whose effective user is not its real user (a setuid program such as sudo,
-    which hansa never starts, and whose arguments cannot be read). (One that does not lead its group
-    is not the one looked for either: some of the account's processes never let their arguments be read.)"""
+    the one looked for: CannotLook. One read half written (_mac_parse_args) that leads its group is
+    read again too, and taken as it reads once two reads in a row agree (an exec is not half way through
+    twice alike: a process whose first argument is empty reads so every time); one never read whole is
+    not the one looked for. Not read at all: one that started
+    before `since` (the launch word was made then), and one whose effective user is not its real user
+    (a setuid program such as sudo, which hansa never starts, and whose arguments cannot be read). (One
+    that does not lead its group is not the one looked for either: some of the account's processes never
+    let their arguments be read.)"""
     for i in range(LOOK_TRIES):
         data = _sysctl(_CTL_KERN, _KERN_PROC, _KERN_PROC_ALL, 0, slack=_KINFO_PROC_SIZE * 16)
         if data:
@@ -1144,7 +1160,7 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         time.sleep(0.05 * (i + 1))
     else:
         raise CannotLook("the process list could not be read")
-    found, unread = [], []
+    found, unsure = [], {}  # unsure: pid -> its last read, None when unread
     for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
         k = data[i:i + _KINFO_PROC_SIZE]
         pid = struct.unpack_from("@i", k, 40)[0]
@@ -1154,22 +1170,24 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         if since and struct.unpack_from("@l", k, 0)[0] < since - 2:  # 2 s for the rounding of both clocks
             continue
         got = _mac_procargs(pid)
-        if got is None:
-            unread += [pid] if _may_lead(pid) else []
-        elif token.encode() in got[0]:
+        if got is not None and token.encode() in got[0]:
             found.append(pid)
-    for i in range(LOOK_TRIES):  # in the middle of an exec, say: a moment later it can be read, or is gone
-        if not unread:
+        elif (got is None or not got[2]) and _may_lead(pid):  # as each process hansa starts does
+            unsure[pid] = got
+    for i in range(LOOK_TRIES):  # in the middle of an exec, say: a moment later it is read whole, or is gone
+        if not unsure:
             break
         time.sleep(0.05 * (i + 1))
-        again = []
-        for pid in unread:
+        again = {}
+        for pid, before in unsure.items():
             got = _mac_procargs(pid)
-            if got is not None:
-                found += [pid] if token.encode() in got[0] else []
-            elif _mac_state(pid) not in ("", "Z") and _may_lead(pid):
-                again.append(pid)
-        unread = again
+            if got is not None and token.encode() in got[0]:
+                found.append(pid)
+            elif (got is None and _mac_state(pid) not in ("", "Z") or got is not None and not got[2] and got != before) \
+                    and _may_lead(pid):
+                again[pid] = got
+        unsure = again
+    unread = [pid for pid, got in unsure.items() if got is None]  # one still half written is not the one looked for
     if unread:
         raise CannotLook(f"the arguments of process {unread[0]} could not be read")
     return found
@@ -1256,7 +1274,7 @@ def task_processes(tid: str, folders: list = ()) -> list:
         for k in _mac_procs(_KERN_PROC_ALL, 0):
             pid = struct.unpack_from("@i", k, 40)[0]
             if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
-                args, env = _mac_procargs(pid) or ([], [])
+                args, env, _ = _mac_procargs(pid) or ([], [], True)
                 if ours(args, env):
                     found.append((pid, args))
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
@@ -1509,7 +1527,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
+    env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid,
+           "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)

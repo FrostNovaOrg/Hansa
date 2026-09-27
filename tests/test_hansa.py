@@ -90,7 +90,7 @@ if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
     sys.exit(0)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
     t = os.environ.get("CLAUDE_CODE_TMPDIR", "")
-    open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "there": os.path.isdir(t),
+    open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
@@ -248,13 +248,45 @@ def tmp_writable() -> bool:
     return True
 
 
+def stop_started_on(desk_root: Path, since: float, wait=10) -> None:
+    """Stop what still runs with `--desk <desk_root>` on its command line and started after `since` (a follower
+    hansa notify on started), and wait until it has ended: it writes its last state in the desk on its way out."""
+    from hansa import run
+    try:
+        pids = {p for d in {str(desk_root), str(desk_root.resolve())} for p in run.pids_with_arg(d, since)}
+    except run.CannotLook:
+        return
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    end = time.time() + wait
+    while pids and time.time() < end:
+        pids = {p for p in pids if run.alive(p)}
+        time.sleep(0.05)
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
 
 
 class DeskTest(unittest.TestCase):
     def setUp(self):
+        started = time.time()
         self.tmp = Path(tempfile.mkdtemp())
+        # registered first, so it runs last: after the other cleanups have stopped what the test started, and
+        # after the followers of its desk (detached, each ends a moment after its session) have ended
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(stop_started_on, self.tmp / "desk", started)
+        env = unittest.mock.patch.dict(os.environ)  # what setUp and the test set in it is put back when it ends
+        env.start()
+        self.addCleanup(env.stop)
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         sh("git", "init", "-q", "-b", "main", cwd=self.repo)
@@ -675,6 +707,18 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", orphan.pid), m)
         self.assertIsNone(orphan.poll())  # still working, not stopped and started over
 
+    def test_a_test_leaves_neither_its_folder_nor_its_environment(self):
+        before = dict(os.environ)
+        case = DeskTest("test_a_task_that_ends_after_its_check_is_posted_once_to_its_session")  # a worker, a follower
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual((result.testsRun, result.errors, result.failures), (1, [], []))
+        self.assertNotEqual(case.tmp, self.tmp)
+        self.assertFalse(case.tmp.exists())
+        time.sleep(1.5)  # a follower ends a moment after its session: none is left to write there again
+        self.assertFalse(case.tmp.exists())
+        self.assertEqual(dict(os.environ), before)
+
     def test_a_worker_is_taken_over_every_time_while_processes_start_and_end_around_it(self):
         stop = threading.Event()
 
@@ -734,6 +778,101 @@ class DeskTest(unittest.TestCase):
                 unittest.mock.patch.object(run.time, "sleep"), self.assertRaises(run.CannotLook):
             run.pids_with_arg(self.desk.meta(tid)["launch"])
         self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
+
+    def test_a_process_read_half_way_through_an_exec_is_read_again(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        real, halves = run._mac_procargs, [([b"ython3", b"", b""], [], False), ([b""], [], False)]  # as mid-exec
+        with unittest.mock.patch.object(run, "_mac_procargs",
+                                        side_effect=lambda p: halves.pop(0) if p == orphan.pid and halves else real(p)), \
+                unittest.mock.patch.object(run.time, "sleep"):
+            self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
+
+    def test_a_process_never_read_whole_is_not_the_worker_and_does_not_stop_the_lookup(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        other = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        real, reads = run._mac_procargs, {orphan.pid: 0, other.pid: 0}
+
+        def procargs(p):  # the worker half written once; the other half written, and differently, every time
+            if p not in reads:
+                return real(p)
+            reads[p] += 1
+            if p == other.pid:
+                return [b"x" * reads[p]], [], False
+            return ([b"ython3", b"", b""], [], False) if reads[p] == 1 else real(p)
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=procargs), \
+                unittest.mock.patch.object(run.time, "sleep"):
+            self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"], self.desk.meta(tid)["started"]),
+                             [orphan.pid])
+        self.assertEqual(reads[other.pid], 1 + run.LOOK_TRIES)
+
+    def test_a_process_read_alike_twice_is_taken_as_it_reads_after_the_second_read(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        # an empty first argument reads as half written every time
+        other = subprocess.Popen(["perl", "-e", 'exec {"/bin/sleep"} "", 60'], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        end = time.time() + 10
+        while (run._mac_procargs(other.pid) or [[b"perl"]])[0][:1] != [b"60"] and time.time() < end:
+            time.sleep(0.02)
+        real, reads = run._mac_procargs, []
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=lambda p: (reads.append(p), real(p))[1]):
+            m = self.desk.meta(tid)
+            self.assertEqual(run.pids_with_arg(m["launch"], m["started"]), [orphan.pid])
+        self.assertEqual(reads.count(other.pid), 2)
+
+    def test_whole_arguments_are_told_from_half_written_ones(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        end = time.time() + 10
+        while orphan.pid not in run.pids_with_arg(self.desk.meta(tid)["launch"]) and time.time() < end:
+            time.sleep(0.05)
+        data = run._sysctl(run._CTL_KERN, run._KERN_PROCARGS2, orphan.pid)
+        argv, _, whole = run._mac_parse_args(data)  # the first argument is the Python the executable ran
+        self.assertEqual((argv[1:], whole), ([b"-c", b"import time; time.sleep(60)", self.desk.meta(tid)["launch"].encode()],
+                                             True))
+        path = b"/Applications/Xcode.app/Contents/Developer/usr/bin/python3"  # 58 bytes: 6 NULs to 64
+        argv = [path, b"-c", b"import time; time.sleep(3)", b"tok"]
+        read = struct.pack("@i", 4) + path + b"\0" * 6 + b"\0".join(argv + [b"HOME=/h", b"", b""]) + b"\0" * 40
+        self.assertEqual(run._mac_parse_args(read), (argv, [b"HOME=/h"], True))
+        # a process that rewrote its own arguments, as postgres does: whole
+        title = struct.pack("@i", 3) + b"/opt/pg/bin/postgres" + b"\0" * 4 + b"postgres: walwriter " + b"\0" * 40
+        self.assertEqual(run._mac_parse_args(title), ([b"postgres: walwriter ", b"", b""], [], True))
+        # as macOS gave them in the middle of an exec: all NULs, and a NUL in the path
+        self.assertFalse(run._mac_parse_args(struct.pack("@i", 4) + b"\0" * 200)[2])
+        cut = read[:4 + 51] + b"\0" + read[4 + 52:]
+        self.assertEqual(run._mac_parse_args(cut)[0], [b"ython3", b"", b"", b""])
+        self.assertFalse(run._mac_parse_args(cut)[2])
+
+    def test_a_process_that_keeps_execing_itself_does_not_stop_the_lookup(self):
+        from hansa import run
+        tid, orphan = self.orphan_starting()
+        again = ("import os, sys, time; time.sleep(0.01); "
+                 "os.execv(sys.executable, [sys.executable, '-c', sys.argv[1], sys.argv[1], str(int(sys.argv[2]) + 1)])")
+        other = subprocess.Popen([sys.executable, "-c", again, again, "0"], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        m, real, first = self.desk.meta(tid), run._mac_procargs, []
+
+        def procargs(p):  # the worker is read half written the first time in each lookup, as mid-exec
+            if p == orphan.pid and not first:
+                first.append(p)
+                return [b"ython3", b"", b""], [], False
+            return real(p)
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=procargs):
+            for _ in range(20):
+                first.clear()
+                self.assertEqual(run.pids_with_arg(m["launch"], m["started"]), [orphan.pid])
+        self.assertIsNone(other.poll())
 
     def unreadable_beside(self, change):
         """On macOS: a worker left in `starting`, and beside it a process of this account that leads its
@@ -1680,9 +1819,20 @@ class DeskTest(unittest.TestCase):
     def test_the_web_command_opens_the_port_this_desks_server_serves_on(self):
         env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
         bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        (self.tmp / "t").mkdir()  # where the server tries srt when it starts: in the test's folder, gone with it
         serve = subprocess.Popen([bin_, "--desk", str(self.desk.root), "serve", "--port", "0"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
-        self.addCleanup(lambda: serve.poll() is None and (serve.kill(), serve.wait()))
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                 env={**env, "TMPDIR": str(self.tmp / "t")})
+
+        def stop():  # as Ctrl+C does: a server stopped while it tries srt removes the folder it tried it in
+            if serve.poll() is None:
+                serve.send_signal(signal.SIGINT)
+                try:
+                    serve.wait(20)
+                except subprocess.TimeoutExpired:
+                    serve.kill()
+                    serve.wait()
+        self.addCleanup(stop)
         self.addCleanup(serve.stdout.close)
         said = serve.stdout.readline()
         port = int(re.search(r"web page on 127\.0\.0\.1:(\d+) ", said).group(1))
@@ -1697,6 +1847,8 @@ class DeskTest(unittest.TestCase):
         r = subprocess.run([bin_, "--desk", str(self.desk.root), "web", "--port", "9999"], input="",
                            capture_output=True, text=True, env=env, timeout=20)
         self.assertIn("http://127.0.0.1:9999/", r.stdout)
+        stop()
+        self.assertEqual(os.listdir(self.tmp / "t"), [])
 
     def test_bin_hansa_runs_its_own_checkout_whatever_the_current_directory(self):
         from hansa import build
@@ -3625,8 +3777,11 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         seen, argvs = self.tmp / "tmp.jsonl", self.tmp / "argv.jsonl"
         s = self.desk.settings()
-        s["lanes"]["a"]["env"] = {"FAKE_SEE_TMP": str(seen), "FAKE_SHOW_ARGV": str(argvs)}
+        s["lanes"]["a"]["env"] = {"FAKE_SEE_TMP": str(seen), "FAKE_SHOW_ARGV": str(argvs), "TMPDIR": "/tmp"}
         self.assertEqual(self.desk.save_settings(s), [])
+        server_tmp = unittest.mock.patch.dict(os.environ, {"TMPDIR": str(self.tmp)})  # the server's own, not the run's
+        server_tmp.start()
+        self.addCleanup(server_tmp.stop)
         d = Dispatcher(self.desk)
         t1 = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(d, t1)["state"], "done")
@@ -3642,6 +3797,8 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(name.startswith(f"hansa-{tid}-"), r)
             self.assertLessEqual(len(f"/tmp/{name}".encode()), 30, r)  # short: Claude Code makes sockets in it
             self.assertEqual((r["there"], r["mode"]), (True, 0o700), r)
+            # also its TMPDIR, where Claude Code's own sandbox makes its sockets and empty folders, which it leaves
+            self.assertEqual(r["tmpdir"], r["tmp"])
             self.assertFalse(os.path.exists(r["tmp"]))  # removed once the worker ended
             allowed = self.allowed_by(a)
             for tool in ("Read", "Edit"):
