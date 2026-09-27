@@ -545,6 +545,10 @@ def _verify(desk: Desk, a) -> None:
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
+    lane = m.get("lane", "")
+    if a.lane and a.lane != lane:
+        _lane_reaches(desk, a.lane, m)
+        lane = a.lane
     d = desk.tasks_dir / a.id
     task = (d / "task.md").read_text(encoding="utf-8").strip()
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
@@ -553,15 +557,34 @@ def _verify(desk: Desk, a) -> None:
     text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12])
             + (f"\nLook in particular at: {note}\n" if note else "")
             + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
-    vid = desk.new_task(text, kind="verify", parent=a.id, lane=m.get("lane", ""), effort=a.effort or "",
+    vid = desk.new_task(text, kind="verify", parent=a.id, lane=lane, effort=a.effort or "",
                         start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
                         browser=a.browser or m.get("browser"), **notify.recorded(sess))
     if v:
         close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
     desk.update(a.id, verify=vid, **notify.recorded(sess))
-    print(f"{vid} queued: a worker will run {a.id}'s change to see whether it holds. "
+    print(f"{vid} queued" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
+          + f": a worker will run {a.id}'s change to see whether it holds. "
           + (_wait_for(desk, vid) if notify.hears_of(desk, vid) else f"Follow it with: hansa wait {vid}")
           + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
+
+
+def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
+    """Refuses, queueing nothing, a lane that cannot reach the task's change: one that is not on the desk, or not on
+    the repository of the task's own lane, where the task's branch is."""
+    lanes = desk.settings()["lanes"]
+    nothing = "; nothing was queued"
+    if name not in lanes:
+        raise SystemExit(f"hansa: there is no lane {name}; lanes: {', '.join(sorted(lanes)) or 'none'}{nothing}")
+    own = lanes.get(m.get("lane"))
+    if own is None:
+        raise SystemExit(f"hansa: {m['id']}'s lane {m.get('lane') or '(none)'} is no longer on the desk, so which "
+                         f"repository its change is in is not known; lane {name} cannot be shown to reach it{nothing}")
+    same = lambda x, y: os.path.realpath(x) == os.path.realpath(y)
+    if not same(lanes[name]["repo"], own["repo"]):
+        raise SystemExit(f"hansa: lane {name} cannot reach {m['id']}'s change: it is on {lanes[name]['repo']}, and "
+                         f"{m['id']}'s branch is in {own['repo']}, the repository of its lane {m['lane']}. Verify it "
+                         f"on a lane on that repository{nothing}")
 
 
 def cmd_pause(a):
@@ -1338,10 +1361,17 @@ def main(argv=None):
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--browser", action="store_true", help="give the follow-up a browser")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
+    p.description = ("have a worker run a finished task's change to see whether it holds (never merged). By default "
+                     "it runs on the task's own lane, with that lane's provider and model, and waits there behind "
+                     "the lane's other tasks. --lane L runs it on lane L instead: a check by another model is a "
+                     "stronger one, and an idle lane starts it sooner.")
     p.add_argument("id")
     p.add_argument("note", nargs="*", help="what to look at in particular")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--browser", action="store_true", help="give the verification a browser")
+    p.add_argument("--lane", help="run the verification on this lane, with its provider, model, effort, sandbox and "
+                   "lists; by default it runs on the task's own lane. A lane on the same repository as the task's; "
+                   "use it to have another model check the task, or when the task's lane is busy")
     p = add("cancel", cmd_cancel, "stop a queued or running task, or close a finished one without merging")
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")

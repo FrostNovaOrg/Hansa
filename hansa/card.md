@@ -30,7 +30,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
 | `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
-| `hansa verify <id> ["what to look at"] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged |
+| `hansa verify <id> ["what to look at"] [--lane L] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged. It runs on the task's own lane unless `--lane L` puts it on another lane on the same repository |
 | `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |
 | `hansa notify [on \| off]` | list the sessions hansa posts to; `on` / `off`: start or stop posting to this session (see Hearing from hansa) |
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background only when hansa does not post to your session |
@@ -108,6 +108,10 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   task is about, and tries edge cases. Its verdict (holds, does not hold,
   unsure) shows in `hansa show <id>`; hansa will not merge while it runs, nor after
   "does not hold" unless you say `--despite-check`.
+- A verification runs on the task's own lane, with its provider, unless you say
+  `--lane L`. One by another model is a stronger check than the same model
+  checking itself. Use `--lane` when the task's lane uses a provider new to the
+  desk, or when that lane is busy and another lane on the same repository is not.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and
   also have the `reviewer` helper read the change.
 
