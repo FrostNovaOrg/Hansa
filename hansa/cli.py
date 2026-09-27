@@ -950,6 +950,9 @@ def _save(desk: Desk, new: dict) -> None:
 def _lane_value(field: str, values: list):
     if values == ["none"]:  # the help's word for empty: what no value gives
         values = []
+    elif "none" in [x for v in values for x in (v.split(",") if field == "providers" else [v])]:
+        raise SystemExit(f"hansa: none means an empty {field}, so it cannot come with other values "
+                         f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
     if field in LANE_LISTS:
         return [x for v in values for x in (v.split(",") if field == "providers" else [v]) if x]
     if field == "env":
@@ -1036,6 +1039,12 @@ def cmd_lane(a):
         if a.action == "add":
             if a.name in s["lanes"]:
                 raise SystemExit(f"hansa: there is already a lane {a.name}; change it with hansa lane set {a.name} ...")
+            # none as lane set takes it: alone it means empty, with other values it is refused
+            given = {f: _lane_value(f, v if isinstance(v, list) else [v]) for f, v in (
+                ("providers", a.providers), ("check", a.check), ("setup", a.setup), ("allow", a.allow),
+                ("network", a.network)) if v is not None}
+            if a.base is not None:
+                _lane_value("base", [a.base])
             repo = str(Path(a.repo).resolve())
             theirs = account.foreign_repo(repo)
             if theirs:
@@ -1044,10 +1053,8 @@ def cmd_lane(a):
                 base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
             except (RuntimeError, OSError) as e:
                 raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
-            providers = [x for x in (a.providers or "").split(",") if x] or None
-            new["lanes"][a.name] = ln = default_lane(repo, base, providers)
-            ln.update({k: v for k, v in (("check", a.check), ("setup", a.setup), ("allow", a.allow),
-                                         ("network", [h for h in a.network or [] if h != "none"])) if v})
+            new["lanes"][a.name] = ln = default_lane(repo, base, given.pop("providers", None) or None)
+            ln.update({k: v for k, v in given.items() if v})
             _save(desk, new)
             desk.event("lane_added", lane=a.name)
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
@@ -1126,7 +1133,7 @@ def cmd_lane(a):
         desk.event("lane_network_changed", lane=a.name, old=old, new=value)
         print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "
               f"this change is recorded. Tell the principal, in the conversation, what you changed and why.")
-    if a.field == "network":
+    if a.field == "network" and not any(is_local(h) for h in old):  # told once, when localhost comes on the list
         warning = _loopback_warning(a.name, value)
         if warning:
             print(desk.redact(warning))
@@ -1383,7 +1390,7 @@ def main(argv=None):
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
         "timeout_min take one whole number. " +
-        "network is the list is the hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
+        "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
         "a program told to use the sandbox's proxy for localhost reaches this machine's loopback through it, so "
