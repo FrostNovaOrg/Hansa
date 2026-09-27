@@ -160,15 +160,9 @@ def ready_now(desk: Desk, s: dict | None = None) -> list:
 
 def ask_knows_ready(a: dict) -> bool:
     """Whether hansa recorded which providers were ready when the request was made. ready_then lists them (so a
-    provider not set up then counts as not ready); not_ready, from an earlier hansa, lists those set up but not
-    ready. A request made before either was recorded has neither: hansa cannot tell."""
-    return "ready_then" in a or "not_ready" in a
-
-
-def _not_ready_then(a: dict, n: str) -> bool:
-    if "ready_then" in a:
-        return n not in (a.get("ready_then") or [])
-    return n in (a.get("not_ready") or [])
+    provider not set up then counts as not ready). A request made before that was recorded has none: hansa cannot
+    tell."""
+    return "ready_then" in a
 
 
 def ask_names(a: dict, ready: list) -> list:
@@ -176,7 +170,7 @@ def ask_names(a: dict, ready: list) -> list:
     now. None for a request made before hansa recorded which were ready (ask_knows_ready: it cannot tell)."""
     if not ask_knows_ready(a):
         return []
-    return [n for n in ready if _not_ready_then(a, n)
+    return [n for n in ready if n not in (a.get("ready_then") or [])
             and re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", str(a.get("text", "")), re.IGNORECASE)]
 
 

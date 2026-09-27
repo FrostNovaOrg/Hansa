@@ -3345,14 +3345,6 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("kimi", "sk-kimi-12345678")
         self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["kimi is ready now: done?"])
         self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("kimi", [1])])
-        asks = self.desk.asks()  # from the hansa that recorded only what was set up and not ready: still read
-        asks.append({"id": 2, "text": "Please fill in kimi's key", "by": "", "created": 0, "closed": None,
-                     "answer": "", "not_ready": ["kimi"]})
-        asks.append({"id": 3, "text": "kimi too?", "by": "", "created": 0, "closed": None, "answer": "",
-                     "not_ready": []})
-        write_json(self.desk.asks_path, asks)
-        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]],
-                         ["kimi is ready now: done?", "kimi is ready now: done?", ""])
 
     def test_a_request_made_while_its_provider_was_ready_gets_no_note(self):
         self.assertIn("claude", views.ready_now(self.desk))
