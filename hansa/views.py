@@ -10,7 +10,7 @@ from pathlib import Path
 from . import build, cost, notify
 from .desk import Desk, is_git_rule, read_json
 from .run import (ROUND_QUIET, STUCK_AFTER, join_command, lane_occupied, markers_in_change, markers_text,
-                  progress_of, provider_problem, server_state, server_text, server_up, srt_needed, srt_problem,
+                  not_looking, progress_of, provider_problem, server_state, server_text, srt_needed, srt_problem,
                   srt_record, srt_when, tried_lanes, waiting_reason)
 
 STATES = {
@@ -84,9 +84,9 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
                 f"{mc.get('onto', '')[:10]}, then " + ("the lane's setup and " if mc.get("setup") else "")
                 + f"check: {mc.get('command', '')}")
     other = merge_check_busy_with(desk, m, tasks)
-    return (f"merge check queued{again}: " + (f"waits for lane {lane}, busy with {other}" if other
-                                              else "starts when `hansa serve` next looks (within seconds)"
-                                              if server_up(desk) else "`hansa serve` is not running"))
+    return (f"merge check queued{again}: " + (f"waits for lane {lane}, busy with {other}" if other else
+                                              not_looking(desk)
+                                              or "starts when `hansa serve` next looks (within seconds)"))
 
 
 def silent(r: dict) -> bool:
@@ -588,8 +588,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
             "desk: a second one refuses to start.",
             f"  now: {server_text(server_state(desk))}",
-            f"It counts as running while the process serve.lock names is alive, and as not running once that "
-            f"process is gone. Once a round (starting and finishing tasks) it writes its heartbeat; a round can "
+            f"It counts as running while a hansa serve holds serve.lock, which names its process, and as not "
+            f"running once none holds it, whatever process that number names by then. Once a round (starting and finishing tasks) it writes its heartbeat; a round can "
             f"take a while, when a worker's processes are stopped (up to 20 s each) or what a task left is swept "
             f"on a busy machine. Quiet for {ROUND_QUIET} s, it counts as busy, still running; quiet for "
             f"{STUCK_AFTER // 60} minutes, hansa status and the posts to the coordinator's session say it is "
