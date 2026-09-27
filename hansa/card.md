@@ -144,8 +144,9 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 hansa posts to your session through its inbox when something needs you: a task
 ended (after its check) or failed, a verification or design session ended, a
 merge check ended, the principal answered a request, a provider an open request
-names became ready when it was not as you asked (once; the request may be done),
-the server stopped (or,
+names became ready when it was not as you asked (once, on a key or settings save
+or a check; the request may be done; one ready again only because its rest ran
+out shows the note in `hansa status` but is not posted), the server stopped (or,
 still running, finished no round for 5 minutes: busy or stuck), and then that it
 runs again. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next

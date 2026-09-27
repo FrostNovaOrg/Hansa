@@ -651,6 +651,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         except Exception as e:  # noqa: BLE001 - the register then shows it as gone quiet, which it is
             _say(f"could not record the end: {e}")
         write_json(priv / f"{key}.state.json", {**read_json(priv / f"{key}.state.json", {}), "ended": now()})
+        held.close()
 
 
 def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: float) -> tuple:

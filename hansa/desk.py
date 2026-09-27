@@ -581,15 +581,15 @@ class Desk:
 
     def add_ask(self, text: str, by: str = "", session: dict | None = None) -> int:
         """session: the Claude Code session that asked, which hears the answer (hansa/notify.py). It records the
-        providers not ready then: a request naming one of them may be done once it is (views.ask_note)."""
+        providers ready then; any other name (one not set up yet too) was not, and a request naming it may be done
+        once it is (views.ask_note)."""
         from .views import ready_now
-        s = self.settings()
-        not_ready = sorted(set(s["providers"]) - set(ready_now(self, s)))
+        ready_then = ready_now(self)
         with self.lock():
             asks = self.asks()
             n = max((a["id"] for a in asks), default=0) + 1
             asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
-                         "answer": "", "not_ready": not_ready, **({"session": session} if session else {})})
+                         "answer": "", "ready_then": ready_then, **({"session": session} if session else {})})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)
         return n

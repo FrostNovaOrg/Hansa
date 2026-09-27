@@ -2472,6 +2472,50 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(notify.session_name(1, notify.NAME_LIMIT), "")
         self.assertEqual(run.call_args.kwargs["timeout"], 10)
 
+    def test_a_follower_posts_while_its_name_lookup_hangs(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        p, sock = self.session()
+        sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+        key = notify.key_of(sess)
+        started, release, got, broke = threading.Event(), threading.Event(), {}, []
+
+        def look(pid, timeout=15):
+            started.set()
+            return release.wait(60) and "desk-87"
+
+        def meanwhile():  # the follower runs in this test's own thread; this plays the desk around it
+            try:
+                self.assertTrue(started.wait(30), "the follower never looked the name up")
+                self.desk.write_key("mimo", "sk-mimo-12345678")  # a line for the session, while the lookup hangs
+                got["posts"] = self.soon(lambda: self.posts(sock), timeout=10)
+                self.assertFalse(release.is_set())
+                release.set()
+                got["name"] = self.soon(lambda: [r.get("name") for r in notify.records(self.desk)
+                                                 if r.get("name")], timeout=10)
+            except BaseException as e:  # noqa: BLE001 - raised again once the follower ended
+                broke.append(e)
+            finally:
+                release.set()
+                p.kill()
+                p.wait()
+
+        was = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, was)
+        th = threading.Thread(target=meanwhile)
+        with unittest.mock.patch.object(notify, "session_name", look), \
+                unittest.mock.patch.object(notify, "Namer", functools.partial(notify.Namer, first=0)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            th.start()
+            self.assertEqual(notify.follow(self.desk, key, sess, sock, "n"), 0)
+        th.join()
+        if broke:
+            raise broke[0]
+        self.assertIn("- mimo is ready now: done? Still open: request #1", got["posts"][0])
+        self.assertEqual(got["name"], ["desk-87"])  # and what the lookup found is recorded once it ends
+
     def test_two_sessions_each_hear_their_own_tasks_and_both_hear_one_from_a_shell(self):
         (a, sa), (b, sb) = self.session(), self.session()
         for p, sock in ((a, sa), (b, sb)):
@@ -3290,10 +3334,29 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("mimo", "sk-mimo-12345678")  # a closed request is not told
         self.assertEqual(len(self.events("ask_ready")), 2)
 
+    def test_a_request_naming_a_provider_not_set_up_yet_gets_the_note_once_it_is_ready(self):
+        self.desk.add_ask("Please set up provider kimi and its key")
+        self.assertNotIn("kimi", self.desk.asks()[0]["ready_then"])
+        s = self.desk.settings()
+        s["providers"]["kimi"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], [""])  # no key yet
+        self.desk.write_key("kimi", "sk-kimi-12345678")
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["kimi is ready now: done?"])
+        self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("kimi", [1])])
+        asks = self.desk.asks()  # from the hansa that recorded only what was set up and not ready: still read
+        asks.append({"id": 2, "text": "Please fill in kimi's key", "by": "", "created": 0, "closed": None,
+                     "answer": "", "not_ready": ["kimi"]})
+        asks.append({"id": 3, "text": "kimi too?", "by": "", "created": 0, "closed": None, "answer": "",
+                     "not_ready": []})
+        write_json(self.desk.asks_path, asks)
+        self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]],
+                         ["kimi is ready now: done?", "kimi is ready now: done?", ""])
+
     def test_a_request_made_while_its_provider_was_ready_gets_no_note(self):
         self.assertIn("claude", views.ready_now(self.desk))
         self.desk.add_ask("claude login please, for the docs lane")
-        self.assertEqual(self.desk.asks()[0]["not_ready"], [])
+        self.assertIn("claude", self.desk.asks()[0]["ready_then"])
         self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], [""])
         self.desk.ready_news()
         self.assertEqual(self.events("ask_ready"), [])

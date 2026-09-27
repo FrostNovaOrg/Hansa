@@ -158,10 +158,25 @@ def ready_now(desk: Desk, s: dict | None = None) -> list:
     return [n for n in sorted(s["providers"]) if not provider_problem(desk, s, n)]
 
 
+def ask_knows_ready(a: dict) -> bool:
+    """Whether hansa recorded which providers were ready when the request was made. ready_then lists them (so a
+    provider not set up then counts as not ready); not_ready, from an earlier hansa, lists those set up but not
+    ready. A request made before either was recorded has neither: hansa cannot tell."""
+    return "ready_then" in a or "not_ready" in a
+
+
+def _not_ready_then(a: dict, n: str) -> bool:
+    if "ready_then" in a:
+        return n not in (a.get("ready_then") or [])
+    return n in (a.get("not_ready") or [])
+
+
 def ask_names(a: dict, ready: list) -> list:
     """The providers an open request names (as whole words) that were not ready when it was made and are ready
-    now. None for a request made before hansa recorded which were ready (it cannot tell)."""
-    return [n for n in ready if n in (a.get("not_ready") or [])
+    now. None for a request made before hansa recorded which were ready (ask_knows_ready: it cannot tell)."""
+    if not ask_knows_ready(a):
+        return []
+    return [n for n in ready if _not_ready_then(a, n)
             and re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", str(a.get("text", "")), re.IGNORECASE)]
 
 
@@ -174,13 +189,14 @@ def ask_note(a: dict, ready: list) -> str:
 def ready_news(desk: Desk) -> None:
     """After a provider's key or settings changed or its check ended: for each open request, the providers it
     names that became ready since it was made (ask_names) and it was not told of yet, as an ask_ready event the
-    follower posts. Each is told once; again only after the provider stopped being ready and became ready again."""
+    follower posts. Each is told once; again only after the provider stopped being ready and became ready again.
+    Only then: a provider that becomes ready by itself (its rest runs out) gets the note in status, but no post."""
     ready = ready_now(desk)
     news, changed = {}, False
     with desk.lock():
         asks = desk.asks()
         for a in asks:
-            if a.get("closed") or "not_ready" not in a:
+            if a.get("closed") or not ask_knows_ready(a):
                 continue
             told = [n for n in a.get("told_ready") or [] if n in ready]  # stopped being ready: may be told again
             for n in ask_names(a, ready):
@@ -696,7 +712,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
             "could not start), a verification's verdict, a design session that ended, a queued merge check that "
             "ended, a request the principal answered or closed (with the answer), a provider that an open request names "
-            "becoming ready when it was not as the request was made (once; the request may be done), hansa serve stopping or "
+            "becoming ready when it was not as the request was made (once; the request may be done; looked at when a "
+            "key, the settings or a check change it, so one ready again only because its rest ran out gets the note "
+            "in hansa status but no post), hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
             "line per event and the next command; events seconds apart come in one message.",
