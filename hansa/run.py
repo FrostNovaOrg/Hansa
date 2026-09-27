@@ -1141,7 +1141,9 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
     """As pids_with_arg. A process of this account whose arguments cannot be read is read again a few
     times; one that still cannot be, and leads its own process group as hansa's processes do, may be
     the one looked for: CannotLook. One read half written (_mac_parse_args) that leads its group is
-    read again too; one never read whole is not the one looked for. Not read at all: one that started
+    read again too, and taken as it reads once two reads in a row agree (an exec is not half way through
+    twice alike: a process whose first argument is empty reads so every time); one never read whole is
+    not the one looked for. Not read at all: one that started
     before `since` (the launch word was made then), and one whose effective user is not its real user
     (a setuid program such as sudo, which hansa never starts, and whose arguments cannot be read). (One
     that does not lead its group is not the one looked for either: some of the account's processes never
@@ -1153,7 +1155,7 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         time.sleep(0.05 * (i + 1))
     else:
         raise CannotLook("the process list could not be read")
-    found, unsure = [], {}  # unsure: pid -> whether it was unread (else read half written)
+    found, unsure = [], {}  # unsure: pid -> its last read, None when unread
     for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
         k = data[i:i + _KINFO_PROC_SIZE]
         pid = struct.unpack_from("@i", k, 40)[0]
@@ -1166,21 +1168,21 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         if got is not None and token.encode() in got[0]:
             found.append(pid)
         elif (got is None or not got[2]) and _may_lead(pid):  # as each process hansa starts does
-            unsure[pid] = got is None
+            unsure[pid] = got
     for i in range(LOOK_TRIES):  # in the middle of an exec, say: a moment later it is read whole, or is gone
         if not unsure:
             break
         time.sleep(0.05 * (i + 1))
         again = {}
-        for pid in unsure:
+        for pid, before in unsure.items():
             got = _mac_procargs(pid)
             if got is not None and token.encode() in got[0]:
                 found.append(pid)
-            elif (got is None and _mac_state(pid) not in ("", "Z") or got is not None and not got[2]) \
+            elif (got is None and _mac_state(pid) not in ("", "Z") or got is not None and not got[2] and got != before) \
                     and _may_lead(pid):
-                again[pid] = got is None
+                again[pid] = got
         unsure = again
-    unread = [pid for pid, u in unsure.items() if u]  # one still half written is not the one looked for
+    unread = [pid for pid, got in unsure.items() if got is None]  # one still half written is not the one looked for
     if unread:
         raise CannotLook(f"the arguments of process {unread[0]} could not be read")
     return found

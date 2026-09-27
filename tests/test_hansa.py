@@ -784,12 +784,37 @@ class DeskTest(unittest.TestCase):
         tid, orphan = self.orphan_starting()
         other = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
         self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
-        real = run._mac_procargs
-        with unittest.mock.patch.object(run, "_mac_procargs",
-                                        side_effect=lambda p: ([b""], [], False) if p == other.pid else real(p)), \
+        real, reads = run._mac_procargs, {orphan.pid: 0, other.pid: 0}
+
+        def procargs(p):  # the worker half written once; the other half written, and differently, every time
+            if p not in reads:
+                return real(p)
+            reads[p] += 1
+            if p == other.pid:
+                return [b"x" * reads[p]], [], False
+            return ([b"ython3", b"", b""], [], False) if reads[p] == 1 else real(p)
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=procargs), \
                 unittest.mock.patch.object(run.time, "sleep"):
             self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"], self.desk.meta(tid)["started"]),
                              [orphan.pid])
+        self.assertEqual(reads[other.pid], 1 + run.LOOK_TRIES)
+
+    def test_a_process_read_alike_twice_is_taken_as_it_reads_after_the_second_read(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        # an empty first argument reads as half written every time
+        other = subprocess.Popen(["perl", "-e", 'exec {"/bin/sleep"} "", 60'], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        end = time.time() + 10
+        while (run._mac_procargs(other.pid) or [[b"perl"]])[0][:1] != [b"60"] and time.time() < end:
+            time.sleep(0.02)
+        real, reads = run._mac_procargs, []
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=lambda p: (reads.append(p), real(p))[1]):
+            m = self.desk.meta(tid)
+            self.assertEqual(run.pids_with_arg(m["launch"], m["started"]), [orphan.pid])
+        self.assertEqual(reads.count(other.pid), 2)
 
     def test_whole_arguments_are_told_from_half_written_ones(self):
         from hansa import run
@@ -823,9 +848,17 @@ class DeskTest(unittest.TestCase):
                  "os.execv(sys.executable, [sys.executable, '-c', sys.argv[1], sys.argv[1], str(int(sys.argv[2]) + 1)])")
         other = subprocess.Popen([sys.executable, "-c", again, again, "0"], start_new_session=True)
         self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
-        m = self.desk.meta(tid)
-        for _ in range(20):
-            self.assertEqual(run.pids_with_arg(m["launch"], m["started"]), [orphan.pid])
+        m, real, first = self.desk.meta(tid), run._mac_procargs, []
+
+        def procargs(p):  # the worker is read half written the first time in each lookup, as mid-exec
+            if p == orphan.pid and not first:
+                first.append(p)
+                return [b"ython3", b"", b""], [], False
+            return real(p)
+        with unittest.mock.patch.object(run, "_mac_procargs", side_effect=procargs):
+            for _ in range(20):
+                first.clear()
+                self.assertEqual(run.pids_with_arg(m["launch"], m["started"]), [orphan.pid])
         self.assertIsNone(other.poll())
 
     def unreadable_beside(self, change):
