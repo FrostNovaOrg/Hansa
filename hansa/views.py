@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
 from . import build, cost, notify
 from .desk import Desk, is_git_rule, read_json
-from .run import (ROUND_QUIET, STUCK_AFTER, join_command, lane_occupied, markers_in_change, markers_text,
+from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, markers_in_change, markers_text,
                   not_looking, progress_of, provider_problem, server_state, server_text, srt_needed, srt_problem,
                   srt_record, srt_when, tried_lanes, waiting_reason)
 
@@ -35,12 +36,22 @@ def plain(line: str, width: int | None = 200) -> str:
     return ESCAPES.sub("", line)[:width]
 
 
+def as_closed_now(m: dict) -> dict:
+    """A verification that had ended when its task closed, recorded before hansa kept such a one as it ended
+    (state cancelled, the closed line as its error, and its verdict), as the rule has it now: done, with the
+    closed line and no error. The record itself stays as it is. Any other task as it is."""
+    if m.get("kind") == "verify" and m.get("state") == "cancelled" and "verdict" in m \
+            and str(m.get("error") or "").startswith("closed: "):
+        return {**m, "state": "done", "closed": m["error"], "error": ""}
+    return m
+
+
 def verification(desk: Desk, m: dict):
     """The latest verification of a task: {task, state, verdict}, or None."""
     vid = m.get("verify")
     if not vid:
         return None
-    v = desk.meta(vid)
+    v = as_closed_now(desk.meta(vid))
     return {"task": vid, "state": v["state"], "verdict": v.get("verdict", "")}
 
 
@@ -323,7 +334,7 @@ def task_text_lines(desk: Desk, m: dict, full: bool = False) -> list:
 def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     """hansa show. full: the whole text and report. heard: whether the session it is for hears from hansa
     (default: the session this command runs in)."""
-    m = desk.meta(tid)
+    m = as_closed_now(desk.meta(tid))
     m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
     head = f"{tid} · {m['state']} · lane {m.get('lane') or 'any'}"
@@ -511,6 +522,20 @@ def lane_origin(desk: Desk, name: str) -> str:
     return "; ".join(x for x in (made and f"made with {made}", last and f"last changed with {last}") if x)
 
 
+def local_servers_text(mac: bool, listed: bool) -> str:
+    """What localhost on a lane's network list means on this machine, for hansa explain lane."""
+    if mac:
+        return ("local servers a worker starts (on macOS): they need localhost on the list; with it a worker, the"
+                " setup and the check can bind ports and reach every service on this machine's loopback, local"
+                " proxies among them, which reach the internet whatever the list says"
+                + ("; this lane lists it, so keep it only if this Mac's loopback holds nothing a worker must not"
+                   " reach" if listed else "; this lane does not list it, so its workers cannot bind a port"))
+    return ("local servers a worker starts (on Linux): they need nothing on the list, since each sandbox has a"
+            " loopback of its own; localhost on it adds nothing for them, and lets a program told to use the"
+            " sandbox's proxy for localhost reach this machine's loopback through it"
+            + ("; this lane lists it, and need not" if listed else ""))
+
+
 def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
     s = desk.settings()
     if what == "lane":
@@ -554,6 +579,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " like); it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
             " reset, branch and the like), which commits its changes",
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
+            "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
             "  folders a worker may also write (a build or test tool's cache): "
             + (", ".join(ln.get("write", [])) or "none"),
             "  allowed commands (for design sessions only, which run outside the sandbox and may run these plus"
