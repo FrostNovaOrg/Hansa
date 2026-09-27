@@ -1092,10 +1092,11 @@ def _mac_group_running(pgid) -> bool:
     return any(k[36] != _SZOMB for k in _mac_procs(_KERN_PROC_PGRP, int(pgid)))
 
 
-def _mac_procargs(pid: int):
-    """A process's arguments and environment, as two lists; None when they cannot be read (a process
-    of another account, one in the middle of an exec, one that ended meanwhile)."""
-    data = _sysctl(_CTL_KERN, _KERN_PROCARGS2, pid)
+def _mac_parse_args(data):
+    """What KERN_PROCARGS2 gave, as (arguments, environment, whole); None when it holds nothing. The
+    executable's path comes first, then NULs up to the next multiple of 8 bytes, then the arguments. Read
+    in the middle of an exec it can be half written: all NULs, or a path with a NUL in it, so that the end
+    of the path is taken for the first argument and its padding for empty ones. Then `whole` is False."""
     if not data or len(data) < 4:
         return None
     argc = struct.unpack_from("@i", data, 0)[0]
@@ -1103,9 +1104,18 @@ def _mac_procargs(pid: int):
     end = rest.find(b"\0")  # the executable's path, then NULs up to the first argument
     if end < 0:
         return None
-    words = rest[end:].lstrip(b"\0").split(b"\0")
+    after = rest[end:].lstrip(b"\0")
+    words = after.split(b"\0")
     env = words[argc:]  # the environment ends at an empty string; the kernel's own strings follow it
-    return words[:argc], env[:env.index(b"")] if b"" in env else env
+    return words[:argc], env[:env.index(b"")] if b"" in env else env, \
+        end > 0 and len(rest) - len(after) == (end // 8 + 1) * 8
+
+
+def _mac_procargs(pid: int):
+    """A process's arguments and environment, as two lists, and whether they were read whole (_mac_parse_args);
+    None when they cannot be read (a process of another account, one in the middle of an exec, one that
+    ended meanwhile)."""
+    return _mac_parse_args(_sysctl(_CTL_KERN, _KERN_PROCARGS2, pid))
 
 
 class CannotLook(Exception):
@@ -1130,10 +1140,12 @@ def _may_lead(pid: int) -> bool:
 def _mac_pids_with_arg(token: str, since=None) -> list:
     """As pids_with_arg. A process of this account whose arguments cannot be read is read again a few
     times; one that still cannot be, and leads its own process group as hansa's processes do, may be
-    the one looked for: CannotLook. Not read at all: one that started before `since` (the launch word
-    was made then), and one whose effective user is not its real user (a setuid program such as sudo,
-    which hansa never starts, and whose arguments cannot be read). (One that does not lead its group
-    is not the one looked for either: some of the account's processes never let their arguments be read.)"""
+    the one looked for: CannotLook. One read half written (_mac_parse_args) that leads its group is
+    read again too; one never read whole is not the one looked for. Not read at all: one that started
+    before `since` (the launch word was made then), and one whose effective user is not its real user
+    (a setuid program such as sudo, which hansa never starts, and whose arguments cannot be read). (One
+    that does not lead its group is not the one looked for either: some of the account's processes never
+    let their arguments be read.)"""
     for i in range(LOOK_TRIES):
         data = _sysctl(_CTL_KERN, _KERN_PROC, _KERN_PROC_ALL, 0, slack=_KINFO_PROC_SIZE * 16)
         if data:
@@ -1141,7 +1153,7 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         time.sleep(0.05 * (i + 1))
     else:
         raise CannotLook("the process list could not be read")
-    found, unsure = [], {}
+    found, unsure = [], {}  # unsure: pid -> whether it was unread (else read half written)
     for i in range(0, len(data) - _KINFO_PROC_SIZE + 1, _KINFO_PROC_SIZE):
         k = data[i:i + _KINFO_PROC_SIZE]
         pid = struct.unpack_from("@i", k, 40)[0]
@@ -1153,26 +1165,24 @@ def _mac_pids_with_arg(token: str, since=None) -> list:
         got = _mac_procargs(pid)
         if got is not None and token.encode() in got[0]:
             found.append(pid)
-        elif _may_lead(pid):  # unread, or read without the word: as each process hansa starts, it leads its group
-            unsure[pid] = got
-    # In the middle of an exec the arguments cannot be read, or are read half written (all NULs, a path
-    # cut short): read again until two reads agree, or it is gone.
-    for i in range(LOOK_TRIES):
+        elif (got is None or not got[2]) and _may_lead(pid):  # as each process hansa starts does
+            unsure[pid] = got is None
+    for i in range(LOOK_TRIES):  # in the middle of an exec, say: a moment later it is read whole, or is gone
         if not unsure:
             break
         time.sleep(0.05 * (i + 1))
         again = {}
-        for pid, before in unsure.items():
+        for pid in unsure:
             got = _mac_procargs(pid)
             if got is not None and token.encode() in got[0]:
                 found.append(pid)
-            elif got is None and _mac_state(pid) in ("", "Z") or got is not None and got == before:
-                pass
-            elif _may_lead(pid):
-                again[pid] = got
+            elif (got is None and _mac_state(pid) not in ("", "Z") or got is not None and not got[2]) \
+                    and _may_lead(pid):
+                again[pid] = got is None
         unsure = again
-    if unsure:
-        raise CannotLook(f"the arguments of process {next(iter(unsure))} could not be read")
+    unread = [pid for pid, u in unsure.items() if u]  # one still half written is not the one looked for
+    if unread:
+        raise CannotLook(f"the arguments of process {unread[0]} could not be read")
     return found
 
 
@@ -1234,7 +1244,7 @@ def task_processes(tid: str) -> list:
         for k in _mac_procs(_KERN_PROC_ALL, 0):
             pid = struct.unpack_from("@i", k, 40)[0]
             if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
-                args, env = _mac_procargs(pid) or ([], [])
+                args, env, _ = _mac_procargs(pid) or ([], [], True)
                 if ours(env):
                     found.append((pid, args))
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]

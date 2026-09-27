@@ -771,11 +771,62 @@ class DeskTest(unittest.TestCase):
         if not run._ON_MAC:
             self.skipTest("Linux reads /proc")
         tid, orphan = self.orphan_starting()
-        real, halves = run._mac_procargs, [([b"ython3", b"", b""], []), ([b""], [])]  # as macOS gave them mid-exec
+        real, halves = run._mac_procargs, [([b"ython3", b"", b""], [], False), ([b""], [], False)]  # as mid-exec
         with unittest.mock.patch.object(run, "_mac_procargs",
                                         side_effect=lambda p: halves.pop(0) if p == orphan.pid and halves else real(p)), \
                 unittest.mock.patch.object(run.time, "sleep"):
             self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"]), [orphan.pid])
+
+    def test_a_process_never_read_whole_is_not_the_worker_and_does_not_stop_the_lookup(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        other = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        real = run._mac_procargs
+        with unittest.mock.patch.object(run, "_mac_procargs",
+                                        side_effect=lambda p: ([b""], [], False) if p == other.pid else real(p)), \
+                unittest.mock.patch.object(run.time, "sleep"):
+            self.assertEqual(run.pids_with_arg(self.desk.meta(tid)["launch"], self.desk.meta(tid)["started"]),
+                             [orphan.pid])
+
+    def test_whole_arguments_are_told_from_half_written_ones(self):
+        from hansa import run
+        if not run._ON_MAC:
+            self.skipTest("Linux reads /proc")
+        tid, orphan = self.orphan_starting()
+        end = time.time() + 10
+        while orphan.pid not in run.pids_with_arg(self.desk.meta(tid)["launch"]) and time.time() < end:
+            time.sleep(0.05)
+        data = run._sysctl(run._CTL_KERN, run._KERN_PROCARGS2, orphan.pid)
+        argv, _, whole = run._mac_parse_args(data)  # the first argument is the Python the executable ran
+        self.assertEqual((argv[1:], whole), ([b"-c", b"import time; time.sleep(60)", self.desk.meta(tid)["launch"].encode()],
+                                             True))
+        path = b"/Applications/Xcode.app/Contents/Developer/usr/bin/python3"  # 58 bytes: 6 NULs to 64
+        argv = [path, b"-c", b"import time; time.sleep(3)", b"tok"]
+        read = struct.pack("@i", 4) + path + b"\0" * 6 + b"\0".join(argv + [b"HOME=/h", b"", b""]) + b"\0" * 40
+        self.assertEqual(run._mac_parse_args(read), (argv, [b"HOME=/h"], True))
+        # a process that rewrote its own arguments, as postgres does: whole
+        title = struct.pack("@i", 3) + b"/opt/pg/bin/postgres" + b"\0" * 4 + b"postgres: walwriter " + b"\0" * 40
+        self.assertEqual(run._mac_parse_args(title), ([b"postgres: walwriter ", b"", b""], [], True))
+        # as macOS gave them in the middle of an exec: all NULs, and a NUL in the path
+        self.assertFalse(run._mac_parse_args(struct.pack("@i", 4) + b"\0" * 200)[2])
+        cut = read[:4 + 51] + b"\0" + read[4 + 52:]
+        self.assertEqual(run._mac_parse_args(cut)[0], [b"ython3", b"", b"", b""])
+        self.assertFalse(run._mac_parse_args(cut)[2])
+
+    def test_a_process_that_keeps_execing_itself_does_not_stop_the_lookup(self):
+        from hansa import run
+        tid, orphan = self.orphan_starting()
+        again = ("import os, sys, time; time.sleep(0.01); "
+                 "os.execv(sys.executable, [sys.executable, '-c', sys.argv[1], sys.argv[1], str(int(sys.argv[2]) + 1)])")
+        other = subprocess.Popen([sys.executable, "-c", again, again, "0"], start_new_session=True)
+        self.addCleanup(lambda: other.poll() is None and (other.kill(), other.wait()))
+        m = self.desk.meta(tid)
+        for _ in range(20):
+            self.assertEqual(run.pids_with_arg(m["launch"], m["started"]), [orphan.pid])
+        self.assertIsNone(other.poll())
 
     def unreadable_beside(self, change):
         """On macOS: a worker left in `starting`, and beside it a process of this account that leads its
@@ -1630,9 +1681,20 @@ class DeskTest(unittest.TestCase):
     def test_the_web_command_opens_the_port_this_desks_server_serves_on(self):
         env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
         bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        (self.tmp / "t").mkdir()  # where the server tries srt when it starts: in the test's folder, gone with it
         serve = subprocess.Popen([bin_, "--desk", str(self.desk.root), "serve", "--port", "0"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
-        self.addCleanup(lambda: serve.poll() is None and (serve.kill(), serve.wait()))
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                 env={**env, "TMPDIR": str(self.tmp / "t")})
+
+        def stop():  # as Ctrl+C does: a server stopped while it tries srt removes the folder it tried it in
+            if serve.poll() is None:
+                serve.send_signal(signal.SIGINT)
+                try:
+                    serve.wait(20)
+                except subprocess.TimeoutExpired:
+                    serve.kill()
+                    serve.wait()
+        self.addCleanup(stop)
         self.addCleanup(serve.stdout.close)
         said = serve.stdout.readline()
         port = int(re.search(r"web page on 127\.0\.0\.1:(\d+) ", said).group(1))
@@ -1647,6 +1709,8 @@ class DeskTest(unittest.TestCase):
         r = subprocess.run([bin_, "--desk", str(self.desk.root), "web", "--port", "9999"], input="",
                            capture_output=True, text=True, env=env, timeout=20)
         self.assertIn("http://127.0.0.1:9999/", r.stdout)
+        stop()
+        self.assertEqual(os.listdir(self.tmp / "t"), [])
 
     def test_bin_hansa_runs_its_own_checkout_whatever_the_current_directory(self):
         from hansa import build
