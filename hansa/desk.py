@@ -7,6 +7,7 @@ Layout (everything under one directory):
     lanes/<lane>/brief.md  standing instructions sent to every worker in a lane
     tasks/<id>/          task.md, meta.json, result.md, and what its processes wrote, keys removed
     worktrees/<lane>/    one git worktree per lane
+    notes/               the coordinator's own notes, kept past a cleared session; it writes there without asking
     events.jsonl         append-only record of everything that happened
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
@@ -329,6 +330,7 @@ class Desk:
         self.tasks_dir = self.root / "tasks"
         self.lanes_dir = self.root / "lanes"
         self.worktrees_dir = self.root / "worktrees"
+        self.notes_dir = self.root / "notes"
         self.state_dir = self.root / ".hansa"
         self.events_path = self.root / "events.jsonl"
         self.asks_path = self.root / "asks.json"

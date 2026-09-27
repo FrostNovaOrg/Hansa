@@ -3332,6 +3332,38 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
         self.assertEqual(len(list(self.desk.state_dir.glob("coordinator-settings.json.*"))), 1)  # the old one, kept once
 
+    def test_the_coordinator_writes_its_notes_without_asking_and_loads_no_connectors_or_guesses(self):
+        show = self.tmp / "argv-claude"  # the session: the one variable, then its options one per line
+        show.write_text("#!/bin/sh\necho \"$CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION\"\n"
+                        "for x in \"$@\"; do echo \"$x\"; done\n")
+        show.chmod(0o755)
+        notes = self.desk.root / "notes"
+        self.assertTrue(notes.is_dir())  # a new desk has it
+        notes.rmdir()  # a desk made before notes/
+        mine = self.desk.root / ".claude" / "settings.json"
+        mine.write_text(json.dumps({"permissions": {"allow": ["Bash(hansa:*)"], "deny": []}}))
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "coordinator"], capture_output=True, text=True,
+                           env={**os.environ, "HANSA_CLAUDE": str(show), "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(notes.is_dir())  # made when it starts
+        self.assertEqual(notes.stat().st_uid, self.desk.root.stat().st_uid)
+        root = str(self.desk.root).lstrip("/")
+        rules = json.loads(mine.read_text())["permissions"]
+        self.assertIn(f"Edit(//{root}/notes/**)", rules["allow"])  # one Edit rule: Write and Edit alike
+        self.assertTrue(self.covered(rules["allow"], "Edit", f"/{root}/notes/plan.md"))
+        for closed in ("settings.json", "tasks/t0001/task.md", "lanes/a/brief.md", "events.jsonl", "secrets/x.key",
+                       ".hansa/web-token"):  # only notes/ is allowed; these stay denied
+            self.assertFalse(self.covered(rules["allow"], "Edit", f"/{root}/{closed}"), closed)
+            self.assertTrue(self.covered(rules["deny"], "Edit", f"/{root}/{closed}"), closed)
+        out = r.stdout.splitlines()
+        self.assertEqual(out[0], "false")  # over the principal's own setting
+        argv = out[1:]
+        given = json.loads(argv[argv.index("--settings") + 1])
+        self.assertIs(given["disableClaudeAiConnectors"], True)
+        self.assertIs(given["promptSuggestionEnabled"], False)
+        self.assertNotIn("--strict-mcp-config", argv)  # the machine's MCP servers stay
+
     def test_the_coordinator_session_gets_a_follower_at_an_inbox_path_hansa_chose(self):
         echo = self.tmp / "echo-claude"  # the session: its pid (hansa's own, which it became) and its options
         echo.write_text("#!/bin/sh\necho \"$$ $@\"\nsleep 2\n")
@@ -3549,8 +3581,15 @@ class DeskTest(unittest.TestCase):
         # not the desk's project settings, whose hooks the account could write: root's, and hansa's rules
         i = started["argv"].index("--setting-sources")
         self.assertEqual(started["argv"][i + 1], "user")
-        rules = json.loads(started["argv"][started["argv"].index("--settings") + 1])["permissions"]
+        given = json.loads(started["argv"][started["argv"].index("--settings") + 1])
+        rules = given["permissions"]
         self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", rules["deny"])
+        # its notes without asking, no claude.ai connectors and no guessed next message: from what hansa passes
+        self.assertIn(f"Edit(//{str(self.desk.root).lstrip('/')}/notes/**)", rules["allow"])
+        self.assertTrue((self.desk.root / "notes").is_dir())
+        self.assertEqual((given["disableClaudeAiConnectors"], given["promptSuggestionEnabled"]), (True, False))
+        self.assertEqual(started["env"]["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], "false")
+        self.assertNotIn("--strict-mcp-config", started["argv"])
         # root's own Claude Code folder, the one this session runs from, is closed to it; the account's is not
         self.assert_own_folder_closed(rules["deny"], self.tmp / "root-claude")
         self.assertFalse(self.covered(rules["deny"], "Read", str(self.tmp / "account-claude" / "settings.json")))

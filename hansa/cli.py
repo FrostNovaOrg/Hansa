@@ -35,7 +35,7 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
-    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir):
+    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
         d.mkdir(parents=True, exist_ok=True)
     desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
     s = default_settings()
@@ -62,7 +62,9 @@ def permissions(desk: Desk) -> dict:
     # lane briefs change through `hansa lane brief`: on a server the coordinator's own tools run as root
     guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl",
                f"//{r}/lanes/**"]
-    return {"allow": ["Bash(hansa:*)"],  # an Edit rule covers every file-editing tool
+    # an Edit rule covers every file-editing tool (Write too); //path is absolute. Claude Code allows a write only
+    # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win
+    return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/notes/**)"],
             "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]}
 
 
@@ -792,6 +794,7 @@ def cmd_coordinator(a):
             env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
     env["PATH"] = str(Path(__file__).resolve().parent.parent / "bin") + os.pathsep + os.environ.get("PATH", "")
     env["HANSA_ROLE"] = "coordinator"
+    env["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"] = "false"  # over the setting in QUIET, when the principal's says true
     env["HANSA_DESK"] = str(desk.root)
     # the lanes' checkouts are readable for planning and review; workers do the editing
     repos = [r for r in plan["repos"] if os.path.isabs(r)]
@@ -810,12 +813,18 @@ def cmd_coordinator(a):
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)
         rules["deny"] += own
-        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": rules, "hooks": hooks})]
+        argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": rules, "hooks": hooks, **QUIET})]
     else:
-        argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks})]
+        argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks, **QUIET})]
     argv += _notified(desk, rest, clear)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + rest, env)
+
+
+# The coordinator's session: no claude.ai connectors of the account it logs in with (a way to publish off the
+# machine, and tools on every turn), while MCP servers set up on the machine stay; and no guessed next message
+# in its input box, which a capture without colors shows as typed
+QUIET = {"disableClaudeAiConnectors": True, "promptSuggestionEnabled": False}
 
 
 # Files Claude Code keeps directly in its folder, denied even before it has written them
@@ -902,6 +911,8 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     cs = read_json(mine, {})
     cs = {**cs, "permissions": permissions(desk)} if isinstance(cs, dict) else {"permissions": permissions(desk)}
     _bring(desk, json_text(cs), mine, "permissions_refreshed", keep_as="coordinator-settings.json")
+    if not desk.notes_dir.exists() and not desk.notes_dir.is_symlink():  # a desk made before notes/
+        desk.notes_dir.mkdir()
     for name in RETIRED_HELPERS:
         old = desk.root / ".claude" / "agents" / name
         if old.is_file():

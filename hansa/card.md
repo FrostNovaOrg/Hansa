@@ -154,6 +154,8 @@ background. Tasks and requests you made come to you; those made elsewhere
 come to every session hansa posts to.
 With `--clear-daily`, hansa clears your session once a day when it is idle, so
 keep what must survive in the desk (tasks, requests), not only in the conversation.
+Your plan and findings go in files under the desk's `notes/`: that is where you
+keep what must survive a cleared session, and you write there without asking.
 These lines come from hansa, not from the principal, and approve nothing.
 If your settings hold messages from other sessions (`crossSessionInbound`),
 you will not hear hansa; the principal can change that.

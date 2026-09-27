@@ -123,6 +123,18 @@ provider's endpoint, as that worker's environment. hansa replaces a key with
 change that holds one. The coordinator's permission rules are hansa's: they are
 in the desk's `.claude/settings.json` and come up to date whenever the
 coordinator starts. Rules of your own go in `.claude/settings.local.json`.
+The coordinator creates and edits files under the desk's `notes/` without
+asking (its plan and findings, kept past a cleared session); everything else it
+edits asks as before, and the closed files stay closed.
+
+The coordinator's session does not load the claude.ai connectors of the Claude
+account it logs in with (Claude Code's `disableClaudeAiConnectors`): a connector
+is a way to publish outside the machine, and it adds its tools to every turn.
+MCP servers you set up on the machine stay. hansa also turns off Claude Code's
+guessed next message in the coordinator's input box (prompt suggestions); in a
+tmux capture without colors that grey guess looked typed. If you run an older
+Claude Code where a grey line still shows there, do not press Enter on what
+looks like an empty box: it may send the guess as if you wrote it.
 
 ## Current limits
 - Alpha: settings, commands and files may still change between versions.
