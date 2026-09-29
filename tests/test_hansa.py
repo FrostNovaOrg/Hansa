@@ -534,6 +534,13 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((code, out), (0, self.git_out("show", f"task/{tid}", "--", "hello.txt") + "\n"))
         code, out, _ = self.hansa_git("a", "grep", "-n", "demo")
         self.assertEqual((code, out), (0, "README.md:1:demo\n"))
+        both = (f"task/{tid}:hello.txt", "main:README.md")  # several files in one call, as the card says
+        code, out, _ = self.hansa_git("a", "show", *both)
+        self.assertEqual((code, out), (0, self.git_out("show", *both) + "\n"))
+        self.assertIn("demo\n", out)
+        self.assertIn(self.git_out("show", both[0]), out)
+        code, out, _ = self.hansa_git("a", "grep", "-n", "-e", "demo", "-e", "nothing-here", "main", "--", ".")
+        self.assertEqual((code, out), (0, "main:README.md:1:demo\n"))  # several things at once, as the card says
         code, out, _ = self.hansa_git("a", "show", f"task/{tid}:notes.txt")  # a stored key is never shown
         self.assertEqual(code, 0)
         self.assertNotIn(key, out)
@@ -546,6 +553,111 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.hansa_git("a", "log", "--bogus")[0], 128)  # git's own failure, as git ends
         code, _, err = self.hansa_git("z", "log")
         self.assertIn("no lane z", err)
+
+    def hansa_notes(self, *args):
+        """(exit code, standard output, what it said when it refused) of hansa notes ARGS."""
+        out, code, err = io.StringIO(), 0, ""
+        with contextlib.redirect_stdout(out):
+            try:
+                main(["--desk", str(self.desk.root), "notes", *args])
+            except SystemExit as e:
+                code, err = (e.code, "") if isinstance(e.code, int) else (1, str(e.code))
+        return code, out.getvalue(), err
+
+    NOTES = ("# Plan\nintro\n\n## Round 1\ndone one\n### Detail\nx\n```\n## in code, not a heading\n```\n\n"
+             "## Round 2\nopen\n\n## Round 12\nlast\n")
+
+    def notes_state(self):
+        return {str(p.relative_to(self.desk.notes_dir)): p.read_bytes() for p in self.desk.notes_dir.rglob("*")
+                if p.is_file()}
+
+    def test_hansa_notes_lists_files_with_sizes_lines_and_headings(self):
+        (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
+        (self.desk.notes_dir / "archive").mkdir()
+        (self.desk.notes_dir / "archive" / "plan.md").write_text("## Round 0\nold\n")
+        code, out, _ = self.hansa_notes()
+        self.assertEqual(code, 0)
+        self.assertIn(f"notes/plan.md  {len(self.NOTES)} bytes, 16 lines", out)
+        self.assertRegex(out, r"\n +4 ## Round 1\n +6 ### Detail\n +12 ## Round 2\n +15 ## Round 12")
+        self.assertNotIn("in code", out)
+        self.assertIn("notes/archive/plan.md  15 bytes, 2 lines (headings not listed", out)
+        self.assertNotIn("Round 0", out)
+        self.assertIn("1 ## Round 0", self.hansa_notes("archive/plan.md")[1])
+
+    def test_hansa_notes_archive_moves_a_section_with_its_subsections(self):
+        src, dst = self.desk.notes_dir / "plan.md", self.desk.notes_dir / "archive" / "plan.md"
+        src.write_text(self.NOTES)
+        code, out, _ = self.hansa_notes("archive", "plan.md", "Round 1")  # in the middle, with a subsection
+        self.assertEqual(code, 0, out)
+        self.assertIn("lines 4-11", out)
+        self.assertIn("made now", out)
+        self.assertEqual(src.read_text(), "# Plan\nintro\n\n## Round 2\nopen\n\n## Round 12\nlast\n")
+        moved = dst.read_text().splitlines()
+        self.assertEqual(moved[0], "## Round 1")
+        self.assertRegex(moved[1], r"moved here from notes/plan.md on \d{4}-\d\d-\d\d \d\d:\d\d")
+        self.assertEqual(moved[2:], ["done one", "### Detail", "x", "```", "## in code, not a heading", "```", ""])
+        # the whole heading wins over the longer one it starts; the last section; added to the file now there
+        self.assertEqual(self.hansa_notes("archive", "plan.md", "## Round 12")[0], 0)
+        self.assertEqual(src.read_text(), "# Plan\nintro\n\n## Round 2\nopen\n\n")
+        self.assertIn("\n## Round 12\n", dst.read_text())
+        self.assertTrue(dst.read_text().startswith("## Round 1\n"))
+        self.assertTrue(dst.read_text().endswith("last\n"))
+        # a prefix that matches one heading; --to another file, made with its folder
+        self.assertEqual(self.hansa_notes("archive", "plan.md", "Round", "--to", "done/r2.md")[0], 0)
+        self.assertTrue((self.desk.notes_dir / "done" / "r2.md").read_text().startswith("## Round 2\n"))
+        self.assertEqual(src.read_text(), "# Plan\nintro\n\n")
+        self.assertFalse(list(self.desk.notes_dir.rglob("*.hansa-tmp")))
+
+    def test_hansa_notes_archive_writes_the_other_file_first(self):
+        from hansa import notes
+        src, dst = self.desk.notes_dir / "plan.md", self.desk.notes_dir / "archive" / "plan.md"
+        src.write_text(self.NOTES)
+        real, calls = notes._write, []
+
+        def crash_second(p, data, mode):
+            calls.append(p)
+            if len(calls) == 2:
+                raise KeyboardInterrupt  # stopped between the two
+            real(p, data, mode)
+        with unittest.mock.patch.object(notes, "_write", crash_second), self.assertRaises(KeyboardInterrupt):
+            self.hansa_notes("archive", "plan.md", "Round 2")
+        self.assertEqual(src.read_text(), self.NOTES)  # the section is in both files, not in neither
+        self.assertIn("## Round 2\n", dst.read_text())
+
+    def test_hansa_notes_archive_refuses_and_changes_nothing(self):
+        (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
+        (self.desk.notes_dir / "twice.md").write_text("# Todo\na\n# Todo\nb\n")
+        (self.desk.notes_dir / "archive").mkdir()
+        (self.desk.notes_dir / "archive" / "plan.md").write_text("## Round 0\n")
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.desk.notes_dir / "out").symlink_to(outside)
+        (self.desk.notes_dir / "out.md").symlink_to(self.tmp / "elsewhere.md")
+        before = self.notes_state()
+        for args, says in ((["plan.md", "Round 3"], "no heading in notes/plan.md matches 'Round 3'"),
+                           (["plan.md", "Round"], "3 headings in notes/plan.md match 'Round'"),
+                           (["twice.md", "Todo"], "2 headings in notes/twice.md match 'Todo'"),
+                           (["plan.md", "in code"], "no heading"),
+                           (["../settings.json", "Plan"], "../settings.json is refused"),
+                           ([str(self.desk.notes_dir / "plan.md"), "Plan"], "is refused"),
+                           (["plan.md", "Round 1", "--to", "../x.md"], "../x.md is refused"),
+                           (["plan.md", "Round 1", "--to", str(self.tmp / "x.md")], "is refused"),
+                           (["plan.md", "Round 1", "--to", "out/x.md"], "a link that leads out of notes/"),
+                           (["plan.md", "Round 1", "--to", "out.md"], "a link that leads out of notes/"),
+                           (["out/a.md", "Round 1"], "a link that leads out of notes/"),
+                           (["missing.md", "Round 1"], "there is no file notes/missing.md"),
+                           (["plan.md", "Round 1", "--to", "plan.md"], "the file it is in")):
+            code, _, err = self.hansa_notes("archive", *args)
+            self.assertEqual(code, 1, args)
+            self.assertIn(says, err, args)
+            self.assertIn("othing was changed", err, args)
+            self.assertEqual(self.notes_state(), before, args)
+        self.assertFalse((self.tmp / "x.md").exists())
+        self.assertEqual(list(outside.iterdir()), [])
+        err = self.hansa_notes("archive", "plan.md", "Round")[2]
+        self.assertRegex(err, r"12 ## Round 2\n +15 ## Round 12$")  # the headings it matched, to pick from
+        err = self.hansa_notes("archive", "plan.md", "Nothing")[2]
+        self.assertIn("4 ## Round 1", err)  # all the file's headings
 
     def test_hansa_git_refuses_commands_and_options_that_write_or_run_and_changes_nothing(self):
         tid = self.desk.new_task("Add hello.txt")

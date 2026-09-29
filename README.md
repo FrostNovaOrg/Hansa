@@ -125,7 +125,9 @@ in the desk's `.claude/settings.json` and come up to date whenever the
 coordinator starts. Rules of your own go in `.claude/settings.local.json`.
 The coordinator creates and edits files under the desk's `notes/` without
 asking (its plan and findings, kept past a cleared session); everything else it
-edits asks as before, and the closed files stay closed.
+edits asks as before, and the closed files stay closed. `hansa notes archive FILE HEADING`
+moves a finished section from a notes file to `notes/archive/FILE` without the
+coordinator typing it out again.
 
 The coordinator's session does not load the claude.ai connectors of the Claude
 account it logs in with (Claude Code's `disableClaudeAiConnectors`): a connector
