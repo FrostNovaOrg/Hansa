@@ -22,7 +22,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 ## Commands
 | command | what it does |
 |---|---|
-| `hansa status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, today's usage |
+| `hansa status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, usage in the last 24 h |
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `hansa show <id> [--full \| --report]` | the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report) |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |

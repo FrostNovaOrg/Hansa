@@ -1598,6 +1598,37 @@ class DeskTest(unittest.TestCase):
             self.assertIn(f"hansa tells this session when {tid} ends", str(e.exception.code))
             self.assertNotIn("hansa wait", str(e.exception.code))
 
+    def test_status_counts_the_last_24_hours_each_thing_by_when_it_happened(self):
+        now, h = time.time(), 3600
+        across = self.desk.new_task("finished before midnight, merged after it")
+        self.desk.update(across, state="merged", finished=now - 2 * h, merged=now - 10 * 60)
+        old = self.desk.new_task("finished 25 h ago")
+        self.desk.update(old, state="done", finished=now - 25 * h,
+                         usage={"m": {"in": 1000, "out": 1000, "cache_read": 0, "cache_write": 0}})
+        ran = self.desk.new_task("its run ended 23 h ago")
+        self.desk.update(ran, state="done", finished=now - 23 * h,
+                         usage={"m": {"in": 5, "out": 7, "cache_read": 0, "cache_write": 0}})
+        long_merged = self.desk.new_task("finished and merged 30 h ago")
+        self.desk.update(long_merged, state="merged", finished=now - 31 * h, merged=now - 30 * h)
+        # a merge counts by when it was merged, not when its task finished: these fail at any hour if it did
+        late = self.desk.new_task("finished 25 h ago, merged 10 min ago")
+        self.desk.update(late, state="merged", finished=now - 25 * h, merged=now - 10 * 60)
+        just_out = self.desk.new_task("finished 26 h ago, merged 25 h ago")
+        self.desk.update(just_out, state="merged", finished=now - 26 * h, merged=now - 25 * h)
+        t = views.status(self.desk)["last_24h"]
+        self.assertEqual((t["finished"], t["merged"], t["worker_tokens"]), (2, 2, 12))
+        self.assertIn("last 24 h: 2 finished, 2 merged; workers used 12 tokens",
+                      views.status_text(views.status(self.desk)))
+
+    def test_lane_list_lines_up_its_columns(self):
+        s = self.desk.settings()
+        s["lanes"]["shop-mimo-cpp"] = {**s["lanes"]["a"], "base": "dev-v2"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rows = self.hansa("lane").splitlines()[:-1]
+        self.assertEqual(len(rows), 2)
+        for word in (str(self.repo), "base ", "providers "):
+            self.assertEqual(len({r.index(word) for r in rows}), 1, rows)
+
     def test_a_lane_without_a_check_merges_at_once_and_says_its_tasks_go_untested(self):
         out = self.hansa("lane", "add", "b", "--repo", str(self.repo))
         self.assertIn("Lane b has no check, so its tasks will be merged untested", out)
@@ -6515,7 +6546,7 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(other)])
         listed = self.hansa("lane")
-        self.assertIn(f"a  {self.repo.resolve()}  base main  providers claude", listed)
+        self.assertIn(f"a  {self.repo.resolve()}   base main  providers claude", listed)  # "repo" pads to "other"
         self.assertIn("b  ", listed)
 
         out = self.hansa("lane", "set", "b", "allow", "Bash(pnpm test:*)", "Bash(pnpm lint)")
