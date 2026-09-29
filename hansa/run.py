@@ -166,8 +166,10 @@ VERIFY_TASK = """Find out, by running things, whether task {id} does what it ask
 
 1. Run first.
    - If the change adds or changes tests: undo the code part of the change (keep the tests) and
-     run those tests. They should fail; if they still pass, they do not test the change. Then put
-     the code back.
+     run those tests. Then put the code back. Each defect the task names needs a test that fails
+     with the code undone; one that still passes does not test the change. A test the task asks
+     for to cover behaviour that already worked (coverage) may pass either way: judge it on
+     whether it tests what its name says.
    - Run what the task is about the way a user or caller would meet it.
    - Try the edge cases you can think of: empty or missing values, data or settings left from
      before the change, errors, other languages.
@@ -180,9 +182,11 @@ anything the change does that the task did not ask for. End with exactly one of 
 VERDICT: holds
 VERDICT: does not hold
 VERDICT: unsure
-Say "does not hold" when something the task asked for does not hold, and also when a test the
-change adds or changes still passes with the code undone: such a test checks nothing, even if
-the task asked for it that way.
+Say "does not hold" when something the task asked for does not hold, and also when the only
+tests for a defect the task names still pass with the code undone: such a test checks nothing,
+even if the task asked for it that way. A coverage test the task asked for that passes either
+way does not count against the change; a test whose name promises one case and tests another
+does, coverage or not.
 """
 VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
 VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]

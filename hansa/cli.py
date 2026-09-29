@@ -465,6 +465,12 @@ def _retry(desk: Desk, a) -> None:
     report = desk.tasks_dir / a.id / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
         text += "\nThe previous attempt's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
+    vid = m.get("verify")  # the latest verification of the attempt, whatever it found, given whole
+    vreport = desk.tasks_dir / vid / "result.md" if vid else None
+    if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
+        verdict = desk.meta(vid).get("verdict") or "none"
+        text += (f"\n\nThe report of {vid}, the verification of the previous attempt (a worker who ran the change "
+                 f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
     if a.browser and not desk.settings().get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
     opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
@@ -1443,6 +1449,9 @@ def main(argv=None):
     p = add("retry", cmd_retry, "queue a follow-up to a task")
     p.add_argument("id")
     p.add_argument("note", nargs="*")
+    p.description = ("queue a follow-up to a task. Its worker is given the task, the note, the previous attempt's "
+                     "report and, when that attempt was verified, the latest verification's report whole, with its "
+                     "verdict, whatever the verdict was.")
     p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
     p.add_argument("--update", action="store_true", help="continue from the previous attempt with the base as it is "

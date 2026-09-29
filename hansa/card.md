@@ -28,7 +28,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
 | `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
-| `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
+| `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `hansa verify <id> ["what to look at"] [--lane L] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged. It runs on the task's own lane unless `--lane L` puts it on another lane on the same repository |
 | `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |
@@ -107,7 +107,9 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 - Text or documentation only: the lane's check is enough; read the diff yourself.
 - Code or tests: `hansa verify <id>` first. A worker then runs the change rather
   than reading it: it undoes the code to see the new tests fail, runs what the
-  task is about, and tries edge cases. Its verdict (holds, does not hold,
+  task is about, and tries edge cases. Each defect the task names needs a test
+  that fails on the old code; coverage tests the task asked for may pass on both,
+  and are judged on whether they test what their names say. Its verdict (holds, does not hold,
   unsure) shows in `hansa show <id>`; hansa will not merge while it runs, nor after
   "does not hold" unless you say `--despite-check`.
 - A verification runs on the task's own lane, with its provider, unless you say
@@ -311,7 +313,7 @@ here; work that needs code changed or a browser goes to a worker.
   or the worker got stuck. The task then fails, and its report is the worker's
   notes along the way: read them to see what went wrong, then split the task or
   make it clearer rather than re-running it unchanged. `hansa retry` passes the
-  previous report on.
+  previous report on, and the latest verification's report whole, with its verdict.
 - A key of the principal's never shows in reports, errors or the event log: hansa
   replaces it with [key of <provider>]. If a change itself holds a key, `hansa show`
   says so and hansa never merges it: redo the work with `hansa retry <id> --fresh`
