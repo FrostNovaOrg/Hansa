@@ -2417,6 +2417,19 @@ class DeskTest(unittest.TestCase):
 
     def test_status_and_notify_start_no_claude_and_show_the_name_the_follower_recorded(self):
         p, sock = self.session()
+        # the follower (its own process) names the session as on a desk: by `claude agents --json`, here a
+        # stand-in that lists it once the test says so. Its record is the follower's: written with each feed.
+        listed = self.tmp / "agents.json"
+        claude = self.tmp / "named" / "claude"
+        claude.parent.mkdir()
+        claude.write_text("#!/usr/bin/env python3\nimport os, sys\n"
+                          "if sys.argv[1:3] != ['agents', '--json']:\n    sys.exit('only agents --json here')\n"
+                          f"sys.stdout.write(open({str(listed)!r}).read() if os.path.exists({str(listed)!r}) "
+                          "else '[]')\n")
+        claude.chmod(0o755)
+        os.environ["HANSA_CLAUDE"] = str(claude)
+        from hansa import build
+        build()  # hansa's own commit, which status shows: git once, not claude, whichever test runs first
         with unittest.mock.patch.object(notify, "agents_rows", side_effect=AssertionError("claude was started")), \
                 unittest.mock.patch.object(notify.subprocess, "run", side_effect=AssertionError("a program ran")):
             with self.in_session(p, sock):
@@ -2424,8 +2437,9 @@ class DeskTest(unittest.TestCase):
                               self.hansa_out("notify", "on"))
             self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)\n", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (no name yet) · since ", self.hansa_out("notify"))
-            key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
-            notify._write_record(self.desk, key, {**notify.records(self.desk)[0], "name": "desk-87"})
+            write_json(listed, [{"pid": p.pid, "name": "desk-87"}])
+            # its first lookup is 5 s after it starts; one that came before the listing tries again 15 s later
+            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)\n" in self.hansa_out("status"), timeout=60)
             self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (desk-87) · since ", self.hansa_out("notify"))
             with self.in_session(p, sock):
