@@ -1420,6 +1420,114 @@ class DeskTest(unittest.TestCase):
             main(["lane", "add", "--help"])
         self.assertIn("later changes to LANE do not reach the new lane", " ".join(helped.getvalue().split()))
 
+    def test_lane_add_like_refuses_an_empty_repo_and_sets_an_earlier_brief_aside(self):
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "q", "--like", "a", "--repo", ""])
+        self.assertIn("cannot come with --repo", str(e.exception))
+        self.assertNotIn("q", self.desk.settings()["lanes"])
+        self.hansa("lane", "brief", "a", "Use C++20.")
+        (self.desk.lanes_dir / "q").mkdir(parents=True)
+        (self.desk.lanes_dir / "q" / "brief.md").write_text("Left by an earlier q.\n")
+        out = self.hansa("lane", "add", "q", "--like", "a")
+        self.assertEqual((self.desk.lanes_dir / "q" / "brief.md").read_text(), "Use C++20.")
+        kept = list((self.desk.lanes_dir / "q").glob("brief-before-*.md"))
+        self.assertEqual([k.read_text() for k in kept], ["Left by an earlier q.\n"])
+        self.assertIn(f"the earlier ones are kept in {kept[0]}", out)
+        self.hansa("lane", "remove", "q")
+        out = self.hansa("lane", "add", "q", "--like", "a")  # the same text: nothing to set aside
+        self.assertNotIn("kept in", out)
+        self.assertEqual(len(list((self.desk.lanes_dir / "q").glob("brief-before-*.md"))), 1)
+
+    def run_on(self, lane: str) -> Path:
+        """Run one task on the lane and cancel it (no review waits); the lane's worktree."""
+        tid = self.desk.new_task("Add hello.txt", lane=lane)
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.desk.update(tid, state="cancelled")
+        wt = self.desk.worktrees_dir / lane
+        self.assertTrue((wt / ".git").is_file())
+        return wt
+
+    def worktrees(self) -> str:
+        return subprocess.run(["git", "worktree", "list"], cwd=self.repo, capture_output=True, text=True).stdout
+
+    def test_lane_remove_removes_its_worktree_as_git_does(self):
+        wt = self.run_on("a")
+        (wt / ".bashrc").write_text("")  # a sandbox's placeholder: nobody's work
+        out = self.hansa("lane", "remove", "a")
+        self.assertNotIn("a", self.desk.settings()["lanes"])
+        self.assertFalse(os.path.lexists(wt))
+        self.assertNotIn(str(wt.resolve()), self.worktrees())
+        self.assertIn(f"Its worktree {wt} is removed, with git worktree remove", out)
+        self.assertNotIn("dropped", out)
+        self.assertNotIn(str(wt), json.loads((self.desk.state_dir / "worktrees.json").read_text()))
+        self.assertEqual(self.events("lane_worktree_removed")[-1]["worktree"], str(wt))
+
+    def test_lane_remove_keeps_work_no_branch_holds_until_told(self):
+        wt = self.run_on("a")
+        sh("git", "checkout", "-q", "--detach", cwd=wt)
+        (wt / "loose.txt").write_text("loose\n")
+        sh("git", "add", "loose.txt", cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "on no branch", cwd=wt)
+        (wt / "README.md").write_text("changed\n")
+        (wt / "new.txt").write_text("new\n")
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "a"])
+        said = str(e.exception.code)
+        self.assertIn("lane a was not removed", said)
+        self.assertIn("not committed: README.md, new.txt", said)
+        self.assertIn("on no branch: ", said)
+        self.assertIn(" on no branch\n", said)
+        self.assertIn("hansa lane remove a --keep", said)
+        self.assertIn("hansa lane remove a --discard", said)
+        self.assertIn("a", self.desk.settings()["lanes"])
+        self.assertTrue((wt / "new.txt").exists())
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "a", "--keep", "--discard"])
+        self.assertIn("choose one", str(e.exception.code))
+        out = self.hansa("lane", "remove", "a", "--keep")
+        self.assertFalse(wt.exists())
+        branch = re.search(r"on branch (hansa-kept/a-\S+) there", out).group(1)
+        files = subprocess.run(["git", "show", "--format=", "--name-only", branch], cwd=self.repo,
+                               capture_output=True, text=True).stdout.split()
+        self.assertEqual(sorted(files), ["README.md", "new.txt"])
+        shown = subprocess.run(["git", "show", f"{branch}~1:loose.txt"], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(shown.stdout, "loose\n")
+
+    def test_lane_remove_clears_the_worktree_of_a_lane_already_gone(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        wt = self.run_on("b")
+        s = self.desk.settings()  # removed as lane remove did before it removed worktrees
+        del s["lanes"]["b"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        (wt / "new.txt").write_text("new\n")
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "b"])
+        self.assertIn("the worktree of lane b was not removed", str(e.exception.code))
+        self.assertIn("not committed: new.txt", str(e.exception.code))
+        self.assertTrue(wt.exists())
+        tid = self.desk.new_task("Something for b", lane="b")
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "b", "--discard"])
+        self.assertIn(f"lane b, which is gone, still has {tid} queued", str(e.exception.code))
+        self.desk.update(tid, state="cancelled")
+        out = self.hansa("lane", "remove", "b", "--discard")
+        self.assertNotIn("lane b removed", out)
+        self.assertIn("what it held that no branch kept is dropped", out)
+        self.assertFalse(wt.exists())
+        self.assertNotIn(str(wt.resolve()), self.worktrees())
+        self.assertIn("a", self.desk.settings()["lanes"])
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "remove", "b"])
+        self.assertIn("there is no lane b, and no worktree of one", str(e.exception.code))
+
+    def test_lane_remove_leaves_a_worktree_whose_git_file_was_changed(self):
+        wt = self.run_on("a")
+        (wt / ".git").write_text(f"gitdir: {self.tmp}\n")
+        out = self.hansa("lane", "remove", "a")
+        self.assertNotIn("a", self.desk.settings()["lanes"])
+        self.assertIn(f"Its worktree {wt} stays: the worktree's .git file was changed", out)
+        self.assertTrue(wt.exists())
+
     def test_lane_add_sets_the_check_setup_and_allowed_commands(self):
         out = self.hansa("lane", "add", "c", "--repo", str(self.repo), "--check", "make test", "--setup", "make deps",
                          "--allow", "Bash(make test:*)", "Bash(make lint:*)")
