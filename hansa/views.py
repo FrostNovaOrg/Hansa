@@ -10,8 +10,8 @@ from pathlib import Path
 
 from . import build, cost, notify
 from .desk import Desk, is_git_rule, read_json, write_json
-from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, markers_in_change, markers_text,
-                  not_looking, progress_of, provider_problem, server_state, server_text, srt_needed, srt_problem,
+from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
+                  markers_text, not_looking, progress_of, provider_problem, server_state, server_text, srt_needed, srt_problem,
                   srt_record, srt_when, tried_lanes, waiting_reason)
 
 STATES = {
@@ -215,7 +215,7 @@ def status(desk: Desk) -> dict:
     merging = [m for m in tasks if m["state"] == "merging"]
     tried = tried_lanes(desk)
     busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried
-    hb = read_json(desk.state_dir / "heartbeat", 0) or 0
+    last = last_round(desk)
     server = server_state(desk)
     today = [m for m in tasks if (m.get("finished") or 0) >= _midnight()]
     rows = cost.worker_rows(desk, _midnight())
@@ -226,7 +226,7 @@ def status(desk: Desk) -> dict:
         "paused": desk.paused(),
         "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
         "server": server,
-        "server_seconds_ago": int(time.time() - hb) if hb else None,
+        "server_seconds_ago": int(time.time() - last) if last else None,
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)

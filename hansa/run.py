@@ -2831,7 +2831,7 @@ def _exists(pid, start: str) -> bool:
 def beat(desk: Desk) -> None:
     """hansa serve got through a round, or a step of one: the heartbeat server_state reads."""
     desk.state_dir.mkdir(exist_ok=True)
-    (desk.state_dir / "heartbeat").write_text(str(now()))
+    write_json(desk.state_dir / "heartbeat", now())  # replaced whole: a reader never finds it emptied
 
 
 def pulse(desk: Desk, every: float = 5.0) -> None:
@@ -2849,6 +2849,22 @@ def pulse(desk: Desk, every: float = 5.0) -> None:
     threading.Thread(target=run, name="hansa-pulse", daemon=True).start()
 
 
+def last_round(desk: Desk):
+    """When the hansa serve that holds serve.lock last finished a round, by its heartbeat; when it started (the
+    time serve.lock was written) where the heartbeat is missing, unreadable or older than this server, which
+    it then says nothing about. None when neither is there."""
+    try:
+        start = (desk.state_dir / "serve.lock").stat().st_mtime  # written once, as the server takes the lock
+    except OSError:
+        start = None
+    hb = read_json(desk.state_dir / "heartbeat")
+    if isinstance(hb, bool) or not isinstance(hb, (int, float)) or hb <= 0:
+        hb = None
+    if hb is None or start is None:
+        return hb if start is None else start
+    return max(hb, start)
+
+
 def server_state(desk: Desk) -> dict:
     """One rule for whether hansa serve runs. gone: no hansa serve holds serve.lock (lock_held), whatever
     process the number in it names now; where the lock cannot be asked, the process it names is gone or is
@@ -2857,7 +2873,8 @@ def server_state(desk: Desk) -> dict:
     quiet: seconds since its last round; answers: whether its process still wrote its pulse lately (a
     process stopped with Ctrl-Z, say, does not)."""
     pid, start = server_holder(desk)
-    quiet = max(0, int(time.time() - (read_json(desk.state_dir / "heartbeat", 0) or 0)))
+    last = last_round(desk)
+    quiet = max(0, int(time.time() - last)) if last else 0  # none: no lock either, so gone below
     held = lock_held(desk)
     if held is None:  # the lock cannot be asked: the process it names, and when that one started
         held = bool(pid) and _exists(pid, start) and (bool(start) or quiet < ROUND_QUIET)  # a number alone:
