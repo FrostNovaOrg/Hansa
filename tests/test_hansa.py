@@ -209,7 +209,7 @@ if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_TASK, nami
         open(os.path.join(os.environ["FAKE_LEAVE_IN_TMP"], name + ".pid"), "w").write(str(c.pid))
 if os.environ.get("FAKE_SANDBOX_LEFT"):  # what a sandbox on Linux leaves in the worktree: empty placeholders
     os.makedirs(".claude", exist_ok=True)
-    for f in (".claude/.cc-writes", ".claude/settings.json"):
+    for f in (".claude/.cc-writes", ".claude/settings.json", ".bashrc", ".gitconfig", ".mcp.json", ".vscode", ".idea"):
         open(f, "w").close()
 if os.environ.get("FAKE_WRITE"):
     open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
@@ -425,9 +425,20 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["files"]), ("done", [".claude/notes.md", "hello.txt"]), m)  # what has content
         wt = Path(m["worktree"])
         self.assertTrue((wt / ".claude" / ".cc-writes").exists())  # left where it was, uncommitted
+        self.assertTrue((wt / ".bashrc").exists())
         run.commit_work(self.desk, wt, "nothing but placeholders")  # with only those there, nothing to commit
         self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), m["head"])
-        self.assertIn("sandbox's placeholders", run.PROTOCOL)
+        (wt / ".gitconfig").write_text("[user]\n")  # one with content, or deeper down, is someone's work
+        (wt / "sub").mkdir()
+        (wt / "sub" / ".bashrc").write_text("")
+        run.commit_work(self.desk, wt, "a real one")
+        self.assertEqual(sorted(self.git_out("show", "--name-only", "--format=", "HEAD", cwd=wt).split()),
+                         [".gitconfig", "sub/.bashrc"])
+        for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):  # workers are told each name, and to leave them
+            flat = " ".join(text.split())
+            for name in (*run.SANDBOX_PLACEHOLDERS, ".claude/"):
+                self.assertIn(name, flat)
+            self.assertIn("hansa never commits them", flat)
 
     def test_workers_are_told_git_stash_is_refused_and_background_work_ends_in_its_command(self):
         from hansa import run
@@ -1911,6 +1922,17 @@ class DeskTest(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("hansa web kept running after its connection closed")
         self.assertEqual(code, 0)
+
+    def test_the_web_command_with_no_input_prints_the_address_and_returns_as_its_help_says(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "web"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("/?t=", r.stdout)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["web", "--help"])
+        self.assertIn("hansa web </dev/null", " ".join(out.getvalue().split()))
 
     def test_a_task_cancelled_while_hansa_prepares_it_never_runs(self):
         import hansa.run as run
@@ -3469,6 +3491,37 @@ class DeskTest(unittest.TestCase):
         self.assertIn("effort: medium", (agents / "scout.md").read_text())
         self.assertFalse((agents / "verifier.md").exists())  # retired, kept in .hansa/
         self.assertTrue(list(self.desk.state_dir.glob("verifier.md.*")))
+
+    @unittest.skipIf(os.getuid() == 0, "root may write anywhere")
+    def test_the_coordinator_turns_off_claude_codes_updates_only_where_this_account_cannot_write_its_install(self):
+        def install(where, npm):  # a stand-in claude as npm or the native installer puts it, reached by a link
+            pkg = where / "lib" / "node_modules" / "@anthropic-ai" / "claude-code" if npm else where / "versions"
+            pkg.mkdir(parents=True)
+            (pkg / "cli").write_text("#!/bin/sh\necho \"updater=${DISABLE_AUTOUPDATER-unset}\"\n")
+            (pkg / "cli").chmod(0o755)
+            (where / "bin").mkdir()
+            (where / "bin" / "claude").symlink_to(pkg / "cli")
+            return where / "bin" / "claude", where / "lib" / "node_modules" if npm else pkg
+
+        def start(claude, **extra):
+            env = {k: v for k, v in os.environ.items() if k != "DISABLE_AUTOUPDATER"}
+            r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk",
+                                str(self.desk.root), "coordinator"], capture_output=True, text=True,
+                               env={**env, "HANSA_CLAUDE": str(claude), **extra})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout.strip().splitlines()[0]
+
+        for npm in (True, False):
+            claude, held = install(self.tmp / f"own-{npm}", npm)
+            self.assertEqual(start(claude), "updater=unset")  # the user's own install keeps updating
+            claude, held = install(self.tmp / f"theirs-{npm}", npm)
+            held.chmod(0o555)  # another account's: this one cannot write there
+            self.addCleanup(held.chmod, 0o755)
+            self.assertEqual(start(claude), "updater=1")
+            self.assertEqual(start(claude, DISABLE_AUTOUPDATER="0"), "updater=0")  # a value of the user's stays
+        (self.tmp / "own-True" / "bin").chmod(0o555)  # the command's own folder counts too
+        self.addCleanup((self.tmp / "own-True" / "bin").chmod, 0o755)
+        self.assertEqual(start(self.tmp / "own-True" / "bin" / "claude"), "updater=1")
 
     def test_the_coordinator_gets_an_operator_that_cannot_touch_code_or_keys(self):
         echo = self.tmp / "echo-claude"

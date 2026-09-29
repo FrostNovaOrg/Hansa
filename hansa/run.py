@@ -118,8 +118,10 @@ PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in th
 on branch task/{tid}, which was made for this task.
 - Do not commit: when you end, hansa commits everything you changed here. To look at your
   work, git status, git diff, git log and git show are allowed.
-- If git status lists untracked .bashrc, .gitconfig, .vscode, .mcp.json, .claude/ and the like that
-  you did not make: they are the sandbox's placeholders, never committed; leave them and do not report them.
+- On Linux the sandbox puts empty files where the paths it protects are missing, so while you work git
+  status may list untracked .bashrc, .bash_profile, .zshrc, .zprofile, .profile, .gitconfig, .gitmodules,
+  .ripgreprc, .mcp.json, .vscode, .idea or .claude/ that you did not make. Leave them: do not delete them
+  or report them as a change. The sandbox removes them and hansa never commits them.
 - Do not push, do not switch branches, do not touch other directories.
 - You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
@@ -141,8 +143,10 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - Change files as your checks need (undo code, add a throwaway test), but do not commit; hansa sets
   your changes aside when you end. For undoing, `git checkout <commit> -- <path>` and
   `git restore` are allowed here.
-- If git status lists untracked .bashrc, .gitconfig, .vscode, .mcp.json, .claude/ and the like that
-  nobody made: they are the sandbox's placeholders, never committed; leave them and do not report them.
+- On Linux the sandbox puts empty files where the paths it protects are missing, so while you work git
+  status may list untracked .bashrc, .bash_profile, .zshrc, .zprofile, .profile, .gitconfig, .gitmodules,
+  .ripgreprc, .mcp.json, .vscode, .idea or .claude/ that nobody made. Leave them: do not delete them
+  or report them as a change. The sandbox removes them and hansa never commits them.
 - Do not push, do not switch branches, do not touch other directories.
 - You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
@@ -197,6 +201,14 @@ GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "r
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs")
 GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir")
 GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
+# What a worker's sandbox on Linux (bubblewrap, in Claude Code and srt alike) mounts an empty file over at the top
+# of the worktree when it is missing, so it cannot be made: its fixed list of files a program may run or obey
+# (.gitconfig to .mcp.json) and the folders .vscode and .idea. It removes them once no sandbox of its run is
+# still up, so a worker can see them in git status. Under .claude/ it does the same for the settings, skills,
+# hooks and the like it protects there. The macOS sandbox (Seatbelt) makes none; Claude Code's own
+# .claude/.cc-writes there is an empty folder, which git does not list. sandbox_leftovers keeps them all out.
+SANDBOX_PLACEHOLDERS = (".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
+                        ".ripgreprc", ".mcp.json", ".vscode", ".idea")
 # A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified. Design sessions keep them.
 INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
                      "AskUserQuestion", "Monitor"]
@@ -821,11 +833,14 @@ def wgit(desk: Desk, wt: Path, *args) -> str:
 
 
 def sandbox_leftovers(desk: Desk, wt: Path) -> list:
-    """Untracked files a worker's sandbox left under .claude/ in the worktree: its .cc-writes and the empty
-    placeholders for what it protects. Nobody's work, so never committed."""
-    out = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", "--", ".claude")
-    return [f for f in out.split("\0") if f and (Path(f).name == ".cc-writes" or (wt / f).is_file()
-                                                  and not (wt / f).is_symlink() and (wt / f).stat().st_size == 0)]
+    """Untracked files a worker's sandbox left in the worktree: under .claude/ its .cc-writes and the empty
+    placeholders for what it protects, and at the top the empty SANDBOX_PLACEHOLDERS. Nobody's work, so
+    never committed."""
+    out = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", "--", ".claude",
+               *(f":(top,literal){n}" for n in SANDBOX_PLACEHOLDERS))
+    return [f for f in out.split("\0") if f and (f.startswith(".claude/") or f in SANDBOX_PLACEHOLDERS)
+            and (Path(f).name == ".cc-writes" or (wt / f).is_file() and not (wt / f).is_symlink()
+                 and (wt / f).stat().st_size == 0)]
 
 
 def commit_work(desk: Desk, wt: Path, message: str) -> None:
