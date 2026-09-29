@@ -206,7 +206,8 @@ def task_line(desk: Desk, m: dict) -> str:
     elif st == "merging":
         from .views import merge_check_waits_for
         ahead = merge_check_waits_for(desk, m)
-        head += f" (its merge check is queued and waits for {ahead})" if ahead else " (its merge check is queued or running)"
+        what = "merge" if (m.get("merge_check") or {}).get("plain") else "merge check"
+        head += f" (its {what} is queued and waits for {ahead})" if ahead else f" (its {what} is queued or running)"
     from .views import background_note
     note = background_note(m)
     return f"{head} · next: {_next_step(desk, tid)}" + (f" · {note}" if note else "")
@@ -221,7 +222,7 @@ def _item(desk: Desk, e: dict):
             return None
         if kind == "merge_check_ended" and e.get("note") == "cancelled":  # the coordinator cancelled it
             return None
-        if kind == "task_merged" and not e.get("merge_checked"):  # a merge the coordinator ran and saw
+        if kind == "task_merged" and not e.get("merge_checked") and not e.get("waited"):  # the coordinator saw it
             return None
         try:
             m = desk.meta(tid)
@@ -229,11 +230,12 @@ def _item(desk: Desk, e: dict):
             return None
         if kind == "merge_check_ended":
             key = ("merge", tid)
-            line = (f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}: "
-                    f"{m.get('title', '')} · next: {_next_step(desk, tid)}")
+            line = (f"{tid}'s {'merge' if e.get('waited') else 'merge check'} ended; nothing was merged: "
+                    f"{e.get('note') or 'the check failed'}: {m.get('title', '')} · next: {_next_step(desk, tid)}")
         elif kind == "task_merged":
-            key, line = ("merge", tid), (f"{tid} merged into {e.get('into')} after its merge check passed: "
-                                         f"{m.get('title', '')}"
+            how = ("in its turn behind a merge check, without a check of its own" if e.get("waited") else
+                   "after its merge check passed")
+            key, line = ("merge", tid), (f"{tid} merged into {e.get('into')} {how}: {m.get('title', '')}"
                                          + (f" · note: {m['unverified']}" if m.get("unverified") else ""))
         else:
             key, line = ("task", tid), task_line(desk, m)

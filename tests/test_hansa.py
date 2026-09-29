@@ -408,6 +408,23 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"more lines; the whole report: hansa show {tid} --report", shown)
         self.assertLess(len(shown), views.REPORT_CHARS + 5000)
         self.assertEqual(self.hansa("show", tid, "--report").strip(), wide.strip())
+        one = "y" * 50000  # one line alone longer than the limit: cut there too
+        (self.desk.tasks_dir / tid / "result.md").write_text(one + "\n")
+        shown = self.hansa("show", tid)
+        self.assertIn("  " + "y" * views.REPORT_CHARS + "\n", shown)
+        self.assertNotIn("y" * (views.REPORT_CHARS + 1), shown)
+        self.assertIn(f"  ... {50000 - views.REPORT_CHARS} more characters of this line; the whole report: "
+                      f"hansa show {tid} --report", shown)
+        self.assertEqual(self.hansa("show", tid, "--report").strip(), one)
+        (self.desk.tasks_dir / tid / "result.md").write_text(f"first\nsecond\n{one}\nfourth\n")
+        shown = self.hansa("show", tid)
+        self.assertIn("  first\n  second\n  yyy", shown)
+        self.assertNotIn("fourth", shown)
+        kept = views.REPORT_CHARS - len("first\nsecond\n")
+        self.assertIn("  " + "y" * kept + "\n", shown)
+        self.assertNotIn("y" * (kept + 1), shown)
+        self.assertIn(f"  ... {50000 - kept} more characters of this line and 1 more lines; the whole report: "
+                      f"hansa show {tid} --report", shown)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["add", "--help"])
@@ -1317,6 +1334,76 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(phases, {t1: "running", t2: "queued", t3: "running"})
         for t in (t1, t2, t3):
             self.assertEqual(self.settle_merge(d, t)["state"], "merged")
+
+    def test_a_merge_needing_no_check_waits_its_turn_behind_a_merge_check(self):
+        d, t1, t2 = self.two_lanes(check="sleep 1; test -f README.md")
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = ""  # t2 needs no check
+        s["concurrency"] = 2
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.move_main()  # so t1 needs a merge check
+        self.hansa("merge", t1)
+        d.tick()
+        self.assertEqual(self.desk.meta(t1)["merge_check"]["phase"], "running")
+        out = self.hansa("merge", t2)
+        self.assertIn(f"{t2} is not merged yet", out)
+        self.assertIn(f"so it waits for {t1}'s merge check on lane a", out)
+        self.assertIn(f"hansa wait {t2}", out)
+        m2 = self.desk.meta(t2)
+        self.assertEqual((m2["state"], m2["merge_check"]["phase"], m2["merge_check"]["plain"]), ("merging", "queued", True))
+        waits = f"merge queued, to go in without a check if main has still not moved: waits for {t1}'s merge check on lane a"
+        self.assertIn(f"{t2} b: Add b.txt\n      {waits}", views.status_text(views.status(self.desk)))
+        self.assertIn(waits, views.show_text(self.desk, t2))
+        self.assertIn(f"its merge is queued and waits for {t1}'s merge check", notify.task_line(self.desk, m2))
+        d.tick()
+        self.assertEqual(self.desk.meta(t2)["state"], "merging")  # t1's check still runs
+        self.assertFalse((self.repo / "b.txt").exists())
+        m1 = self.settle_merge(d, t1)
+        m2 = self.settle_merge(d, t2)
+        self.assertEqual((m1["state"], m2["state"]), ("merged", "merged"), (m1, m2))
+        self.assertEqual(self.git_out("rev-parse", "main"), m2["merge_commit"])
+        self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", "main").split()[1:], [m1["merge_commit"], m2["head"]])
+        self.assertEqual(self.events("merge_check_base_moved"), [])  # t1's check was not run again
+        self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])
+        merged = [e for e in self.events("task_merged") if e["task"] == t2]
+        self.assertTrue(merged[0]["waited"])
+        self.assertIn(f"{t2} merged into main in its turn", notify._item(self.desk, merged[0])[1])
+
+    def test_a_merge_that_waited_is_checked_when_the_base_moved_meanwhile(self):
+        d, t1, _ = self.two_lanes(check="sleep 1; test -f README.md")
+        self.move_main()  # so t1 needs a merge check
+        t3 = self.desk.new_task("Add b.txt again", lane="b")  # made on the moved base: needs no check now
+        self.assertEqual(self.settle(d, t3)["state"], "done")
+        self.hansa("merge", t1)
+        d.tick()
+        self.assertIn(f"so it waits for {t1}'s merge check on lane a", self.hansa("merge", t3))
+        m1 = self.settle_merge(d, t1)
+        m3 = self.settle_merge(d, t3)
+        self.assertEqual((m1["state"], m3["state"], m3["merge_check_result"]["ok"]), ("merged", "merged", True))
+        self.assertEqual(m3["merge_check_result"]["onto"], m1["merge_commit"])  # checked on the base t1 left
+        self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1, t3])
+        self.assertEqual(self.events("merge_check_base_moved"), [])
+
+    def test_a_merge_needing_no_check_on_another_repository_is_not_held_up(self):
+        d, t1, _ = self.two_lanes(check="sleep 1; test -f README.md")
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        (other / "README.md").write_text("other\n")
+        sh("git", "add", ".", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=other)
+        s = self.desk.settings()
+        s["lanes"]["c"] = {**json.loads(json.dumps(s["lanes"]["a"])), "repo": str(other)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        t3 = self.desk.new_task("Add a.txt there", lane="c")
+        self.assertEqual(self.settle(d, t3)["state"], "done")
+        self.move_main()
+        self.hansa("merge", t1)
+        d.tick()
+        self.assertEqual(self.desk.meta(t1)["merge_check"]["phase"], "running")
+        self.assertIn(f"{t3} merged into main", self.hansa("merge", t3))
+        self.assertEqual(self.desk.meta(t3)["state"], "merged")
+        self.assertEqual(self.settle_merge(d, t1)["state"], "merged")
 
     def test_a_task_whose_base_did_not_move_merges_at_once(self):
         s = self.desk.settings()
