@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, build, cost, installed_text, notify, views
+from . import account, build, cost, installed_text, notes, notify, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
@@ -1498,6 +1498,21 @@ def cmd_concurrency(a):
     print(f"concurrency: {old} -> {a.n}")
 
 
+def cmd_notes(a):
+    desk = Desk.find(a.desk)
+    if a.words[:1] == ["archive"] and len(a.words) > 1:
+        if len(a.words) != 3:
+            raise SystemExit('hansa: hansa notes archive FILE HEADING [--to OTHER]: one file and one heading (quote a '
+                             'heading of several words: "Round 3"); nothing was changed')
+        print(notes.archive(desk, a.words[1], a.words[2], a.to or ""))
+        return
+    if a.to:
+        raise SystemExit("hansa: --to goes with hansa notes archive FILE HEADING")
+    if len(a.words) > 1:
+        raise SystemExit("hansa: hansa notes [PATH] lists one file or folder under notes/")
+    print(notes.list_text(desk, a.words[0] if a.words else ""))
+
+
 def cmd_help(a):
     print(CARD.read_text(encoding="utf-8"))
 
@@ -1711,6 +1726,21 @@ def main(argv=None):
                         "but with no worker, and print how they ended")
     q.add_argument("name")
     q.add_argument("--every", type=float, default=0.5, help=argparse.SUPPRESS)
+    p = add("notes", cmd_notes, "the coordinator's notes: list the files under notes/ with their headings, or move "
+            "a finished section out of one: hansa notes archive FILE HEADING [--to OTHER]")
+    p.description = (
+        "hansa notes [PATH]: the files under the desk's notes/ (or under notes/PATH), each with its size, its number "
+        "of lines and its headings with their line numbers; under notes/archive/ only size and lines, unless PATH "
+        "names it. hansa notes archive FILE HEADING [--to OTHER]: move the section of notes/FILE that starts at the "
+        "heading matching HEADING (its text without the #s, whole, or the start of it when that matches only one "
+        "heading) and runs up to the next heading of the same or a higher level, subsections with it, onto the end "
+        "of notes/OTHER (default: notes/archive/FILE, made when missing), under a line saying when it was moved. "
+        "Both files must be inside notes/. When HEADING matches no heading or several, nothing is changed and the "
+        "headings are listed. The other file is written first and the notes file replaced whole after it, so a "
+        "crash between the two leaves the section in both files, never in neither")
+    p.add_argument("words", nargs="*", metavar="PATH | archive FILE HEADING")
+    p.add_argument("--to", metavar="OTHER", help="with archive: the file under notes/ the section goes to "
+                   "(default: archive/FILE)")
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
     p.add_argument("n", nargs="?", type=int)
     p = add("cost", cmd_cost, "tokens and what they are worth")

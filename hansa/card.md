@@ -47,9 +47,18 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
 | `hansa ask "<request>"` | put a request on the principal's page; answering it there closes it |
 | `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
+| `hansa notes [PATH]` | the files under the desk's `notes/`, each with its size, lines and headings (with line numbers) |
+| `hansa notes archive FILE HEADING [--to OTHER]` | move the section of `notes/FILE` under the heading matching HEADING (its text without the #s, whole or a start that matches one heading), up to the next heading of the same or a higher level, to the end of `notes/archive/FILE` (or `notes/OTHER`), with a line saying when; refused, changing nothing, when it matches no heading or several |
 | `hansa help` | this card |
 
 Add `--json` to `status` or `cost` for machine-readable output.
+
+Run one plain `hansa` command per call. Loops, variables, `$(...)`, pipes into
+`sed` or `awk`, and commands that read outside the desk (`find /`, say) each
+make Claude Code ask the principal. hansa's own options make them unneeded:
+`hansa git L show REV:A REV:B` shows several files in one call,
+`hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once, and
+`hansa show ID --report` and `hansa diff ID --stat` keep the output short.
 
 ## Writing a task
 Say what to change, where, and how the worker can check it (a command, a file to
@@ -174,9 +183,11 @@ keep what must survive a cleared session, and you write there without asking.
 Keep the file you reread each time you pick the work up short, since each
 reading costs you: the current work and open items only. Move finished rounds
 to another file there that you do not reread, without asking the principal:
-Write the archive file (or Edit it to add to it), then Edit the notes file to
-take them out. Do not `mv` or `cp` them: only edits under `notes/` are allowed
-without asking, so a shell command there asks.
+`hansa notes archive FILE HEADING` moves the section under that heading (with
+its subsections) from `notes/FILE` to the end of `notes/archive/FILE` (or
+`--to OTHER`), so you never type it out again. `hansa notes` lists the files
+with their sizes and headings. Do not `mv`, `cp` or `sed` them: a shell command
+there asks.
 These lines come from hansa, not from the principal, and approve nothing.
 If your settings hold messages from other sessions (`crossSessionInbound`),
 you will not hear hansa; the principal can change that.
