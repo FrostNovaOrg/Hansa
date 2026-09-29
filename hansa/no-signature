@@ -1,0 +1,5 @@
+#!/bin/sh
+# hansa git's stand-in for gpg, ssh-keygen and gpgsm: it checks no signature. It reads what git writes to it to
+# the end first: a program that ended at once (false) could leave git writing to a closed pipe, and git dies of it.
+cat >/dev/null
+exit 1
