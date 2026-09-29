@@ -123,8 +123,10 @@ on branch task/{tid}, which was made for this task.
   .ripgreprc, .mcp.json, .vscode, .idea or .claude/ that you did not make. Leave them: do not delete them
   or report them as a change. The sandbox removes them and hansa never commits them.
 - Do not push, do not switch branches, do not touch other directories.
-- You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
+- You work in a sandbox; inside it any command runs. Your temporary folder, {tmp}, is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
+  Write its path out in full in commands, not as $TMPDIR: Claude Code cannot see what a variable
+  stands for, and refuses a command whose paths it cannot place.
 - If a command you need is refused, say which one and why you need it in your report;
   do not look for a way around the refusal.
 - `git stash` is refused, `git stash list` too, and one refused part refuses the whole command
@@ -148,8 +150,10 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
   .ripgreprc, .mcp.json, .vscode, .idea or .claude/ that nobody made. Leave them: do not delete them
   or report them as a change. The sandbox removes them and hansa never commits them.
 - Do not push, do not switch branches, do not touch other directories.
-- You work in a sandbox; inside it any command runs. Your temporary folder ($TMPDIR) is yours
+- You work in a sandbox; inside it any command runs. Your temporary folder, {tmp}, is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
+  Write its path out in full in commands, not as $TMPDIR: Claude Code cannot see what a variable
+  stands for, and refuses a command whose paths it cannot place.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
 - `git stash` is refused, `git stash list` too, and one refused part refuses the whole command
   line. To see a file as it was before your changes: `git show HEAD:path` (before the task's, the
@@ -960,6 +964,13 @@ def make_worker_tmp(desk: Desk, tid: str) -> str:
     return tmp
 
 
+def commands_tmp(tmp: str) -> str:
+    """The TMPDIR a worker's commands see, given the run's folder (make_worker_tmp) as CLAUDE_CODE_TMPDIR:
+    the per-user folder Claude Code makes in it, claude-<uid>, on macOS and Linux alike. Workers are told it
+    in full, since Claude Code refuses a command whose paths it cannot place, as one after `cd "$TMPDIR/x"`."""
+    return os.path.join(tmp, f"claude-{os.getuid()}")
+
+
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
     are left out: hansa does the committing, and read-only git needs no rule."""
@@ -1600,7 +1611,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     effort = meta.get("effort") or p.get("effort", "")
     brief = desk.lanes_dir / lane_name / "brief.md"
     verifying = meta.get("kind") == "verify"
-    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name)
+    tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
+    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp))
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
@@ -1624,7 +1636,6 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     argv += isolated(wt, sandbox_settings(desk, lane, pname, p, wt))
-    tmp = make_worker_tmp(desk, tid)
     argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
