@@ -181,10 +181,10 @@ def ask_note(a: dict, ready: list) -> str:
 
 
 def ready_news(desk: Desk) -> None:
-    """After a provider's key or settings changed or its check ended: for each open request, the providers it
-    names that became ready since it was made (ask_names) and it was not told of yet, as an ask_ready event the
-    follower posts. Each is told once; again only after the provider stopped being ready and became ready again.
-    Only then: a provider that becomes ready by itself (its rest runs out) gets the note in status, but no post."""
+    """After a provider's key or settings changed, its check ended or its rest ran out (hansa serve looks): for
+    each open request, the providers it names that became ready since it was made (ask_names) and it was not told
+    of yet, as an ask_ready event the follower posts. Each is told once; again only after the provider stopped
+    being ready and became ready again."""
     ready = ready_now(desk)
     news, changed = {}, False
     with desk.lock():
@@ -272,6 +272,9 @@ def status(desk: Desk) -> dict:
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
+        # for the page: the latest requests the coordinator closed itself in the past week, with its reason
+        "asks_closed": [{k: a.get(k) for k in ("id", "text", "closed", "reason")} for a in desk.asks()
+                        if a.get("closed_by") == "coordinator" and a["closed"] >= time.time() - 7 * 86400][-5:],
         "today": {"finished": len(today), "merged": sum(m["state"] == "merged" for m in today),
                   "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
                   "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},

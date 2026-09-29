@@ -2497,6 +2497,7 @@ class Dispatcher:
         self.procs = {}
         self.merge_procs = {}  # merge checks this server started
         self.try_procs = {}  # tries (hansa lane try) this server started, by lane
+        self.resting = None  # the providers resting at the last round; None before the first
 
     def ended(self, tid: str, returncode) -> None:
         if self.desk.meta(tid).get("phase") == "checking":
@@ -2713,11 +2714,22 @@ class Dispatcher:
             if proc:
                 self.try_procs[ln] = proc
 
+    def rests(self, s: dict) -> None:
+        """A provider whose rest ran out is ready again with no save or check to say so: tell the open requests
+        that name it, as those do (desk.ready_news), under the same once-only rule, so a rest that starts is
+        looked at too. Also once as the server starts, for rests that ran out while no server ran."""
+        st = self.desk.provider_state()
+        resting = {n for n in s["providers"] if (st.get(n) or {}).get("cool_until", 0) > time.time()}
+        if resting != self.resting:
+            self.desk.ready_news()
+        self.resting = resting
+
     def tick(self) -> None:
         desk = self.desk
         s = desk.settings()
         desk.state_dir.mkdir(exist_ok=True)
         beat(desk)
+        self.rests(s)
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
                 del self.procs[tid]

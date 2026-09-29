@@ -605,6 +605,26 @@ class Desk:
             write_json(self.asks_path, asks)
         self.event("ask_closed", id=n, by=by)
 
+    def close_ask_as_coordinator(self, n: int, reason: str, by: str = "") -> None:
+        """The coordinator closes an open request of this desk itself (hansa ask --close), saying why; the page
+        shows it as closed by the coordinator, and nobody is posted: the coordinator knows."""
+        reason = self.redact(reason.strip())
+        if not reason:
+            raise SystemExit("hansa: say why the request is closed: hansa ask --close N \"why\"")
+        with self.lock():
+            asks = self.asks()
+            a = next((a for a in asks if a.get("id") == n), None)
+            if not a:
+                raise SystemExit(f"hansa: there is no request #{n} on this desk (hansa status lists the open ones)")
+            if a.get("closed"):
+                raise SystemExit(f"hansa: request #{n} is already closed"
+                                 + (f" by the coordinator: {a['reason']}" if a.get("closed_by") == "coordinator" else
+                                    f": {a['answer']}" if a.get("answer") else "")
+                                 + "; nothing changed")
+            a.update(closed=now(), answer="", closed_by="coordinator", reason=reason)
+            write_json(self.asks_path, asks)
+        self.event("ask_closed", id=n, by=by, coordinator=True, reason=reason)
+
     def web_token(self) -> str:
         f = self.state_dir / "web-token"
         if not f.is_file():
