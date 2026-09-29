@@ -3368,7 +3368,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])  # hansa closes nothing itself
         heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
         self.assertEqual([x["line"] for x in heard], ["mimo is ready now: done? Still open: request #1 (Please fill in "
-                                                      "mimo's key) (the principal closes a request on the page)"])
+                                                      "mimo's key) (the principal closes a request on the page; if it is done, "
+                                                      "close it: hansa ask --close N \"why\")"])
         self.desk.close_ask(1)
         self.assertEqual(notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None}), [])
 
@@ -3403,6 +3404,78 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("kimi", "sk-kimi-12345678")
         self.assertEqual([a["note"] for a in views.status(self.desk)["asks"]], ["kimi is ready now: done?"])
         self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("kimi", [1])])
+
+    def test_a_provider_ready_again_after_its_rest_is_posted_once(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-mimo-12345678")
+        self.desk.set_provider_state("mimo", cool_until=time.time() + 600, reason="out of quota")
+        self.desk.add_ask("mimo hit its limit: please raise it")
+        self.assertNotIn("mimo", self.desk.asks()[0]["ready_then"])
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(self.events("ask_ready"), [])  # still resting
+        self.desk.set_provider_state("mimo", cool_until=time.time() - 1)  # its rest ran out: no save, no check
+        d.tick()
+        d.tick()
+        self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("mimo", [1])])
+        heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
+        self.assertEqual([x["line"][:47] for x in heard], ["mimo is ready now: done? Still open: request #1"])
+        Dispatcher(self.desk).tick()  # a server started again: told already, so nothing new
+        self.assertEqual(len(self.events("ask_ready")), 1)
+        self.desk.set_provider_state("mimo", cool_until=time.time() + 600)  # rests again, then is ready again
+        d.tick()
+        self.desk.set_provider_state("mimo", cool_until=time.time() - 1)
+        d.tick()
+        self.assertEqual(len(self.events("ask_ready")), 2)
+
+    def test_the_coordinator_closes_its_own_request_with_a_reason(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        self.desk.add_ask("May the docs lane use the npm registry?")
+        with self.assertRaises(SystemExit):  # the reason is required
+            self.hansa_out("ask", "--close", "1")
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("ask", "--close", "9", "done")
+        self.assertIn("there is no request #9", str(e.exception.code))
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):  # a worker, verification or design session
+            with self.assertRaises(SystemExit) as e:
+                self.hansa_out("ask", "--close", "1", "done")
+            self.assertIn("only the coordinator closes a request", str(e.exception.code))
+        self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])
+        self.desk.write_key("mimo", "sk-mimo-12345678")  # ready now: the note and one post
+        with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+            out = self.hansa_out("ask", "--close", "1", "The principal filled it in: sk-mimo-12345678")
+        self.assertIn("ask #1 is closed", out)
+        a = self.desk.asks()[0]
+        self.assertTrue(a["closed"])
+        self.assertEqual((a["closed_by"], a["reason"]), ("coordinator", "The principal filled it in: [key of mimo]"))
+        st = views.status(self.desk)
+        self.assertEqual([x["id"] for x in st["asks"]], [2])  # status stops listing it
+        self.assertNotIn("#1:", views.status_text(st))
+        self.assertEqual([(x["id"], x["reason"]) for x in st["asks_closed"]],
+                         [(1, "The principal filled it in: [key of mimo]")])  # the page shows it, with the reason
+        closed = self.events("ask_closed")
+        self.assertEqual([(e["id"], e["by"], e["coordinator"]) for e in closed], [(1, "coordinator", True)])
+        me = {"key": "k", "session": None}
+        self.assertEqual(notify.items_for(self.desk, closed, me), [])  # the coordinator knows: no post
+        self.assertEqual(notify.items_for(self.desk, self.events("ask_ready"), me), [])  # nor that it may be done
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("ask", "--close", "1", "again")
+        self.assertIn("request #1 is already closed by the coordinator", str(e.exception.code))
+        self.desk.close_ask(2, "yes", by="page")  # closed on the page: refused as already closed too
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("ask", "--close", "2", "done")
+        self.assertIn("request #2 is already closed: yes", str(e.exception.code))
+        self.assertEqual(len(self.events("ask_closed")), 2)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["ask", "--help"])
+        self.assertIn('the coordinator closes it: hansa ask --close N "why"; the reason is required',
+                      " ".join(out.getvalue().split()))
 
     def test_a_request_made_while_its_provider_was_ready_gets_no_note(self):
         self.assertIn("claude", views.ready_now(self.desk))
