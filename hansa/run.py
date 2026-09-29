@@ -2034,7 +2034,8 @@ def finish_check(desk: Desk, tid: str) -> dict:
 # The task is "merging" meanwhile, with merge_check {phase: queued | starting | running, ...}; hansa serve
 # runs it when the lane is free, in the lane's worktree, and it ends in "merged", or back in "done" with
 # merge_check_result saying why nothing was merged. One runs at a time per repository and base branch, in
-# the order the merges were asked (merge_check.queued); others wait for it (merge_check_ahead).
+# the order the merges were asked (merge_check.queued); others wait for it (merge_check_ahead). A merge that
+# needs no check, asked while one runs or waits there, joins the same line (merge_check {plain: True}, plain_merge).
 MERGE_FILES = ("merge-check.log", "merge-setup.log", "merge-check.err")
 MERGE_MOVES = 2  # the base moved this often while its merge was being checked: hansa stops trying
 
@@ -2155,11 +2156,68 @@ def unverified_note(desk: Desk, m: dict) -> str:
 
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
     """Nothing was merged: the task goes back to waiting for review, with the result saying why."""
+    plain = ((desk.meta(tid).get("merge_check") or {}).get("plain"))
     m = desk.change(tid, lambda x: None if x["state"] != "merging" else
                     {"state": "done", "merge_check": None, "merge_check_result": result})
     if m:
-        desk.event("merge_check_ended", task=tid, ok=False, note=(result or {}).get("note", "cancelled"))
+        desk.event("merge_check_ended", task=tid, ok=False, note=(result or {}).get("note", "cancelled"),
+                   **({"waited": True} if plain else {}))
     return m
+
+
+def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
+    """A merge that needed no check when it was asked, but waited its turn behind a merge check on the same
+    repository and base branch (merge_check {plain: True}), now first in line: merged without a check if the
+    base has still not moved (or its lane has no check, or it was asked --despite-check). "check" when the base
+    has moved and the lane has a check: it is now a merge check like the others, still first in line; None
+    otherwise (merged, or back for review saying why nothing was merged)."""
+    with desk.lock():  # a cancel or a key saved meanwhile lands before this or after it
+        m = desk.meta(tid)
+        mc = m.get("merge_check") or {}
+        if m["state"] != "merging" or mc.get("phase") != "queued" or not mc.get("plain"):
+            return None
+        repo, name = lane["repo"], lane.get("base") or "main"
+        tip = git("rev-parse", name, cwd=repo)
+        unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
+        if unchecked and not mc.get("despite"):
+            desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": 0})
+            desk.event("merge_check_queued", task=tid, onto=tip, waited=True)
+            return "check"
+        why = ""
+        current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+        if current != name:
+            why = f"the checkout at {repo} is on {current}, not {name}; the principal needs to switch it back"
+        elif git("status", "--porcelain", "--untracked-files=no", cwd=repo):
+            why = f"the checkout at {repo} has uncommitted changes"
+        else:
+            leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
+            if leaked:
+                desk.update(tid, leaked=leaked)
+                why = f"the change holds the key of {', '.join(leaked)}"
+        if why:
+            end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "note": f"{why}; nothing was merged"})
+            return None
+        try:
+            git("merge", "--no-ff", "-m", f"Merge {tid}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
+        except RuntimeError as e:
+            files = conflicted_files(lambda *x: git(*x, cwd=repo))
+            places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
+            try:
+                git("merge", "--abort", cwd=repo)
+            except RuntimeError:
+                pass
+            end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "files": files,
+                                        "note": f"conflicts with {name} as it is now" if files
+                                        else desk.redact(f"merging it into {name} failed ({str(e)[:200]})"),
+                                        "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
+            return None
+        m = desk.update(tid, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+                        merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None)
+        close_verification(desk, m, f"closed: {tid} was merged")
+    desk.event("task_merged", task=tid, into=name, waited=True, onto=tip,
+               **({"despite_check": True} if mc.get("despite_check") or unchecked else {}),
+               **({"merge_not_checked": True} if unchecked else {}))
+    return None
 
 
 def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
@@ -2715,6 +2773,15 @@ class Dispatcher:
             at = merge_target(s, ln)
             if at in held:
                 continue
+            if (m.get("merge_check") or {}).get("plain"):  # its turn: it needs neither the lane nor a slot
+                try:
+                    if plain_merge(desk, m["id"], s["lanes"][ln]) != "check":
+                        continue
+                except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
+                    end_merge_check(desk, m["id"], {"ok": False, "at": now(),
+                                                    "note": desk.redact(f"the merge could not be made: {e}")[:600]})
+                    continue
+                m = desk.meta(m["id"])  # a merge check now, first in line
             if ln in busy or free <= 0:
                 held.add(at)  # first in line: the ones after it wait for it
                 continue

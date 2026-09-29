@@ -18,7 +18,7 @@ from . import account, build, cost, installed_text, notify, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
-                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, not_looking, proc_start, provider_env, pulse,
+                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_target, not_looking, proc_start, provider_env, pulse,
                   quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
                   is_local, mac_loopback_listeners)
 
@@ -355,6 +355,30 @@ def cmd_merge(a):
                   f"exactly that if the check passes. "
                   f"{_runs_when(desk, a.id, base)} {_wait_for(desk, a.id)} "
                   f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)" + _unverified_later(desk, m))
+            return
+        # a merge check runs or waits on this repository and base branch: going in now would move the base under
+        # it, so this merge waits its turn in the same line
+        s = desk.settings()
+        at = merge_target(s, m["lane"])
+        if any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
+               for x in desk.tasks()):
+            despite = bool((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked)
+            m = desk.update(a.id, state="merging", merge_check_result=None, **sess, merge_check={
+                "phase": "queued", "queued": now(), "moves": 0, "plain": True,
+                **({"despite": True, "despite_check": despite} if a.despite_check else {})})
+            ahead = views.merge_check_waits_for(desk, m)
+            desk.event("merge_queued", task=a.id, onto=tip, behind=(merge_check_ahead(s, m, desk.tasks()) or {}).get("id"))
+            then = ("without a check, as --despite-check asks" if a.despite_check else
+                    f"without a check if {base} has still not moved" + (
+                        f"; if it has, it merges {a.id} onto {base} as it is then in lane {m['lane']}'s worktree, runs "
+                        f"the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges exactly that if "
+                        f"the check passes" if lane.get("check") else ""))
+            note = unverified_note(desk, m)
+            print(f"{a.id} is not merged yet: merges go into {base} one at a time while a merge check runs or waits "
+                  f"there, in the order they were asked, so it waits for {ahead}. When its turn comes, hansa merges it "
+                  f"{then}. {_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
+                  + (f"\nnote: {note}. It is merged all the same when its turn comes: this is a note, not a stop"
+                     if note else ""))
             return
         try:
             git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})

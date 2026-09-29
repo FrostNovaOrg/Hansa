@@ -19,7 +19,8 @@ STATES = {
     "running": "a worker is on it, or hansa is running the lane's check on its work",
     "done": "the worker finished; waiting for your review (hansa show / hansa merge / hansa retry)",
     "merging": ("hansa merge is checking it together with what the base gained since it was made: merged onto the "
-                "base as it is now, with the lane's check run there; it merges if that passes"),
+                "base as it is now, with the lane's check run there; it merges if that passes. Or it needs no check "
+                "and waits its turn behind a merge check on the same base"),
     "failed": "the run ended with an error; hansa show says why",
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
@@ -88,7 +89,8 @@ def merge_check_waits_for(desk: Desk, m: dict, tasks: list | None = None) -> str
     """The merge check on the same repository and base branch that a queued one waits for, in words ("t0123's
     merge check on lane a"); '' when it is first in line."""
     x = merge_check_ahead(desk.settings(), m, tasks if tasks is not None else desk.tasks())
-    return f"{x['id']}'s merge check on lane {x.get('lane')}" if x else ""
+    what = "merge" if ((x or {}).get("merge_check") or {}).get("plain") else "merge check"
+    return f"{x['id']}'s {what} on lane {x.get('lane')}" if x else ""
 
 
 def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
@@ -102,6 +104,10 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
                 f"{mc.get('onto', '')[:10]}, then " + ("the lane's setup and " if mc.get("setup") else "")
                 + f"check: {mc.get('command', '')}")
     ahead = merge_check_waits_for(desk, m, tasks)
+    if mc.get("plain"):
+        how = "without a check" + ("" if mc.get("despite") else f" if {base} has still not moved")
+        return (f"merge queued, to go in {how}: " + (f"waits for {ahead}" if ahead else not_looking(desk)
+                                                      or "merges when `hansa serve` next looks (within seconds)"))
     other = merge_check_busy_with(desk, m, tasks)
     return (f"merge check queued{again}: " + (f"waits for {ahead}" if ahead else
                                               f"waits for lane {lane}, busy with {other}" if other else
@@ -329,7 +335,7 @@ def status_text(st: dict) -> str:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
     if st.get("merging"):
-        out.append("merging (each merges by itself if its check passes on the base as it is now; "
+        out.append("merging (each merges by itself if its check passes on the base as it is now, or in its turn; "
                    + ("hansa tells this session when each ends):" if st.get("heard") else "hansa wait <id>):"))
         out += [f"  {m['id']} {m['lane']}: {m['title']}\n      {m['where']}" for m in st["merging"]]
     if st["review"]:
@@ -460,15 +466,22 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     report = report_of(desk, tid)
     if report:
         lines = report.splitlines()
-        shown, size = [], 0
+        shown, size, cut = [], 0, 0
         for x in lines if full else lines[:REPORT_LINES]:
-            size += len(x) + 1
-            if not full and shown and size > REPORT_CHARS:
+            if not full and size + len(x) + 1 > REPORT_CHARS:
+                if not shown or len(x) > REPORT_CHARS:  # a line longer than the limit is cut there, not given whole
+                    keep = max(REPORT_CHARS - size, 0)
+                    shown.append(x[:keep])
+                    cut = len(x) - keep
                 break
+            size += len(x) + 1
             shown.append(x)
         out += ["report:"] + ["  " + x for x in shown]
-        if len(lines) > len(shown):
-            out.append(f"  ... {len(lines) - len(shown)} more lines; the whole report: hansa show {tid} --report")
+        more = len(lines) - len(shown)
+        if cut or more:
+            out.append("  ... " + (f"{cut} more characters of this line" if cut else "")
+                       + (" and " if cut and more else "") + (f"{more} more lines" if more else "")
+                       + f"; the whole report: hansa show {tid} --report")
     if background_note(m):
         out.append(background_note(m))
     if m.get("replaced_by"):
@@ -582,6 +595,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                        f"hansa merge {tid} again (it checks the merge again) · hansa merge {tid} --despite-check")
     nxt["merging"] = (f"{notify.wait_step(desk, tid, heard)}: it merges by itself if the check passes, and comes "
                       f"back for review if not · hansa cancel {tid} stops it")
+    if (m.get("merge_check") or {}).get("plain"):
+        nxt["merging"] = (f"{notify.wait_step(desk, tid, heard)}: it merges by itself in its turn, and comes back for "
+                          f"review if it cannot · hansa cancel {tid} stops it")
     if m.get("markers") and m["state"] == "done":
         nxt["done"] = f"hansa retry {tid} --update \"settle the markers in {', '.join(m['markers'])}\""
     if m.get("leaked") and m["state"] == "done":
