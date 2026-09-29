@@ -1944,14 +1944,14 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(os.listdir(self.tmp / "t"), [])
 
     def test_bin_hansa_runs_its_own_checkout_whatever_the_current_directory(self):
-        from hansa import build
+        from hansa import build, installed_text
         other = self.tmp / "other-checkout"
         (other / "hansa").mkdir(parents=True)
         (other / "hansa" / "__init__.py").write_text("__version__ = '9.9.9'\n")
         (other / "hansa" / "__main__.py").write_text("print('hansa 9.9.9 from the other checkout')\n")
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--version"], cwd=other,
                            capture_output=True, text=True, timeout=30)
-        self.assertEqual((r.returncode, r.stdout.strip()), (0, f"hansa {build()}"), r.stderr)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, f"hansa {build()}, {installed_text()}"), r.stderr)
 
     def test_the_web_command_ends_when_its_connection_does(self):
         # run over ssh to keep a tunnel to the page open; a closed window or a laptop gone to sleep
@@ -5676,6 +5676,71 @@ class DeskTest(unittest.TestCase):
                               "subprocess.run([sys.executable, '-c', 'import os; print(repr(os.environ.get(\"HANSA_BUILD\")))'])"],
                              env=env, capture_output=True, text=True, cwd="/")
         self.assertEqual(out.stdout.splitlines(), [handed, "None", "None"], out.stderr)  # a restart asks git again
+
+    def test_installed_is_when_build_was_written_else_when_the_newest_code_file_changed(self):
+        import hansa
+        pkg = self.tmp / "installed" / "hansa"
+        (pkg / "agents").mkdir(parents=True)
+        (pkg / "__pycache__").mkdir()
+        for name, at in (("__init__.py", 1_000_000), ("agents/scout.md", 2_000_000), ("ui.html", 1_500_000),
+                         ("__pycache__/run.cpython-312.pyc", 9_000_000)):  # what Python writes as it runs: not code
+            (pkg / name).write_text("x")
+            os.utime(pkg / name, (at, at))
+        self.addCleanup(hansa.installed.cache_clear)
+        with unittest.mock.patch.object(hansa, "__file__", str(pkg / "__init__.py")):
+            hansa.installed.cache_clear()
+            self.assertEqual(hansa.installed(), 2_000_000)  # a checkout: when its files last changed, not a commit time
+            (pkg / "BUILD").write_text("abc1234 2026-09-01\n")
+            os.utime(pkg / "BUILD", (3_000_000, 3_000_000))
+            hansa.installed.cache_clear()
+            self.assertEqual(hansa.installed(), 3_000_000)  # an install: when it wrote BUILD
+        at = time.mktime((2026, 9, 29, 14, 3, 59, 0, 0, -1))
+        self.assertEqual(hansa.installed_text(at), "installed 2026-09-29 14:03")  # to the minute
+        self.assertEqual(hansa.installed_text(0), "")
+
+    def test_version_and_status_say_when_the_running_code_was_installed(self):
+        import hansa
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["--version"])
+        self.assertEqual(out.getvalue().strip(), f"hansa {hansa.build()}, {hansa.installed_text()}")
+        self.assertRegex(hansa.installed_text(), r"^installed \d{4}-\d\d-\d\d \d\d:\d\d$")
+        first = views.status_text(views.status(self.desk)).splitlines()[0]
+        self.assertIn(f" · hansa {hansa.build()} · {hansa.installed_text()} · now ", first)
+
+    def test_status_says_when_hansa_serve_runs_older_code_than_is_installed(self):
+        import hansa
+        import hansa.run as run
+        self.assertEqual(run.serve_code(self.desk), "")  # no server: nothing to restart
+        self.serving()
+        pid = run.server_holder(self.desk)[0]
+        rec = self.desk.state_dir / "serve-code"
+        write_json(rec, {"pid": pid, "build": hansa.build(), "installed": hansa.installed()})
+        self.assertEqual(run.serve_code(self.desk), "")  # the code it runs is the code installed
+        self.assertEqual(views.status(self.desk)["serve_code"], "")
+        old = hansa.installed() - 3600
+        write_json(rec, {"pid": pid, "build": "0.5.0a1 0ld0000", "installed": old})
+        said = run.serve_code(self.desk)
+        self.assertEqual(said, f"hansa serve runs 0.5.0a1 0ld0000 ({hansa.installed_text(old)}), but {hansa.build()} "
+                               f"was {hansa.installed_text()}: restart it")
+        self.assertEqual(views.status_text(views.status(self.desk)).splitlines()[1], said)
+        write_json(rec, {"pid": pid, "build": hansa.build(), "installed": old})  # the same commit, put in place again
+        self.assertIn("restart it", run.serve_code(self.desk))
+        write_json(rec, {"pid": pid + 1, "build": hansa.build(), "installed": hansa.installed()})  # another server's
+        lock = self.desk.state_dir / "serve.lock"  # one that recorded nothing: by when it started
+        os.utime(lock, (old, old))
+        self.assertEqual(run.serve_code(self.desk), f"hansa serve started "
+                         f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(old))}, before {hansa.build()} was "
+                         f"{hansa.installed_text()}: restart it")
+        os.utime(lock, None)  # started after the code was installed
+        self.assertEqual(run.serve_code(self.desk), "")
+
+    def test_hansa_serve_records_the_code_it_runs(self):
+        import hansa
+        import hansa.run as run
+        run.record_serve_code(self.desk)
+        self.assertEqual(json.loads((self.desk.state_dir / "serve-code").read_text()),
+                         {"pid": os.getpid(), "build": hansa.build(), "installed": hansa.installed()})
 
     def test_status_sizes_its_columns_to_the_longest_lane_and_provider_names(self):
         s = self.desk.settings()

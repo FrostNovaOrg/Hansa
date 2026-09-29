@@ -8,10 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-from . import build, cost, notify
+from . import build, cost, installed, installed_text, notify
 from .desk import Desk, is_git_rule, read_json, write_json
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
-                  markers_text, not_looking, progress_of, provider_problem, server_state, server_text, srt_needed, srt_problem,
+                  markers_text, not_looking, progress_of, provider_problem, serve_code, server_state, server_text, srt_needed, srt_problem,
                   srt_record, srt_when, tried_lanes, waiting_reason)
 
 STATES = {
@@ -222,6 +222,8 @@ def status(desk: Desk) -> dict:
     return {
         "desk": str(desk.root),
         "build": build(),
+        "installed": installed(),  # when the code this runs was put in place
+        "serve_code": serve_code(desk, server),  # hansa serve on older code than is installed: what to do
         "audits_cost": bool(s["coordinator"].get("audits_cost")),
         "paused": desk.paused(),
         "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
@@ -284,7 +286,9 @@ def status_text(st: dict) -> str:
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
            server_text(st.get("server") or {"state": "up" if st["server_up"] else "gone"})]
     out += ["cost audit on"] if st.get("audits_cost") else []
-    out = [" · ".join(out + [f"hansa {st['build']}", time.strftime("now %H:%M")])]
+    out = [" · ".join(out + [f"hansa {st['build']}", installed_text(st.get("installed") or 0) or "installed ?",
+                              time.strftime("now %H:%M")])]
+    out += [st["serve_code"]] if st.get("serve_code") else []
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
