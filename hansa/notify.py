@@ -236,7 +236,8 @@ def _item(desk: Desk, e: dict):
         else:
             key, line = ("task", tid), task_line(desk, m)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
-    if kind == "ask_closed" and e.get("by") != "hansa":  # hansa closes a design session's request itself
+    # hansa closes a design session's request itself, and the coordinator knows of one it closed (hansa ask --close)
+    if kind == "ask_closed" and e.get("by") != "hansa" and not e.get("coordinator"):
         x = next((a for a in desk.asks() if a.get("id") == e.get("id")), None)
         if not x:
             return None
@@ -250,7 +251,7 @@ def _item(desk: Desk, e: dict):
         return (("ready", e.get("provider")),
                 f"{e.get('provider')} is ready now: done? Still open: "
                 + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
-                + " (the principal closes a request on the page)",
+                + " (the principal closes a request on the page; if it is done, close it: hansa ask --close N \"why\")",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "

@@ -625,7 +625,8 @@ def cmd_wait(a):
                  if m["state"] == "done" and mc and not mc.get("ok") else
                  "\n  merged after its merge check passed" if m["state"] == "merged" and mc.get("ok") else ""))
     for x in answered:
-        print(f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
+        print(f"request #{x['id']} closed by the coordinator: {x.get('reason', '')}" if x.get("closed_by") == "coordinator"
+              else f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
     still = [desk.meta(t) for t in watch if live(t)]
     if not ended and not answered:
         print(f"no task finished in {a.timeout:g} min")
@@ -640,6 +641,13 @@ def cmd_wait(a):
 
 
 def cmd_ask(a):
+    if a.close is not None:
+        if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: the requests are the coordinator's
+            raise SystemExit("hansa: only the coordinator closes a request; a worker, verification or design "
+                             "session cannot. Say in your report that it may be done")
+        Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
+        print(f"ask #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the reason")
+        return
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
                                   session=notify.session_here())
     print(f"ask #{n} is on the principal's page")
@@ -1394,8 +1402,14 @@ def main(argv=None):
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
-    p = add("ask", cmd_ask, "put a request on the principal's page")
-    p.add_argument("text", nargs="+")
+    p = add("ask", cmd_ask, "put a request on the principal's page, or close one of yours that is done (--close)")
+    p.description = ("put a request on the principal's page: hansa ask \"<request>\". The principal answers it there, "
+                     "which closes it. When it is done some other way (the principal did it and said so in the "
+                     "conversation, say), the coordinator closes it: hansa ask --close N \"why\"; the reason is "
+                     "required, and the page shows it as closed by the coordinator, with the reason. Workers, "
+                     "verifications and design sessions cannot close requests")
+    p.add_argument("text", nargs="*", help="the request; with --close, why it is closed")
+    p.add_argument("--close", type=int, metavar="N", help="close open request #N of this desk, saying why")
     p = add("explain", cmd_explain, "what a setting or state means: lane NAME | provider NAME | task ID | states | server "
             "| notify")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server", "notify"])
@@ -1506,6 +1520,8 @@ def main(argv=None):
         return 0
     if a.cmd == "add" and not a.text and not a.file:
         ap.error("add needs the task text or --file")
+    if a.cmd == "ask" and not a.text:
+        ap.error("ask needs the request" if a.close is None else "ask --close needs the reason: hansa ask --close N \"why\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     if a.cmd not in ("coordinator", "init", "notify", "notify-follow"):
         _as_desk_account(a, argv)
