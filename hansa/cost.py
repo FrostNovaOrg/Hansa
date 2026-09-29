@@ -222,16 +222,20 @@ TURN_KINDS = {"human": "typed", "peer": "peer", "task-notification": "helper res
 def _starts_turn(d: dict):
     """What a record starting a coordinator turn says started it, or None when it starts none: the principal
     typing, a hansa post or another session's message, a scheduled wakeup, a helper's result, or other.
-    Tool results, and the note that follows a wakeup (isMeta), carry on the turn they belong to."""
+    A record with an origin starts a turn whatever isMeta says (a hansa post is isMeta with origin peer); tool
+    results, and an isMeta record without an origin (the note that follows a wakeup), carry on the turn they
+    belong to."""
     if d.get("type") == "system":
         return "wakeup" if d.get("subtype") == "scheduled_task_fire" else None
-    if d.get("type") != "user" or d.get("isMeta"):
+    if d.get("type") != "user":
         return None
     content = (d.get("message") or {}).get("content") if isinstance(d.get("message"), dict) else None
     if isinstance(content, list) and content and all(
             isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
         return None
     origin = d.get("origin") if isinstance(d.get("origin"), dict) else {}
+    if d.get("isMeta") and not origin.get("kind"):
+        return None
     return TURN_KINDS.get(origin.get("kind"), "other")
 
 
