@@ -723,6 +723,10 @@ def _since(text: str) -> float:
 
 
 def cmd_cost(a):
+    if a.turns:
+        rep = cost.turns(Desk.find(a.desk), a.days, _since(a.since) if a.since else None)
+        print(json.dumps(rep, ensure_ascii=False, indent=1) if a.json else views.cost_turns_text(rep))
+        return
     rep = cost.report(Desk.find(a.desk), a.days, _since(a.since) if a.since else None)
     if a.json:
         rep = {k: v for k, v in rep.items() if k != "rows"} if not a.rows else rep
@@ -1724,6 +1728,9 @@ def main(argv=None):
     p.add_argument("--by", default="day", choices=["day", "seat", "lane", "task", "model", "provider"])
     p.add_argument("--json", action="store_true")
     p.add_argument("--rows", action="store_true", help="with --json: include every row")
+    p.add_argument("--turns", action="store_true", help="the coordinator's own usage turn by turn: what started "
+                   "each turn, its steps, the conversation's length at its first step, its worth and the tools it "
+                   "called; then totals by what started them. No message text")
     p = add("check", cmd_check, "send one tiny request through a provider (or all)")
     p.add_argument("provider", nargs="?")
     p = add("serve", cmd_serve, "run the dispatcher and the web page (keep it running)")

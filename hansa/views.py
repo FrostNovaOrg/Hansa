@@ -830,6 +830,38 @@ def cost_text(rep: dict, by: str = "day") -> str:
     return "\n".join(out)
 
 
+def cost_turns_text(rep: dict) -> str:
+    """hansa cost --turns: one line per turn of the coordinator, then totals by what started them."""
+    t = rep["total"]
+    out = [f"the coordinator's turns, {rep['window']}: {t['turns']} turn(s), {t['steps']} step(s), worth ${t['usd']:.2f}"]
+    session = None
+    for r in rep["turns"]:
+        if r["session"] != session:
+            session = r["session"]
+            out.append(f"session {session[:8]}")
+        tools = ", ".join(f"{k} {n}" for k, n in r["tools"].items())
+        out.append(f"  {time.strftime('%m-%d %H:%M', time.localtime(r['start']))}  {r['kind']:<13} "
+                   f"{r['steps']:>4} step(s)  length {r['length']:>9,}  {'$%.2f' % r['usd']:>8}" + (f"  {tools}" if tools else ""))
+    if rep["by_kind"]:
+        out.append("by what started the turns:")
+        for k, v in rep["by_kind"].items():
+            out.append(f"  {k:<13} {v['turns']:>4} turn(s) {v['steps']:>5} step(s)  {'$%.2f' % v['usd']:>8}  {v['share']:>4.0%}")
+        sh = rep["token_shares"]
+        out.append(f"the worth in cache reads {sh['cache_read']:.0%}, cache writes {sh['cache_write']:.0%}, "
+                   f"fresh input {sh['in']:.0%}, output (thinking included) {sh['out']:.0%}")
+    if rep["helpers"]:
+        out.append("helpers, not in the turns above: " + ", ".join(
+            f"{k} {v['steps']} step(s) ${v['usd']:.2f}" for k, v in rep["helpers"].items()))
+    if rep["unpriced_models"]:
+        out.append("no price yet for: " + ", ".join(rep["unpriced_models"]) + ": their steps are worth $0 here, "
+                   "as they are left out of hansa cost's dollars, so the tokens do not match")
+    if rep.get("coordinator_uncounted"):
+        out.append(rep["coordinator_uncounted"])
+    out.append("The total is the coordinator's row of hansa cost --by seat over the same window. A turn's length is "
+               "the conversation it reread at its first step (input + cache read + cache write).")
+    return "\n".join(out)
+
+
 def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool = False) -> str:
     """hansa diff: a task's changes against its base, limited to these paths when given. new: only what this
     attempt added on top of the attempt it continues from (hansa retry), without the base merged into it."""
