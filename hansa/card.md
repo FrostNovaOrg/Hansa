@@ -48,7 +48,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa ask "<request>"` | put a request on the principal's page; answering it there closes it |
 | `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
 | `hansa notes [PATH]` | the files under the desk's `notes/`, each with its size, lines and headings (with line numbers) |
-| `hansa notes archive FILE HEADING [--to OTHER]` | move the section of `notes/FILE` under the heading matching HEADING (its text without the #s, whole or a start that matches one heading), up to the next heading of the same or a higher level, to the end of `notes/archive/FILE` (or `notes/OTHER`), with a line saying when; refused, changing nothing, when it matches no heading or several |
+| `hansa notes archive FILE HEADING [--to OTHER]` | move the section of `notes/FILE` under the heading matching HEADING (its text, whole or a start that matches one heading; with #s in front, as in `"## Round 1"`, only a heading of that level), up to the next heading of the same or a higher level, to the end of `notes/archive/FILE` (or `notes/OTHER`), with a line saying when; refused, changing nothing, when it matches no heading or several |
 | `hansa help` | this card |
 
 Add `--json` to `status` or `cost` for machine-readable output.

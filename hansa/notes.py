@@ -100,7 +100,13 @@ def list_text(desk: Desk, name: str = "") -> str:
 
 
 def _match(heads: list, want: str) -> list:
-    want = want.strip().lstrip("#").strip()
+    """The headings WANT names: their text, whole or the start of it; WANT starting with #s ("## Round 1") names
+    only headings of that level."""
+    want = want.strip()
+    level = len(want) - len(want.lstrip("#"))
+    want = want.lstrip("#").strip()
+    if level:
+        heads = [h for h in heads if h[1] == level]
     whole = [h for h in heads if h[2] == want]
     return whole or [h for h in heads if want and h[2].startswith(want)]
 
@@ -133,16 +139,21 @@ def archive(desk: Desk, name: str, heading: str, to: str = "") -> str:
         raise SystemExit(f"hansa: the section would go to the file it is in ({_rel(desk, src)}); nothing was changed")
     if dst.exists() and not dst.is_file():
         raise SystemExit(f"hansa: {_rel(desk, dst)} is not a file; nothing was changed")
+    root = _root(desk)
+    blocked = next((p for p in dst.parents if (p == root or root in p.parents) and p.exists() and not p.is_dir()), None)
+    if blocked:
+        raise SystemExit(f"hansa: {_rel(desk, blocked)} is a file, so {_rel(desk, dst)} cannot be made under it; "
+                         f"nothing was changed")
     lines = _lines(src, strict=True)
     heads = headings(lines)
     found = _match(heads, heading)
     listed = lambda hs: "\n".join(f"  {i + 1:>5} {'#' * lvl} {t}" for i, lvl, t in hs)  # noqa: E731
     if not found:
-        raise SystemExit(f"hansa: no heading in {_rel(desk, src)} matches {heading!r} (its text without the #s, whole "
-                         f"or the start of it); nothing was changed. Its headings:\n{listed(heads) or '  (none)'}")
+        raise SystemExit(f"hansa: no heading in {_rel(desk, src)} matches {heading!r} (its text, whole or the start of "
+                         f"it; with #s in front, only a heading of that level); nothing was changed. Its headings:\n{listed(heads) or '  (none)'}")
     if len(found) > 1:
         raise SystemExit(f"hansa: {len(found)} headings in {_rel(desk, src)} match {heading!r}; give more of the one "
-                         f"to move. Nothing was changed. They are:\n{listed(found)}")
+                         f"to move, or #s in front for its level. Nothing was changed. They are:\n{listed(found)}")
     start, level, text = found[0]
     end = next((i for i, lvl, _ in heads if i > start and lvl <= level), len(lines))
     section = lines[start:end]

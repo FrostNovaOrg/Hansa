@@ -143,11 +143,22 @@ def machine_hint(r: dict) -> str:
     return ""
 
 
+WAITED = "it waited its turn (it needed no check, and none ran), then was not merged"
+
+
+def waited_text(r: dict) -> str:
+    """Why a merge that waited its turn without a check was not merged (merge_check_result {waited: True})."""
+    return f"{WAITED}: {str(r.get('note') or 'it could not be made').removesuffix('; nothing was merged')}"
+
+
 def merge_result_lines(m: dict) -> list:
     """What the last merge check found, for hansa show."""
     r = m.get("merge_check_result")
     if not r:
         return []
+    if r.get("waited"):  # it needed no check: it waited its turn behind other merges, and no check ran
+        return ["merge: " + (f"{WAITED}: " + r["conflict"].removeprefix("hansa: ") if r.get("conflict")
+                             else waited_text(r))]
     if r.get("conflict"):
         return ["merge check: nothing was merged; " + r["conflict"].removeprefix("hansa: ")]
     where = f"hansa merged it onto the base at {r.get('onto', '')[:10]}"
@@ -283,6 +294,7 @@ def status(desk: Desk) -> dict:
                     "check": None if not m.get("check") else m["check"]["ok"],
                     "check_could_not_run": bool((m.get("check") or {}).get("could_not_run")), "verify": verification(desk, m),
                     "merge_check": (m.get("merge_check_result") or {}).get("ok"),
+                    "merge_waited": bool((m.get("merge_check_result") or {}).get("waited")),
                     "merge_note": (m.get("merge_check_result") or {}).get("note")
                     or f"exit {(m.get('merge_check_result') or {}).get('exit')}"}
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
@@ -343,8 +355,8 @@ def status_text(st: dict) -> str:
         out += [f"  {m['id']} {m['lane']}: {m['title']} [{m['stat'] or 'no changes'}"
                 + ("; check could not run (the machine's problem, not the task's)" if m.get("check_could_not_run")
                    else {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]])
-                + (f"; merge check FAILED ({m['merge_note']}), nothing merged"
-                   if m.get("merge_check") is False else "")
+                + (f"; merge: {waited_text({'note': m['merge_note']})}" if m.get("merge_waited") else
+                   f"; merge check FAILED ({m['merge_note']}), nothing merged" if m.get("merge_check") is False else "")
                 + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
                 + (f"; {m['denied']} command(s) refused" if m["denied"] else "")
                 + (f"; holds the key of {', '.join(m['leaked'])}: cannot be merged" if m.get("leaked") else "")
@@ -480,7 +492,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         more = len(lines) - len(shown)
         if cut or more:
             out.append("  ... " + (f"{cut} more characters of this line" if cut else "")
-                       + (" and " if cut and more else "") + (f"{more} more lines" if more else "")
+                       + (" and " if cut and more else "") + (f"{more} more line{'s' if more > 1 else ''}" if more else "")
                        + f"; the whole report: hansa show {tid} --report")
     if background_note(m):
         out.append(background_note(m))
@@ -587,7 +599,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, v['task'], heard)} "
                        f"(hansa merge {tid} is held until it ends)")
     mr = m.get("merge_check_result") or {}
-    if mr and not mr.get("ok") and m["state"] == "done" and machine_hint(mr):
+    if mr.get("waited") and m["state"] == "done":
+        nxt["done"] = (f"hansa retry {tid} --update \"<how to settle the conflict>\" · hansa retry {tid} --fresh "
+                       f"\"<the same change on the current base>\"" if mr.get("conflict") else
+                       f"once what stopped it is fixed (the principal fixes a checkout; tell them with hansa ask): "
+                       f"hansa merge {tid} again")
+    elif mr and not mr.get("ok") and m["state"] == "done" and machine_hint(mr):
         nxt["done"] = (f"{recheck_step(mr, tid)} (runs the check "
                        f"again and merges if it passes) · hansa retry {tid} \"...\" · hansa merge {tid} --despite-check")
     elif mr and not mr.get("ok") and m["state"] == "done":
