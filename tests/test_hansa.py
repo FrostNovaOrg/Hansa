@@ -601,6 +601,9 @@ class DeskTest(unittest.TestCase):
         (self.tmp / "allowed").write_text("")
         sh("git", "config", "gpg.ssh.allowedSignersFile", str(self.tmp / "allowed"), cwd=self.repo)
         made = {}
+        # git writes the signed text to the signature program; a text larger than a pipe holds, written to a program
+        # that ended at once (false), killed git with SIGPIPE every time, and a short one now and then
+        body = "".join(f"line {n} of a long message\n" for n in range(12000))
         for kind, key, begin in (("openpgp", "gpg.program", "PGP SIGNATURE"), ("ssh", "gpg.ssh.program", "SSH SIGNATURE"),
                                  ("x509", "gpg.x509.program", "SIGNED MESSAGE")):
             made[kind] = self.tmp / f"{kind}-ran"
@@ -608,14 +611,17 @@ class DeskTest(unittest.TestCase):
             script.write_text(f"#!/bin/sh\ntouch '{made[kind]}'\n")
             script.chmod(0o755)
             sh("git", "config", key, str(script), cwd=self.repo)
-            commit = (f"tree {tree}\nparent {head}\n"
-                      "author A <a@example.com> 1700000000 +0000\ncommitter A <a@example.com> 1700000000 +0000\n"
-                      f"gpgsig -----BEGIN {begin}-----\n \n iQEzBAABCAAdFiEE\n -----END {begin}-----\n\nsigned\n")
-            signed = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=self.repo,
-                                    input=commit, capture_output=True, text=True, check=True).stdout.strip()
-            sh("git", "update-ref", f"refs/heads/{kind}", signed, cwd=self.repo)
-            for args in (["log", "--format=%G? %s", kind], ["show", "-s", "--format=%GS %GK", kind]):
-                self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
+            for name, message in ((kind, "signed\n"), (f"{kind}-long", f"signed\n\n{body}")):
+                commit = (f"tree {tree}\nparent {head}\n"
+                          "author A <a@example.com> 1700000000 +0000\ncommitter A <a@example.com> 1700000000 +0000\n"
+                          f"gpgsig -----BEGIN {begin}-----\n \n iQEzBAABCAAdFiEE\n -----END {begin}-----\n\n{message}")
+                signed = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=self.repo,
+                                        input=commit, capture_output=True, text=True, check=True).stdout.strip()
+                sh("git", "update-ref", f"refs/heads/{name}", signed, cwd=self.repo)
+                for _ in range(5):
+                    for args in (["log", "--format=%G? %s", name], ["show", "-s", "--format=%GS %GK", name]):
+                        code, _, err = self.hansa_git("a", *args)
+                        self.assertEqual(code, 0, (args, err))
         self.assertEqual([k for k, p in made.items() if p.exists()], [])
 
     def test_hansa_git_runs_as_the_desks_account_with_its_arguments_as_they_are(self):

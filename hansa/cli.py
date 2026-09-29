@@ -24,6 +24,7 @@ from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_ver
 
 CARD = Path(__file__).with_name("card.md")
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
+NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by hansa verify and the reviewer
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
@@ -291,10 +292,13 @@ def cmd_git(a):
     env.update(GIT_PAGER="cat", PAGER="cat", GIT_EDITOR="false", EDITOR="false", VISUAL="false",
                GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="false", SSH_ASKPASS="false")
     # the repository's own config may still name programs to run: an fsmonitor, diff.external, textconv drivers,
-    # gpg for signatures (also for a format such as %G?); a filter driver it names still runs, as the desk's account
+    # gpg for signatures (also for a format such as %G?); a filter driver it names still runs, as the desk's account.
+    # The signature programs become hansa's stand-in, which reads its input and fails: not false, which can end
+    # before git has written the signed text to it, and git then dies of SIGPIPE
     args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *args[1:]]
-    no_programs = ["-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "gpg.program=false",
-                   "-c", "gpg.ssh.program=false", "-c", "gpg.x509.program=false"]
+    no_sig = str(NO_SIGNATURE)
+    no_programs = ["-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", f"gpg.program={no_sig}",
+                   "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
     r = subprocess.run(["git", "--no-pager", *no_programs, *args],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
