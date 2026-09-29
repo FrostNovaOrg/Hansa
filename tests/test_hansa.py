@@ -423,7 +423,7 @@ class DeskTest(unittest.TestCase):
         kept = views.REPORT_CHARS - len("first\nsecond\n")
         self.assertIn("  " + "y" * kept + "\n", shown)
         self.assertNotIn("y" * (kept + 1), shown)
-        self.assertIn(f"  ... {50000 - kept} more characters of this line and 1 more lines; the whole report: "
+        self.assertIn(f"  ... {50000 - kept} more characters of this line and 1 more line; the whole report: "
                       f"hansa show {tid} --report", shown)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
@@ -624,6 +624,20 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(src.read_text(), self.NOTES)  # the section is in both files, not in neither
         self.assertIn("## Round 2\n", dst.read_text())
 
+    def test_hansa_notes_archive_picks_a_headings_level_by_its_hashes(self):
+        src = self.desk.notes_dir / "plan.md"
+        src.write_text("# Round 1\ntop\n## Round 1\nsub\n# Round 2\nnext\n")
+        code, _, err = self.hansa_notes("archive", "plan.md", "Round 1")
+        self.assertEqual(code, 1)
+        self.assertIn("2 headings in notes/plan.md match 'Round 1'", err)
+        code, out, _ = self.hansa_notes("archive", "plan.md", "## Round 1")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(src.read_text(), "# Round 1\ntop\n# Round 2\nnext\n")
+        self.assertTrue((self.desk.notes_dir / "archive" / "plan.md").read_text().startswith("## Round 1\n"))
+        self.assertEqual(self.hansa_notes("archive", "plan.md", "# Round")[0], 1)  # two at level 1 start so
+        self.assertEqual(self.hansa_notes("archive", "plan.md", "#Round 1")[0], 0)
+        self.assertEqual(src.read_text(), "# Round 2\nnext\n")
+
     def test_hansa_notes_archive_refuses_and_changes_nothing(self):
         (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
         (self.desk.notes_dir / "twice.md").write_text("# Todo\na\n# Todo\nb\n")
@@ -646,7 +660,10 @@ class DeskTest(unittest.TestCase):
                            (["plan.md", "Round 1", "--to", "out.md"], "a link that leads out of notes/"),
                            (["out/a.md", "Round 1"], "a link that leads out of notes/"),
                            (["missing.md", "Round 1"], "there is no file notes/missing.md"),
-                           (["plan.md", "Round 1", "--to", "plan.md"], "the file it is in")):
+                           (["plan.md", "Round 1", "--to", "plan.md"], "the file it is in"),
+                           (["plan.md", "Round 1", "--to", "twice.md/z"], "notes/twice.md is a file"),
+                           (["plan.md", "Round 1", "--to", "twice.md/y/z.md"], "notes/twice.md is a file"),
+                           (["plan.md", "### Round 1"], "no heading in notes/plan.md matches '### Round 1'")):
             code, _, err = self.hansa_notes("archive", *args)
             self.assertEqual(code, 1, args)
             self.assertIn(says, err, args)
@@ -1480,6 +1497,36 @@ class DeskTest(unittest.TestCase):
         merged = [e for e in self.events("task_merged") if e["task"] == t2]
         self.assertTrue(merged[0]["waited"])
         self.assertIn(f"{t2} merged into main in its turn", notify._item(self.desk, merged[0])[1])
+
+    def test_a_merge_that_waited_its_turn_and_was_refused_says_no_check_ran(self):
+        d, t1, t2 = self.two_lanes(check="sleep 1; test -f README.md")
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = ""  # t2 needs no check, and its lane has none
+        s["concurrency"] = 2
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.move_main()  # so t1 needs a merge check
+        self.hansa("merge", t1)
+        d.tick()
+        self.hansa("merge", t2)
+        sh("git", "checkout", "-q", "-b", "elsewhere", cwd=self.repo)  # the principal switched the checkout meanwhile
+        self.settle_merge(d, t1)
+        m2 = self.settle_merge(d, t2)
+        self.assertEqual((m2["state"], m2["merge_check_result"]["waited"]), ("done", True), m2)
+        says = "it waited its turn (it needed no check, and none ran), then was not merged: the checkout at"
+        shown = views.show_text(self.desk, t2)
+        self.assertIn(f"merge: {says}", shown)
+        self.assertIn("is on elsewhere, not main", shown)
+        self.assertNotIn("ran the lane's check there", shown)
+        self.assertNotIn("FAILED", shown)
+        self.assertNotIn("it checks the merge again", shown)
+        self.assertIn(f"hansa merge {t2} again", shown)
+        status = views.status_text(views.status(self.desk))
+        self.assertIn(f"merge: {says}", status)
+        self.assertNotIn("merge check FAILED", status.split(f"{t2} b:")[1].splitlines()[0])
+        ended = [e for e in self.events("merge_check_ended") if e["task"] == t2]
+        post = notify._item(self.desk, ended[0])[1]
+        self.assertIn(f"{t2}'s merge: {says}", post)
+        self.assertIn(f"hansa merge {t2} again", post)
 
     def test_a_merge_that_waited_is_checked_when_the_base_moved_meanwhile(self):
         d, t1, _ = self.two_lanes(check="sleep 1; test -f README.md")

@@ -374,8 +374,12 @@ def cmd_merge(a):
                         f"the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges exactly that if "
                         f"the check passes" if lane.get("check") else ""))
             note = unverified_note(desk, m)
-            print(f"{a.id} is not merged yet: merges go into {base} one at a time while a merge check runs or waits "
-                  f"there, in the order they were asked, so it waits for {ahead}. When its turn comes, hansa merges it "
+            checks = any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
+                         and not (x.get("merge_check") or {}).get("plain") for x in desk.tasks())
+            there = ("while a merge check runs or waits there" if checks else
+                     "while other merges wait there (none of them needs a check)")
+            print(f"{a.id} is not merged yet: merges go into {base} one at a time {there}, in the order they were "
+                  f"asked, so it waits for {ahead}. When its turn comes, hansa merges it "
                   f"{then}. {_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
                   + (f"\nnote: {note}. It is merged all the same when its turn comes: this is a note, not a stop"
                      if note else ""))
@@ -677,7 +681,8 @@ def cmd_wait(a):
     for m in ended:
         mc = m.get("merge_check_result") or {}
         print(f"{m['id']} {m['state']}: {m['title']}  (hansa show {m['id']})"
-              + (f"\n  its merge check did not pass, so nothing was merged: "
+              + (f"\n  its merge: {views.waited_text(mc)}" if m["state"] == "done" and mc.get("waited") else
+                 f"\n  its merge check did not pass, so nothing was merged: "
                  + (mc.get("note") or f"the check failed (exit {mc.get('exit')})")
                  if m["state"] == "done" and mc and not mc.get("ok") else
                  "\n  merged after its merge check passed" if m["state"] == "merged" and mc.get("ok") else ""))
@@ -1763,8 +1768,8 @@ def main(argv=None):
         "hansa notes [PATH]: the files under the desk's notes/ (or under notes/PATH), each with its size, its number "
         "of lines and its headings with their line numbers; under notes/archive/ only size and lines, unless PATH "
         "names it. hansa notes archive FILE HEADING [--to OTHER]: move the section of notes/FILE that starts at the "
-        "heading matching HEADING (its text without the #s, whole, or the start of it when that matches only one "
-        "heading) and runs up to the next heading of the same or a higher level, subsections with it, onto the end "
+        "heading matching HEADING (its text, whole, or the start of it when that matches only one heading; HEADING "
+        "starting with #s, such as \"## Round 1\", matches only headings of that level) and runs up to the next heading of the same or a higher level, subsections with it, onto the end "
         "of notes/OTHER (default: notes/archive/FILE, made when missing), under a line saying when it was moved. "
         "Both files must be inside notes/. When HEADING matches no heading or several, nothing is changed and the "
         "headings are listed. The other file is written first and the notes file replaced whole after it, so a "

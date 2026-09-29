@@ -2166,8 +2166,11 @@ def unverified_note(desk: Desk, m: dict) -> str:
 
 
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
-    """Nothing was merged: the task goes back to waiting for review, with the result saying why."""
+    """Nothing was merged: the task goes back to waiting for review, with the result saying why. A merge that
+    needed no check and waited its turn (plain) says so in its result (waited): no check ran for it."""
     plain = ((desk.meta(tid).get("merge_check") or {}).get("plain"))
+    if plain and result:
+        result = {**result, "waited": True}
     m = desk.change(tid, lambda x: None if x["state"] != "merging" else
                     {"state": "done", "merge_check": None, "merge_check_result": result})
     if m:

@@ -230,8 +230,10 @@ def _item(desk: Desk, e: dict):
             return None
         if kind == "merge_check_ended":
             key = ("merge", tid)
-            line = (f"{tid}'s {'merge' if e.get('waited') else 'merge check'} ended; nothing was merged: "
-                    f"{e.get('note') or 'the check failed'}: {m.get('title', '')} · next: {_next_step(desk, tid)}")
+            from .views import waited_text
+            said = (f"{tid}'s merge: {waited_text(e)}" if e.get("waited") else
+                    f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}")
+            line = f"{said}: {m.get('title', '')} · next: {_next_step(desk, tid)}"
         elif kind == "task_merged":
             how = ("in its turn behind a merge check, without a check of its own" if e.get("waited") else
                    "after its merge check passed")
