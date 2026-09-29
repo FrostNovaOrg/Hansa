@@ -156,11 +156,6 @@ def merge_result_lines(m: dict) -> list:
             + ["  " + plain(x) for x in r.get("tail", [])] + (["  " + hint] if hint else []))
 
 
-def _midnight() -> float:
-    t = time.localtime()
-    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
-
-
 def ready_now(desk: Desk, s: dict | None = None) -> list:
     """The providers that can take work now."""
     s = s or desk.settings()
@@ -226,8 +221,8 @@ def status(desk: Desk) -> dict:
     busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried
     last = last_round(desk)
     server = server_state(desk)
-    today = [m for m in tasks if (m.get("finished") or 0) >= _midnight()]
-    rows = cost.worker_rows(desk, _midnight())
+    day = time.time() - 86400  # the last 24 h, each thing by when it happened: not reset at midnight
+    rows = cost.worker_rows(desk, day)  # by when the run ended
     return {
         "desk": str(desk.root),
         "build": build(),
@@ -286,9 +281,10 @@ def status(desk: Desk) -> dict:
         # for the page: the latest requests the coordinator closed itself in the past week, with its reason
         "asks_closed": [{k: a.get(k) for k in ("id", "text", "closed", "reason")} for a in desk.asks()
                         if a.get("closed_by") == "coordinator" and a["closed"] >= time.time() - 7 * 86400][-5:],
-        "today": {"finished": len(today), "merged": sum(m["state"] == "merged" for m in today),
-                  "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
-                  "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
+        "last_24h": {"finished": sum((m.get("finished") or 0) >= day for m in tasks),
+                     "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
+                     "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
+                     "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
     }
 
 
@@ -355,8 +351,8 @@ def status_text(st: dict) -> str:
     if st["asks"]:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
-    t = st["today"]
-    out.append(f"today: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
+    t = st["last_24h"]
+    out.append(f"last 24 h: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
                f" (worth ${t['worker_usd']:.2f}; hansa cost for everything)")
     return "\n".join(out)
 

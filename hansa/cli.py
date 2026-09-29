@@ -1124,8 +1124,11 @@ def cmd_lane(a):
     desk = Desk.find(a.desk)
     if not a.action:
         lanes = desk.settings()["lanes"]
-        for name, ln in sorted(lanes.items()):
-            print(f"{name}  {ln['repo']}  base {ln.get('base', 'main')}  providers {' > '.join(ln['providers'])}")
+        rows = [(name, ln["repo"], f"base {ln.get('base', 'main')}", "providers " + " > ".join(ln["providers"]))
+                for name, ln in sorted(lanes.items())]
+        widths = [max((len(r[i]) for r in rows), default=0) for i in range(3)]
+        for r in rows:
+            print("  ".join(f"{x:<{w}}" for x, w in zip(r, widths)) + "  " + r[3])
         print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane L")
         return
     if a.action == "try":

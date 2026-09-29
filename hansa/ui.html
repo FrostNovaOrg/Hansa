@@ -85,7 +85,7 @@ const T = ZH ? {
   prices:"价目（美元／每百万 token）", in:"输入", out:"输出", cacheRead:"读缓存", cacheWrite:"写缓存", cacheWrite1h:"写缓存（1 小时）",
   addPrice:"加一个模型", pricesNote:"缓存价空着就按常见倍数算；第三方模型请填全。",
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
-  today:"今天", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
+  last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
@@ -131,7 +131,7 @@ const T = ZH ? {
   prices:"Prices (USD per million tokens)", in:"Input", out:"Output", cacheRead:"Cache read", cacheWrite:"Cache write", cacheWrite1h:"Cache write (1h)",
   addPrice:"Add model", pricesNote:"Blank cache prices use the usual multiples; fill them in for third-party models.",
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
-  today:"Today", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
+  last24h:"Last 24 h", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
   days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
   costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill.",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
@@ -215,12 +215,12 @@ async function loadStatus() {
     + (st.srt_missing ? " · " + st.srt_missing : "");
   $("#state").className = (st.paused || !st.server_up || (st.server && st.server.state === "stuck") || st.srt_missing) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});
-  const t = st.today;
+  const t = st.last_24h;
   $("#tab-status").replaceChildren(
     h("section", {}, h("div", {class:"row"},
       st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
                 : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)],
-      h("span", {class:"muted"}, `${T.today}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd.toFixed(2)} ${T.listValue}`))),
+      h("span", {class:"muted"}, `${T.last24h}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd.toFixed(2)} ${T.listValue}`))),
     section(T.lanes, table([T.lane, T.order, T.now], st.lanes.map(l => [l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : l.trying ? T.trying : T.free]))),
     st.running.length ? section(T.running, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
       st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""),
