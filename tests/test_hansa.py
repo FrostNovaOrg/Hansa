@@ -6090,14 +6090,19 @@ class DeskTest(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
         self.assertEqual((merging[t2]["phase"], merging[t2]["minutes"], merging[t2]["lane"]), ("running", 0, "b"))
-        self.assertEqual((merging[t3]["phase"], merging[t3]["busy_with"]), ("queued", t2))
-        self.assertIn(f"waits for lane b, busy with {t2}", merging[t3]["where"])  # what hansa status says
+        # t3 waits for t2's merge check on the same repository and base, which also keeps lane b busy
+        self.assertEqual((merging[t3]["phase"], merging[t3]["busy_with"], merging[t3]["waits_for"]),
+                         ("queued", t2, {"id": t2, "lane": "b"}))
+        self.assertEqual(merging[t3]["where"], f"merge check queued: waits for {t2}'s merge check on lane b")  # as hansa status says
         # shown with the tasks waiting for review, in both languages, as hansa status puts it
         self.assertIn("st.review.length || (st.merging || []).length ? section(T.review", page)
+        self.assertIn("m.waits_for ? T.mcQueuedAhead(m.waits_for) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)", page)
         self.assertIn("`merge check running for ${n} min`", page)
+        self.assertIn("`merge check queued: waits for ${w.id}'s merge check on lane ${w.lane}`", page)
         self.assertIn("`merge check queued: waits for lane ${lane}, busy with ${id}`", page)
         self.assertIn("`合并验收已跑了 ${n} 分钟`", page)
-        self.assertIn("合并验收在排队：等工作线 ${lane} 空出来", page)
+        self.assertIn("`合并验收在排队：同一个仓库和基础分支一次只跑一个合并验收，先等工作线 ${w.lane} 上 ${w.id} 的合并验收`", page)
+        self.assertIn("`合并验收在排队：等工作线 ${lane} 空出来（现在在做 ${id}）`", page)
 
     def test_the_page_shows_how_long_the_check_itself_has_run(self):
         skip_unless_ports(self)
