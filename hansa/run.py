@@ -2033,7 +2033,8 @@ def finish_check(desk: Desk, tid: str) -> dict:
 # or `hansa merge --recheck` of any task on such a lane (merge_check {recheck: True, by: who asked}).
 # The task is "merging" meanwhile, with merge_check {phase: queued | starting | running, ...}; hansa serve
 # runs it when the lane is free, in the lane's worktree, and it ends in "merged", or back in "done" with
-# merge_check_result saying why nothing was merged.
+# merge_check_result saying why nothing was merged. One runs at a time per repository and base branch, in
+# the order the merges were asked (merge_check.queued); others wait for it (merge_check_ahead).
 MERGE_FILES = ("merge-check.log", "merge-setup.log", "merge-check.err")
 MERGE_MOVES = 2  # the base moved this often while its merge was being checked: hansa stops trying
 
@@ -2048,6 +2049,35 @@ def lane_occupied(m: dict) -> bool:
     """Whether this task holds its lane's worktree now: a worker or check on it, or its merge check."""
     return (m["state"] == "running" and m.get("kind") != "design") or \
         (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running"))
+
+
+def merge_target(s: dict, lane_name) -> tuple | None:
+    """The repository and base branch a lane's merges move; None for a lane not in settings."""
+    lane = s["lanes"].get(lane_name)
+    if not lane:
+        return None
+    return str(Path(lane["repo"]).expanduser().resolve()), lane.get("base") or "main"
+
+
+def merge_order(m: dict) -> tuple:
+    """A merge check's place in line: when its merge was asked (kept when it is checked again)."""
+    return (m.get("merge_check") or {}).get("queued") or 0, m["id"]
+
+
+def merge_check_ahead(s: dict, m: dict, tasks: list):
+    """The merge check a queued one waits for: one at a time runs per repository and base branch, in the order
+    the merges were asked, so each is checked on the base as the one before left it. The one running there, or
+    else the one asked earlier that is still queued; None when this one is first."""
+    if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase", "queued") != "queued":
+        return None
+    at = merge_target(s, m.get("lane"))
+    if not at:
+        return None
+    others = [x for x in tasks if x["id"] != m["id"] and x["state"] == "merging" and merge_target(s, x.get("lane")) == at]
+    running = [x for x in others if (x.get("merge_check") or {}).get("phase") in ("starting", "running")]
+    earlier = sorted((x for x in others if (x.get("merge_check") or {}).get("phase", "queued") == "queued"
+                      and merge_order(x) < merge_order(m)), key=merge_order)
+    return (running or earlier or [None])[0]
 
 
 def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
@@ -2671,14 +2701,22 @@ class Dispatcher:
         tasks = desk.tasks()
         busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
         free = s["concurrency"] - sum(map(lane_occupied, tasks))
-        for m in tasks:
+        # one merge check at a time per repository and base branch, in the order the merges were asked: one
+        # that ran beside another would be checked on a base that the other's merge then moves
+        held = {merge_target(s, m.get("lane")) for m in tasks
+                if m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running")}
+        for m in sorted(tasks, key=merge_order):
             if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
                 continue
             ln = m.get("lane")
             if ln not in s["lanes"]:
                 end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": f"lane {ln} is no longer in settings"})
                 continue
+            at = merge_target(s, ln)
+            if at in held:
+                continue
             if ln in busy or free <= 0:
+                held.add(at)  # first in line: the ones after it wait for it
                 continue
             try:
                 proc = start_merge_check(desk, m["id"], ln, s["lanes"][ln])
@@ -2696,7 +2734,10 @@ class Dispatcher:
             if proc:
                 self.merge_procs[m["id"]] = proc
                 busy.add(ln)
+                held.add(at)
                 free -= 1
+            elif (desk.meta(m["id"]).get("merge_check") or {}).get("phase") == "queued":
+                held.add(at)  # merged at once onto a base that had moved: checked again, still first in line
 
     def tries(self, s: dict) -> None:
         """Finish tries that ended, stop those over the lane's time, finish those an earlier server left, and

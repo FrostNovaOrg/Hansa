@@ -11,8 +11,8 @@ from pathlib import Path
 from . import build, cost, installed, installed_text, notify
 from .desk import Desk, is_git_rule, read_json, write_json
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
-                  markers_text, not_looking, progress_of, provider_problem, serve_code, server_state, server_text, srt_needed, srt_problem,
-                  srt_record, srt_when, tried_lanes, waiting_reason)
+                  markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
+                  server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -84,6 +84,13 @@ def merge_check_busy_with(desk: Desk, m: dict, tasks: list | None = None):
                  if x.get("lane") == m.get("lane") and lane_occupied(x) and x["id"] != m["id"]), None)
 
 
+def merge_check_waits_for(desk: Desk, m: dict, tasks: list | None = None) -> str:
+    """The merge check on the same repository and base branch that a queued one waits for, in words ("t0123's
+    merge check on lane a"); '' when it is first in line."""
+    x = merge_check_ahead(desk.settings(), m, tasks if tasks is not None else desk.tasks())
+    return f"{x['id']}'s merge check on lane {x.get('lane')}" if x else ""
+
+
 def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
     """Where a merging task's merge check is, in one line."""
     mc = m.get("merge_check") or {}
@@ -94,8 +101,10 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
         return (f"merge check running for {_mins(mc.get('started'))} min{again}: {m['id']} merged onto {base} at "
                 f"{mc.get('onto', '')[:10]}, then " + ("the lane's setup and " if mc.get("setup") else "")
                 + f"check: {mc.get('command', '')}")
+    ahead = merge_check_waits_for(desk, m, tasks)
     other = merge_check_busy_with(desk, m, tasks)
-    return (f"merge check queued{again}: " + (f"waits for lane {lane}, busy with {other}" if other else
+    return (f"merge check queued{again}: " + (f"waits for {ahead}" if ahead else
+                                              f"waits for lane {lane}, busy with {other}" if other else
                                               not_looking(desk)
                                               or "starts when `hansa serve` next looks (within seconds)"))
 
@@ -258,6 +267,8 @@ def status(desk: Desk) -> dict:
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
                      "minutes": _mins((m.get("merge_check") or {}).get("started")),
                      "busy_with": merge_check_busy_with(desk, m, tasks),
+                     "waits_for": {k: x.get(k) for k in ("id", "lane")}
+                     if (x := merge_check_ahead(s, m, tasks)) else None,
                      "again": bool((m.get("merge_check") or {}).get("moves")),
                      "where": merge_check_text(desk, m, tasks)} for m in merging],
         "review": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "stat": m.get("stat", ""),

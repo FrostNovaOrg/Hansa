@@ -204,7 +204,9 @@ def task_line(desk: Desk, m: dict) -> str:
     elif st in ("failed", "cancelled") and m.get("error") and m.get("error") != st:
         head += f" ({str(m['error'])[:200]})"
     elif st == "merging":
-        head += " (its merge check is queued or running)"
+        from .views import merge_check_waits_for
+        ahead = merge_check_waits_for(desk, m)
+        head += f" (its merge check is queued and waits for {ahead})" if ahead else " (its merge check is queued or running)"
     from .views import background_note
     note = background_note(m)
     return f"{head} · next: {_next_step(desk, tid)}" + (f" · {note}" if note else "")
