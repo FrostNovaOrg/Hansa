@@ -1134,7 +1134,7 @@ def cmd_lane(a):
             if a.base is not None:
                 _lane_value("base", [a.base])
             if a.like:
-                if a.repo:
+                if a.repo is not None:  # an empty --repo too: it is not ignored
                     raise SystemExit(f"hansa: --like {a.like} takes the repository of lane {a.like}, which its "
                                      f"check and setup are for, so it cannot come with --repo; nothing was changed")
                 if a.like not in s["lanes"]:
@@ -1169,14 +1169,23 @@ def cmd_lane(a):
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
-            copied = desk.lanes_dir / (a.like or "") / "brief.md"
-            if a.like and copied.is_file():  # the standing instructions, copied as the settings are
-                brief.write_text(copied.read_text(encoding="utf-8"), encoding="utf-8")
+            aside = None
+            if a.like:  # the standing instructions, copied as the settings are
+                copied = desk.lanes_dir / a.like / "brief.md"
+                text = copied.read_text(encoding="utf-8") if copied.is_file() else ""
+                old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
+                if old.strip() and old != text:  # left by an earlier lane of this name: set aside, not lost
+                    aside = brief.with_name(f"brief-before-{time.strftime('%Y%m%d-%H%M%S')}.md")
+                    aside.write_text(old, encoding="utf-8")
+                brief.write_text(text, encoding="utf-8")
             elif not brief.exists():
                 brief.write_text("", encoding="utf-8")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
                   + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check") if ln.get(f)))
+            if aside:
+                print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
+                      f"{a.like}'s, and the earlier ones are kept in {aside}")
             for f in OUTSIDE_WORKER:
                 if ln.get(f):
                     desk.event("lane_command_changed", lane=a.name, field=f, old="", new=ln[f])
@@ -1211,6 +1220,8 @@ def cmd_lane(a):
             if differs or changed:
                 print(f"try it: hansa lane try {a.name}")
             return
+        if a.action == "remove":
+            return _lane_remove(desk, a, s, new)
         if a.name not in s["lanes"]:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
         if a.action == "brief":  # through hansa only: on a server the coordinator's own tools run as root
@@ -1225,22 +1236,6 @@ def cmd_lane(a):
             desk.event("lane_brief_changed", lane=a.name, new=text)
             print(f"lane {a.name}: standing instructions replaced ({len(text)} characters); "
                   f"every worker in the lane gets them from its next task on")
-            return
-        if a.action == "remove":
-            tasks = [m for m in desk.tasks() if m.get("lane") == a.name]
-            busy = [m["id"] for m in tasks if m["state"] in ("queued", "running", "merging")]
-            if busy:
-                raise SystemExit(f"hansa: lane {a.name} still has {', '.join(busy)} queued or running; nothing was "
-                                 f"changed. Wait for them (hansa wait) or cancel them first")
-            # merging a finished task needs its lane's repo and base
-            review = [m["id"] for m in tasks if m["state"] == "done" and m.get("kind") != "verify"]
-            if review:
-                raise SystemExit(f"hansa: lane {a.name} still has {', '.join(review)} finished and waiting for review; "
-                                 f"nothing was changed. Merging needs the lane: clear them first with hansa merge "
-                                 f"or hansa cancel")
-            del new["lanes"][a.name]
-            _save(desk, new)
-            print(f"lane {a.name} removed; its brief stays in {desk.lanes_dir / a.name}")
             return
         value = _lane_value(a.field, a.values)
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
@@ -1269,6 +1264,149 @@ def cmd_lane(a):
     if a.field in ("setup", "check", "network", "write") and old != value and (ln.get("setup") or ln.get("check")):
         print(f"To see that the lane's setup and check work in its sandbox before a task needs them: "
               f"hansa lane try {a.name}")
+
+
+def _lane_worktrees(desk: Desk, name: str, lanes: dict) -> list:
+    """The worktrees lane NAME made on the desk that are still there: its own and its design sessions'.
+    A folder another lane has by its name is that lane's: x-design is lane x's design worktree."""
+    out = []
+    for wt in (desk.worktrees_dir / name, desk.worktrees_dir / f"{name}-design"):
+        theirs = wt.name != name and wt.name in lanes
+        theirs = theirs or (wt.name == name and name not in lanes and name.endswith("-design")
+                            and name[:-len("-design")] in lanes)
+        if os.path.lexists(wt) and not theirs:
+            out.append(wt)
+    return out
+
+
+def _worktree_repo(desk: Desk, wt: Path, repos: list):
+    """The repository whose git lists this worktree: the one hansa remembered when it made it, or one of
+    these; None when none does."""
+    from .run import _known_git_files, git_admin_dirs
+    line = _known_git_files(desk).get(str(wt)) or ""
+    found = []
+    if line.startswith("gitdir:"):  # <common>/worktrees/<id>; its commondir file leads back to <common>
+        admin = Path(line[len("gitdir:"):].strip())
+        try:
+            found.append(str((admin / (admin / "commondir").read_text(encoding="utf-8").strip()).resolve()))
+        except OSError:
+            pass
+    for repo in dict.fromkeys([*found, *repos]):
+        try:
+            if len(git_admin_dirs(Path(repo), wt)) == 1:
+                return Path(repo)
+        except (RuntimeError, OSError):
+            continue
+    return None
+
+
+def _worktree_state(desk: Desk, wt: Path, repos: list) -> dict:
+    """What a worktree holds that removing it would lose: changes not committed and commits no branch keeps.
+    "why": hansa cannot tell, or runs no git there."""
+    from .run import check_git_file, sandbox_leftovers, wgit
+    repo = _worktree_repo(desk, wt, repos)
+    if repo is None:
+        return {"why": "no repository hansa knows of lists it as a worktree, so hansa cannot tell whose it is "
+                       "and runs no git there"}
+    try:
+        check_git_file(desk, wt, repo)  # no git through a .git file hansa did not see git write
+        left = set(sandbox_leftovers(desk, wt))
+        try:
+            changed = wgit(desk, wt, "diff", "--name-only", "-z", "HEAD").split("\0")
+        except RuntimeError:  # no commit at HEAD: everything is uncommitted
+            changed = wgit(desk, wt, "ls-files", "-z").split("\0")
+        untracked = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+        try:
+            commits = wgit(desk, wt, "log", "--format=%h %s", "HEAD", "--not", "--branches").splitlines()
+        except RuntimeError:
+            commits = []
+    except RuntimeError as e:
+        return {"why": str(e)}
+    changes = [f for f in dict.fromkeys([*changed, *untracked]) if f and f not in left]
+    return {"repo": repo, "changes": changes, "commits": commits}
+
+
+def _held_text(wt: Path, st: dict) -> str:
+    lines = [f"  {wt}:"]
+    if st["changes"]:
+        more = len(st["changes"]) - 10
+        lines.append(f"    not committed: {', '.join(st['changes'][:10])}" + (f" (and {more} more)" if more > 0 else ""))
+    if st["commits"]:
+        more = len(st["commits"]) - 5
+        lines += [f"    on no branch: {c}" for c in st["commits"][:5]] + ([f"    (and {more} more)"] if more > 0 else [])
+    return "\n".join(lines)
+
+
+def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool) -> str:
+    """git worktree remove, after putting what it holds on a new branch when keep; the branch's name or ''."""
+    from .run import _remember_git_file, commit_work, wgit
+    kept = ""
+    if keep and (st["changes"] or st["commits"]):
+        kept = f"hansa-kept/{wt.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+        wgit(desk, wt, "checkout", "-q", "-b", kept)
+        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed")
+    # --force: what a worker's sandbox left there is nobody's work, and git would refuse for it
+    git("worktree", "remove", "--force", str(wt), cwd=st["repo"])
+    _remember_git_file(desk, wt, None)
+    desk.event("lane_worktree_removed", lane=lane, worktree=str(wt), **({"kept": kept} if kept else {}))
+    return kept
+
+
+def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
+    """Remove a lane and its worktrees, or the worktrees an earlier lane remove left of a lane that is gone.
+    Work a worktree holds that no branch keeps is not lost: without --keep or --discard nothing is removed."""
+    lanes, name = s["lanes"], a.name
+    known = name in lanes
+    wts = _lane_worktrees(desk, name, lanes)
+    if not known and not wts:
+        raise SystemExit(f"hansa: there is no lane {name}, and no worktree of one; lanes: "
+                         f"{', '.join(sorted(lanes)) or 'none'}")
+    if a.keep and a.discard:
+        raise SystemExit("hansa: --keep puts what the worktree holds on a new branch and --discard drops it; choose "
+                         "one. Nothing was changed")
+    what = f"lane {name}" if known else f"lane {name}, which is gone,"
+    tasks = [m for m in desk.tasks() if m.get("lane") == name]
+    busy = [m["id"] for m in tasks if m["state"] in ("queued", "running", "merging")]
+    if busy:
+        raise SystemExit(f"hansa: {what} still has {', '.join(busy)} queued or running; nothing was "
+                         f"changed. Wait for them (hansa wait) or cancel them first")
+    # merging a finished task needs its lane's repo and base
+    review = [m["id"] for m in tasks if m["state"] == "done" and m.get("kind") != "verify"]
+    if review:
+        raise SystemExit(f"hansa: {what} still has {', '.join(review)} finished and waiting for review; "
+                         f"nothing was changed. Merging needs the lane: clear them first with hansa merge "
+                         f"or hansa cancel")
+    if read_try(desk, name).get("phase") in ("queued", "running"):
+        raise SystemExit(f"hansa: a try of lane {name} is queued or running in its worktree; nothing was changed. "
+                         f"Wait for it (hansa lane try {name} waits too), then remove the lane")
+    repos = list(dict.fromkeys([*([lanes[name]["repo"]] if known else []), *(x["repo"] for x in lanes.values())]))
+    states = {wt: _worktree_state(desk, wt, repos) for wt in wts}
+    held = {wt: st for wt, st in states.items() if st.get("changes") or st.get("commits")}
+    if held and not (a.keep or a.discard):
+        raise SystemExit(
+            f"hansa: {'lane ' + name + ' was not removed' if known else 'the worktree of lane ' + name + ' was not removed'}"
+            f": its worktree holds work that no branch keeps, which removing it would lose:\n"
+            + "\n".join(_held_text(wt, st) for wt, st in held.items())
+            + f"\nTo keep it on a new branch (hansa-kept/{name}-DATE) of its repository and then remove "
+              f"{'the lane and ' if known else ''}the worktree: hansa lane remove {name} --keep. To drop it: "
+              f"hansa lane remove {name} --discard. Nothing was changed")
+    if known:
+        del new["lanes"][name]
+        _save(desk, new)
+        print(f"lane {name} removed; its brief stays in {desk.lanes_dir / name}")
+    for wt, st in states.items():
+        if st.get("why"):
+            print(f"Its worktree {wt} stays: {st['why']}. The principal can look at it and delete it; if git in its "
+                  f"repository still lists it, git worktree prune there clears that")
+            continue
+        try:
+            kept = _remove_worktree(desk, name, wt, st, a.keep)
+        except RuntimeError as e:
+            print(f"Its worktree {wt} stays: {e}. hansa lane remove {name} tries again")
+            continue
+        print(f"Its worktree {wt} is removed, with git worktree remove in {st['repo']}, as the desk's account"
+              + (f"; what it held that no branch kept is on branch {kept} there" if kept else
+                 "; what it held that no branch kept is dropped" if held.get(wt) else ""))
 
 
 def _lane_try(desk: Desk, a) -> None:
@@ -1550,8 +1688,16 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("text", nargs="*")
     q.add_argument("--file", help="a file with the new instructions; - reads them from standard input")
-    q = lane.add_parser("remove", help="remove a lane with no task queued, running or waiting for review")
+    q = lane.add_parser("remove", help="remove a lane with no task queued, running or waiting for review, and its "
+                        "worktree", description=(
+        "Remove a lane with no task queued, running or waiting for review, and its worktrees (git worktree remove, "
+        "as the desk's account). When a worktree holds changes not committed or commits no branch keeps, nothing is "
+        "removed unless --keep or --discard says what to do with them. For a lane that is gone but whose worktree "
+        "is still there, it removes the worktree the same way. The lane's brief stays."))
     q.add_argument("name")
+    q.add_argument("--keep", action="store_true", help="put what the worktree holds that no branch keeps on a new "
+                   "branch hansa-kept/NAME-DATE of the lane's repository, then remove it")
+    q.add_argument("--discard", action="store_true", help="drop what the worktree holds that no branch keeps")
     q = lane.add_parser("try", help="run a lane's setup and check once in its worktree and sandbox, as for a task "
                         "but with no worker, and print how they ended")
     q.add_argument("name")
