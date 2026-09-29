@@ -6048,6 +6048,98 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(rep["by"]["seat"]["worker"]["tokens"], 6300)
         self.assertEqual(rep["unpriced_models"], [])
 
+    def test_cost_turns_shows_where_the_coordinators_money_goes(self):
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        t0 = time.time() - 3600
+
+        def at(n):
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t0 + n * 60))
+
+        def call(n, mid, u, tool=None, side=False):
+            usage = {"input_tokens": u[0], "output_tokens": u[1], "cache_read_input_tokens": u[2],
+                     "cache_creation_input_tokens": u[3],
+                     "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": u[3]}}
+            content = [{"type": "tool_use", "id": f"tu_{mid}_{tool}", "name": tool, "input": {}}] if tool else \
+                [{"type": "text", "text": "SECRET-ANSWER"}]
+            return {"type": "assistant", "timestamp": at(n), "isSidechain": side,
+                    "message": {"id": mid, "model": "claude-opus-5", "content": content, "usage": usage}}
+
+        def user(n, kind=None, meta=False, content="SECRET-PROMPT", side=False):
+            return {"type": "user", "timestamp": at(n), "isSidechain": side, **({"isMeta": True} if meta else {}),
+                    **({"origin": {"kind": kind}} if kind else {}), "message": {"role": "user", "content": content}}
+
+        result = [{"type": "tool_result", "tool_use_id": "x", "content": "SECRET-OUTPUT"}]
+        lines = [
+            user(0, "human"),  # typed: one message over three lines, then a tool result and a second step
+            {**call(0, "m1", (10, 50, 1000, 200)), "message": {**call(0, "m1", (10, 50, 1000, 200))["message"],
+                                                               "content": [{"type": "thinking", "thinking": "SECRET"}]}},
+            call(0, "m1", (10, 50, 1000, 200), "Bash"),
+            call(0, "m1", (10, 50, 1000, 200), "Read"),
+            user(1, content=result),
+            call(1, "m2", (5, 20, 1400, 100), "Bash"),
+            {"type": "queue-operation", "timestamp": at(2)},
+            user(3, "peer", meta=True),  # a hansa post: isMeta, yet a turn of its own
+            call(3, "m3", (4, 30, 1500, 300)),
+            {"type": "system", "subtype": "scheduled_task_fire", "timestamp": at(5)},  # a scheduled wakeup
+            user(5, meta=True),  # the note that follows a wakeup: no origin, carries on
+            call(5, "m4", (3, 10, 1800, 50)),
+            user(5, "peer", meta=True),  # a post right after a wakeup: its own turn, not the wakeup's
+            call(5, "m6", (1, 5, 1860, 20), "Bash"),
+            user(6, "task-notification"),  # a helper's result
+            user(6, content="SECRET-SIDE", side=True),  # a sidechain: a helper's, not a turn
+            call(6, "s1", (7, 70, 700, 70), "Grep", side=True),
+            call(7, "m5", (2, 40, 1900, 400), "Agent"),
+        ]
+        text = "\n".join(json.dumps(x) for x in lines) + "\n" + json.dumps(user(8, "human"))[:40]  # half-written
+        (proj / "sess-1234abcd.jsonl").write_text(text)
+        helper = proj / "sess-1234abcd" / "subagents"
+        helper.mkdir(parents=True)
+        (helper / "agent-1.jsonl").write_text(json.dumps(call(6, "h1", (1, 10, 100, 10), "Glob", side=True)) + "\n")
+        (helper / "agent-1.meta.json").write_text(json.dumps({"agentType": "scout"}))
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.desk.save_settings(s)
+        rep = cost.turns(self.desk, 1)
+        got = [(t["kind"], t["steps"], t["length"], t["tools"]) for t in rep["turns"]]
+        self.assertEqual(got, [("typed", 2, 1210, {"Bash": 2, "Read": 1}), ("peer", 1, 1804, {}),
+                               ("wakeup", 1, 1853, {}), ("peer", 1, 1881, {"Bash": 1}),
+                               ("helper result", 1, 2302, {"Agent": 1})])
+        prices = s["prices"]
+
+        def worth(u):
+            return cost.value("claude-opus-5", {"in": u[0], "out": u[1], "cache_read": u[2], "cache_write": u[3],
+                                                "cache_write_5m": 0, "cache_write_1h": u[3]}, prices)
+        typed = worth((10, 50, 1000, 200)) + worth((5, 20, 1400, 100))
+        self.assertAlmostEqual(rep["turns"][0]["usd"], typed, places=6)
+        self.assertEqual({k: (v["turns"], v["steps"]) for k, v in rep["by_kind"].items()},
+                         {"typed": (1, 2), "peer": (2, 2), "wakeup": (1, 1), "helper result": (1, 1)})
+        self.assertAlmostEqual(sum(v["share"] for v in rep["by_kind"].values()), 1.0, places=6)
+        self.assertAlmostEqual(rep["by_kind"]["typed"]["share"], typed / rep["total"]["usd"], places=4)
+        self.assertAlmostEqual(sum(rep["token_shares"].values()), 1.0, places=6)
+        steps = [(10, 50, 1000, 200), (5, 20, 1400, 100), (4, 30, 1500, 300), (3, 10, 1800, 50), (1, 5, 1860, 20),
+                 (2, 40, 1900, 400)]
+        pr = cost.price_for("claude-opus-5", prices)
+        reads = sum(u[2] for u in steps) * pr["cache_read"] / 1e6
+        self.assertAlmostEqual(rep["token_shares"]["cache_read"], reads / rep["total"]["usd"], places=4)
+        self.assertEqual((rep["total"]["turns"], rep["total"]["steps"]), (5, 6))
+        self.assertEqual({k: v["steps"] for k, v in rep["helpers"].items()}, {"helper": 1, "helper:scout": 1})
+        seat = cost.report(self.desk, 1)["by"]["seat"]
+        self.assertAlmostEqual(rep["total"]["usd"], seat["coordinator"]["usd"], places=6)
+        self.assertEqual(seat["coordinator"]["tokens"], sum(sum(u) for u in steps))
+        self.assertAlmostEqual(rep["helpers"]["helper"]["usd"], seat["helper"]["usd"], places=6)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "cost", "--turns", "--days", "1"])
+        text = out.getvalue()
+        self.assertNotIn("SECRET", text)
+        self.assertIn("helper result", text)
+        self.assertIn("Bash 2, Read 1", text)
+        self.assertIn(f"worth ${seat['coordinator']['usd']:.2f}", text)
+        later = cost.turns(self.desk, 1, since=t0 + 4 * 60)  # --since: the wakeup, the post and the helper's result
+        self.assertEqual([t["kind"] for t in later["turns"]], ["wakeup", "peer", "helper result"])
+
     def test_cost_rows_add_up_to_the_total_in_every_view(self):
         tid = self.desk.new_task("Add hello.txt")
         self.settle(Dispatcher(self.desk), tid)

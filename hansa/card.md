@@ -350,6 +350,7 @@ here; work that needs code changed or a browser goes to a worker.
   and run `hansa cost --since HH:MM --by seat` when it is done.
   Your own usage is counted only when you run with the workers' Claude login;
   by lane or task it is a row of its own, (coordinator), so the rows add up.
+  `hansa cost --turns` shows where the coordinator's own money goes.
 - When `hansa status` says cost audit on, the principal wants the cost in every
   report: end each report with what that round of work cost (as above), and
   point out anything unusual, such as one task costing far more than the others

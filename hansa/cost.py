@@ -37,16 +37,24 @@ def price_for(model: str, prices: dict):
             "cache_write": cw, "cache_write_1h": pr.get("cache_write_1h", cw if "cache_write" in pr else i * 2)}
 
 
-def value(model: str, u: dict, prices: dict):
-    """List-price dollars for one usage record, or None when the model has no price."""
+def parts(model: str, u: dict, prices: dict):
+    """List-price dollars for one usage record by kind of token (in, out, cache_read, cache_write),
+    or None when the model has no price."""
     pr = price_for(model, prices)
     if pr is None:
         return None
     w5, w1h = u.get("cache_write_5m"), u.get("cache_write_1h")
     if w5 is None and w1h is None:  # not split: Claude Code writes one-hour cache entries
         w5, w1h = 0, u.get("cache_write", 0)
-    return (u.get("in", 0) * pr["in"] + u.get("out", 0) * pr["out"] + u.get("cache_read", 0) * pr["cache_read"]
-            + (w5 or 0) * pr["cache_write"] + (w1h or 0) * pr["cache_write_1h"]) / 1e6
+    return {"in": u.get("in", 0) * pr["in"] / 1e6, "out": u.get("out", 0) * pr["out"] / 1e6,
+            "cache_read": u.get("cache_read", 0) * pr["cache_read"] / 1e6,
+            "cache_write": ((w5 or 0) * pr["cache_write"] + (w1h or 0) * pr["cache_write_1h"]) / 1e6}
+
+
+def value(model: str, u: dict, prices: dict):
+    """List-price dollars for one usage record, or None when the model has no price."""
+    p = parts(model, u, prices)
+    return None if p is None else sum(p.values())
 
 
 def _day(ts: float) -> str:
@@ -96,46 +104,77 @@ def coordinator_dirs(desk: Desk) -> list:
     return [(name, Path(home) / "projects" / slug(desk.root)) for home, name in homes.items()]
 
 
-def transcript_rows(desk: Desk, since: float) -> list:
-    s = desk.settings()
-    per = defaultdict(lambda: defaultdict(int))
-    seen = set()
+def transcript_files(desk: Desk, since: float):
+    """(provider, file, seat) for every session record file of the coordinator and its helpers
+    changed since then."""
     for provider, proj in coordinator_dirs(desk):
         if not proj.is_dir():
             continue
-        for f in proj.rglob("*.jsonl"):
-            if f.stat().st_mtime < since:
+        for f in sorted(proj.rglob("*.jsonl")):
+            if f.stat().st_mtime >= since:
+                yield provider, f, helper_seat(f) if "subagents" in f.parts else "coordinator"
+
+
+def records(f: Path, usage_only: bool = False):
+    """The records of one file. The session may be writing it: a half-written last line is skipped."""
+    with open(f, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if usage_only and '"usage"' not in line:
                 continue
-            seat = helper_seat(f) if "subagents" in f.parts else "coordinator"
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    if '"usage"' not in line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    msg = d.get("message") or {}
-                    u, mid = msg.get("usage"), msg.get("id")
-                    if not u or not mid or mid in seen or str(msg.get("model", "")).startswith("<"):
-                        continue
-                    seen.add(mid)
-                    ts = _ts(d.get("timestamp"))
-                    if ts < since:
-                        continue
-                    cc = u.get("cache_creation") or {}
-                    row = per[(_day(ts), seat, msg.get("model", "?"), provider)]
-                    row["in"] += u.get("input_tokens", 0)
-                    row["out"] += u.get("output_tokens", 0)
-                    row["cache_read"] += u.get("cache_read_input_tokens", 0)
-                    row["cache_write"] += u.get("cache_creation_input_tokens", 0)
-                    row["cache_write_5m"] += cc.get("ephemeral_5m_input_tokens", 0)
-                    row["cache_write_1h"] += cc.get("ephemeral_1h_input_tokens", 0)
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(d, dict):
+                yield d
+
+
+def step(d: dict, seen: set, since: float):
+    """(model, usage in hansa's fields, time) for the first line of one model call in the window, else None.
+    A message is spread over several lines with the same id and usage: it counts once."""
+    msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+    u, mid = msg.get("usage"), msg.get("id")
+    if not u or not mid or mid in seen or str(msg.get("model", "")).startswith("<"):
+        return None
+    seen.add(mid)
+    ts = _ts(d.get("timestamp"))
+    if ts < since:
+        return None
+    cc = u.get("cache_creation") or {}
+    out = {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0),
+           "cache_read": u.get("cache_read_input_tokens", 0), "cache_write": u.get("cache_creation_input_tokens", 0),
+           "cache_write_5m": cc.get("ephemeral_5m_input_tokens", 0), "cache_write_1h": cc.get("ephemeral_1h_input_tokens", 0)}
+    if not cc_split_known(out):
+        out.pop("cache_write_5m"), out.pop("cache_write_1h")
+    return msg.get("model", "?"), out, ts
+
+
+def record_seat(d: dict, seat: str) -> str:
+    """A sidechain in the coordinator's own file is a helper's."""
+    return "helper" if seat == "coordinator" and d.get("isSidechain") else seat
+
+
+def transcript_rows(desk: Desk, since: float) -> list:
+    s = desk.settings()
+    per = defaultdict(lambda: {**{k: 0 for k in TOKEN_FIELDS}, "usd": 0.0, "unpriced": False})
+    seen = set()
+    for provider, f, seat in transcript_files(desk, since):
+        for d in records(f, usage_only=True):
+            got = step(d, seen, since)
+            if not got:
+                continue
+            model, u, ts = got
+            row = per[(_day(ts), record_seat(d, seat), model, provider)]
+            for k in TOKEN_FIELDS:
+                row[k] += u[k]
+            usd = value(model, u, s["prices"])  # each call valued alone, as hansa cost --turns does
+            if usd is None:
+                row["unpriced"] = True
+            else:
+                row["usd"] += usd
     rows = []
     for (day, seat, model, provider), u in sorted(per.items()):
-        if not cc_split_known(u):
-            u.pop("cache_write_5m"), u.pop("cache_write_1h")
-        usd = value(model, u, s["prices"])
+        usd = None if u["unpriced"] else u["usd"]
         rows.append({"day": day, "seat": seat, "lane": "", "task": "", "provider": provider,
                      "model": model, **{k: u[k] for k in TOKEN_FIELDS}, "usd": usd,
                      "priced_by": "price table" if usd is not None else "no price"})
@@ -175,6 +214,100 @@ def coordinator_uncounted(desk: Desk) -> str:
     return (f"The coordinator's own usage and its helpers' are not counted: the coordinator runs as "
             f"{who.get('user') or 'another user'}, and Claude Code keeps its session records private to that user, "
             f"where hansa, running as {account.name_of(account.uid())}, cannot read them.")
+
+
+TURN_KINDS = {"human": "typed", "peer": "peer", "task-notification": "helper result"}
+
+
+def _starts_turn(d: dict):
+    """What a record starting a coordinator turn says started it, or None when it starts none: the principal
+    typing, a hansa post or another session's message, a scheduled wakeup, a helper's result, or other.
+    A record with an origin starts a turn whatever isMeta says (a hansa post is isMeta with origin peer); tool
+    results, and an isMeta record without an origin (the note that follows a wakeup), carry on the turn they
+    belong to."""
+    if d.get("type") == "system":
+        return "wakeup" if d.get("subtype") == "scheduled_task_fire" else None
+    if d.get("type") != "user":
+        return None
+    content = (d.get("message") or {}).get("content") if isinstance(d.get("message"), dict) else None
+    if isinstance(content, list) and content and all(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+        return None
+    origin = d.get("origin") if isinstance(d.get("origin"), dict) else {}
+    if d.get("isMeta") and not origin.get("kind"):
+        return None
+    return TURN_KINDS.get(origin.get("kind"), "other")
+
+
+def turns(desk: Desk, days: int = 7, since: float | None = None) -> dict:
+    """hansa cost --turns: the coordinator's sessions turn by turn, valued as hansa cost values them, so the
+    total is the coordinator's row of hansa cost --by seat over the same window. Only times, counts, tool
+    names and numbers: no message text."""
+    window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
+              else f"last {days} day(s)")
+    since = since if since is not None else time.time() - days * 86400
+    prices = desk.settings()["prices"]
+    seen, tools_seen = set(), set()
+    out, helpers, unpriced = [], defaultdict(lambda: {"steps": 0, "usd": 0.0}), set()
+    shares = {k: 0.0 for k in TOKEN_FIELDS}
+    for provider, f, seat in transcript_files(desk, since):
+        cur = None
+        for d in records(f):
+            s_ = record_seat(d, seat)
+            got = step(d, seen, since)
+            if s_ != "coordinator":
+                if got:
+                    usd = value(got[0], got[1], prices)
+                    helpers[s_]["steps"] += 1
+                    helpers[s_]["usd"] += usd or 0
+                    if usd is None:
+                        unpriced.add(got[0])
+                continue
+            kind = _starts_turn(d)
+            if kind or (cur is None and got):
+                cur = {"session": f.stem, "start": _ts(d.get("timestamp")), "kind": kind or "other", "steps": 0,
+                       "length": 0, "usd": 0.0, "tools": defaultdict(int)}
+                out.append(cur)
+            if cur is None or d.get("type") != "assistant":
+                continue
+            if got:
+                model, u, _ = got
+                p_ = parts(model, u, prices)
+                if cur["steps"] == 0:
+                    cur["length"] = u["in"] + u["cache_read"] + u["cache_write"]
+                cur["steps"] += 1
+                if p_ is None:
+                    unpriced.add(model)
+                else:
+                    cur["usd"] += sum(p_.values())
+                    for k in TOKEN_FIELDS:
+                        shares[k] += p_[k]
+            if cur["steps"]:  # a call outside the window (or seen before) brings no tools either
+                content = (d.get("message") or {}).get("content")
+                for b in content if isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in tools_seen:
+                        tools_seen.add(b.get("id"))
+                        cur["tools"][str(b.get("name", "?"))] += 1
+    rows = sorted((t for t in out if t["steps"]), key=lambda t: t["start"])
+    for t in rows:
+        t["usd"] = round(t["usd"], 6)
+        t["tools"] = dict(sorted(t["tools"].items(), key=lambda kv: (-kv[1], kv[0])))
+    total = sum(t["usd"] for t in rows)
+    by = {}
+    for t in rows:
+        b = by.setdefault(t["kind"], {"turns": 0, "steps": 0, "usd": 0.0})
+        b["turns"] += 1
+        b["steps"] += t["steps"]
+        b["usd"] += t["usd"]
+    for b in by.values():
+        b["usd"] = round(b["usd"], 6)
+        b["share"] = b["usd"] / total if total else 0.0
+    worth = sum(shares.values())
+    return {"window": window, "turns": rows, "by_kind": dict(sorted(by.items(), key=lambda kv: -kv[1]["usd"])),
+            "total": {"turns": len(rows), "steps": sum(t["steps"] for t in rows), "usd": round(total, 6)},
+            "token_shares": {k: (v / worth if worth else 0.0) for k, v in shares.items()},
+            "helpers": {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(helpers.items())},
+            "unpriced_models": sorted(unpriced), "coordinator_uncounted": coordinator_uncounted(desk)}
 
 
 def unassigned(r: dict) -> str:
