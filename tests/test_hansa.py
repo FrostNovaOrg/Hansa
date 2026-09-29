@@ -1411,9 +1411,14 @@ class DeskTest(unittest.TestCase):
                          usage={"m": {"in": 5, "out": 7, "cache_read": 0, "cache_write": 0}})
         long_merged = self.desk.new_task("finished and merged 30 h ago")
         self.desk.update(long_merged, state="merged", finished=now - 31 * h, merged=now - 30 * h)
+        # a merge counts by when it was merged, not when its task finished: these fail at any hour if it did
+        late = self.desk.new_task("finished 25 h ago, merged 10 min ago")
+        self.desk.update(late, state="merged", finished=now - 25 * h, merged=now - 10 * 60)
+        just_out = self.desk.new_task("finished 26 h ago, merged 25 h ago")
+        self.desk.update(just_out, state="merged", finished=now - 26 * h, merged=now - 25 * h)
         t = views.status(self.desk)["last_24h"]
-        self.assertEqual((t["finished"], t["merged"], t["worker_tokens"]), (2, 1, 12))
-        self.assertIn("last 24 h: 2 finished, 1 merged; workers used 12 tokens",
+        self.assertEqual((t["finished"], t["merged"], t["worker_tokens"]), (2, 2, 12))
+        self.assertIn("last 24 h: 2 finished, 2 merged; workers used 12 tokens",
                       views.status_text(views.status(self.desk)))
 
     def test_lane_list_lines_up_its_columns(self):
