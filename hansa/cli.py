@@ -14,12 +14,12 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, build, cost, notify, views
+from . import account, build, cost, installed_text, notify, views
 from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, not_looking, proc_start, provider_env, pulse,
-                  quiet_text, read_try, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -729,6 +729,7 @@ def cmd_serve(a):
     if not held:
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
+    record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
     except OSError as e:
@@ -1279,7 +1280,7 @@ def _split_claude_args(argv: list):
 class _Version(argparse.Action):
     """--version, worked out only when asked (it may ask git which commit this is)."""
     def __call__(self, parser, namespace, values, option_string=None):
-        print(f"hansa {build()}")
+        print(", ".join(filter(None, [f"hansa {build()}", installed_text()])))
         parser.exit()
 
 

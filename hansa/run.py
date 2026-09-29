@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account
+from . import account, build, installed, installed_text
 from .desk import HOME_SECRETS, Desk, claude_home, is_git_rule, now, read_json, write_json
 
 # Only the wording providers use for "out of quota", so a task that is itself
@@ -2885,6 +2885,36 @@ def server_state(desk: Desk) -> dict:
     answers = pulse.get("pid") == pid and time.time() - (pulse.get("at") or 0) < ROUND_QUIET
     return {"state": "up" if quiet < ROUND_QUIET else "busy" if quiet < STUCK_AFTER else "stuck",
             "pid": pid, "quiet": quiet, "answers": answers}
+
+
+def record_serve_code(desk: Desk) -> None:
+    """hansa serve, as it starts: which code it runs and when that was installed, as serve_code reads it."""
+    write_json(desk.state_dir / "serve-code", {"pid": os.getpid(), "build": build(), "installed": installed()})
+
+
+def serve_code(desk: Desk, st: dict = None) -> str:
+    """'' unless hansa serve runs other code than is installed now (installed since, but not restarted); then
+    what to do about it, in a line. A server that did not record its code (started on a hansa before this
+    record) is told by when it started: before the code now installed was."""
+    st = st or server_state(desk)
+    if st["state"] == "gone":
+        return ""
+    now_build, now_at = build(), installed()
+    rec = read_json(desk.state_dir / "serve-code", {})
+    if isinstance(rec, dict) and rec.get("pid") == st["pid"] and isinstance(rec.get("build"), str):
+        at = rec.get("installed") if isinstance(rec.get("installed"), (int, float)) else 0
+        if (rec["build"], at) == (now_build, now_at):
+            return ""
+        runs = f"{rec['build']} ({installed_text(at)})" if at else rec["build"]
+        return f"hansa serve runs {runs}, but {now_build} was {installed_text(now_at)}: restart it"
+    try:
+        start = (desk.state_dir / "serve.lock").stat().st_mtime  # written once, as the server takes the lock
+    except OSError:
+        return ""
+    if not now_at or now_at <= start:
+        return ""
+    since = time.strftime("%Y-%m-%d %H:%M", time.localtime(start))
+    return f"hansa serve started {since}, before {now_build} was {installed_text(now_at)}: restart it"
 
 
 def server_up(desk: Desk) -> bool:

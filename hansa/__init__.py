@@ -8,6 +8,7 @@ same files, so nobody has to read this code to know what is going on.
 import functools
 import os
 import subprocess
+import time
 from pathlib import Path
 
 __version__ = "0.5.0a1"
@@ -32,3 +33,32 @@ def build() -> str:
     except (OSError, subprocess.SubprocessError):
         sha = ""
     return f"{__version__} {sha}".strip()
+
+
+@functools.lru_cache(maxsize=1)
+def installed() -> float:
+    """When the code running here was put in place: when hansa/BUILD was written where an install wrote one, else
+    when hansa's newest file last changed (a checkout's commit time says when it was committed, not when it was
+    put in place). Asked once: hansa serve asks as it starts,
+    so it keeps the answer for the code it loaded (run.serve_code). 0 when unknown."""
+    here = Path(__file__).resolve().parent
+    try:
+        return (here / "BUILD").stat().st_mtime
+    except OSError:
+        pass
+    latest = 0.0
+    for f in here.rglob("*"):
+        if "__pycache__" in f.relative_to(here).parts or f.suffix == ".pyc":
+            continue
+        try:
+            if f.is_file():
+                latest = max(latest, f.stat().st_mtime)
+        except OSError:
+            continue
+    return latest
+
+
+def installed_text(at: float = None) -> str:
+    """'installed 2026-09-29 14:03', to the minute, in local time; '' when unknown. By default this code's."""
+    at = installed() if at is None else at
+    return time.strftime("installed %Y-%m-%d %H:%M", time.localtime(at)) if at else ""
