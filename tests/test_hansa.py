@@ -464,7 +464,7 @@ class DeskTest(unittest.TestCase):
                           "command line", flat)
             self.assertIn("`git show HEAD:path`", flat)
             self.assertIn("stop background work within the command that started it, or wait for it there", flat)
-            text.format(tid="t1", lane="a")  # still a template with nothing else to fill
+            text.format(tid="t1", lane="a", tmp="/tmp/x")  # still a template with nothing else to fill
 
     def test_a_change_holding_a_stored_key_is_never_merged_and_the_key_is_never_shown(self):
         key = "sk-test-0123456789"
@@ -4453,7 +4453,7 @@ class DeskTest(unittest.TestCase):
         self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
         task, verify = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
         self.assertIn("checking another worker's finished task", verify[verify.index("--append-system-prompt") + 1])
-        for argv in (task, verify):
+        for argv, t in ((task, tid), (verify, self.desk.meta(tid)["verify"])):
             self.assertIn("Bash", self.allowed_by(argv))
             deny = self.denied_by(argv)  # weighed before the allow rules, so they still hold
             for r in ("Bash(git commit:*)", "Bash(git push:*)", "Bash(git stash:*)", "ScheduleWakeup",
@@ -4464,8 +4464,12 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("excludedCommands", box)
             prompt = argv[argv.index("--append-system-prompt") + 1]
             self.assertIn("any command runs", prompt)
-            self.assertIn("$TMPDIR", prompt)
             self.assertIn("scratch files there, not in this directory", prompt)
+            flat = " ".join(prompt.split())  # its own run's folder, in full, as its commands see it; no bare $TMPDIR
+            own = run.commands_tmp(self.desk.meta(t)["worker_tmps"][-1]["path"])
+            self.assertIn(f"Your temporary folder, {own}, is yours alone", flat)
+            self.assertIn("not as $TMPDIR: Claude Code cannot see what a variable stands for", flat)
+            self.assertEqual(flat.count("$TMPDIR"), 1)
             self.assertIn("If a command you need is refused", prompt)
         self.assertIn("Bash(git commit:*)", self.denied_by(task))
         self.assertIn("Bash(git checkout:*)", self.allowed_by(verify))
@@ -4502,6 +4506,13 @@ class DeskTest(unittest.TestCase):
             self.assertEqual((r["there"], r["mode"]), (True, 0o700), r)
             # also its TMPDIR, where Claude Code's own sandbox makes its sockets and empty folders, which it leaves
             self.assertEqual(r["tmpdir"], r["tmp"])
+            # told in full what its commands see as $TMPDIR (Claude Code's own folder in it), never to write $TMPDIR:
+            # Claude Code cannot place a path after `cd "$TMPDIR/x"`, and refuses the command
+            prompt = " ".join(a[a.index("--append-system-prompt") + 1].split())
+            self.assertEqual(run.commands_tmp(r["tmp"]), os.path.join(r["tmp"], f"claude-{os.getuid()}"))
+            self.assertIn(f"Your temporary folder, {run.commands_tmp(r['tmp'])}, is yours alone", prompt)
+            self.assertIn("Write its path out in full in commands, not as $TMPDIR", prompt)
+            self.assertEqual(prompt.count("$TMPDIR"), 1)
             self.assertFalse(os.path.exists(r["tmp"]))  # removed once the worker ended
             allowed = self.allowed_by(a)
             for tool in ("Read", "Edit"):
