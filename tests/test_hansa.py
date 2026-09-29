@@ -1452,7 +1452,7 @@ class DeskTest(unittest.TestCase):
         self.hansa("lane", "set", "a", "check", "echo checked")
         held = cli.hold_server_lock(self.desk)
         self.addCleanup(held.close)
-        (self.desk.state_dir / "heartbeat").write_text(str(time.time() - run.STUCK_AFTER - 60))
+        self.round_at(run.STUCK_AFTER + 60)
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "lane", "try", "a"])
         self.assertIn(f"hansa serve (pid {os.getpid()}) is busy or stuck: no round finished for 6 minutes",
@@ -2684,7 +2684,65 @@ class DeskTest(unittest.TestCase):
         return p
 
     def round_at(self, quiet):
-        (self.desk.state_dir / "heartbeat").write_text(str(time.time() - quiet))
+        """The server's last round was quiet s ago; the server started before it (a quiet longer than it has
+        been running is never said)."""
+        at = time.time() - quiet
+        (self.desk.state_dir / "heartbeat").write_text(str(at))
+        lock = self.desk.state_dir / "serve.lock"
+        if lock.exists() and lock.stat().st_mtime > at - 1:
+            os.utime(lock, (at - 1, at - 1))
+
+    def test_a_heartbeat_being_written_is_not_read_as_a_server_quiet_since_1970(self):
+        from hansa import run
+        srv = self.serving()
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        lock = self.desk.state_dir / "serve.lock"
+        started = time.time() - 60
+        os.utime(lock, (started, started))  # up for a minute
+        (self.desk.state_dir / "heartbeat").write_text("")  # the moment a rewrite in place emptied it
+        st = run.server_state(self.desk)
+        self.assertEqual((st["state"], st["pid"]), ("busy", srv.pid))
+        self.assertLess(st["quiet"], 70)  # counted from the server's start, not from 1970
+        self.assertLess(views.status(self.desk)["server_seconds_ago"], 70)
+        (self.desk.state_dir / "heartbeat").unlink()  # none at all: the same
+        self.assertLess(run.server_state(self.desk)["quiet"], 70)
+        self.assertLess(views.status(self.desk)["server_seconds_ago"], 70)
+        time.sleep(4)  # the follower looked a few times, and would have posted by now
+        self.assertNotIn("busy or stuck", self.server_posts(sock))
+        self.assertNotIn("stuck", self.hansa_out("status"))
+
+    def test_a_heartbeat_from_before_the_server_started_counts_from_its_start(self):
+        from hansa import run
+        self.serving()
+        lock = self.desk.state_dir / "serve.lock"
+        started = time.time() - 10
+        os.utime(lock, (started, started))
+        (self.desk.state_dir / "heartbeat").write_text(str(time.time() - run.STUCK_AFTER - 600))  # an earlier server's
+        st = run.server_state(self.desk)
+        self.assertEqual(st["state"], "up")
+        self.assertLess(st["quiet"], 20)
+        self.assertLess(views.status(self.desk)["server_seconds_ago"], 20)
+        started = time.time() - run.STUCK_AFTER - 60  # this one, up long enough to be stuck by its own count
+        os.utime(lock, (started, started))
+        self.assertEqual(run.server_state(self.desk)["state"], "stuck")
+
+    def test_the_heartbeat_is_replaced_whole_not_rewritten_in_place(self):
+        from hansa import run
+        self.desk.state_dir.mkdir(exist_ok=True)
+        hb = self.desk.state_dir / "heartbeat"
+        hb.write_text("1")
+        before = hb.stat().st_ino
+        held = open(hb)  # a reader that opened it before the beat
+        self.addCleanup(held.close)
+        run.beat(self.desk)
+        self.assertNotEqual(hb.stat().st_ino, before)  # a new file renamed over the old one
+        self.assertEqual(held.read(), "1")  # what the reader opened was never emptied
+        self.assertAlmostEqual(float(hb.read_text()), time.time(), delta=5)  # a plain number, as readers expect
+        self.assertEqual([f.name for f in self.desk.state_dir.iterdir() if f.name.startswith("heartbeat")],
+                         ["heartbeat"])
 
     def server_posts(self, sock) -> str:
         return "".join(self.posts(sock))
@@ -5226,7 +5284,7 @@ class DeskTest(unittest.TestCase):
         for quiet, said in ((0, "starts when `hansa serve` next looks (within seconds)"),
                             (run.ROUND_QUIET + 5, "starts when `hansa serve` next looks (within seconds)"),
                             (run.STUCK_AFTER + 60, "but `hansa serve` is busy or stuck: no round finished for 6 minutes")):
-            (self.desk.state_dir / "heartbeat").write_text(str(time.time() - quiet))
+            self.round_at(quiet)
             why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
             self.assertIn(said, why)
             self.assertEqual("within seconds" in why, quiet < run.STUCK_AFTER, why)
@@ -5245,7 +5303,7 @@ class DeskTest(unittest.TestCase):
                             (run.STUCK_AFTER + 60, "hansa opens the design session once `hansa serve` gets through its "
                                                    "rounds; `hansa serve` is busy or stuck: no round finished for 6 "
                                                    "minutes. Then it asks the principal to join it.")):
-            (self.desk.state_dir / "heartbeat").write_text(str(time.time() - quiet))
+            self.round_at(quiet)
             out = self.hansa("design", "Talk it over", "--lane", "a")
             self.assertIn(said, out)
             self.hansa("cancel", out.split()[0])
