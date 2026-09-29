@@ -546,9 +546,9 @@ def _verify(desk: Desk, a) -> None:
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
     lane = m.get("lane", "")
-    if a.lane and a.lane != lane:
-        _lane_reaches(desk, a.lane, m)
-        lane = a.lane
+    if (a.lane and a.lane != lane) or lane not in desk.settings()["lanes"]:
+        _lane_reaches(desk, a.lane or lane, m)
+        lane = a.lane or lane
     d = desk.tasks_dir / a.id
     task = (d / "task.md").read_text(encoding="utf-8").strip()
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
@@ -574,12 +574,25 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
     the repository of the task's own lane, where the task's branch is."""
     lanes = desk.settings()["lanes"]
     nothing = "; nothing was queued"
+    own = lanes.get(m.get("lane"))
+    if own is None and name == m.get("lane"):
+        raise SystemExit(f"hansa: {m['id']}'s lane {name or '(none)'} is no longer on the desk; verify it with --lane L, "
+                         f"a lane on the repository where its branch {m.get('branch') or 'task/' + m['id']} is"
+                         f"{nothing}")
     if name not in lanes:
         raise SystemExit(f"hansa: there is no lane {name}; lanes: {', '.join(sorted(lanes)) or 'none'}{nothing}")
-    own = lanes.get(m.get("lane"))
-    if own is None:
-        raise SystemExit(f"hansa: {m['id']}'s lane {m.get('lane') or '(none)'} is no longer on the desk, so which "
-                         f"repository its change is in is not known; lane {name} cannot be shown to reach it{nothing}")
+    if own is None:  # the task's branch, still at the change, is what shows the lane is on its repository
+        branch = m.get("branch") or f"task/{m['id']}"
+        try:
+            tip = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}", cwd=lanes[name]["repo"])
+        except (RuntimeError, OSError):
+            tip = ""
+        if tip != m["head"]:
+            raise SystemExit(f"hansa: {m['id']}'s lane {m.get('lane') or '(none)'} is no longer on the desk, and lane "
+                             f"{name}'s repository {lanes[name]['repo']} has no branch {branch} at {m['id']}'s change "
+                             f"({m['head'][:12]}), so lane {name} cannot be shown to reach it. Verify it on a lane on "
+                             f"the repository where that branch is{nothing}")
+        return
     same = lambda x, y: os.path.realpath(x) == os.path.realpath(y)
     if not same(lanes[name]["repo"], own["repo"]):
         raise SystemExit(f"hansa: lane {name} cannot reach {m['id']}'s change: it is on {lanes[name]['repo']}, and "
@@ -1057,6 +1070,13 @@ def _differs_from_siblings(name: str, ln: dict, lanes: dict) -> list:
     return lines
 
 
+def _changed_from(name: str, ln: dict, other: str, theirs: dict) -> list:
+    """What a lane made with --like OTHER was given in place of OTHER's settings, one line per field."""
+    blank = {"write": [], "check": "", "setup": "", **default_lane(ln["repo"], "main")}
+    return [f"{f}: {name} has {_shown(ln.get(f, blank.get(f, '')))}; {other} has {_shown(theirs.get(f, blank.get(f, '')))}"
+            for f in dict.fromkeys([*theirs, *ln]) if ln.get(f, blank.get(f)) != theirs.get(f, blank.get(f))]
+
+
 def cmd_lane(a):
     desk = Desk.find(a.desk)
     if not a.action:
@@ -1079,21 +1099,46 @@ def cmd_lane(a):
                 ("network", a.network)) if v is not None}
             if a.base is not None:
                 _lane_value("base", [a.base])
-            repo = str(Path(a.repo).resolve())
+            if a.like:
+                if a.repo:
+                    raise SystemExit(f"hansa: --like {a.like} takes the repository of lane {a.like}, which its "
+                                     f"check and setup are for, so it cannot come with --repo; nothing was changed")
+                if a.like not in s["lanes"]:
+                    raise SystemExit(f"hansa: there is no lane {a.like} to copy; lanes: "
+                                     f"{', '.join(sorted(s['lanes'])) or 'none'}. Nothing was changed")
+                if given.get("providers") == []:
+                    raise SystemExit("hansa: a lane needs a provider; nothing was changed")
+                like = s["lanes"][a.like]
+                ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
+                ln.update(given, **({"base": a.base} if a.base else {}))
+                for f in ("check", "setup"):
+                    if ln.get(f) == "":
+                        del ln[f]
+                repo, base = ln["repo"], ln.get("base", "main")
+            elif not a.repo:
+                raise SystemExit("hansa: say which git checkout the lane works on (--repo PATH), or which lane to "
+                                 "copy (--like L); nothing was changed")
+            else:
+                repo = str(Path(a.repo).resolve())
             theirs = account.foreign_repo(repo)
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
-            try:
-                base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-            except (RuntimeError, OSError) as e:
-                raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
-            new["lanes"][a.name] = ln = default_lane(repo, base, given.pop("providers", None) or None)
-            ln.update({k: v for k, v in given.items() if v})
+            if not a.like:
+                try:
+                    base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+                except (RuntimeError, OSError) as e:
+                    raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
+                ln = default_lane(repo, base, given.pop("providers", None) or None)
+                ln.update({k: v for k, v in given.items() if v})
+            new["lanes"][a.name] = ln
             _save(desk, new)
-            desk.event("lane_added", lane=a.name)
+            desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
-            if not brief.exists():
+            copied = desk.lanes_dir / (a.like or "") / "brief.md"
+            if a.like and copied.is_file():  # the standing instructions, copied as the settings are
+                brief.write_text(copied.read_text(encoding="utf-8"), encoding="utf-8")
+            elif not brief.exists():
                 brief.write_text("", encoding="utf-8")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
@@ -1115,11 +1160,21 @@ def cmd_lane(a):
                 print(f"Lane {a.name} has no check, so its tasks will be merged untested: hansa merge checks nothing "
                       f"before it merges them, not even when {base} has moved since a task was made. Set one with: "
                       f"hansa lane set {a.name} check \"<the command that runs the tests>\"")
-            differs = _differs_from_siblings(a.name, ln, s["lanes"])
+            changed = []
+            if a.like:
+                changed = _changed_from(a.name, ln, a.like, s["lanes"][a.like])
+                print(desk.redact(f"Lane {a.name} is a copy of lane {a.like} as it is now; later changes to "
+                                  f"{a.like} do not reach it. "
+                                  + ("Changed from " + a.like + ":\n" + "\n".join(f"  {x}" for x in changed)
+                                     if changed else "Nothing was changed from it.")))
+            others = {n: x for n, x in s["lanes"].items() if n != a.like}
+            differs = _differs_from_siblings(a.name, ln, others)
             if differs:
                 print(desk.redact(f"Lane {a.name} differs from the other lanes on {repo}; nothing was copied from "
-                                  f"them (change it with hansa lane set {a.name} FIELD ...):\n"
+                                  f"them{' but ' + a.like if a.like else ''} (change it with hansa lane set {a.name} "
+                                  f"FIELD ...):\n"
                                   + "\n".join(f"  {x}" for x in differs)))
+            if differs or changed:
                 print(f"try it: hansa lane try {a.name}")
             return
         if a.name not in s["lanes"]:
@@ -1416,7 +1471,11 @@ def main(argv=None):
         "need localhost, and it opens every service on the machine's loopback, local proxies among them, which "
         "reach the internet: list it only on a Mac whose loopback holds nothing a worker must not reach."))
     q.add_argument("name")
-    q.add_argument("--repo", required=True, help="the git checkout the lane works on")
+    q.add_argument("--repo", help="the git checkout the lane works on")
+    q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
+                   "providers, setup, check, network, folders it may write, env, limits) and standing instructions; "
+                   "each other option given replaces that one field. It is a copy: later changes to LANE do not "
+                   "reach the new lane. The worktree is the new lane's own. Not with --repo")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "

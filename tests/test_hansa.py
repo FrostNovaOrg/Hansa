@@ -1352,6 +1352,57 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((c["network"], c["env"], c["timeout_min"], c.get("write", [])), ([], {}, 240, []))
         self.assertEqual({k: v for k, v in self.desk.settings()["lanes"].items() if k != "c"}, before)
 
+    def test_lane_add_like_copies_another_lane_and_says_what_was_changed(self):
+        self.hansa("lane", "set", "a", "check", "make test && make lint")
+        self.hansa("lane", "set", "a", "setup", "make deps")
+        self.hansa("lane", "set", "a", "network", "registry.npmjs.org")
+        self.hansa("lane", "set", "a", "env", "PORT_BASE=4000")
+        self.hansa("lane", "set", "a", "write", str(self.tmp / "cache"))
+        self.hansa("lane", "set", "a", "timeout_min", "90")
+        self.hansa("lane", "brief", "a", "Use C++20.")
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {**s["providers"]["claude"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        a = self.desk.settings()["lanes"]["a"]
+        before = len(self.events("lane_command_changed"))
+        out = self.hansa("lane", "add", "m", "--like", "a", "--providers", "mimo")
+        m = self.desk.settings()["lanes"]["m"]
+        self.assertEqual(m, {**a, "providers": ["mimo"]})
+        self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
+                                                                                 "brief.md").read_text())
+        self.assertIn("Use C++20.", (self.desk.lanes_dir / "m" / "brief.md").read_text())
+        self.assertIn("Lane m is a copy of lane a as it is now; later changes to a do not reach it.", out)
+        self.assertIn('Changed from a:\n  providers: m has ["mimo"]; a has ["claude"]\n', out)
+        self.assertNotIn("differs from the other lanes", out)  # a is the only other lane, and it was copied
+        self.assertNotIn("untested", out)
+        self.assertIn("they are recorded", out)
+        self.assertIn('registry.npmjs.org', out)
+        self.assertTrue(out.endswith("try it: hansa lane try m\n"), out)
+        self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")[before:]), ["check", "setup"])
+        self.assertEqual(self.events("lane_added")[-1].get("like"), "a")
+        self.hansa("lane", "set", "a", "check", "make check")  # a copy: a's later changes do not reach m
+        self.assertEqual(self.desk.settings()["lanes"]["m"]["check"], "make test && make lint")
+        out = self.hansa("lane", "add", "n", "--like", "a", "--check", "none", "--network", "none")
+        n = self.desk.settings()["lanes"]["n"]
+        self.assertEqual((n.get("check"), n["network"], n["setup"]), (None, [], "make deps"))
+        self.assertIn("Lane n has no check", out)
+        self.assertIn('  network: n has []; a has ["registry.npmjs.org"]\n', out)
+        self.assertIn("Lane n differs from the other lanes on", out)  # from m, which was not copied
+        self.assertIn("nothing was copied from them but a", out)
+        out = self.hansa("lane", "add", "p", "--like", "m")
+        self.assertIn("Nothing was changed from it.", out)
+        lanes = self.desk.settings()["lanes"]
+        for extra, said in ((["--like", "z"], "there is no lane z to copy"),
+                            (["--like", "a", "--repo", str(self.repo)], "cannot come with --repo"),
+                            ([], "--repo PATH"), (["--like", "a", "--providers", "none"], "needs a provider")):
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "add", "q", *extra])
+            self.assertIn(said, str(e.exception))
+        self.assertEqual(self.desk.settings()["lanes"], lanes)
+        with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
+            main(["lane", "add", "--help"])
+        self.assertIn("later changes to LANE do not reach the new lane", " ".join(helped.getvalue().split()))
+
     def test_lane_add_sets_the_check_setup_and_allowed_commands(self):
         out = self.hansa("lane", "add", "c", "--repo", str(self.repo), "--check", "make test", "--setup", "make deps",
                          "--allow", "Bash(make test:*)", "Bash(make lint:*)")
@@ -4888,6 +4939,31 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "cancel", t2])
         self.assertEqual((self.desk.meta(v3)["lane"], self.desk.meta(v3)["state"], self.desk.meta(v3)["error"]),
                          ("a", "cancelled", f"closed: {t2} was cancelled"))  # stopped with its task, from another lane
+
+    def test_verify_of_a_task_whose_lane_is_gone(self):
+        d, t1, t2 = self.two_lanes()
+        s = self.desk.settings()
+        other = self.tmp / "other"  # a copy of the repository without the task's branch
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(other)], check=True)
+        s["lanes"]["c"] = {**json.loads(json.dumps(s["lanes"]["a"])), "repo": str(other)}
+        del s["lanes"]["a"]  # removed after t1 ran
+        self.assertEqual(self.desk.save_settings(s), [])
+        before = len(self.desk.tasks())
+        for lane, said in (([], f"{t1}'s lane a is no longer on the desk; verify it with --lane L"),
+                           (["--lane", "a"], f"{t1}'s lane a is no longer on the desk; verify it with --lane L"),
+                           (["--lane", "c"], f"lane c's repository {other} has no branch task/{t1} at {t1}'s change"),
+                           (["--lane", "z"], "there is no lane z")):
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "verify", t1, *lane])
+            self.assertIsInstance(e.exception.code, str)
+            self.assertIn(said, str(e.exception))
+            self.assertIn("nothing was queued", str(e.exception))
+        self.assertEqual((len(self.desk.tasks()), self.desk.meta(t1).get("verify")), (before, None))
+        out = self.hansa("verify", t1, "--lane", "b")  # b is on the repository where t1's branch is
+        vid = self.desk.meta(t1)["verify"]
+        self.assertIn(f"{vid} queued on lane b:", out)
+        v = self.settle(d, vid)
+        self.assertEqual((v["lane"], v["state"], v["kind"]), ("b", "done", "verify"))
 
     def test_a_verification_that_ended_stays_as_it_ended_when_its_task_closes(self):
         d = Dispatcher(self.desk)
