@@ -45,7 +45,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane remove L` | remove a lane; refused while one of its tasks is queued, running or waiting for review |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model]` | tokens and what they are worth at the principal's prices |
-| `hansa ask "<request>"` | put a request on the principal's page |
+| `hansa ask "<request>"` | put a request on the principal's page; answering it there closes it |
+| `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
 | `hansa help` | this card |
 
 Add `--json` to `status` or `cost` for machine-readable output.
@@ -149,9 +150,9 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 hansa posts to your session through its inbox when something needs you: a task
 ended (after its check) or failed, a verification or design session ended, a
 merge check ended, the principal answered a request, a provider an open request
-names became ready when it was not as you asked (once, on a key or settings save
-or a check; the request may be done; one ready again only because its rest ran
-out shows the note in `hansa status` but is not posted), the server stopped (or,
+names became ready when it was not as you asked (once, on a key or settings save,
+a check, or its rest running out; the request may be done: if it is, close it
+with `hansa ask --close N "why"`), the server stopped (or,
 still running, finished no round for 5 minutes: busy or stuck), and then that it
 runs again. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next
