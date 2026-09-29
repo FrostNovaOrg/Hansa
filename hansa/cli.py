@@ -130,6 +130,15 @@ def _wait_for(desk: Desk, tid: str) -> str:
     return notify.wait_step(desk, tid, True) if notify.hears_of(desk, tid) else f"Wait for it: hansa wait {tid}"
 
 
+def _runs_when(desk: Desk, tid: str, base: str) -> str:
+    """When a merge check just queued runs: after the one ahead of it on the same repository and base branch,
+    if any, and when its lane is free."""
+    m = desk.meta(tid)
+    ahead = views.merge_check_waits_for(desk, m)
+    return (f"One merge check runs at a time on {base}, so it waits for {ahead}, then runs when lane {m['lane']} is "
+            f"free." if ahead else f"It runs when lane {m['lane']} is free.")
+
+
 def _waits(desk: Desk, tid: str) -> str:
     """The line for a task just queued that no provider of its lane can start now, in hansa status's words;
     '' when one can."""
@@ -328,7 +337,7 @@ def cmd_merge(a):
             desk.event("check_rerun_queued", task=a.id, onto=tip, by=by)
             print(f"{a.id} is not merged yet: hansa runs the lane's check again. It merges {a.id} onto {base} as it is "
                   f"now in lane {m['lane']}'s worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check "
-                  f"there, and merges exactly that if the check passes. It runs when lane {m['lane']} is free. "
+                  f"there, and merges exactly that if the check passes. {_runs_when(desk, a.id, base)} "
                   f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
                   + _unverified_later(desk, m))
             return
@@ -343,7 +352,7 @@ def cmd_merge(a):
                   f"together were never checked. hansa merges {a.id} onto {base} as it is now in lane {m['lane']}'s "
                   f"worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges "
                   f"exactly that if the check passes. "
-                  f"It runs when lane {m['lane']} is free. {_wait_for(desk, a.id)} "
+                  f"{_runs_when(desk, a.id, base)} {_wait_for(desk, a.id)} "
                   f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)" + _unverified_later(desk, m))
             return
         try:

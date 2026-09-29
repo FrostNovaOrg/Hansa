@@ -94,6 +94,7 @@ const T = ZH ? {
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
   noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   merging:"正在合并验收（跟基础分支现在的样子合在一起再跑一遍验收，通过就自动合并，不通过就回到待审）", mergeCheck:"合并验收",
+  mcQueuedAhead:w => `合并验收在排队：同一个仓库和基础分支一次只跑一个合并验收，先等工作线 ${w.lane} 上 ${w.id} 的合并验收`,
   mcRunning:n => `合并验收已跑了 ${n} 分钟`, mcQueuedBusy:(lane, id) => `合并验收在排队：等工作线 ${lane} 空出来（现在在做 ${id}）`,
   mcQueuedSoon:"合并验收在排队：工作线空着，几秒内开始", mcQueuedNoServer:"合并验收在排队：后台没在运行，开始不了",
   mcAgain:"（又一次：验收期间基础分支变了）",
@@ -138,6 +139,7 @@ const T = ZH ? {
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
   noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
   merging:"Merging (checked together with the base as it is now; each merges by itself if that passes, and comes back for review if not)", mergeCheck:"Merge check",
+  mcQueuedAhead:w => `merge check queued: waits for ${w.id}'s merge check on lane ${w.lane}`,
   mcRunning:n => `merge check running for ${n} min`, mcQueuedBusy:(lane, id) => `merge check queued: waits for lane ${lane}, busy with ${id}`,
   mcQueuedSoon:"merge check queued: starts within seconds", mcQueuedNoServer:"merge check queued: the server is not running",
   mcAgain:" (again: the base moved while it was checked)",
@@ -229,7 +231,7 @@ async function loadStatus() {
       st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : null,
     st.review.length || (st.merging || []).length ? section(T.review, (st.merging || []).length ? [h("h3", {}, T.merging),
       table([T.task, T.lane, T.titleCol, T.mergeCheck], st.merging.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"},
-        (["starting", "running"].includes(m.phase) ? T.mcRunning(m.minutes) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)
+        (["starting", "running"].includes(m.phase) ? T.mcRunning(m.minutes) : m.waits_for ? T.mcQueuedAhead(m.waits_for) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)
           : st.server_up ? T.mcQueuedSoon : T.mcQueuedNoServer) + (m.again ? T.mcAgain : ""))]))] : null,
       st.review.length ? table([T.task, T.lane, T.titleCol, T.changes, T.checkCol, T.verifyCol, T.refused],
       st.review.map(m => [taskLink(m.id), m.lane, m.title, [m.stat || T.none, (m.leaked || []).length ? h("span", {class:"bad"}, " · " + T.keyInChange) : null,

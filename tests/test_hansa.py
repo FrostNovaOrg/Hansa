@@ -1246,6 +1246,62 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([e["moves"] for e in self.events("merge_check_base_moved")], [1, 2])
         self.assertFalse((self.repo / "b.txt").exists())
 
+    def move_main(self, repo=None):
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved",
+           cwd=repo or self.repo)
+        return self.git_out("rev-parse", "main", cwd=repo)
+
+    def test_merge_checks_on_one_repository_run_one_after_the_other_in_the_order_asked(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        s = self.desk.settings()
+        s["concurrency"] = 2
+        self.assertEqual(self.desk.save_settings(s), [])
+        tip = self.move_main()  # so both need a merge check
+        self.hansa("merge", t1)
+        out = self.hansa("merge", t2)
+        self.assertIn(f"One merge check runs at a time on main, so it waits for {t1}'s merge check on lane a", out)
+        d.tick()
+        self.assertEqual(self.desk.meta(t1)["merge_check"]["phase"], "running")
+        self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "queued")  # lane b is free, but it waits
+        waits = f"merge check queued: waits for {t1}'s merge check on lane a"
+        self.assertIn(waits, views.show_text(self.desk, t2))
+        self.assertIn(waits, views.status_text(views.status(self.desk)))
+        self.assertEqual(views.status(self.desk)["merging"][1]["waits_for"], {"id": t1, "lane": "a"})
+        self.assertIn(f"waits for {t1}'s merge check on lane a", notify.task_line(self.desk, self.desk.meta(t2)))
+        m1 = self.settle_merge(d, t1)
+        m2 = self.settle_merge(d, t2)
+        self.assertEqual((m1["state"], m2["state"]), ("merged", "merged"), (m1, m2))
+        self.assertEqual(m1["merge_check_result"]["onto"], tip)
+        self.assertEqual(m2["merge_check_result"]["onto"], m1["merge_commit"])  # checked on the base t1 left
+        self.assertEqual(self.git_out("rev-parse", "main"), m2["merge_commit"])
+        self.assertEqual(self.events("merge_check_base_moved"), [])  # neither was checked for nothing
+        started = [e["task"] for e in self.events("merge_check_started")]
+        self.assertEqual(started, [t1, t2])
+
+    def test_a_merge_check_on_another_repository_is_not_held_up(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        (other / "README.md").write_text("other\n")
+        sh("git", "add", ".", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=other)
+        s = self.desk.settings()
+        s["lanes"]["c"] = {**json.loads(json.dumps(s["lanes"]["a"])), "repo": str(other)}
+        s["concurrency"] = 3
+        self.assertEqual(self.desk.save_settings(s), [])
+        t3 = self.desk.new_task("Add a.txt there", lane="c")
+        self.assertEqual(self.settle(d, t3)["state"], "done")
+        self.move_main()
+        self.move_main(other)
+        for t in (t1, t2, t3):
+            self.hansa("merge", t)
+        d.tick()
+        phases = {t: self.desk.meta(t)["merge_check"]["phase"] for t in (t1, t2, t3)}
+        self.assertEqual(phases, {t1: "running", t2: "queued", t3: "running"})
+        for t in (t1, t2, t3):
+            self.assertEqual(self.settle_merge(d, t)["state"], "merged")
+
     def test_a_task_whose_base_did_not_move_merges_at_once(self):
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "test -f hello.txt"
