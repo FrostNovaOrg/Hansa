@@ -4813,6 +4813,15 @@ class DeskTest(unittest.TestCase):
         main(["--desk", str(self.desk.root), "cancel", m["id"]])
         self.assertEqual(self.desk.meta(m["id"])["state"], "cancelled")
 
+    def test_the_verification_tells_tests_for_a_defect_from_coverage_tests(self):
+        from hansa.run import VERIFY_TASK
+        text = " ".join(VERIFY_TASK.split())
+        self.assertIn("Each defect the task names needs a test that fails with the code undone", text)
+        self.assertIn("A test the task asks for to cover behaviour that already worked (coverage) may pass either "
+                      "way: judge it on whether it tests what its name says", text)
+        self.assertIn("a test whose name promises one case and tests another does, coverage or not", text)
+        self.assertIn("VERDICT: does not hold", text)
+
     def test_retry_replaces_the_original(self):
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         main(["--desk", str(self.desk.root), "retry", m["id"], "also", "add", "a", "second", "line"])
@@ -4820,6 +4829,35 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(old["state"], "replaced")
         self.assertNotIn(m["id"], [r["id"] for r in views.status(self.desk)["review"]])
         self.assertEqual(self.desk.meta(old["replaced_by"])["parent"], m["id"])
+
+    def test_a_retry_gives_its_worker_the_latest_verification_report_whatever_its_verdict(self):
+        d = Dispatcher(self.desk)
+        tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
+        main(["--desk", str(self.desk.root), "retry", tid, "no", "verification", "yet"])
+        tid2 = self.desk.meta(tid)["replaced_by"]
+        self.assertNotIn("verification", (self.desk.tasks_dir / tid2 / "task.md").read_text().split("---")[-1]
+                         .replace("no verification yet", ""))
+        tid = self.settle(d, tid2)["id"]
+        for verdict in ("does not hold", "holds"):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_VERDICT": verdict}
+            self.assertEqual(self.desk.save_settings(s), [])
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "verify", tid])
+            vid = self.desk.meta(tid)["verify"]
+            self.assertEqual(self.settle(d, vid)["verdict"], verdict)
+            s["lanes"]["a"]["env"] = {}
+            self.assertEqual(self.desk.save_settings(s), [])
+            vreport = (self.desk.tasks_dir / vid / "result.md").read_text().strip()
+            self.assertGreater(len(vreport), 400)
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "retry", tid, "fix", "what", "it", "found"])
+            new = self.desk.meta(tid)["replaced_by"]
+            text = (self.desk.tasks_dir / new / "task.md").read_text()
+            self.assertIn(f"The report of {vid}, the verification of the previous attempt", text)
+            self.assertIn(f"its verdict: {verdict}):\n{vreport}", text)  # whole, marked as the verification's
+            self.settle(d, new)
+            tid = new
 
     def test_browser_is_given_to_one_task_at_a_time(self):
         with self.assertRaises(SystemExit):  # no browser set up: refuse, queue nothing
