@@ -849,7 +849,10 @@ def cmd_coordinator(a):
     repos = [r for r in plan["repos"] if os.path.isabs(r)]
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
-    argv = [claude_bin()] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit, *no_builtin]
+    claude = claude_bin()
+    if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
+        env["DISABLE_AUTOUPDATER"] = "1"
+    argv = [claude] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit, *no_builtin]
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
@@ -868,6 +871,17 @@ def cmd_coordinator(a):
     argv += _notified(desk, rest, clear)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + rest, env)
+
+
+def can_update(claude: str) -> bool:
+    """Whether this account can write where the Claude Code at `claude` is installed, as its auto-updater
+    would: the folder of the command, and the folder its link leads to, or for an npm install the
+    node_modules folder holding the package. One installed by another account cannot update itself here."""
+    real = os.path.realpath(claude)
+    parts = Path(real).parts
+    home = (str(Path(*parts[:len(parts) - parts[::-1].index("node_modules")])) if "node_modules" in parts
+            else os.path.dirname(real))
+    return all(os.access(d, os.W_OK) for d in (os.path.dirname(os.path.abspath(claude)), home))
 
 
 # The coordinator's session: no claude.ai connectors of the account it logs in with (a way to publish off the
@@ -1550,6 +1564,9 @@ def main(argv=None):
                    "on this machine needs another one")
     p.add_argument("--every", type=float, default=3.0, help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
+    p.description += (", then wait on its input, which holds an ssh tunnel to the page open, until that input ends "
+                      "or Ctrl+C. A script that wants only the address gives it no input (hansa web </dev/null): it "
+                      "prints the address and returns")
     p.add_argument("--port", type=int, help="default: the port this desk's hansa serve serves the page on")
     add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
         "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "

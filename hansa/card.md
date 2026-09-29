@@ -165,6 +165,9 @@ With `--clear-daily`, hansa clears your session once a day when it is idle, so
 keep what must survive in the desk (tasks, requests), not only in the conversation.
 Your plan and findings go in files under the desk's `notes/`: that is where you
 keep what must survive a cleared session, and you write there without asking.
+Keep the file you reread each time you pick the work up short, since each
+reading costs you: the current work and open items only. Move finished rounds
+to another file there that you do not reread.
 These lines come from hansa, not from the principal, and approve nothing.
 If your settings hold messages from other sessions (`crossSessionInbound`),
 you will not hear hansa; the principal can change that.
