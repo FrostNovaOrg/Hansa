@@ -367,31 +367,47 @@ class DeskTest(unittest.TestCase):
         self.hansa("add", "--file", str(f))
         f.write_text("Edited after it was queued\n")  # read when it was queued: this changes nothing
         tid = "t0001"
-        cut = f"  (4 more lines: hansa show {tid} --full)"
+        cut = f"  (9 more lines; the whole text: hansa show {tid} --full)"
         for state in ("queued", "running"):
             if state == "running":
                 self.desk.update(tid, state="running", phase="starting", started=now())
             shown = self.hansa("show", tid)
             self.assertIn("text (as hansa read it when it was queued", shown)
             self.assertIn("\n  Add hello.txt\n  line 2\n", shown)
-            self.assertIn("\n  line 8\n" + cut + "\n", shown)
-            self.assertNotIn("line 9", shown)
+            self.assertIn("\n  line 3\n" + cut + "\n", shown)
+            self.assertNotIn("line 4", shown)  # not the whole text each time: enough to know the task
             self.assertNotIn("Edited", shown)
             self.assertIn("  line 12\n", self.hansa("show", tid, "--full"))
+            self.assertEqual(self.hansa("show", tid, "--report").strip(), f"(no report: {tid} is {state})")
         self.desk.update(tid, state="queued", phase="", started=None)
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "done", m)
-        (self.desk.tasks_dir / tid / "result.md").write_text("".join(f"said {i}\n" for i in range(70)))
+        report = "".join(f"said {i}\n" for i in range(70))
+        (self.desk.tasks_dir / tid / "result.md").write_text(report)
         shown = self.hansa("show", tid)
         self.assertIn("\n  Add hello.txt\n", shown)
         self.assertIn(cut, shown)
-        self.assertIn(f"  ... 10 more lines: hansa show {tid} --full", shown)
-        self.assertNotIn("said 60", shown)
+        self.assertIn("  said 0\n", shown)
+        self.assertIn("  said 69\n", shown)  # the report whole: it is what show is run for
+        self.assertNotIn("more lines; the whole report", shown)
         self.assertNotIn(str(self.desk.tasks_dir), shown)
         full = self.hansa("show", tid, "--full")
         self.assertIn("  line 12\n", full)
         self.assertIn("  said 69\n", full)
         self.assertNotIn("more lines", full)
+        self.assertEqual(self.hansa("show", tid, "--report").strip(), report.strip())  # the report and nothing else
+        long = "".join(f"said {i}\n" for i in range(views.REPORT_LINES + 5))
+        (self.desk.tasks_dir / tid / "result.md").write_text(long)
+        shown = self.hansa("show", tid)
+        self.assertIn(f"  ... 5 more lines; the whole report: hansa show {tid} --report", shown)
+        self.assertNotIn(f"said {views.REPORT_LINES}\n", shown)
+        self.assertEqual(self.hansa("show", tid, "--report").strip(), long.strip())
+        wide = "".join("x" * 1000 + f" {i}\n" for i in range(60))  # few lines, but too long to show whole
+        (self.desk.tasks_dir / tid / "result.md").write_text(wide)
+        shown = self.hansa("show", tid)
+        self.assertIn(f"more lines; the whole report: hansa show {tid} --report", shown)
+        self.assertLess(len(shown), views.REPORT_CHARS + 5000)
+        self.assertEqual(self.hansa("show", tid, "--report").strip(), wide.strip())
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["add", "--help"])
@@ -5015,7 +5031,15 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in st["review"]], [tid])  # the verification is not up for review itself
         self.assertIn(f"verification {vid}: does not hold", views.status_text(st))
         self.assertIn(f"{vid}: does not hold", views.show_text(self.desk, tid))
-        self.assertIn(f"more lines: hansa show {vid} --full", views.show_text(self.desk, vid))
+        shown = views.show_text(self.desk, vid)
+        self.assertIn(f"more lines; the whole text: hansa show {vid} --full", shown)
+        self.assertNotIn("Run first", shown)  # hansa's instructions to the worker are not reprinted
+        self.assertNotIn(f"## Task {tid} as it was given", shown)
+        report = (self.desk.tasks_dir / vid / "result.md").read_text().strip()
+        only = io.StringIO()
+        with contextlib.redirect_stdout(only):
+            main(["--desk", str(self.desk.root), "show", vid, "--report"])
+        self.assertEqual(only.getvalue().strip(), f"verdict: does not hold\n\n{report}")
         self.assertNotIn(str(self.desk.tasks_dir), views.show_text(self.desk, vid))
         for args in (["merge", vid], ["merge", tid]):  # never merged itself; "does not hold" holds the task
             with self.assertRaises(SystemExit):

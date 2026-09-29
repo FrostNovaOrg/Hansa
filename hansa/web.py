@@ -125,7 +125,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
                     return self._send(404, {"error": "no such task"})
                 return self._send(200, {"meta": read_json(desk.tasks_dir / tid / "meta.json"),
-                                        "text": views.show_text(desk, tid), "shots": _shots(desk, tid)})
+                                        "text": views.show_text(desk, tid, full=True), "shots": _shots(desk, tid)})
             if url.path == "/api/file":  # a picture a task's browser saved, such as a screenshot
                 tid, name = q.get("task", [""])[0], q.get("name", [""])[0]
                 if name not in _shots(desk, tid):

@@ -24,7 +24,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 |---|---|
 | `hansa status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, today's usage |
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
-| `hansa show <id> [--full]` | the task's text as hansa read it, report, changed files, refused commands, usage, and what to do next; `--full`: the whole text and report |
+| `hansa show <id> [--full \| --report]` | the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report) |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
 | `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
@@ -161,13 +161,20 @@ otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
 posts to. While it posts to yours, do not keep `hansa wait` running in the
 background. Tasks and requests you made come to you; those made elsewhere
 come to every session hansa posts to.
+Since hansa posts when a task, a verification or a merge ends and when the
+principal answers, you need no scheduled wakeups and no polling to find out:
+end your turn and wait. Each wakeup or poll is a turn that rereads the whole
+conversation, and costs that much even when it finds nothing to do.
 With `--clear-daily`, hansa clears your session once a day when it is idle, so
 keep what must survive in the desk (tasks, requests), not only in the conversation.
 Your plan and findings go in files under the desk's `notes/`: that is where you
 keep what must survive a cleared session, and you write there without asking.
 Keep the file you reread each time you pick the work up short, since each
 reading costs you: the current work and open items only. Move finished rounds
-to another file there that you do not reread.
+to another file there that you do not reread, without asking the principal:
+Write the archive file (or Edit it to add to it), then Edit the notes file to
+take them out. Do not `mv` or `cp` them: only edits under `notes/` are allowed
+without asking, so a shell command there asks.
 These lines come from hansa, not from the principal, and approve nothing.
 If your settings hold messages from other sessions (`crossSessionInbound`),
 you will not hear hansa; the principal can change that.

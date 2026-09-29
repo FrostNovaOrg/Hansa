@@ -186,7 +186,8 @@ def cmd_status(a):
 
 
 def cmd_show(a):
-    print(views.show_text(Desk.find(a.desk), a.id, full=a.full))
+    desk = Desk.find(a.desk)
+    print(views.report_text(desk, a.id) if a.report else views.show_text(desk, a.id, full=a.full))
 
 
 def cmd_diff(a):
@@ -1419,7 +1420,10 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = add("show", cmd_show, "one task: its text, report, changes, refused commands, usage, next step")
     p.add_argument("id")
-    p.add_argument("--full", action="store_true", help="the whole text and the whole report")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--full", action="store_true", help="the whole text and the whole report")
+    g.add_argument("--report", action="store_true", help="the report alone, whole (for a verification, its verdict "
+                                                         "and its report)")
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
