@@ -372,8 +372,10 @@ def background_note(m: dict) -> str:
             "its report may be incomplete: read the changes before merging")
 
 
-TEXT_LINES = 8  # the first lines of a task's text that hansa show gives; --full gives it all
-REPORT_LINES = 60
+TEXT_LINES = 3  # the first lines of a task's text that hansa show gives, enough to know the task; --full: all
+TEXT_WIDTH = 200  # and of each line, the first characters
+REPORT_LINES = 400  # a report longer than this is cut in hansa show; --report and --full give it whole
+REPORT_CHARS = 40000
 
 
 def task_text_lines(desk: Desk, m: dict, full: bool = False) -> list:
@@ -384,12 +386,29 @@ def task_text_lines(desk: Desk, m: dict, full: bool = False) -> list:
     if not lines:
         return []
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
-    shown = lines if full else lines[:TEXT_LINES]
+    shown = lines if full else [x if len(x) <= TEXT_WIDTH else x[:TEXT_WIDTH] + " ..." for x in lines[:TEXT_LINES]]
     out = [f"text (as hansa read it when it was queued{', ' + when if when else ''}; the worker is given this):"]
     out += ["  " + x for x in shown]
-    if len(lines) > len(shown):
-        out.append(f"  ({len(lines) - len(shown)} more lines: hansa show {m['id']} --full)")
+    if not full and (len(lines) > TEXT_LINES or any(len(x) > TEXT_WIDTH for x in lines[:TEXT_LINES])):
+        out.append(f"  ({len(lines) - len(shown)} more lines; the whole text: hansa show {m['id']} --full)")
     return out
+
+
+def report_of(desk: Desk, tid: str) -> str:
+    """The worker's report (tasks/ID/result.md), keys removed as it was kept; empty if there is none yet."""
+    f = desk.tasks_dir / tid / "result.md"
+    return f.read_text(encoding="utf-8").strip() if f.exists() else ""
+
+
+def report_text(desk: Desk, tid: str) -> str:
+    """hansa show ID --report: the report alone, whole; for a verification, its verdict first."""
+    m = desk.meta(tid)
+    report = report_of(desk, tid)
+    out = []
+    if m.get("kind") == "verify" and (m.get("state") == "done" or m.get("verdict")):
+        out.append(f"verdict: {m.get('verdict') or 'none given'}")
+    out.append(report or f"(no report: {tid} is {m['state']})")
+    return "\n\n".join(out)
 
 
 def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
@@ -427,13 +446,18 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    "on the server, so the worker never started (hansa explain server)")
     for a in m.get("attempts", []):
         out.append(f"earlier try on {a['provider']}: {a['error']}")
-    report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
+    report = report_of(desk, tid)
     if report:
         lines = report.splitlines()
-        shown = lines if full else lines[:REPORT_LINES]
+        shown, size = [], 0
+        for x in lines if full else lines[:REPORT_LINES]:
+            size += len(x) + 1
+            if not full and shown and size > REPORT_CHARS:
+                break
+            shown.append(x)
         out += ["report:"] + ["  " + x for x in shown]
         if len(lines) > len(shown):
-            out.append(f"  ... {len(lines) - len(shown)} more lines: hansa show {tid} --full")
+            out.append(f"  ... {len(lines) - len(shown)} more lines; the whole report: hansa show {tid} --report")
     if background_note(m):
         out.append(background_note(m))
     if m.get("replaced_by"):
