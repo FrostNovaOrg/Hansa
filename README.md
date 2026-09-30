@@ -106,8 +106,10 @@ page gives.
   `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
   shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
   macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
-  AI tools, cloud tools, git and registry credentials, password stores and
-  keyrings, the keychains, cookies, mail and messages under `~/Library`), or of
+  AI tools and Anthropic's own tool settings in `~/.config/anthropic`, cloud
+  tools, git and registry credentials, proxy clients' settings with their
+  server passwords or subscription links, password stores and keyrings, the
+  keychains, cookies, mail and messages under `~/Library`), or of
   the folders and files the principal lists on the page (Settings, "workers may
   not read": this machine's own folders of keys; Read is denied there to every
   Claude Code run hansa starts, the coordinator too), no network but the

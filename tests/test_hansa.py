@@ -6166,6 +6166,37 @@ class DeskTest(unittest.TestCase):
         self.assertIn("may not read", told)
         self.assertIn("~/.tsh", told)
 
+    def test_anthropics_tool_settings_and_proxy_clients_settings_are_kept_from_workers(self):
+        from hansa import run
+        home, p = Path.home(), self.desk.settings()["providers"]["claude"]
+        everywhere = (".config/anthropic", ".config/clash", ".config/clash.meta", ".config/mihomo", ".config/clash-verge",
+                      ".config/io.github.clash-verge-rev.clash-verge-rev", ".config/sing-box", ".config/v2ray",
+                      ".config/xray", ".config/nekoray")
+        mac = ("Library/Application Support/io.github.clash-verge-rev.clash-verge-rev",
+               "Library/Application Support/com.nssurge.surge-mac", "Library/Application Support/clash-verge")
+        for system in ("linux", "darwin"):
+            with unittest.mock.patch.object(sys, "platform", system):
+                lane = self.desk.settings()["lanes"]["a"]
+                deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
+                srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            for f in everywhere:
+                self.assertIn(str(home / f), deny, (system, f))
+            for f in mac:
+                (self.assertIn if system == "darwin" else self.assertNotIn)(str(home / f), deny, (system, f))
+            self.assertNotIn(str(home / ".config"), deny, system)  # not the whole folder: build tools read there
+        # the write list refuses them, and the coordinator's Read tool is denied them (the macOS ones on macOS)
+        for f in everywhere:
+            self.assertIn("a login or key that workers may not read", write_problems([str(home / f)])[0], f)
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
+        for f in everywhere + (mac if sys.platform == "darwin" else ()):
+            self.assertIn(f"Read(//{str(home / f).lstrip('/')}/**)", denied, f)
+        told = self.hansa("explain", "lane", "a")
+        for f in everywhere:
+            self.assertIn(f"~/{f}", told)
+
     def test_what_the_principal_keeps_from_workers_reaches_every_sandbox_and_every_read_tool(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
