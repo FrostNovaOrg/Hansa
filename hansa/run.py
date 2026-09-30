@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import (DENY_AT, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
+from .desk import (DENY_AT, other_envs, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
                    program_candidates, read_json, write_json, write_problems)
 from .desk import lane_env as checked_env
 
@@ -121,6 +121,7 @@ KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key 
 # says nothing about other tasks, so the provider does not rest; the task moves on.
 REFUSED_STOPS = {"content_filter", "refusal"}
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
+RUN_TMP_VARS = ("TMPDIR", "CLAUDE_CODE_TMPDIR")  # hansa's for each run (make_worker_tmp, in_srt), not a lane's
 GIT_ID = {"GIT_AUTHOR_NAME": "hansa", "GIT_AUTHOR_EMAIL": "hansa@localhost",
           "GIT_COMMITTER_NAME": "hansa", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
 PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in this directory,
@@ -326,11 +327,20 @@ def srt_record(desk: Desk) -> dict:
     return read_json(desk.state_dir / "srt.json", {}) or {}
 
 
-def try_srt(desk: Desk, settings_file, tmp: str, cwd, env: dict) -> str:
-    """Run `true` in srt with these settings and environment, as a setup or check would run, and record what
-    happened in the desk's state (srt_record). Returns srt's path; raises SrtCannotRun when it is not there
-    or does not run: srt is a node script, so a PATH without node finds srt and still cannot start it."""
-    path = shutil.which("srt", path=env.get("PATH", os.defpath)) or shutil.which("srt")
+def base_env() -> dict:
+    """hansa's own environment, as what it runs outside the sandbox is given it (srt, the scripts around a
+    setup or check and their git, Claude Code): never a lane's env, which reaches only what runs in the
+    sandbox (in_sandbox, env_file)."""
+    return {k: os.environ[k] for k in BASE_ENV if k in os.environ}
+
+
+def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
+    """Run `true` in srt with these settings, as a setup or check would run, and record what happened in the
+    desk's state (srt_record). srt is found on hansa's own PATH and run with hansa's environment, never a
+    lane's. Returns srt's path; raises SrtCannotRun when it is not there or does not run: srt is a node
+    script, so a PATH without node finds srt and still cannot start it."""
+    env = base_env()
+    path = shutil.which("srt")
     rec = {"found": bool(path), "path": path or "", "ran": False, "said": "", "at": now()}
     if path:
         try:
@@ -362,7 +372,7 @@ def try_srt_at_start(desk: Desk) -> dict:
         write_json(f, {"network": {"allowedDomains": [], "deniedDomains": []},
                        "filesystem": {"allowWrite": full_paths([tmp]), "denyWrite": [],
                                       "denyRead": full_paths([desk.secrets_dir, desk.state_dir])}})
-        try_srt(desk, f, tmp, tmp, {k: os.environ[k] for k in BASE_ENV if k in os.environ})
+        try_srt(desk, f, tmp, tmp)
     except SrtCannotRun:
         pass
     finally:
@@ -896,7 +906,8 @@ def write_list(desk: Desk, lane: dict) -> tuple:
     s = desk.settings()
     kept = kept_from_workers(s, desk.root)[0]
     for x in given:
-        said = write_problems([x], lane.get("repo"), desk.root, s["providers"], kept, lane.get("env"))
+        said = write_problems([x], lane.get("repo"), desk.root, s["providers"], kept, lane.get("env"),
+                              other_envs(s["lanes"], lane))
         if said:
             left.append(f"left out of this run: {said[0].removeprefix('write cannot include ')} "
                         "(the write list is changed with hansa lane set)")
@@ -907,9 +918,41 @@ def write_list(desk: Desk, lane: dict) -> tuple:
 
 def lane_env(desk: Desk, lane: dict) -> tuple:
     """A lane's env as a run may be given it: (the variables that pass the checks now, a line for each left
-    out). It reaches what hansa runs outside the sandbox (srt, the worker's Claude Code, the scripts before a
-    worker), so one saved before a check was there is not passed on."""
+    out). It reaches only what runs in the sandbox (in_sandbox, env_file); the checks are a second line, so
+    one saved before a check was there is not passed on."""
     return checked_env(lane.get("env", {}), desk.root)
+
+
+def sandbox_env(desk: Desk, lane: dict) -> dict:
+    """The lane's env as the commands in the sandbox get it: what passes the checks, without the temporary
+    folder, which is each run's own."""
+    return {k: v for k, v in lane_env(desk, lane)[0].items() if k not in RUN_TMP_VARS}
+
+
+def in_sandbox(desk: Desk, lane: dict, command: str) -> str:
+    """A lane's command (setup, check) as srt is given it to run with /bin/sh -c: with the lane's env set
+    inside the sandbox, by env there (`exec /usr/bin/env K=V ... /bin/sh -c COMMAND`). srt itself, the script
+    around it and the git it runs get hansa's environment, so nothing a lane's env names is looked up, loaded
+    or read outside the sandbox."""
+    env = sandbox_env(desk, lane)
+    if not env:
+        return command
+    return ("exec /usr/bin/env " + " ".join(shlex.quote(f"{k}={v}") for k, v in env.items())
+            + " /bin/sh -c " + shlex.quote(command))
+
+
+def env_file(desk: Desk, tid: str, lane: dict) -> dict:
+    """How a worker's Bash commands get the lane's env: {"CLAUDE_ENV_FILE": a file of `export K='V'` lines},
+    {} when the lane sets nothing. Claude Code reads the file itself and runs its content in front of each
+    Bash command, inside its sandbox; Claude Code starts without the lane's env, so its own lookups (git, the
+    sandbox's helpers, its shell, MCP servers) use hansa's environment. The file is in the task's raw folder
+    (.hansa), which no worker can write or read."""
+    env = sandbox_env(desk, lane)
+    if not env:
+        return {}
+    f = desk.raw_dir(tid) / "lane-env.sh"
+    f.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()), encoding="utf-8")
+    return {"CLAUDE_ENV_FILE": str(f)}
 
 
 def no_read(desk: Desk) -> tuple:
@@ -989,9 +1032,8 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
     write_json(f, srt_settings(desk, lane, pname, p, wt, tmp))
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), tmp]})
-    env = {**{k: os.environ[k] for k in BASE_ENV if k in os.environ}, **lane_env(desk, lane)[0]}
     try:
-        srt = try_srt(desk, f, tmp, wt, env)
+        srt = try_srt(desk, f, tmp, wt)
     except SrtCannotRun:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -999,10 +1041,11 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 
 
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
-    """The srt settings of a task's setup and check, once they have ended, and their temporary folders
+    """The srt settings of a task's setup and check, once they have ended, the lane's env file, and their temporary folders
     still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
     for name in ("setup", "check"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
+    (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
     m = desk.meta(tid)
     for t in [*m.get("sandbox_tmp", []), *([m["worker_tmp"]] if m.get("worker_tmp") else [])]:
         shutil.rmtree(t, ignore_errors=True)
@@ -1619,7 +1662,7 @@ def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
     srt, settings, tmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
     line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
-    return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", lane["setup"], str(raw / "setup.log"), str(raw / "run.err"),
+    return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", in_sandbox(desk, lane, lane["setup"]), str(raw / "setup.log"), str(raw / "run.err"),
             line, tmp, srt, settings, *argv]
 
 
@@ -1744,7 +1787,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **lane_env(desk, lane)[0], "HANSA_TASK": tid,
+    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), "HANSA_TASK": tid,
            "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
@@ -1808,7 +1851,7 @@ def design_command(desk: Desk, tid: str):
              "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir), *no_read_rules(kept),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
-    env = {**provider_env(desk, pname, p), **lane_env(desk, lane)[0], "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
+    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
            "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
@@ -2139,11 +2182,10 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
             return None
         wt, pname = Path(meta.get("worktree") or desk.worktrees_dir / lane_name), meta.get("provider", "")
         srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
-        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-        env.update({**lane_env(desk, lane)[0], "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp})
+        env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
         desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
-            proc = subprocess.Popen(["/bin/sh", "-c", CHECK_SCRIPT, token, lane["check"], str(raw / "check.exit"), tmp,
+            proc = subprocess.Popen(["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "check.exit"), tmp,
                                      srt, settings], cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
@@ -2414,14 +2456,14 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
         srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, p, wt)
-        argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, lane["check"], str(raw / "merge-check.exit"), tmp, srt, settings]
+        argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "merge-check.exit"), tmp, srt,
+                settings]
         if lane.get("setup"):
             ssrt, ssettings, stmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
-            argv = ["/bin/sh", "-c", SETUP_SCRIPT, token, lane["setup"], str(raw / "merge-setup.log"),
+            argv = ["/bin/sh", "-c", SETUP_SCRIPT, token, in_sandbox(desk, lane, lane["setup"]), str(raw / "merge-setup.log"),
                     str(raw / "merge-check.err"), expected_git_line(desk, wt) or "(unknown, so no git runs here)",
                     stmp, ssrt, ssettings, *argv]
-        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-        env.update({**lane_env(desk, lane)[0], "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp})
+        env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": lane["check"],
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
         desk.update(tid, merge_check=mc)
@@ -2600,12 +2642,11 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
             if lane.get(step):
                 tmp = tempfile.mkdtemp(prefix=f"hansa-{step}-")
                 write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp))
-                args += [step, lane[step], str(d / f"{step}-sandbox.json"), tmp]
+                args += [step, in_sandbox(desk, lane, lane[step]), str(d / f"{step}-sandbox.json"), tmp]
                 tmps.append(tmp)
-        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-        env.update({**lane_env(desk, lane)[0], "TERM": "dumb"})
+        env = {**base_env(), "TERM": "dumb"}
         try:  # srt first, with the first step's settings (as in_srt): when it cannot run, nothing runs
-            srt = try_srt(desk, args[2], args[3], wt, env) if args else srt_bin()
+            srt = try_srt(desk, args[2], args[3], wt) if args else srt_bin()
         except SrtCannotRun as e:
             for x in tmps:
                 shutil.rmtree(x, ignore_errors=True)

@@ -68,7 +68,11 @@ def BG_NOTICE(bid, what):
 exec(BG_SHAPES)
 
 FAKE = r'''#!/usr/bin/env python3
-import json, os, subprocess, sys, time
+import json, os, shlex, subprocess, sys, time
+if os.environ.get("CLAUDE_ENV_FILE"):  # the lane's env: the real one runs the file in front of each Bash command
+    for word in shlex.split(open(os.environ["CLAUDE_ENV_FILE"]).read()):
+        if "=" in word:
+            os.environ[word.split("=", 1)[0]] = word.split("=", 1)[1]
 ''' + BG_SHAPES + r'''
 prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
 if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
@@ -260,6 +264,7 @@ mode = os.fstat(1).st_mode
 with open(LOG, "a") as f:
     f.write(json.dumps({"argv": args, "settings": settings, "tmpdir": os.environ.get("TMPDIR", ""),
                         "tmp_there": os.path.isdir(os.environ.get("TMPDIR", "")), "cwd": os.getcwd(),
+                        "env": dict(os.environ),
                         "stdout": "pipe" if stat.S_ISFIFO(mode) else "file" if stat.S_ISREG(mode) else "other"}) + "\n")
 os.execvp(args[cut + 1], args[cut + 1:])
 '''
@@ -1423,7 +1428,9 @@ class DeskTest(unittest.TestCase):
         m = self.settle_merge(d, t2)
         self.assertEqual((m["state"], m["merge_check_result"]["exit"]), ("done", 3), m)
         setup, check = self.srt_calls()[calls:]
-        self.assertEqual((setup["argv"][-1], check["argv"][-1]), ("echo set up for the merge", "echo merged badly; exit 3"))
+        self.assertEqual((setup["argv"][-1], check["argv"][-1]),  # the lane's env is set inside the sandbox
+                         ("exec /usr/bin/env FAKE_HELLO=b.txt /bin/sh -c 'echo set up for the merge'",
+                          "exec /usr/bin/env FAKE_HELLO=b.txt /bin/sh -c 'echo merged badly; exit 3'"))
         self.assertEqual((setup["stdout"], check["stdout"]), ("pipe", "pipe"))
         self.assertIn("set up for the merge", (self.desk.tasks_dir / t2 / "merge-setup.log").read_text())
         self.assertIn("merged badly", (self.desk.tasks_dir / t2 / "merge-check.log").read_text())
@@ -2670,7 +2677,8 @@ class DeskTest(unittest.TestCase):
         [call] = self.srt_calls()
         argv, got = call["argv"], call["settings"]
         self.assertEqual(argv[0], "--settings")
-        self.assertEqual(argv[2:6], ["--", "/bin/sh", "-c", 'echo "tmp=$TMPDIR"'])
+        self.assertEqual(argv[2:6], ["--", "/bin/sh", "-c", f"exec /usr/bin/env FAKE_SHOW_ARGV={seen} /bin/sh -c "
+                                     + shlex.quote('echo "tmp=$TMPDIR"')])
         self.assertEqual(call["stdout"], "pipe")  # not the log file in the raw folder srt hides
         self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
@@ -2747,7 +2755,7 @@ class DeskTest(unittest.TestCase):
         server = views.explain_text(self.desk, "server")
         self.assertIn("now: hansa serve tried srt: found at /x/srt", server)
         self.assertNotIn("01-01", problem + server)
-        self.assertIn("on the lane's own PATH first", server)
+        self.assertIn("on the PATH hansa serve starts with, never on a lane's", server)
 
     def test_an_srt_that_is_found_but_cannot_start_runs_no_check_and_does_not_fail_the_task(self):
         ran = self.tmp / "check-ran"
@@ -6097,8 +6105,9 @@ class DeskTest(unittest.TestCase):
                 self.assertTrue(len(told) == 1 and f"lane a: write cannot include {x}: it would open {own / 'bin'}, a "
                                 "folder on the lane's PATH (its env)" in told[0], (x, told))
                 self.assertIn("inside the check or setup command", told[0])
-            with self.assertRaises(SystemExit):  # as the coordinator would set it
-                self.hansa("lane", "set", "a", "env", *[f"{k}={v}" for k, v in env.items()])
+            self.hansa("lane", "set", "a", "env", *[f"{k}={v}" for k, v in env.items()])  # as the coordinator would
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["env"], env)  # the env is saved
+            with self.assertRaises(SystemExit):  # and the write entry is refused
                 self.hansa("lane", "set", "a", "write", str(own / "bin"))
             self.assertNotIn(str(own / "bin"), self.desk.settings()["lanes"]["a"].get("write", []))
             # saved earlier: left out at a run's start, with a line
@@ -6119,6 +6128,165 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(m["state"], "done", m)
             self.assertEqual(m["write_left_out"], left)
             self.assertIn(f"write list: left out of this run: {own / 'bin'}: it would open", views.show_text(self.desk, tid))
+
+    def popens(self):
+        """Patch for subprocess.Popen that keeps the environment of each process hansa starts, and what the
+        lane's env file held then: (the patch, the environments, the files' texts)."""
+        envs, files, real = [], [], subprocess.Popen
+
+        def popen(argv, *args, **kw):
+            env = dict(kw.get("env") or os.environ)
+            envs.append(env)
+            if env.get("CLAUDE_ENV_FILE"):
+                files.append((env["CLAUDE_ENV_FILE"], Path(env["CLAUDE_ENV_FILE"]).read_text()))
+            return real(argv, *args, **kw)
+        return unittest.mock.patch("subprocess.Popen", popen), envs, files
+
+    def test_a_worker_starts_without_the_lanes_env_and_its_commands_get_it_from_a_file(self):
+        value = "two words, 'single' \"double\" $HOME `id` \\ and\ta tab"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"LANE_VAR": value, "npm_config_cache": "/srv/x/cache", "FAKE_WRITE": "from the file",
+                                  "TMPDIR": "/tmp"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        patch, envs, files = self.popens()
+        with patch:
+            m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(m["state"], "done", m)
+        [claude] = [e for e in envs if e.get("CLAUDE_ENV_FILE")]
+        self.assertFalse({"LANE_VAR", "npm_config_cache", "FAKE_WRITE"} & set(claude), claude)  # no lane variable
+        self.assertFalse([e for e in envs if value in e.values()])
+        self.assertNotEqual(claude["TMPDIR"], "/tmp")  # the run's own
+        [(path, text)] = files
+        self.assertTrue(Path(path).resolve().is_relative_to(self.desk.state_dir.resolve()), path)  # no worker writes there
+        self.assertEqual(text, f"export LANE_VAR={shlex.quote(value)}\nexport npm_config_cache=/srv/x/cache\n"
+                               "export FAKE_WRITE='from the file'\n")  # quoted; the temporary folder stays the run's
+        r = subprocess.run(["/bin/sh", "-c", text + 'printf %s "$LANE_VAR"'], capture_output=True, text=True,
+                           env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.stdout, value)  # as a shell reads it back
+        self.assertIn("notes.txt", m["files"])  # the stand-in read the file, as Claude Code does for its commands
+        # a lane with no env: no file
+        s["lanes"]["a"]["env"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        patch, envs, files = self.popens()
+        with patch:
+            self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(files, [])
+
+    def test_setup_check_lane_try_and_the_merge_check_get_the_lanes_env_inside_the_sandbox_only(self):
+        from hansa import run
+        value, out = "it's $HOME and \"more\"", self.tmp / "seen"
+        out.mkdir()
+        d, t1, t2 = self.two_lanes()
+        s = self.desk.settings()
+        step = lambda name: f'printf %s "$LANE_VAR" > {out}/{name}-$HANSA_TASK'
+        s["lanes"]["b"].update(env={"LANE_VAR": value, "FAKE_HELLO": "c.txt", "TMPDIR": "/tmp"}, setup=step("setup"),
+                               check=step("check"))
+        self.assertEqual(self.desk.save_settings(s), [])
+        calls = len(self.srt_calls(tries=True))
+        patch, envs, _ = self.popens()
+        with patch:
+            t3 = self.desk.new_task("Add c.txt", lane="b")
+            m = self.settle(d, t3)  # a task's setup and check
+            self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+            self.hansa("merge", t1)
+            self.hansa("merge", t3)  # the base has moved: the setup and the check again, for the merge
+            self.assertEqual(self.settle_merge(d, t3)["state"], "merged")
+            run.write_try(self.desk, "b", {"id": "y1", "phase": "queued", "asked": time.time()})  # hansa lane try
+            end = time.time() + 20
+            while run.read_try(self.desk, "b").get("phase") != "done" and time.time() < end:
+                d.tick()
+                time.sleep(0.1)
+        self.assertTrue(run.read_try(self.desk, "b").get("ok"), run.read_try(self.desk, "b"))
+        # inside the sandbox: each command saw the variable
+        self.assertEqual({f.name: f.read_text() for f in out.iterdir()},
+                         {f"setup-{t3}": value, f"check-{t3}": value, "setup-": value, "check-": value})
+        ran = self.srt_calls(tries=True)[calls:]
+        self.assertEqual(len([c for c in ran if c["argv"][-2:] != ["--", "true"]]), 6)  # 2 for each of the three
+        for c in ran:  # srt itself: hansa's environment, the variable only in the command it is given to run
+            self.assertNotIn("LANE_VAR", c["env"])
+            self.assertNotEqual(c["env"].get("TMPDIR"), "/tmp")
+            if c["argv"][-2:] != ["--", "true"]:
+                self.assertTrue(c["argv"][-1].startswith(f"exec /usr/bin/env {shlex.quote('LANE_VAR=' + value)} "
+                                                         "FAKE_HELLO=c.txt /bin/sh -c "), c["argv"])
+        self.assertTrue(envs)
+        self.assertFalse([e for e in envs if "LANE_VAR" in e or "FAKE_HELLO" in e])  # nor the scripts around it
+
+    def test_a_relative_xdg_config_home_in_a_lanes_env_does_not_reach_the_git_hansa_runs(self):
+        ran = self.tmp / "monitor-ran"
+        monitor = self.tmp / "monitor"
+        monitor.write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+        monitor.chmod(0o755)
+        (self.repo / "cfg" / "git").mkdir(parents=True)  # as a worker's change would hold it
+        (self.repo / "cfg" / "git" / "config").write_text(f"[core]\n\tfsmonitor = {monitor}\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "cfg", cwd=self.repo)
+        self.hansa("lane", "set", "a", "env", "XDG_CONFIG_HOME=cfg")
+        self.hansa("lane", "set", "a", "setup", "true")
+        self.hansa("lane", "set", "a", "check", "true")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(ran.exists(), "git, run by hansa outside the sandbox, ran the repository's fsmonitor command")
+        self.assertEqual([c["env"].get("XDG_CONFIG_HOME") for c in self.srt_calls(tries=True)
+                          if c["env"].get("XDG_CONFIG_HOME") == "cfg"], [])
+
+    def test_an_srt_on_a_lanes_path_is_never_run(self):
+        planted, ran = self.tmp / "planted", self.tmp / "planted-ran"
+        planted.mkdir()
+        (planted / "srt").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nshift 3\nexec "$@"\n')  # put there beforehand
+        (planted / "srt").chmod(0o755)
+        s = self.desk.settings()
+        s["lanes"]["a"].update(env={"PATH": f"{planted}{os.pathsep}{os.environ['PATH']}"}, setup="true",
+                               check=f"command -v srt > {self.tmp}/where.txt")
+        write_json(self.desk.settings_path, s)  # saved earlier
+        from hansa import run
+        d = Dispatcher(self.desk)
+        m = self.settle(d, self.desk.new_task("Add hello.txt"))
+        run.write_try(self.desk, "a", {"id": "y1", "phase": "queued", "asked": time.time()})
+        end = time.time() + 20
+        while run.read_try(self.desk, "a").get("phase") != "done" and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+        self.assertFalse(ran.exists(), "hansa ran the srt on the lane's PATH")
+        calls = self.srt_calls(tries=True)  # srt came from hansa's own PATH
+        self.assertEqual(len(calls), 7, [c["argv"] for c in calls])  # the task's and the try's setup and check
+        self.assertFalse([c for c in calls if str(planted) in c["env"].get("PATH", "")])
+        # the lane's PATH still reaches the command in the sandbox
+        self.assertEqual((self.tmp / "where.txt").read_text().strip(), str(planted / "srt"))
+
+    def test_what_another_lanes_env_names_is_closed_to_this_lanes_workers(self):
+        from hansa import run
+        shared = self.tmp.resolve() / "shared"
+        (shared / "bin").mkdir(parents=True)
+        s = self.desk.settings()
+        s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
+        s["lanes"]["b"]["env"] = {"PATH": f"{shared / 'bin'}:/usr/bin:/bin", "XDG_CONFIG_HOME": str(shared / "cfg"),
+                                  "PIP_CACHE_DIR": str(shared / "pip")}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for x, why in ((shared / "bin", f"it would open {shared / 'bin'}, a folder on lane b's PATH (its env)"),
+                       (shared / "bin" / "srt", f"it would open {shared / 'bin'}, a folder on lane b's PATH (its env)"),
+                       (shared, f"it would open {shared / 'bin'}, a folder on lane b's PATH (its env)"),
+                       (shared / "cfg" / "git", f"it would open {shared / 'cfg'}, which lane b's env names in "
+                                                "XDG_CONFIG_HOME")):
+            s["lanes"]["a"]["write"] = [str(x)]
+            told = validate(s, self.desk.root)
+            self.assertTrue(len(told) == 1 and told[0].startswith(f"lane a: write cannot include {x}: {why}"), (x, told))
+            with self.assertRaises(SystemExit):
+                self.hansa("lane", "set", "a", "write", str(x))
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("write", []), [])
+        self.hansa("lane", "set", "a", "write", str(shared / "pip"), str(shared / "other"))  # a cache variable's folder
+        # the other way round: lane b's env may not come to name what lane a's workers write
+        with self.assertRaises(SystemExit):
+            self.hansa("lane", "set", "b", "env", f"PATH={shared / 'other'}:/usr/bin")
+        self.assertEqual(self.desk.settings()["lanes"]["b"]["env"], s["lanes"]["b"]["env"])
+        # saved earlier: left out at a run's start, with a line
+        s["lanes"]["a"]["write"] = [str(shared / "bin"), str(shared / "pip")]
+        write_json(self.desk.settings_path, s)
+        good, left = run.write_list(self.desk, self.desk.settings()["lanes"]["a"])
+        self.assertEqual(good, [str(shared / "pip")])
+        self.assertTrue(len(left) == 1 and "a folder on lane b's PATH" in left[0], left)
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt", lane="a"))
+        self.assertEqual((m["state"], m["write_left_out"]), ("done", left), m)
 
     def test_a_lanes_path_holds_only_full_paths_outside_the_desk(self):
         for path, entry in (("bin:/usr/bin", "bin"), ("/usr/bin::/bin", ""), (":/usr/bin", ""), ("/usr/bin:", ""),
@@ -6215,18 +6383,22 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(left), len(names) + 2)
         self.assertTrue(left[0].startswith("left out of this run: LD_PRELOAD cannot be set for a lane") and
                         left[0].endswith("(the env is changed with hansa lane set)"), left[0])
-        seen = {}
+        seen, files = {}, []
         real = subprocess.Popen
 
         def popen(argv, *args, **kw):
             seen.update(kw.get("env") or {})
+            if (kw.get("env") or {}).get("CLAUDE_ENV_FILE"):  # read now: the run's folder is gone when it ends
+                files.append(Path(kw["env"]["CLAUDE_ENV_FILE"]).read_text())
             return real(argv, *args, **kw)
 
         tid = self.desk.new_task("Add hello.txt")
         with unittest.mock.patch("subprocess.Popen", popen):
             m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "done", m)
-        self.assertEqual(seen.get("NODE_ENV"), "test")
+        self.assertNotIn("NODE_ENV", seen)  # the lane's env is not Claude Code's: its commands get it from the file
+        self.assertIn("export NODE_ENV=test\n", files[0])
+        self.assertFalse([n for n in (*names, "PATH", "HANSA_TASK") if f"export {n}=" in files[0]], files[0])
         self.assertNotEqual(seen.get("GIT_CONFIG_GLOBAL"), "/x")
         self.assertFalse([n for n in names if seen.get(n) == "/x"])
         self.assertNotEqual(seen.get("PATH"), "bin:/usr/bin")

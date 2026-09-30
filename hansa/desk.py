@@ -112,15 +112,14 @@ PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
 MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
-# A lane's env reaches what hansa runs outside the sandbox too: srt and its node, the worker's Claude Code (which
-# runs git, its shell and its helpers), the /bin/sh scripts before a worker. So what it names is closed to
-# workers, as what hansa's own environment names is, and these names, which tell a loader, git, a shell or
-# Claude Code what to run, are not a lane's to set
+# A lane's env reaches only what runs in the sandbox (run.in_sandbox, run.env_file): srt, the worker's Claude
+# Code and the /bin/sh scripts around a setup or check get hansa's environment. As a second line, what a
+# lane's env names is closed to workers, as what hansa's own environment names is, and these names, which
+# tell a loader, git, a shell or Claude Code what to run, are not a lane's to set
 RUN_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "CLAUDE_")
 RUN_ENV_NAMES = ("NODE_OPTIONS", "BASH_ENV", "ENV", "SHELL", "ZDOTDIR", "HOME")
-RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run, and a lane's "
-               "env also reaches what hansa runs outside the sandbox; set it inside the check or setup command "
-               "instead, where it runs in the sandbox")
+RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run; set it inside "
+               "the check or setup command instead, where it runs in the sandbox")
 # The variables that exist to point a tool in the sandbox at the lane's own folder: what these name may be on
 # the lane's write list (the card names the cache ones)
 CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_CACHE_FOLDER", "CARGO_HOME",
@@ -295,7 +294,8 @@ def validate(s: dict, root=None) -> list:
             p += [f"{at}: repo cannot be {ln['repo']}: it is {d} or inside it, which the principal keeps workers "
                   "from reading (the web page, Settings)" for d in kept if _above(d, ln["repo"])][:1]
         env = ln.get("env", {})
-        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept, env)]
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept, env,
+                                                   other_envs(lanes, ln))]
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
         else:
@@ -370,19 +370,24 @@ def env_problems(env: dict, root=None) -> list:
             if odd:  # it would be looked for in the worktree, which workers write
                 p.append((k, f"cannot have the entry {odd[0]!r}: each folder on a lane's PATH must be a full path "
                              "starting with /, and none may be empty (such an entry is looked for in the "
-                             "worktree, which workers write, and the PATH also finds what hansa runs outside "
-                             "the sandbox)"))
+                             "worktree, which workers write)"))
             elif inside:
-                p.append((k, f"cannot name {inside[0]}: it is the desk or inside it, and a lane's env "
-                             "also reaches what hansa runs outside the sandbox (workers write the worktrees; "
-                             "name a place in the worktree inside the check or setup command instead)"))
+                p.append((k, f"cannot name {inside[0]}: it is the desk or inside it (workers write the "
+                             "worktrees; name a place in the worktree inside the check or setup command instead)"))
     return p
+
+
+def other_envs(lanes, lane) -> dict:
+    """The env of each other lane on the desk, by the lane's name: what any of them names is closed to this
+    lane's workers too (write_problems)."""
+    return {n: ln["env"] for n, ln in (lanes.items() if isinstance(lanes, dict) else ())
+            if ln is not lane and isinstance(ln, dict) and isinstance(ln.get("env"), dict)}
 
 
 def lane_env(env, root=None) -> tuple:
     """A lane's env as a run may be given it: (the variables that pass the checks now, a line for each left
-    out). The env is checked on saving, but one saved before a check was there would still reach what hansa
-    runs outside the sandbox."""
+    out). The env is checked on saving, but one saved before a check was there would still reach the lane's
+    commands."""
     if not isinstance(env, dict):
         return {}, ([] if env is None else ["left out of this run: the whole env: it must be an object of "
                                             "NAME=text (the env is changed with hansa lane set)"])
@@ -978,11 +983,13 @@ BREAKS_WHY = f"a name in it (or where its link leads) has one of {RULE_BREAKERS}
 
 
 @_one_look
-def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=None) -> list:
+def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=None, others=None) -> list:
     """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
     None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it. denied: what
     the principal keeps workers from reading (deny_split's good ones). env: the lane's env, which reaches
-    what hansa runs outside the sandbox: what it names is closed as what hansa's own environment names is."""
+    the lane's commands in the sandbox: what it names is closed as what hansa's own environment names is, so
+    workers cannot write where a lane's commands look. others: the env of each other lane on the desk
+    (other_envs), whose PATH folders and named paths are closed the same way."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/hansa-cache/a/pip"]
@@ -1014,22 +1021,25 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
     on_path = [_plain(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with") for d in on_path]
     env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(env, dict) else {}
-    lane_path = [_plain(d) for d in env.get("PATH", "").split(os.pathsep) if d.startswith("/")]
-    fenced += [(d, _on_path, f"it would open {d}, a folder on the lane's PATH (its env), is inside it or above "
-                             "it: the lane's PATH also finds what hansa runs outside the sandbox (srt, node, "
-                             "git), so a program there would run outside it (put a tool's bin folder on the "
-                             "PATH inside the check or setup command instead)") for d in lane_path]
+    others = {n: {k: v for k, v in e.items() if isinstance(k, str) and isinstance(v, str)}
+              for n, e in (others.items() if isinstance(others, dict) else ()) if isinstance(e, dict)}
+    envs = [("the lane's", env), *((f"lane {n}'s", e) for n, e in others.items())]
+    fenced += [(_plain(d), _on_path, f"it would open {_plain(d)}, a folder on {whose} PATH (its env), is inside it "
+                                     "or above it: a lane's commands find their programs there, so a program a "
+                                     "worker put there would run in their place (put a tool's bin folder on the "
+                                     "PATH inside the check or setup command instead)")
+               for whose, e in envs for d in e.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     fenced += _run_fence(home, env)
     # after the programs hansa knows, which say more: whatever else is in a PATH folder, there or not yet
     fenced += [(d, _on_path, f"it is inside {d}, a folder on the PATH hansa runs with: a program there runs "
                              f"outside the sandbox ({ELSEWHERE})") for d in on_path]
     fenced += _install_fence(home)
     # every path the lane's env names, but those of the variables that point a tool at the lane's own folder
-    fenced += [(d, _on_path, f"it would open {d}, which the lane's env names in {k} (or it is inside it): a lane's "
-                             "env also reaches what hansa runs outside the sandbox, so what it names is closed "
-                             f"to workers (but a cache variable such as {CACHE_ENV[2]} or {CACHE_ENV[0]}, which "
+    fenced += [(d, _on_path, f"it would open {d}, which {whose} env names in {k} (or it is inside it): what a "
+                             "lane's env names is where the lane's commands look, so it is closed to workers "
+                             f"(but a cache variable such as {CACHE_ENV[2]} or {CACHE_ENV[0]}, which "
                              "may point at the lane's own folder; set the other inside the check or setup command)")
-               for k, v in env.items() if k != "PATH" and k not in CACHE_ENV and k not in XDG_OPEN
+               for whose, e in envs for k, v in e.items() if k != "PATH" and k not in CACHE_ENV and k not in XDG_OPEN
                for d in env_paths(v, home)]
     fenced += [(os.path.join(home, n), _overlaps, f"it would open {os.path.join(home, n)}, {what}; {OWN_FOLDER}")
                for n, what in TOOL_HOMES.items()]

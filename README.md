@@ -146,10 +146,15 @@ page gives.
   `npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
   `YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
   gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
-  `CCACHE_DIR`. What a lane's env names is closed to workers, as what hansa's
-  own environment names is (the env also reaches what hansa runs outside the
-  sandbox): a write entry cannot be, be inside or be above a folder on the
-  lane's `PATH` or a full path in another env value. A cache variable (those
+  `CCACHE_DIR`. A lane's env reaches the lane's commands, in the sandbox
+  (setup, check, preview, `hansa lane try` and the worker's Bash commands),
+  not Claude Code and not hansa's own programs: srt, the scripts around a
+  setup or check and Claude Code run with the server's environment, and the
+  worker's commands get the lane's env from a file hansa writes
+  (`CLAUDE_ENV_FILE`). As a second line, what any lane's env on the desk
+  names is closed to workers: a write entry cannot be, be inside or be above
+  a folder on a lane's `PATH` or a full path in another env value, this
+  lane's or another's. A cache variable (those
   above and `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`) may point at
   the lane's own folder; put a tool's bin folder on the `PATH` inside the
   check command, not in the lane's env. A lane's env takes no name that tells

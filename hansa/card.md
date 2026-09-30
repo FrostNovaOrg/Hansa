@@ -290,9 +290,8 @@ here; work that needs code changed or a browser goes to a worker.
   `source`). The preview is started by a design session's Bash tool; write it
   the same way.
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
-  lane's setup and check. Before each setup or check, hansa looks for it on the
-  lane's own PATH first (a PATH in the lane's env, else the server's), then on
-  the PATH of `hansa serve`; node must be on the lane's PATH too (srt is a node
+  lane's setup and check. hansa looks for it on the PATH of `hansa serve`,
+  never on a lane's; node must be on that PATH too (srt is a node
   script). The server tries it when it starts and before each
   setup or check; `hansa status` reports what the server saw. When it cannot run,
   a task's setup fails it before its worker starts, and its check reads "could
@@ -343,11 +342,19 @@ here; work that needs code changed or a browser goes to a worker.
   install, a git hooks folder, a file your shell sources), so do not list such
   a folder.
   `hansa explain lane L` marks each entry a run would leave out, with why.
-  What a lane's env names is closed to workers, as what hansa's own
-  environment names is: the env also reaches what hansa runs outside the
-  sandbox (srt and its node, the worker's Claude Code, the scripts before a
-  worker). So a write entry is refused when it is, is inside, or is above a
-  folder on the lane's `PATH` or a full path in any other env value. A cache
+  A lane's env reaches the lane's commands, which run in the sandbox (setup,
+  check, preview, `hansa lane try` and the worker's Bash commands), not
+  Claude Code itself and not hansa's own programs: srt, the scripts around a
+  setup or check and their git, and Claude Code (with its git, shell, helpers
+  and MCP servers such as the browser) run with the environment of `hansa
+  serve`. So a lane's `PATH` does not find srt or node for hansa, and a
+  setting meant for Claude Code or the browser tool goes in the server's
+  environment or hansa's browser settings, not a lane's env.
+  As a second line, what any lane's env on the desk names is closed to
+  workers, as what hansa's own environment names is, so no worker writes
+  where a lane's commands look: a write entry is refused when it is, is
+  inside, or is above a folder on a lane's `PATH` or a full path in any other
+  env value, this lane's or another's. A cache
   variable (the ones below, and `XDG_CACHE_HOME`, `XDG_DATA_HOME`,
   `XDG_STATE_HOME`) may point at the lane's own folder; put a tool's bin
   folder on the `PATH` inside the check or setup command
