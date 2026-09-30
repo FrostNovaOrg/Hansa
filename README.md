@@ -122,23 +122,48 @@ page gives.
   principal works in directly, and the coordinator run outside it.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
-  tool's own folder under `~/.cache` or `~/Library/Caches`, the listed package
-  caches (`~/.m2/repository`, `~/.gradle/caches`, `~/.npm/_cacache`,
-  `~/.pnpm-store`, `~/.local/share/pnpm/store`, `~/.cargo/registry`,
-  `~/.cargo/git`, `~/go/pkg/mod`, `~/.nuget/packages`, `~/.ivy2/cache`,
-  `~/.conan2/p`, `~/.bun/install/cache`), or a plain folder (no name starting
-  with a dot) outside `~/Library` and `~/Applications`; outside the home
-  folder, anywhere but where programs are installed (the Homebrew prefix,
+  plain folder (no name between the home folder and the entry starts with a
+  dot, and not inside `~/Library` or `~/Applications`), such as
+  `~/hansa-cache/<lane>/<tool>`; outside the home folder, anywhere but where
+  programs are installed (the Homebrew prefix, `/opt/local`, `/opt/X11`,
   `/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, the
   system's own folders, and where `claude`, `git`, `srt`, `node`, `tmux`,
-  hansa and its python really live). The desk, the lane's repository, Claude
-  Code's folders and cache, credential files, folders on the `PATH` and other
-  names for the whole disk are refused as before, and so is a name with
-  `( ) [ ] { } * ?`, a backslash, a look-alike of one, or an invisible
-  character. Rather than share the user's cache, point a tool at a cache
-  folder of the lane's own with the lane's env (`GRADLE_USER_HOME`,
-  `npm_config_cache`, `CARGO_HOME`, `GOMODCACHE`, `PIP_CACHE_DIR`,
-  `-Dmaven.repo.local` and the like). `hansa/card.md` has the list.
+  hansa and its python really live) and the folders on the `PATH` hansa runs
+  with, what is inside them and the folders above them. A lane writes only
+  folders of its own: the user's caches (`~/.cache`, `~/Library/Caches`,
+  `~/.m2/repository`, `~/.npm/_cacache` and the rest) cannot be listed, since
+  they are shared with what runs outside the sandbox, and neither can the
+  common tool homes with plain names (`~/go`, `~/miniconda3`, `~/anaconda3`,
+  `~/miniforge3`, `~/mambaforge`, `~/miniconda`, `~/anaconda`,
+  `~/micromamba`, `~/sdk`) or what is inside them. That list is not
+  complete: hansa cannot see what your own shell, git or tools name in plain
+  folders of the home folder (a conda install, a git hooks folder, a file
+  your shell sources), so do not list such a folder. `hansa explain lane L`
+  marks each entry a run would leave out, with why. A lane's env names may be
+  in either case (`npm_config_cache`). The desk, the lane's
+  repository, Claude Code's folders, credential files and other names for the
+  whole disk are refused as before, and so is a name with `( ) [ ] { } * ?`,
+  a backslash, a look-alike of one, or an invisible character. Point a tool at
+  the lane's folder with the lane's env: pip `PIP_CACHE_DIR`, npm
+  `npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
+  `YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
+  gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
+  `CCACHE_DIR`. A lane's env reaches the lane's commands, in the sandbox
+  (setup, check, preview, `hansa lane try` and the worker's Bash commands),
+  not Claude Code and not hansa's own programs: srt, the scripts around a
+  setup or check and Claude Code run with the server's environment, and the
+  worker's commands get the lane's env from a file hansa writes
+  (`CLAUDE_ENV_FILE`). As a second line, what any lane's env on the desk
+  names is closed to workers: a write entry cannot be, be inside or be above
+  a folder on a lane's `PATH` or a full path in another env value, this
+  lane's or another's. A cache variable (those
+  above and `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`) may point at
+  the lane's own folder; put a tool's bin folder on the `PATH` inside the
+  check command, not in the lane's env. A lane's env takes no name that tells
+  a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
+  `GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
+  `HOME`), no `PATH` entry that is empty or not a full path, and no place
+  inside the desk. `hansa/card.md` says the same.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not

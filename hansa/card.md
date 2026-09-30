@@ -292,9 +292,8 @@ here; work that needs code changed or a browser goes to a worker.
   `source`). The preview is started by a design session's Bash tool; write it
   the same way.
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
-  lane's setup and check. Before each setup or check, hansa looks for it on the
-  lane's own PATH first (a PATH in the lane's env, else the server's), then on
-  the PATH of `hansa serve`; node must be on the lane's PATH too (srt is a node
+  lane's setup and check. hansa looks for it on the PATH of `hansa serve`,
+  never on a lane's; node must be on that PATH too (srt is a node
   script). The server tries it when it starts and before each
   setup or check; `hansa status` reports what the server saw. When it cannot run,
   a task's setup fails it before its worker starts, and its check reads "could
@@ -316,37 +315,79 @@ here; work that needs code changed or a browser goes to a worker.
   lane set` then prints what listens there. `hansa explain lane L` says which
   holds on this machine.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
-  `/Users/me/.m2/repository`) is the folders its workers, setup and check may
+  `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or
-  test tool needs its cache folder. The rule, in two lines:
-  - in the home folder, only a tool's own folder under `~/.cache` (or
-    `~/Library/Caches`), the listed package caches, or a plain folder (no name
-    below the home folder starts with a dot) outside `~/Library` and
-    `~/Applications`, such as `~/work/cache`;
-  - outside it, anywhere but where programs are installed: a tools folder such
-    as `/srv/x/tools/xdg-cache/pnpm`, another volume, `/tmp`.
+  test tool needs its cache folder. A lane writes only folders of its own. The
+  rule, in two lines:
+  - in the home folder, only a plain folder: no name between the home folder
+    and the entry starts with a dot, and it is not inside `~/Library` or
+    `~/Applications`. Such as `~/hansa-cache/<lane>/<tool>` or `~/work/cache`;
+  - outside it, anywhere but where programs are installed and the folders on
+    the `PATH`: a tools folder such as `/srv/x/tools/xdg-cache/pnpm`, another
+    volume, `/tmp`.
 
-  The listed package caches: `~/.m2/repository`, `~/.gradle/caches`,
-  `~/.npm/_cacache`, `~/.pnpm-store`, `~/.local/share/pnpm/store`,
-  `~/.cargo/registry`, `~/.cargo/git`, `~/go/pkg/mod`, `~/.nuget/packages`,
-  `~/.ivy2/cache`, `~/.conan2/p`, `~/.bun/install/cache` (so not `~/.m2`,
-  `~/.npm`, `~/.gradle` or `~/.cargo` whole, and no other hidden folder:
-  shells, git and the tools hansa runs outside the sandbox read those when
-  they start). Where programs are installed: the Homebrew prefix
-  (`/opt/homebrew`, `/home/linuxbrew/.linuxbrew`, wherever `brew` is), `/usr`,
-  `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, and where `claude`,
-  `git`, `srt`, `node`, `tmux`, hansa and its python really live (the install
-  folder, what is inside it and the folders above it). Better than sharing the
-  user's cache: point the tool at a cache folder of the lane's own with the
-  lane's env (`hansa lane set L env GRADLE_USER_HOME=...`, `npm_config_cache`,
-  `CARGO_HOME`, `GOMODCACHE`, `PIP_CACHE_DIR`, Maven's `-Dmaven.repo.local` and
-  the like) and list that folder.
+  So none of the user's caches can be listed: not `~/.cache/pip`,
+  `~/Library/Caches/pip`, `~/.m2/repository`, `~/.gradle/caches`,
+  `~/.npm/_cacache`, `~/.cargo/registry` or any other hidden folder. They are
+  shared with what runs outside the sandbox (apps' updaters, corepack's node,
+  what brew installs from, the user's own builds), and shells, git and the
+  tools hansa runs read hidden files when they start. Give the lane a folder
+  of its own, such as `~/hansa-cache/<lane>/<tool>`, list it, and point the
+  tool there with the lane's env.
+  The well-known tool homes with plain names are refused too, with what is
+  inside them: `~/go` (Go's default GOPATH, whose `pkg/mod` the user's own
+  builds share), `~/sdk` (the Go versions Go downloads), `~/miniconda3`,
+  `~/anaconda3`, `~/miniforge3`, `~/mambaforge`, `~/miniconda`, `~/anaconda`,
+  `~/micromamba`.
+  Those are the common ones, not a complete list: hansa cannot see what your
+  own shell, git or tools name in plain folders of the home folder (a conda
+  install, a git hooks folder, a file your shell sources), so do not list such
+  a folder.
+  `hansa explain lane L` marks each entry a run would leave out, with why.
+  A lane's env reaches the lane's commands, which run in the sandbox (setup,
+  check, preview, `hansa lane try` and the worker's Bash commands), not
+  Claude Code itself and not hansa's own programs: srt, the scripts around a
+  setup or check and their git, and Claude Code (with its git, shell, helpers
+  and MCP servers such as the browser) run with the environment of `hansa
+  serve`. So a lane's `PATH` does not find srt or node for hansa, and a
+  setting meant for Claude Code or the browser tool goes in the server's
+  environment or hansa's browser settings, not a lane's env.
+  As a second line, what any lane's env on the desk names is closed to
+  workers, as what hansa's own environment names is, so no worker writes
+  where a lane's commands look: a write entry is refused when it is, is
+  inside, or is above a folder on a lane's `PATH` or a full path in any other
+  env value, this lane's or another's. A cache
+  variable (the ones below, and `XDG_CACHE_HOME`, `XDG_DATA_HOME`,
+  `XDG_STATE_HOME`) may point at the lane's own folder; put a tool's bin
+  folder on the `PATH` inside the check or setup command
+  (`PATH=$CARGO_HOME/bin:$PATH cargo test`), not in the lane's env. A lane's
+  `PATH` holds only full paths, none empty; no env value names a place inside
+  the desk; and the names that tell a loader, git, a shell or Claude Code
+  what to run are refused (any starting with `LD_`, `DYLD_`, `GIT_` or
+  `CLAUDE_`, and `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
+  `HOME`): set such a thing inside the check or setup command, where it runs
+  in the sandbox. A saved env that holds one: a run leaves that variable out,
+  with a line in `hansa show`.
+  The env names that point common tools at a folder (`hansa lane set L env
+  NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
+  `PIP_CACHE_DIR`; npm `npm_config_cache` (env names may be lower case); pnpm's store `npm_config_store_dir`;
+  yarn `YARN_CACHE_FOLDER`; cargo `CARGO_HOME`; go `GOMODCACHE` and `GOCACHE`;
+  gradle `GRADLE_USER_HOME`; maven `MAVEN_OPTS=-Dmaven.repo.local=...`; ccache
+  `CCACHE_DIR`.
+  Where programs are installed: the Homebrew prefix (`/opt/homebrew`,
+  `/home/linuxbrew/.linuxbrew`, wherever `brew` is), `/opt/local`, `/opt/X11`,
+  `/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, and where
+  `claude`, `git`, `srt`, `node`, `tmux`, hansa and its python really live (the
+  install folder, what is inside it and the folders above it; for hansa, the
+  whole folder that holds its package and `bin/hansa`). The folders on
+  the `PATH` hansa runs with are refused with what is inside them and the
+  folders above them (`~/bin/git` with `~/bin` on the `PATH`): hansa would run
+  a program put there.
   The other refusals hold on top: the home folder or above it, the desk, the
-  lane's repository, a provider's Claude Code folder and `~/.claude`, Claude
-  Code's cache (`claude-cli-nodejs`, so not all of `~/.cache`), a login, key or
-  history workers may not read such as `~/.ssh` or `~/.cargo/credentials`, what
-  the principal keeps workers from reading, folders on the `PATH` or above
-  them, a hidden folder at the top (`/.x`), `/System`, `/dev`, `/proc`, `/sys`
+  lane's repository, a provider's Claude Code folder and `~/.claude`, a login,
+  key or history workers may not read such as `~/.ssh` or
+  `~/.cargo/credentials`, what the principal keeps workers from reading, a
+  hidden folder at the top (`/.x`), `/System`, `/dev`, `/proc`, `/sys`
   and `/etc`, on macOS `/Volumes`; and a path with `( ) [ ] { } * ?` or a
   backslash, a look-alike of one of them (a name that NFKC-normalizes to one),
   or an invisible character (a space other than the plain one too) in a name,

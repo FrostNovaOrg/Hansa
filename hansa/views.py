@@ -14,7 +14,7 @@ from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, ke
                    write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
-                  server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
+                  lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -472,6 +472,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append("  this is the machine's problem, not the task's: srt, which runs the lane's setup, could not run "
                    "on the server, so the worker never started (hansa explain server)")
     out += [f"write list: {x}" for x in m.get("write_left_out") or []]
+    out += [f"env: {x}" for x in m.get("env_left_out") or []]
     out += [f"what workers may not read: {x}" for x in m.get("no_read_left_out") or []]
     for a in m.get("attempts", []):
         out.append(f"earlier try on {a['provider']}: {a['error']}")
@@ -679,6 +680,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             return f"no lane {name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}"
         wt = desk.worktrees_dir / name
         brief = desk.lanes_dir / name / "brief.md"
+        may_write, left_out = write_list(desk, ln)  # as a run is given it: a fence may have come since it was saved
+        env, env_left = lane_env(desk, ln)
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
@@ -705,7 +708,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
                f"  to see that they work where tasks run, with no worker: hansa lane try {name} (after changing the"
                " setup, check, network or write list, or moving the desk to another machine)"]
               if ln.get("setup") or ln.get("check") else []),
-            "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
+            "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
+            *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",
             "    any command inside the sandbox, but it changes files only in the lane's worktree, its own"
@@ -716,7 +720,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
             "  folders a worker may also write (a build or test tool's cache): "
-            + (", ".join(ln.get("write", [])) or "none"),
+            + (", ".join(may_write) or "none"),
+            *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in left_out],
             "  allowed commands (for design sessions only, which run outside the sandbox and may run these plus"
             " their own git add, commit and merge; workers run any command in theirs):"
             + ("" if ln.get("allow") else " none"),
@@ -768,11 +773,11 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             f"  now: {seen}",
             "When srt cannot run, the setup or check does not run either, and the task is not judged on it: its "
             "check reads \"could not run\". That is the machine's problem, not the task's. Before each setup or "
-            "check, hansa looks for srt on the lane's own PATH first (a PATH set in the lane's env, else the one "
-            "hansa serve starts with), then on the PATH hansa serve starts with. node must be on the lane's PATH "
+            "check, hansa looks for srt on the PATH hansa serve starts with, never on a lane's (a lane's env "
+            "reaches only the command inside the sandbox). node must be on that PATH "
             "too, since srt is a node script (an error such as `env: node: No such file or directory`, exit 127, "
-            "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime`, or fix the PATH "
-            "(the lane's env, or the server's, then restart hansa serve). Then, for a task whose "
+            "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime`, or fix the "
+            "server's PATH, then restart hansa serve. Then, for a task whose "
             "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the lane's check "
             "again and merges if it passes; a task whose setup could not run: hansa retry ID."])
     if what == "notify":
