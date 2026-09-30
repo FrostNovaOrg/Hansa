@@ -2805,6 +2805,40 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(run.check_provider(self.desk, "mimo")["ok"])
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
 
+    def test_runs_ride_out_a_short_network_drop_and_the_provider_check_answers_at_once(self):
+        from hansa import cli, run
+        retries, popen = {}, run.subprocess.Popen
+
+        def started(argv, **kwargs):  # a Claude Code run has the task's id in its environment
+            env = kwargs.get("env") or {}
+            if "HANSA_TASK" in env:
+                retries.setdefault(env["HANSA_TASK"], set()).add(env.get("CLAUDE_CODE_MAX_RETRIES"))
+            return popen(argv, **kwargs)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        with unittest.mock.patch.object(run.subprocess, "Popen", started):
+            self.settle(d, tid)
+            self.hansa("verify", tid, "the file's contents")
+            vid = self.desk.meta(tid)["verify"]
+            self.assertEqual(self.settle(d, vid)["verdict"], "holds")
+        self.assertEqual(retries, {tid: {"8"}, vid: {"8"}})  # a task and a verification
+        did = self.desk.new_task("Make the badge bigger")
+        self.desk.update(did, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+                         model_asked="sonnet", kind="design")
+        self.assertEqual(run.design_command(self.desk, did)[1]["CLAUDE_CODE_MAX_RETRIES"], "8")
+        self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["env"]["CLAUDE_CODE_MAX_RETRIES"], "8")
+        seen = {}
+
+        def answer(argv, **kwargs):
+            seen.update(kwargs["env"])
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertEqual(seen["CLAUDE_CODE_MAX_RETRIES"], "0")
+
     def test_the_provider_check_says_not_logged_in(self):
         from hansa import run
 
@@ -4497,7 +4531,7 @@ class DeskTest(unittest.TestCase):
 
         def plan_says(**over):  # what the account's hansa prints, which the account controls
             plan = {"repos": [str(self.repo.resolve()), "relative"], "model": "opus", "effort": "high",
-                    "env": {"ANTHROPIC_BASE_URL": "https://x.invalid", "CLAUDE_CODE_MAX_RETRIES": "3",
+                    "env": {"ANTHROPIC_BASE_URL": "https://x.invalid", "CLAUDE_CODE_MAX_RETRIES": "8",
                             "CLAUDE_CONFIG_DIR": "/account/claude", "CLAUDE_CODE_SHELL_PREFIX": "/tmp/evil",
                             "CLAUDE_CODE_SHELL": "/tmp/evil", "HOME": "/account"}}
             done = subprocess.CompletedProcess([], 0, json.dumps({**plan, **over}), "")
@@ -4506,7 +4540,7 @@ class DeskTest(unittest.TestCase):
         with plan_says(), unittest.mock.patch.dict(os.environ, without, clear=True):
             started = self.coordinator_as_root({})
         env = started["env"]
-        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["CLAUDE_CODE_MAX_RETRIES"]), ("https://x.invalid", "3"))
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["CLAUDE_CODE_MAX_RETRIES"]), ("https://x.invalid", "8"))
         for dropped in ("CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_SHELL", "CLAUDE_CONFIG_DIR"):
             self.assertNotIn(dropped, env)
         self.assertNotEqual(env.get("HOME"), "/account")

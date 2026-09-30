@@ -635,7 +635,11 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
     worker never inherits keys that are not its own."""
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env["TERM"] = "dumb"
-    env["CLAUDE_CODE_MAX_RETRIES"] = "3"  # a rejected key fails in seconds, not after eleven tries
+    # 8 tries, with waits that double: Claude Code rides out a network drop of a minute or two inside
+    # the run (its retries continue the same conversation; with 3 it gave up after about 20 seconds and
+    # the run's work was lost). The cost: a rejected key takes about a minute longer to fail.
+    # check_provider, which must answer at once, sets 0.
+    env["CLAUDE_CODE_MAX_RETRIES"] = "8"
     if p["kind"] == "subscription":
         if p.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = p["config_dir"]
