@@ -58,10 +58,10 @@ HOME_SECRETS = (
     ".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc", ".pypirc",
     # Teleport
     ".tsh", ".tbot",
-    # other AI tools
+    # other AI tools (.config/anthropic: the settings and keys of Anthropic's own command-line tools)
     ".codex", ".gemini", ".cursor", ".grok", ".qwen", ".continue", ".codeium", ".windsurf", ".aider",
     ".config/github-copilot", ".config/opencode", ".local/share/opencode", ".config/goose", ".config/openai",
-    ".openai", ".anthropic", ".cache/huggingface/token", ".huggingface/token", ".kaggle", ".config/kaggle",
+    ".openai", ".anthropic", ".config/anthropic", ".cache/huggingface/token", ".huggingface/token", ".kaggle", ".config/kaggle",
     # cloud and hosting tools
     ".config/gcloud", ".azure", ".oci", ".config/doctl", ".config/hcloud", ".config/scw", ".config/linode-cli",
     ".aliyun", ".tccli", ".bluemix", ".fly", ".config/flyctl", ".config/netlify", ".config/vercel",
@@ -75,6 +75,10 @@ HOME_SECRETS = (
     ".gem/credentials", ".config/hub", ".config/glab-cli", ".config/tea", ".composer/auth.json",
     ".config/composer/auth.json", ".pub-cache/credentials.json", ".config/dart/pub-credentials.json",
     ".sbt/.credentials", ".ivy2/.credentials", ".config/pypoetry/auth.toml", ".subversion/auth",
+    # proxy clients' settings: they hold the proxy's server passwords or subscription links
+    ".config/clash", ".config/clash.meta", ".config/mihomo", ".config/clash-verge",
+    ".config/io.github.clash-verge-rev.clash-verge-rev", ".config/sing-box", ".config/v2ray", ".config/xray",
+    ".config/nekoray",
     # databases' saved passwords
     ".pgpass", ".my.cnf", ".mylogin.cnf",
     # password stores and keyrings
@@ -91,7 +95,8 @@ HOME_SECRETS = (
     ".local/share/fish/fish_history", ".local/share/atuin", ".python_history", ".psql_history", ".mysql_history",
     ".sqlite_history", ".node_repl_history", ".irb_history", ".pry_history", ".rediscli_history", ".dbshell",
     ".mongodb", ".scala_history", ".Rhistory", ".lesshst")
-# For macOS only: the keychains, cookies, the Claude desktop app's data, browsers' profiles, messages and mail
+# For macOS only: the keychains, cookies, the Claude desktop app's data, browsers' profiles, messages, mail
+# and proxy clients' settings (server passwords, subscription links)
 MAC_SECRETS = (
     "Library/Keychains", "Library/Cookies", "Library/HTTPStorages", "Library/Accounts",
     "Library/Application Support/com.apple.TCC", "Library/Application Support/Claude",
@@ -107,7 +112,9 @@ MAC_SECRETS = (
     "Library/Application Support/1Password", "Library/Group Containers/2BUA8C4S2C.com.1password",
     "Library/Application Support/Bitwarden", "Library/Application Support/Bitwarden CLI",
     "Library/Application Support/Keybase", "Library/Application Support/rclone",
-    "Library/Application Support/com.vercel.cli", "Library/Application Support/pypoetry/auth.toml")
+    "Library/Application Support/com.vercel.cli", "Library/Application Support/pypoetry/auth.toml",
+    "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev",
+    "Library/Application Support/com.nssurge.surge-mac", "Library/Application Support/clash-verge")
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")

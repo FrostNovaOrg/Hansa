@@ -82,9 +82,11 @@ write list (an entry that no longer passes hansa's checks when the run starts is
 left out, and `hansa show` says so); it cannot read the desk's keys and
 state, any provider's Claude Code folder or `~/.claude`, the logins, keys,
 tokens, browsers' profiles, messages and shell histories hansa knows under the
-home folder (`.ssh`, `.aws`, `.netrc`, `.tsh`, other AI tools' folders, cloud
-tools' and registries' credentials, password stores and the like; on macOS the
-keychains, cookies, mail and apps' data of that kind under `~/Library` too), or
+home folder (`.ssh`, `.aws`, `.netrc`, `.tsh`, other AI tools' folders and
+Anthropic's own tool settings in `.config/anthropic`, cloud tools' and
+registries' credentials, proxy clients' settings, password stores and the like;
+on macOS the keychains, cookies, mail and apps' data of that kind under
+`~/Library` too), or
 what the principal lists on the web page as not for workers to read
 (`hansa explain lane L` lists it all); it reaches
 no network but the lane's network list, and leaves git history to hansa (no
