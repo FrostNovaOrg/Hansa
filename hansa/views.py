@@ -14,7 +14,7 @@ from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, ke
                    write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
-                  server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
+                  lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -472,6 +472,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append("  this is the machine's problem, not the task's: srt, which runs the lane's setup, could not run "
                    "on the server, so the worker never started (hansa explain server)")
     out += [f"write list: {x}" for x in m.get("write_left_out") or []]
+    out += [f"env: {x}" for x in m.get("env_left_out") or []]
     out += [f"what workers may not read: {x}" for x in m.get("no_read_left_out") or []]
     for a in m.get("attempts", []):
         out.append(f"earlier try on {a['provider']}: {a['error']}")
@@ -680,6 +681,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         wt = desk.worktrees_dir / name
         brief = desk.lanes_dir / name / "brief.md"
         may_write, left_out = write_list(desk, ln)  # as a run is given it: a fence may have come since it was saved
+        env, env_left = lane_env(desk, ln)
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
@@ -706,7 +708,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
                f"  to see that they work where tasks run, with no worker: hansa lane try {name} (after changing the"
                " setup, check, network or write list, or moving the desk to another machine)"]
               if ln.get("setup") or ln.get("check") else []),
-            "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in ln.get("env", {}).items()) or "none"),
+            "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
+            *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",
             "    any command inside the sandbox, but it changes files only in the lane's worktree, its own"

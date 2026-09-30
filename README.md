@@ -132,7 +132,8 @@ page gives.
   `~/.m2/repository`, `~/.npm/_cacache` and the rest) cannot be listed, since
   they are shared with what runs outside the sandbox, and neither can the
   common tool homes with plain names (`~/go`, `~/miniconda3`, `~/anaconda3`,
-  `~/miniforge3`, `~/mambaforge`) or what is inside them. That list is not
+  `~/miniforge3`, `~/mambaforge`, `~/miniconda`, `~/anaconda`,
+  `~/micromamba`, `~/sdk`) or what is inside them. That list is not
   complete: hansa cannot see what your own shell, git or tools name in plain
   folders of the home folder (a conda install, a git hooks folder, a file
   your shell sources), so do not list such a folder. `hansa explain lane L`
@@ -145,7 +146,17 @@ page gives.
   `npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
   `YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
   gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
-  `CCACHE_DIR`. `hansa/card.md` says the same.
+  `CCACHE_DIR`. What a lane's env names is closed to workers, as what hansa's
+  own environment names is (the env also reaches what hansa runs outside the
+  sandbox): a write entry cannot be, be inside or be above a folder on the
+  lane's `PATH` or a full path in another env value. A cache variable (those
+  above and `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`) may point at
+  the lane's own folder; put a tool's bin folder on the `PATH` inside the
+  check command, not in the lane's env. A lane's env takes no name that tells
+  a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
+  `GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
+  `HOME`), no `PATH` entry that is empty or not a full path, and no place
+  inside the desk. `hansa/card.md` says the same.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not

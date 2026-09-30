@@ -112,6 +112,20 @@ PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
 MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
+# A lane's env reaches what hansa runs outside the sandbox too: srt and its node, the worker's Claude Code (which
+# runs git, its shell and its helpers), the /bin/sh scripts before a worker. So what it names is closed to
+# workers, as what hansa's own environment names is, and these names, which tell a loader, git, a shell or
+# Claude Code what to run, are not a lane's to set
+RUN_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "CLAUDE_")
+RUN_ENV_NAMES = ("NODE_OPTIONS", "BASH_ENV", "ENV", "SHELL", "ZDOTDIR", "HOME")
+RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run, and a lane's "
+               "env also reaches what hansa runs outside the sandbox; set it inside the check or setup command "
+               "instead, where it runs in the sandbox")
+# The variables that exist to point a tool in the sandbox at the lane's own folder: what these name may be on
+# the lane's write list (the card names the cache ones)
+CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_CACHE_FOLDER", "CARGO_HOME",
+             "GOMODCACHE", "GOCACHE", "GRADLE_USER_HOME", "MAVEN_OPTS", "CCACHE_DIR")
+XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
 # Bash commands a lane's design sessions may run without asking, for every lane: none. A lane's
 # allowed commands matter only to its design sessions, which run outside the sandbox: workers run
@@ -280,16 +294,12 @@ def validate(s: dict, root=None) -> list:
             # the coordinator sets a lane's repository: none goes where the principal keeps workers from reading
             p += [f"{at}: repo cannot be {ln['repo']}: it is {d} or inside it, which the principal keeps workers "
                   "from reading (the web page, Settings)" for d in kept if _above(d, ln["repo"])][:1]
-        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept)]
         env = ln.get("env", {})
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept, env)]
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
         else:
-            for k, v in env.items():
-                if not ENV_NAME.match(k) or not isinstance(v, str):
-                    p.append(f"{at}: env {k} must be NAME=text")
-                elif k in MANAGED_ENV or k.startswith("ANTHROPIC_"):
-                    p.append(f"{at}: env {k} is set from the provider, not the lane")
+            p += [f"{at}: env {k} {why}" for k, why in env_problems(env, root)]
         for field in ("check", "preview", "setup"):
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
@@ -333,6 +343,52 @@ def validate(s: dict, root=None) -> list:
                 elif not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
                     p.append(f"price {model}: {k} must be a number, 0 or more")
     return p
+
+
+def env_paths(value, home: str) -> list:
+    """The full paths a lane's env value names: its parts between `:`, spaces, `=` and `,` that start with /
+    (or with ~/, the account's home folder)."""
+    parts = re.split(r"[:=,\s]+", value) if isinstance(value, str) else []
+    parts = [home + x[1:] if x == "~" or x.startswith("~/") else x for x in parts]
+    return [_plain(x) for x in dict.fromkeys(parts) if x.startswith("/") and "\0" not in x]
+
+
+def env_problems(env: dict, root=None) -> list:
+    """What is wrong with a lane's env: (the name, why), one for each variable that cannot be set."""
+    p, home = [], None
+    for k, v in env.items():
+        if not isinstance(k, str) or not ENV_NAME.match(k) or not isinstance(v, str):
+            p.append((k, "must be NAME=text"))
+        elif k in MANAGED_ENV or k.startswith("ANTHROPIC_"):
+            p.append((k, "is set from the provider, not the lane"))
+        elif k.startswith(RUN_ENV_PREFIXES) or k in RUN_ENV_NAMES:
+            p.append((k, RUN_ENV_WHY))
+        else:
+            home = home or account_home()
+            odd = [d for d in v.split(os.pathsep) if not d.startswith("/")] if k == "PATH" else []
+            inside = [d for d in env_paths(v, home) if root and _above(str(root), d)]
+            if odd:  # it would be looked for in the worktree, which workers write
+                p.append((k, f"cannot have the entry {odd[0]!r}: each folder on a lane's PATH must be a full path "
+                             "starting with /, and none may be empty (such an entry is looked for in the "
+                             "worktree, which workers write, and the PATH also finds what hansa runs outside "
+                             "the sandbox)"))
+            elif inside:
+                p.append((k, f"cannot name {inside[0]}: it is the desk or inside it, and a lane's env "
+                             "also reaches what hansa runs outside the sandbox (workers write the worktrees; "
+                             "name a place in the worktree inside the check or setup command instead)"))
+    return p
+
+
+def lane_env(env, root=None) -> tuple:
+    """A lane's env as a run may be given it: (the variables that pass the checks now, a line for each left
+    out). The env is checked on saving, but one saved before a check was there would still reach what hansa
+    runs outside the sandbox."""
+    if not isinstance(env, dict):
+        return {}, ([] if env is None else ["left out of this run: the whole env: it must be an object of "
+                                            "NAME=text (the env is changed with hansa lane set)"])
+    bad = dict(env_problems(env, root))
+    return ({k: v for k, v in env.items() if k not in bad},
+            [f"left out of this run: {k} {why} (the env is changed with hansa lane set)" for k, why in bad.items()])
 
 
 def key_problem(k: str) -> str:
@@ -725,11 +781,16 @@ SYSTEM_STARTS = ("/etc", "/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/libex
 MAC_STARTS = ("/Library/LaunchAgents", "/Library/LaunchDaemons", "/Library/Application Support/ClaudeCode")
 
 
-def _run_fence(home: str) -> list:
+def _text(x) -> str:
+    return x if isinstance(x, str) else ""
+
+
+def _run_fence(home: str, lane_env=None) -> list:
     """What runs outside the sandbox, which no lane's write list may open: a worker that could write there
     would change what hansa, its server or the coordinator runs later, with their reach. The programs, each
     found as hansa finds it (the PATH hansa runs with, links resolved), the folder each is installed in, and
-    the files each reads when it starts that can make it run a command."""
+    the files each reads when it starts that can make it run a command. lane_env: the lane's env, whose
+    values are read as hansa's own environment is."""
     out, beside, up = [], [], _chain(home)
 
     def fence(f, why, to=out):  # the file or folder, all inside it and each folder above it
@@ -777,6 +838,9 @@ def _run_fence(home: str) -> list:
             for sub in ("bin", "lib", "lib64", "libexec", "pyvenv.cfg"):
                 fence(os.path.join(d, sub), "part of the python that runs hansa", beside)
     fence(os.path.dirname(os.path.abspath(__file__)), "hansa's own code")
+    # the folder that holds the package, whole: bin/hansa is there, which the coordinator runs
+    fence(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "the folder hansa is installed in (its "
+          "code and bin/hansa, which the coordinator runs outside the sandbox)")
     version = f"{sys.version_info[0]}.{sys.version_info[1]}"
     mods = [x for x in sys.path if x]
     mods += [sysconfig.get_paths().get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")]
@@ -795,26 +859,26 @@ def _run_fence(home: str) -> list:
             fence(os.path.join(home, n), why)
     if sys.platform == "darwin":
         fence(os.path.join(home, "lib"), "where macOS looks for a library a program did not find, outside the sandbox too")
-    env = os.environ.get
-    for var, names, why in (("XDG_CONFIG_HOME", ("git",), HOME_STARTS[1][0]), ("XDG_CONFIG_HOME", ("tmux",), HOME_STARTS[2][0]),
-                            ("XDG_CONFIG_HOME", ("fish",), HOME_STARTS[0][0]),
-                            ("XDG_CACHE_HOME", ("claude", "claude-cli-nodejs"), HOME_STARTS[3][0]),
-                            ("XDG_DATA_HOME", ("claude",), HOME_STARTS[3][0]), ("XDG_STATE_HOME", ("claude",), HOME_STARTS[3][0]),
-                            ("ZDOTDIR", (".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout"), HOME_STARTS[0][0])):
-        if (env(var) or "").startswith("/"):
-            for n in names:
-                fence(os.path.join(env(var), n), why)
-    for var, why in (("ENV", HOME_STARTS[0][0]), ("BASH_ENV", HOME_STARTS[0][0]),
-                     ("GIT_CONFIG_GLOBAL", HOME_STARTS[1][0]), ("GIT_CONFIG_SYSTEM", HOME_STARTS[1][0])):
-        if (env(var) or "").startswith("/"):
-            fence(env(var), why)
-    for var, why in (("NODE_PATH", "a folder node loads packages from, outside the sandbox too"),
-                     ("LD_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too"),
-                     ("DYLD_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too"),
-                     ("DYLD_FALLBACK_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too")):
-        for d in (env(var) or "").split(os.pathsep):
-            if d.startswith("/"):
-                fence(d, why)
+    for env in (os.environ.get, *([lane_env.get] if isinstance(lane_env, dict) else [])):
+        for var, names, why in (("XDG_CONFIG_HOME", ("git",), HOME_STARTS[1][0]), ("XDG_CONFIG_HOME", ("tmux",), HOME_STARTS[2][0]),
+                                ("XDG_CONFIG_HOME", ("fish",), HOME_STARTS[0][0]),
+                                ("XDG_CACHE_HOME", ("claude", "claude-cli-nodejs"), HOME_STARTS[3][0]),
+                                ("XDG_DATA_HOME", ("claude",), HOME_STARTS[3][0]), ("XDG_STATE_HOME", ("claude",), HOME_STARTS[3][0]),
+                                ("ZDOTDIR", (".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout"), HOME_STARTS[0][0])):
+            if _text(env(var)).startswith("/"):
+                for n in names:
+                    fence(os.path.join(env(var), n), why)
+        for var, why in (("ENV", HOME_STARTS[0][0]), ("BASH_ENV", HOME_STARTS[0][0]),
+                         ("GIT_CONFIG_GLOBAL", HOME_STARTS[1][0]), ("GIT_CONFIG_SYSTEM", HOME_STARTS[1][0])):
+            if _text(env(var)).startswith("/"):
+                fence(env(var), why)
+        for var, why in (("NODE_PATH", "a folder node loads packages from, outside the sandbox too"),
+                         ("LD_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too"),
+                         ("DYLD_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too"),
+                         ("DYLD_FALLBACK_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too")):
+            for d in _text(env(var)).split(os.pathsep):
+                if d.startswith("/"):
+                    fence(d, why)
     for d in SYSTEM_STARTS + (MAC_STARTS if sys.platform == "darwin" else ()):
         out.append((d, _overlaps, f"it would open {d}, the system's own settings, libraries or programs, which "
                                   f"every program reads when it starts, outside the sandbox too ({ELSEWHERE})"))
@@ -836,7 +900,11 @@ TOOL_HOMES = {"go": "Go's default GOPATH, whose pkg/mod is the module cache the 
               "miniconda3": "a conda install, whose programs the user's shell runs",
               "anaconda3": "a conda install, whose programs the user's shell runs",
               "miniforge3": "a conda install, whose programs the user's shell runs",
-              "mambaforge": "a conda install, whose programs the user's shell runs"}
+              "mambaforge": "a conda install, whose programs the user's shell runs",
+              "miniconda": "a conda install, whose programs the user's shell runs",
+              "anaconda": "a conda install, whose programs the user's shell runs",
+              "micromamba": "a conda install, whose programs the user's shell runs",
+              "sdk": "where Go keeps the Go versions it downloads, which the user's own builds run"}
 # Outside it, the places programs are installed, whole: what is there runs outside the sandbox sooner or later
 INSTALL_TOPS = ("/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/opt/local", "/opt/X11", "/usr", "/Applications",
                 "/Library", "/nix", "/snap", "/var/lib")
@@ -910,10 +978,11 @@ BREAKS_WHY = f"a name in it (or where its link leads) has one of {RULE_BREAKERS}
 
 
 @_one_look
-def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> list:
+def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=None) -> list:
     """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
     None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it. denied: what
-    the principal keeps workers from reading (deny_split's good ones)."""
+    the principal keeps workers from reading (deny_split's good ones). env: the lane's env, which reaches
+    what hansa runs outside the sandbox: what it names is closed as what hansa's own environment names is."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/hansa-cache/a/pip"]
@@ -944,11 +1013,24 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> li
     fenced += _top_fence()
     on_path = [_plain(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with") for d in on_path]
-    fenced += _run_fence(home)
+    env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(env, dict) else {}
+    lane_path = [_plain(d) for d in env.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    fenced += [(d, _on_path, f"it would open {d}, a folder on the lane's PATH (its env), is inside it or above "
+                             "it: the lane's PATH also finds what hansa runs outside the sandbox (srt, node, "
+                             "git), so a program there would run outside it (put a tool's bin folder on the "
+                             "PATH inside the check or setup command instead)") for d in lane_path]
+    fenced += _run_fence(home, env)
     # after the programs hansa knows, which say more: whatever else is in a PATH folder, there or not yet
     fenced += [(d, _on_path, f"it is inside {d}, a folder on the PATH hansa runs with: a program there runs "
                              f"outside the sandbox ({ELSEWHERE})") for d in on_path]
     fenced += _install_fence(home)
+    # every path the lane's env names, but those of the variables that point a tool at the lane's own folder
+    fenced += [(d, _on_path, f"it would open {d}, which the lane's env names in {k} (or it is inside it): a lane's "
+                             "env also reaches what hansa runs outside the sandbox, so what it names is closed "
+                             f"to workers (but a cache variable such as {CACHE_ENV[2]} or {CACHE_ENV[0]}, which "
+                             "may point at the lane's own folder; set the other inside the check or setup command)")
+               for k, v in env.items() if k != "PATH" and k not in CACHE_ENV and k not in XDG_OPEN
+               for d in env_paths(v, home)]
     fenced += [(os.path.join(home, n), _overlaps, f"it would open {os.path.join(home, n)}, {what}; {OWN_FOLDER}")
                for n, what in TOOL_HOMES.items()]
     fenced.append((home, _home_closed, f"it is inside {home}, the home folder, where a write list may hold only "

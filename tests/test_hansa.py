@@ -6077,6 +6077,210 @@ class DeskTest(unittest.TestCase):
             self.assertIn("  folders a worker may also write (a build or test tool's cache): none\n    a run leaves out ",
                           views.explain_text(self.desk, "lane", "a"))
 
+    def lane_problems(self, env, write=()):
+        s = self.desk.settings()
+        s["lanes"]["a"].update(env=env, write=[str(x) for x in write])
+        return validate(s, self.desk.root)
+
+    def test_a_folder_on_a_lanes_own_path_is_closed_to_workers(self):
+        from hansa import run
+        home = (self.tmp / "home").resolve()
+        own = home / "hansa-cache" / "a"
+        (own / "bin").mkdir(parents=True)
+        (self.tmp / "lbin").symlink_to(own / "bin")
+        with as_home(home):
+            env = {"PATH": f"{own / 'bin'}:/usr/bin:/bin", "CARGO_HOME": str(own / "cargo")}
+            self.assertEqual(self.lane_problems(env, [own / "cargo", own / "pip"]), [])
+            # the folder, inside it, above it, and through a link
+            for x in (own / "bin", own / "bin" / "srt", own, home / "hansa-cache", self.tmp.resolve() / "lbin" / "srt"):
+                told = self.lane_problems(env, [x])
+                self.assertTrue(len(told) == 1 and f"lane a: write cannot include {x}: it would open {own / 'bin'}, a "
+                                "folder on the lane's PATH (its env)" in told[0], (x, told))
+                self.assertIn("inside the check or setup command", told[0])
+            with self.assertRaises(SystemExit):  # as the coordinator would set it
+                self.hansa("lane", "set", "a", "env", *[f"{k}={v}" for k, v in env.items()])
+                self.hansa("lane", "set", "a", "write", str(own / "bin"))
+            self.assertNotIn(str(own / "bin"), self.desk.settings()["lanes"]["a"].get("write", []))
+            # saved earlier: left out at a run's start, with a line
+            s = self.desk.settings()
+            s["lanes"]["a"].update(env=env, write=[str(own / "bin"), str(own / "pip")])
+            write_json(self.desk.settings_path, s)
+            good, left = run.write_list(self.desk, s["lanes"]["a"])
+            self.assertEqual(good, [str(own / "pip")])
+            self.assertTrue(len(left) == 1 and left[0].startswith(f"left out of this run: {own / 'bin'}: it would open "
+                                                                  f"{own / 'bin'}, a folder on the lane's PATH"), left)
+            p = s["providers"]["claude"]
+            for fs in (run.sandbox_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo)["sandbox"]["filesystem"],
+                       run.srt_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
+                self.assertIn(str(own / "pip"), fs["allowWrite"])
+                self.assertNotIn(str(own / "bin"), fs["allowWrite"])
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "done", m)
+            self.assertEqual(m["write_left_out"], left)
+            self.assertIn(f"write list: left out of this run: {own / 'bin'}: it would open", views.show_text(self.desk, tid))
+
+    def test_a_lanes_path_holds_only_full_paths_outside_the_desk(self):
+        for path, entry in (("bin:/usr/bin", "bin"), ("/usr/bin::/bin", ""), (":/usr/bin", ""), ("/usr/bin:", ""),
+                            ("./node_modules/.bin:/usr/bin", "./node_modules/.bin"), ("", ""), ("~/bin:/bin", "~/bin")):
+            told = self.lane_problems({"PATH": path})
+            self.assertTrue(len(told) == 1 and told[0].startswith(f"lane a: env PATH cannot have the entry {entry!r}: "
+                                                                  "each folder on a lane's PATH must be a full path"), told)
+        for inside in (self.desk.root / "tools" / "bin", self.desk.worktrees_dir / "a" / "node_modules" / ".bin",
+                       self.desk.root):
+            told = self.lane_problems({"PATH": f"/usr/bin:{inside}"})
+            self.assertTrue(len(told) == 1 and told[0].startswith(f"lane a: env PATH cannot name {inside}: it is the "
+                                                                  "desk or inside it"), told)
+            told = self.lane_problems({"FOO_DIR": str(inside), "PIP_CACHE_DIR": f"{inside}"})  # any variable
+            self.assertEqual([t.split(" cannot name ")[0] for t in told], ["lane a: env FOO_DIR", "lane a: env PIP_CACHE_DIR"])
+        self.assertEqual(self.lane_problems({"PATH": "/srv/x/tools/node/bin:/usr/local/bin:/usr/bin:/bin"}), [])
+        with self.assertRaises(SystemExit):
+            self.hansa("lane", "set", "a", "env", "PATH=bin:/usr/bin")
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("env", {}), {})
+
+    def test_what_a_lanes_env_names_is_closed_to_workers(self):
+        from hansa import run
+        home = (self.tmp / "home").resolve()
+        own = home / "hansa-cache" / "a"
+        own.mkdir(parents=True)
+        with as_home(home):
+            # any variable, also one a lane may not set (saved earlier): the named folder, inside it, above it
+            for name, value, at in (("LD_LIBRARY_PATH", f"/usr/lib:{own / 'lib'}", own / "lib"),
+                                    ("NODE_PATH", f"{own / 'node'}", own / "node"),
+                                    ("GIT_CONFIG_GLOBAL", f"{own / 'gitconfig'}", own / "gitconfig"),
+                                    ("FOO_DIR", f"{own / 'foo'}", own / "foo"),
+                                    ("FOO_OPTS", f"-x --dir={own / 'foo'},b -I {own / 'inc'}", own / "inc"),
+                                    ("FOO_HOME", "~/hansa-cache/a/foo", own / "foo")):
+                for x in (at, at / "sub" / "x", own):
+                    s = self.desk.settings()
+                    s["lanes"]["a"].update(env={name: value}, write=[str(x)])
+                    told = [t for t in validate(s, self.desk.root) if "write cannot include" in t]
+                    self.assertTrue(len(told) == 1 and f"write cannot include {x}: it would open {own}" in told[0],
+                                    (name, x, told))
+                    write_json(self.desk.settings_path, s)  # saved earlier
+                    good, left = run.write_list(self.desk, s["lanes"]["a"])
+                    self.assertEqual((good, len(left)), ([], 1), (name, x, left))
+                self.assertEqual([t for t in self.lane_problems({name: value}, [own / "elsewhere"]) if "write" in t], [])
+            told = self.lane_problems({"FOO_DIR": str(own / "foo")}, [own / "foo"])
+            self.assertIn(f"it would open {own / 'foo'}, which the lane's env names in FOO_DIR", told[0])
+            # a cache variable points a tool at the lane's own folder, which is on the write list
+            caches = {"npm_config_cache": own / "npm", "npm_config_store_dir": own / "pnpm", "PIP_CACHE_DIR": own / "pip",
+                      "YARN_CACHE_FOLDER": own / "yarn", "CARGO_HOME": own / "cargo", "GOMODCACHE": own / "go" / "mod",
+                      "GOCACHE": own / "go" / "build", "GRADLE_USER_HOME": own / "gradle", "CCACHE_DIR": own / "ccache"}
+            env = {**{k: str(v) for k, v in caches.items()}, "MAVEN_OPTS": f"-Dmaven.repo.local={own / 'm2'}"}
+            self.assertEqual(self.lane_problems(env, [*caches.values(), own / "m2"]), [])
+            self.hansa("lane", "set", "a", "env", *[f"{k}={v}" for k, v in env.items()])
+            self.hansa("lane", "set", "a", "write", *map(str, caches.values()))
+            self.assertEqual(run.write_list(self.desk, self.desk.settings()["lanes"]["a"]), ([str(v) for v in caches.values()], []))
+            self.assertEqual(run.lane_env(self.desk, self.desk.settings()["lanes"]["a"]), (env, []))
+
+    def test_the_xdg_folders_of_a_lane_may_be_listed_but_not_claude_codes_own_files_in_them(self):
+        tools = (self.tmp / "srv" / "tools").resolve()
+        tools.mkdir(parents=True)
+        env = {"CI": "1", "PATH": f"{tools / 'node' / 'bin'}:/usr/local/bin:/usr/bin:/bin",
+               **{f"XDG_{n.upper()}_HOME": str(tools / f"xdg-{n}") for n in ("data", "cache", "config", "state")}}
+        fine = [tools / "xdg-data" / "pnpm", tools / "xdg-cache" / "pnpm", tools / "xdg-state" / "pnpm"]
+        with as_home((self.tmp / "home").resolve()):
+            self.assertEqual(self.lane_problems(env, fine), [])
+            self.assertEqual(self.lane_problems({"CPLUS_INCLUDE_PATH": "/srv/x/deps/src/lib/include"}), [])
+            self.assertEqual(self.lane_problems({}), [])
+            for x in (tools / "xdg-data" / "claude", tools / "xdg-data" / "claude" / "versions", tools / "xdg-data",
+                      tools / "xdg-cache" / "claude-cli-nodejs", tools / "xdg-state" / "claude"):
+                told = self.lane_problems(env, [x])
+                self.assertTrue(len(told) == 1 and "Claude Code's own files" in told[0], (x, told))
+            for x in (tools / "xdg-config" / "pnpm", tools / "xdg-config", tools / "node" / "bin" / "node", tools):
+                self.assertEqual(len(self.lane_problems(env, [x])), 1, x)  # XDG_CONFIG_HOME and the PATH stay closed
+
+    def test_a_lanes_env_holds_no_name_that_tells_a_loader_git_a_shell_or_claude_code_what_to_run(self):
+        from hansa import run
+        names = ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "GIT_CONFIG_GLOBAL",
+                 "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_DIR", "CLAUDE_CODE_SHELL", "CLAUDE_CODE_GIT_BASH_PATH",
+                 "NODE_OPTIONS", "BASH_ENV", "ENV", "SHELL", "ZDOTDIR", "HOME"]
+        for name in names:
+            told = self.lane_problems({name: "x", "CI": "1"})
+            self.assertTrue(len(told) == 1 and told[0].startswith(f"lane a: env {name} cannot be set for a lane: it tells "
+                                                                  "a loader, git, a shell or Claude Code what to run"), told)
+            self.assertIn("set it inside the check or setup command instead, where it runs in the sandbox", told[0])
+            with self.assertRaises(SystemExit):
+                self.hansa("lane", "set", "a", "env", f"{name}=x")
+        fine = {"CI": "1", "NODE_ENV": "test", "LDFLAGS": "-L/x", "GITHUB_ACTIONS": "1", "git_dir": "x", "ENVIRONMENT": "ci",
+                "HOMEBREW_NO_AUTO_UPDATE": "1", "MY_SHELL": "x", "CPLUS_INCLUDE_PATH": "/srv/x/deps/src/lib/include"}
+        self.assertEqual(self.lane_problems(fine), [])
+        # saved earlier: each is left out at a run's start, with a line, and the others are passed on
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {**{n: "/x" for n in names}, "PATH": "bin:/usr/bin", "HANSA_TASK": "t1", **fine}
+        write_json(self.desk.settings_path, s)
+        good, left = run.lane_env(self.desk, s["lanes"]["a"])
+        self.assertEqual(good, fine)
+        self.assertEqual(len(left), len(names) + 2)
+        self.assertTrue(left[0].startswith("left out of this run: LD_PRELOAD cannot be set for a lane") and
+                        left[0].endswith("(the env is changed with hansa lane set)"), left[0])
+        seen = {}
+        real = subprocess.Popen
+
+        def popen(argv, *args, **kw):
+            seen.update(kw.get("env") or {})
+            return real(argv, *args, **kw)
+
+        tid = self.desk.new_task("Add hello.txt")
+        with unittest.mock.patch("subprocess.Popen", popen):
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(seen.get("NODE_ENV"), "test")
+        self.assertNotEqual(seen.get("GIT_CONFIG_GLOBAL"), "/x")
+        self.assertFalse([n for n in names if seen.get(n) == "/x"])
+        self.assertNotEqual(seen.get("PATH"), "bin:/usr/bin")
+        self.assertEqual(seen.get("HANSA_TASK"), tid)
+        self.assertEqual(m["env_left_out"], left)
+        self.assertIn("env: left out of this run: LD_PRELOAD cannot be set for a lane", views.show_text(self.desk, tid))
+        self.assertEqual([e["task"] for e in self.events("env_left_out")], [tid] * len(left))
+        lines = views.explain_text(self.desk, "lane", "a").splitlines()
+        at = lines.index("  environment set for workers: " + ", ".join(f"{k}={v}" for k, v in fine.items()))
+        self.assertTrue(lines[at + 1].startswith("    a run leaves out LD_PRELOAD cannot be set for a lane"), lines[at + 1])
+
+    def test_a_lanes_write_list_opens_nothing_in_the_folder_hansa_is_installed_in(self):
+        top = self.tmp.resolve() / "inst"  # an install: the package and bin/hansa, which the coordinator runs
+        here = Path(views.__file__).resolve().parent
+        shutil.copytree(here, top / "hansa", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(here.parent / "bin", top / "bin")
+        code = ("import importlib.util, json, sys\n"  # loaded by its place, so not through a folder python loads from
+                "spec = importlib.util.spec_from_file_location('hansa', sys.argv[1] + '/hansa/__init__.py',"
+                " submodule_search_locations=[sys.argv[1] + '/hansa'])\n"
+                "sys.modules['hansa'] = m = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(m)\n"
+                "from hansa.desk import write_problems\n"
+                "print(json.dumps([write_problems([x]) for x in sys.argv[2:]]))")
+        asked = [top / "bin", top / "bin" / "hansa", top / "cache", top, top / "hansa" / "x", self.tmp.resolve() / "cache"]
+        (self.tmp / "cwd").mkdir()
+        r = subprocess.run([sys.executable, "-c", code, str(top), *map(str, asked)], capture_output=True, text=True,
+                           cwd=str(self.tmp / "cwd"), env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        told = json.loads(r.stdout)
+        self.assertEqual(len(told[3]), 1)
+        for x, said in zip(asked[:3], told):
+            self.assertTrue(len(said) == 1 and f"write cannot include {x}: it would open {top}, the folder hansa is "
+                            "installed in (its code and bin/hansa" in said[0], (x, said))
+        self.assertIn("hansa's own code", told[4][0])
+        self.assertEqual(told[5], [])
+
+    def test_more_tool_homes_are_refused_and_explain_says_a_malformed_write_list_in_one_line(self):
+        home = (self.tmp / "home").resolve()
+        home.mkdir()
+        with as_home(home):
+            for top, what in (("miniconda", "a conda install"), ("anaconda", "a conda install"),
+                              ("micromamba", "a conda install"), ("sdk", "where Go keeps the Go versions it downloads")):
+                self.assertIn(what, self.refused_and_left_out(home / top / "bin", f"it would open {home / top}, "))
+            self.assertEqual(write_problems([str(home / "sdks"), str(home / "work" / "sdk")]), [])
+            for bad in ([str(home / "work"), 7], "/tmp/cache", [["/tmp/cache"]], ["cache"]):
+                s = self.desk.settings()
+                s["lanes"]["a"]["write"] = bad  # only by editing the settings by hand
+                write_json(self.desk.settings_path, s)
+                lines = views.explain_text(self.desk, "lane", "a").splitlines()
+                at = lines.index("  folders a worker may also write (a build or test tool's cache): none")
+                self.assertEqual(lines[at + 1], "    a run leaves out the whole write list: it must be a list of full "
+                                                "paths starting with / (the write list is changed with hansa lane set)")
+                self.assertFalse(lines[at + 2].startswith("    a run leaves out"), lines[at + 2])
+
     def test_a_lanes_write_list_opens_nothing_inside_a_folder_on_the_path(self):
         home, bin_ = (self.tmp / "home").resolve(), (self.tmp / "home").resolve() / "bin"
         bin_.mkdir(parents=True)

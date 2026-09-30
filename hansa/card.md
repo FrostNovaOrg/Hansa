@@ -335,12 +335,30 @@ here; work that needs code changed or a browser goes to a worker.
   tool there with the lane's env.
   The well-known tool homes with plain names are refused too, with what is
   inside them: `~/go` (Go's default GOPATH, whose `pkg/mod` the user's own
-  builds share), `~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `~/mambaforge`.
+  builds share), `~/sdk` (the Go versions Go downloads), `~/miniconda3`,
+  `~/anaconda3`, `~/miniforge3`, `~/mambaforge`, `~/miniconda`, `~/anaconda`,
+  `~/micromamba`.
   Those are the common ones, not a complete list: hansa cannot see what your
   own shell, git or tools name in plain folders of the home folder (a conda
   install, a git hooks folder, a file your shell sources), so do not list such
   a folder.
   `hansa explain lane L` marks each entry a run would leave out, with why.
+  What a lane's env names is closed to workers, as what hansa's own
+  environment names is: the env also reaches what hansa runs outside the
+  sandbox (srt and its node, the worker's Claude Code, the scripts before a
+  worker). So a write entry is refused when it is, is inside, or is above a
+  folder on the lane's `PATH` or a full path in any other env value. A cache
+  variable (the ones below, and `XDG_CACHE_HOME`, `XDG_DATA_HOME`,
+  `XDG_STATE_HOME`) may point at the lane's own folder; put a tool's bin
+  folder on the `PATH` inside the check or setup command
+  (`PATH=$CARGO_HOME/bin:$PATH cargo test`), not in the lane's env. A lane's
+  `PATH` holds only full paths, none empty; no env value names a place inside
+  the desk; and the names that tell a loader, git, a shell or Claude Code
+  what to run are refused (any starting with `LD_`, `DYLD_`, `GIT_` or
+  `CLAUDE_`, and `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
+  `HOME`): set such a thing inside the check or setup command, where it runs
+  in the sandbox. A saved env that holds one: a run leaves that variable out,
+  with a line in `hansa show`.
   The env names that point common tools at a folder (`hansa lane set L env
   NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
   `PIP_CACHE_DIR`; npm `npm_config_cache` (env names may be lower case); pnpm's store `npm_config_store_dir`;
@@ -351,7 +369,8 @@ here; work that needs code changed or a browser goes to a worker.
   `/home/linuxbrew/.linuxbrew`, wherever `brew` is), `/opt/local`, `/opt/X11`,
   `/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, and where
   `claude`, `git`, `srt`, `node`, `tmux`, hansa and its python really live (the
-  install folder, what is inside it and the folders above it). The folders on
+  install folder, what is inside it and the folders above it; for hansa, the
+  whole folder that holds its package and `bin/hansa`). The folders on
   the `PATH` hansa runs with are refused with what is inside them and the
   folders above them (`~/bin/git` with `~/bin` on the `PATH`): hansa would run
   a program put there.
