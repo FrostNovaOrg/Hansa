@@ -360,7 +360,7 @@ class DeskTest(unittest.TestCase):
         for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "HANSA_TASK"):
             os.environ.pop(k, None)
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
-                          HANSA_NOTIFY_GATHER="0.5",
+                          HANSA_NOTIFY_GATHER="0.5", HANSA_NOTIFY_IDLE_GATHER="0",  # nothing held for idle
                           XDG_RUNTIME_DIR=str(self.tmp))  # the inboxes' folder (notify.socket_path), not the account's
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
         if not tmp_writable():  # inside a sandbox that keeps /tmp closed: the workers' folders go in the test's own
@@ -3586,6 +3586,174 @@ class DeskTest(unittest.TestCase):
         later = self.soon(lambda: [x for x in self.posts(sock) if "t0002" in x])
         self.assertTrue(later[0].startswith(f"[hansa, upgraded] desk {self.desk.root}\n"), later[0])
         self.assertEqual(sum("t0001" in x for x in self.posts(sock)), 1)  # nothing said twice, no catch-up
+
+    # what the follower tells an idle session is held (notify.Gather); the reading of its state and time are stubbed
+    def gathered(self, states, short=3.0, idle=120.0, most=300.0):
+        """A Gather whose readings of the session's state come from states (a list: each reading takes the first,
+        the last stays), and a step(t) that asks it at time t, letting a reading it starts end first."""
+        read = []
+
+        def reading():
+            read.append(states[0])
+            if len(states) > 1:
+                states.pop(0)
+            if read[-1] == "fails":
+                raise RuntimeError("claude agents --json could not run")
+            return read[-1]
+        g = notify.Gather(1, short, idle, most, read=reading)
+
+        def step(t):
+            g.due(t)
+            if g.thread:
+                g.thread.join(5)
+            return g.due(t)
+        return g, step, read
+
+    @staticmethod
+    def line(text, key="task"):
+        return [{"key": [key] if key == "server" else [key, text], "line": text}]
+
+    def test_an_idle_session_gets_lines_minutes_apart_in_one_post_after_the_quiet_period(self):
+        g, step, read = self.gathered([True])
+        g.add(self.line("t0001 done"), 0)
+        self.assertFalse(step(0))
+        self.assertFalse(step(3.5))  # the short gather has passed: held, since the session is idle
+        self.assertEqual(g.record(), {"lines": 1, "since": 0, "until": 300})
+        g.add(self.line("t0002 done"), 60)
+        for t in (61, 120, 179.5):
+            self.assertFalse(step(t), t)
+        self.assertTrue(step(180))  # 120 s with nothing new
+        self.assertEqual(g.lines, ["t0001 done", "t0002 done"])
+        self.assertLessEqual(len(read), 180 / notify.IDLE_EVERY + 1)  # read no more often than every 10 s
+        g.posted()
+        self.assertIsNone(g.record())
+
+    def test_an_idle_session_is_held_from_five_minutes_at_most(self):
+        g, step, _ = self.gathered([True])
+        for t in (0, 100, 200):
+            g.add(self.line(f"line at {t}"), t)
+            self.assertFalse(step(t))
+        self.assertFalse(step(299))
+        self.assertTrue(step(300))  # 100 s after the last line, but 300 s after the first
+        self.assertEqual(len(g.lines), 3)
+
+    def test_a_busy_session_gets_lines_after_the_short_gather(self):
+        for state in (False, "fails", None):  # busy; and the state cannot be read: posted as now
+            with self.subTest(state=state):
+                g, step, read = self.gathered([state])
+                g.add(self.line("t0001 done"), 0)
+                self.assertFalse(step(2.9))
+                self.assertTrue(step(3))
+                self.assertEqual(read, [state])
+                self.assertIsNone(g.record())
+
+    def test_held_lines_go_at_once_when_the_session_stops_being_idle(self):
+        g, step, _ = self.gathered([True, False])  # the principal typed, say
+        g.add(self.line("t0001 done"), 0)
+        self.assertFalse(step(0))
+        self.assertFalse(step(3.5))
+        self.assertTrue(g.held)
+        self.assertTrue(step(10))  # the next reading, 10 s after the first: busy
+        g, step, _ = self.gathered([True, "fails"])
+        g.add(self.line("t0001 done"), 0)
+        self.assertFalse(step(0))
+        self.assertFalse(step(3.5))
+        self.assertTrue(step(10))  # nor are they held once the state cannot be read
+
+    def test_lines_about_hansa_serve_are_not_held(self):
+        g, step, read = self.gathered([True])
+        g.add(self.line("hansa serve stopped", key="server"), 0)
+        self.assertFalse(step(2))
+        self.assertTrue(step(3))
+        self.assertEqual(read, [])
+        g, step, read = self.gathered([True])  # nor what is held when one comes
+        g.add(self.line("t0001 done"), 0)
+        self.assertFalse(step(10))
+        g.add(self.line("hansa serve runs again", key="server"), 20)
+        self.assertTrue(step(23))
+        self.assertEqual(len(g.lines), 2)
+        g, step, read = self.gathered([True], idle=0)  # HANSA_NOTIFY_IDLE_GATHER=0: nothing held, nothing read
+        g.add(self.line("t0001 done"), 0)
+        self.assertTrue(step(3))
+        self.assertEqual(read, [])
+
+    def test_the_session_state_is_read_as_the_daily_clear_reads_it(self):
+        for rows, want in (([{"pid": 1, "status": "idle", "sessionId": "s"}], True),
+                           ([{"pid": 1, "status": "busy"}], False),
+                           ([{"pid": 1, "status": "idle", "waitingFor": "a dialog"}], False),
+                           ([], None)):
+            with unittest.mock.patch.object(notify, "agents_rows", return_value=rows):
+                self.assertEqual(notify.session_state(1)[0], want, rows)
+        with unittest.mock.patch.object(notify, "agents_rows", side_effect=RuntimeError("broke")):
+            self.assertIsNone(notify.session_state(1)[0])
+            self.assertEqual(notify.idle_reading(1), (False, "broke"))
+
+    def test_a_follower_restarting_on_new_code_with_lines_held_loses_none(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        p, sock = self.session()
+        sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+        key = notify.key_of(sess)
+        mark, restarted, got, broke = ["old"], [], {}, []
+
+        class Restart(Exception):
+            pass
+
+        def restart(state):
+            restarted.append(state)
+            raise Restart
+
+        def meanwhile():
+            try:
+                self.soon(lambda: notify.live_records(self.desk), timeout=10)
+                self.desk.write_key("mimo", "sk-mimo-12345678")  # a line for the session, which is idle
+                self.soon(lambda: any(r.get("held") for r in notify.records(self.desk)), timeout=10)
+                got["status"] = self.hansa_out("status")
+                got["notify"] = self.hansa_out("notify")
+                mark[0] = "new"  # an upgrade
+            except BaseException as e:  # noqa: BLE001 - raised again once the follower ended
+                broke.append(e)
+                p.kill()
+                p.wait()
+
+        was = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, was)
+        th = threading.Thread(target=meanwhile)
+        with unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_IDLE_GATHER": "120"}), \
+                unittest.mock.patch.object(notify, "session_state", lambda pid, timeout=15: (True, "s"), create=True), \
+                unittest.mock.patch.object(notify, "code_mark", lambda: mark[0]), \
+                unittest.mock.patch.object(notify, "_restart", restart), \
+                unittest.mock.patch.object(notify, "Namer", functools.partial(notify.Namer, first=3600)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            th.start()
+            with self.assertRaises(Restart):
+                notify.follow(self.desk, key, sess, sock, "n")
+        th.join()
+        if broke:
+            raise broke[0]
+        self.assertEqual(self.posts(sock), [])  # held, not posted
+        self.assertRegex(got["status"], rf"hansa posts to: pid {p.pid} \(no name yet\) \(1 line\(s\) held while the "
+                                        r"session is idle, posted by \d\d:\d\d:\d\d at the latest\)")
+        self.assertRegex(got["notify"], r"\n    1 line\(s\) held while the session is idle, posted by ")
+        # the follower runs again on the new code (here: the same, holding nothing) from where it was
+        def then():
+            end = time.time() + 10
+            while time.time() < end and not self.posts(sock):
+                time.sleep(0.1)
+            p.kill()
+            p.wait()  # reaped: the follower sees it gone
+        th, said = threading.Thread(target=then), io.StringIO()
+        with unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_RESUME": json.dumps(restarted[0])}), \
+                unittest.mock.patch.object(notify, "Namer", functools.partial(notify.Namer, first=3600)), \
+                contextlib.redirect_stdout(said):
+            th.start()
+            self.assertEqual(notify.follow(self.desk, key, sess, sock, "n"), 0)
+        th.join()
+        self.assertIn("restarted on hansa's new code", said.getvalue())
+        self.assertEqual(len(self.posts(sock)), 1, said.getvalue())
+        self.assertIn("- mimo is ready now: done? Still open: request #1", self.posts(sock)[0])
 
     # the daily clear: a stand-in tmux answers capture-pane from a file and records send-keys; a stand-in claude
     # answers agents --json from a file
