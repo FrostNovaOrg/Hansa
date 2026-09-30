@@ -8594,5 +8594,350 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.settings()["concurrency"], 3)
 
 
+    # -- releases (hansa release; hansa/release.py) --------------------------------------------------------------
+    def commit_in_repo(self, name, text, message=None):
+        (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / name).write_text(text)
+        sh("git", "add", name, cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", message or f"Add {name}",
+           cwd=self.repo)
+        return self.git_out("rev-parse", "HEAD")
+
+    def with_release(self, command, **lane):
+        s = self.desk.settings()
+        s["lanes"]["a"].update(release=command, **lane)
+        self.assertEqual(self.desk.save_settings(s), [])
+
+    def settle_release(self, d, rid, timeout=20):
+        from hansa import release
+        end = time.time() + timeout
+        while time.time() < end:
+            d.tick()
+            r = release.get(self.desk, rid)
+            if r["state"] not in ("approved", "starting", "running"):
+                return r
+            time.sleep(0.1)
+        self.fail(f"release #{rid} did not end: {release.get(self.desk, rid)}")
+
+    def refused(self, *args) -> str:
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), *args])
+        return str(e.exception.code)
+
+    def test_a_release_waits_for_the_principals_yes_then_runs_and_the_coordinator_hears_how_it_went(self):
+        from hansa import release
+        out = self.tmp / "released.txt"
+        self.desk.write_key("demo", "sk-demo-release-123456")
+        sha = self.commit_in_repo("deploy.sh", "echo deploying\n")
+        self.hansa("lane", "set", "a", "release", f"sh ./deploy.sh && echo $HANSA_RELEASE_COMMIT > {out} "
+                                                  "&& echo token $DEMO_TOKEN")
+        os.environ["DEMO_TOKEN"] = "sk-demo-release-123456"  # hansa's own environment: a push's login, say
+        self.assertEqual([e["field"] for e in self.events("lane_command_changed")], ["release"])
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            told = self.hansa("release", "a", "first", "cut")
+        self.assertIn("release #1: lane a's main at", told)
+        self.assertIn("its last 2 commit(s) (no release of it went out before)", told)
+        self.assertIn("The command names changed files: deploy.sh", told)
+        self.assertIn("waits for the principal's yes on the web page", told)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["lane"], r["commit"], r["note"]), ("waiting", "a", sha, "first cut"))
+        self.assertEqual([c["subject"] for c in r["commits"]], ["Add deploy.sh", "init"])
+        self.assertEqual((r["files"], r["named"]), (["README.md", "deploy.sh"], ["deploy.sh"]))
+        d = Dispatcher(self.desk)
+        for _ in range(3):  # nothing runs before the yes
+            d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertFalse(out.exists())
+        # the page shows it, in both its languages, with the file the command names
+        [row] = views.status(self.desk)["releases"]
+        self.assertEqual((row["id"], row["state"], row["named"], row["moved"]), (1, "waiting", ["deploy.sh"], ""))
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("releaseYes:", "releaseNo:", "releaseNamed:", "releasesWithoutAsking:", "releaseForbidden:"):
+            self.assertEqual(ui.count(x), 2, x)
+        self.assertIn('"/api/release/answer"', ui)
+        self.assertIn("#1 lane a at", views.status_text(views.status(self.desk)))
+        # the page's yes: to the release as the page showed it
+        self.assertFalse(release.answer(self.desk, 1, True, "", "0" * 40, r["command"])["ok"])
+        self.assertEqual(release.answer(self.desk, 1, True, "", sha, r["command"]), {"ok": True})
+        self.assertFalse(release.answer(self.desk, 1, True, "", sha, r["command"])["ok"])  # answered already
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["exit"]), ("done", 0), r)
+        self.assertEqual(out.read_text().strip(), sha)  # at the commit the principal saw, in the repository
+        log = (self.desk.state_dir / "releases" / "1.log").read_text()
+        self.assertIn("deploying", log)
+        self.assertIn("token [key of demo]", log)  # kept, keys removed
+        self.assertNotIn("sk-demo-release", log + json.dumps(r))
+        self.assertEqual([e["event"] for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                          if e["event"].startswith("release_")],
+                         ["release_asked", "release_answered", "release_started", "release_ended"])
+        # the coordinator's session hears the yes and the end
+        events = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())]
+        heard = [x["line"] for x in notify.items_for(self.desk, events, {"key": "k", "session": {
+            "pid": p.pid, "start": notify.proc_start(p.pid)}})]
+        self.assertTrue(any("release #1 of lane a" in x and "the principal said yes" in x for x in heard), heard)
+        self.assertTrue(any("release #1 of lane a" in x and "done" in x for x in heard), heard)
+        self.assertIn("done", self.hansa("release"))
+        told = self.hansa("explain", "lane", "a")
+        self.assertIn("release: sh ./deploy.sh", told)
+        self.assertIn("last release: #1 lane a at " + sha[:10], told)
+        # the next one shows only what came since
+        self.commit_in_repo("b.txt", "b\n")
+        with self.in_session(p, sock):
+            self.assertIn("1 commit(s) since release #1", self.hansa("release", "a"))
+        self.assertEqual([c["subject"] for c in release.get(self.desk, 2)["commits"]], ["Add b.txt"])
+
+    def test_the_page_answers_a_release_through_its_own_address(self):
+        skip_unless_ports(self)
+        from hansa import release
+        self.with_release("true")
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base, tok = f"http://127.0.0.1:{httpd.server_address[1]}", self.desk.web_token()
+        try:
+            body = json.dumps({"id": 1, "yes": True, "commit": r["commit"], "command": r["command"]}).encode()
+            req = urllib.request.Request(f"{base}/api/release/answer?t={tok}", data=body, method="POST")
+            req.add_header("X-Hansa", "1")
+            with urllib.request.urlopen(req) as got:
+                self.assertEqual(json.load(got), {"ok": True})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+
+    def test_a_refused_release_runs_nothing_and_the_coordinator_hears_why(self):
+        from hansa import release
+        out = self.tmp / "ran.txt"
+        self.with_release(f"touch {out}")
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, False, "not before the demo", r["commit"], r["command"]),
+                         {"ok": True})
+        d = Dispatcher(self.desk)
+        for _ in range(3):
+            d.tick()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["reason"]), ("refused", "not before the demo"))
+        self.assertFalse(out.exists())
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_answered"), {"key": "k", "session": None})]
+        self.assertEqual(len(heard), 1)
+        self.assertIn("the principal refused it: not before the demo", heard[0])
+        self.assertIn("refused by the principal", self.hansa("release"))
+
+    def test_a_lane_the_principal_lists_goes_out_without_asking(self):
+        from hansa import release
+        out = self.tmp / "ran.txt"
+        self.with_release(f"touch {out}")
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
+        told = self.hansa("release", "a")
+        self.assertIn("on the principal's list of lanes released without asking", told)
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        r = self.settle_release(Dispatcher(self.desk), 1)
+        self.assertEqual(r["state"], "done", r)
+        self.assertTrue(out.exists())
+        self.assertEqual(self.events("release_answered"), [])  # nobody was asked
+        # taken off the list before it ran: it waits for the yes after all
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
+        self.commit_in_repo("b.txt", "b\n")
+        self.hansa("release", "a")
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[])), {"ok": True, "problems": []})
+        Dispatcher(self.desk).tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+
+    def test_a_base_that_moved_or_a_command_that_changed_voids_the_yes(self):
+        from hansa import release
+        out = self.tmp / "ran.txt"
+        self.with_release(f"touch {out}")
+        d = Dispatcher(self.desk)
+        # the base moved before the yes
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.commit_in_repo("b.txt", "b\n")
+        self.assertIn("main moved since it was asked", views.status(self.desk)["releases"][0]["moved"])
+        told = release.answer(self.desk, 1, True, "", r["commit"], r["command"])
+        self.assertFalse(told["ok"])
+        self.assertIn("main moved since it was asked", told["void"])
+        self.assertEqual(release.get(self.desk, 1)["state"], "void")
+        # the base moved after the yes, before it ran
+        self.hansa("release", "a")
+        r = release.get(self.desk, 2)
+        self.assertEqual(release.answer(self.desk, 2, True, "", r["commit"], r["command"]), {"ok": True})
+        self.commit_in_repo("c.txt", "c\n")
+        d.tick()
+        r = release.get(self.desk, 2)
+        self.assertEqual(r["state"], "void")
+        self.assertIn("main moved since it was asked", r["void"])
+        # the command changed before the yes, and after it
+        self.hansa("release", "a")
+        r = release.get(self.desk, 3)
+        self.hansa("lane", "set", "a", "release", f"touch {out}; echo more")
+        told = release.answer(self.desk, 3, True, "", r["commit"], r["command"])
+        self.assertIn("release command changed since it was asked", told["void"])
+        self.hansa("release", "a")
+        r = release.get(self.desk, 4)
+        self.assertEqual(release.answer(self.desk, 4, True, "", r["commit"], r["command"]), {"ok": True})
+        self.hansa("lane", "set", "a", "release", f"touch {out}")
+        d.tick()
+        self.assertIn("release command changed since it was asked", release.get(self.desk, 4)["void"])
+        self.assertFalse(out.exists())  # none of them ran
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_void"), {"key": "k", "session": None})]
+        self.assertEqual(len(heard), 4)
+        self.assertTrue(all("is void" in x and "hansa release a" in x for x in heard), heard)
+        # a newer request replaces one still waiting, quietly: the coordinator made it
+        self.hansa("release", "a")
+        self.hansa("release", "a")
+        self.assertEqual(release.get(self.desk, 5)["void"], "replaced by release #6")
+        self.assertEqual(len(notify.items_for(self.desk, self.events("release_void"), {"key": "k", "session": None})), 4)
+
+    def test_words_the_principal_keeps_from_going_out_refuse_a_release(self):
+        from hansa import release
+        self.with_release("true")
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["Project Falcon"])),
+                         {"ok": True, "problems": []})
+        self.commit_in_repo("notes.txt", "public line\nthe PROJECT FALCON plan\n+++ not a header: project falcon\n")
+        self.commit_in_repo("c.txt", "clean\n", message="Tidy\n\nfor project falcon only")
+        self.commit_in_repo("notes.txt", "public line\n")  # taken out again: still in the history that goes out
+        said = self.refused("release", "a")
+        self.assertIn("refused: the commits going out hold words the principal keeps from going out", said)
+        self.assertIn("notes.txt: the PROJECT FALCON plan", said)
+        self.assertIn("notes.txt: +++ not a header: project falcon", said)
+        self.assertIn("commit message: for project falcon only", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], len(r["hits"])), ("forbidden", 3))
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
+        # a word the principal adds after the yes stops it before it runs
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=[])), {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        r = release.get(self.desk, 2)
+        self.assertEqual(release.answer(self.desk, 2, True, "", r["commit"], r["command"]), {"ok": True})
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["public LINE"])), {"ok": True, "problems": []})
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "forbidden")
+        self.assertEqual(self.events("release_started"), [])
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_forbidden"), {"key": "k", "session": None})]
+        self.assertEqual(len(heard), 1)  # the one found at the ask, the coordinator saw itself
+
+    def test_a_worker_cannot_ask_for_a_release(self):
+        from hansa import release
+        self.with_release("true")
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):
+            self.assertIn("only the coordinator asks for a release", self.refused("release", "a"))
+        self.assertEqual(release.releases(self.desk), [])
+        self.hansa("lane", "set", "a", "release", "none")
+        self.assertIn("lane a has no release command", self.refused("release", "a"))
+        self.assertIn("no releases yet", self.hansa("release"))
+
+    def test_a_release_stops_at_the_lanes_time_limit(self):
+        from hansa import release
+        self.with_release("echo started; sleep 60", timeout_min=1)
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        d = Dispatcher(self.desk)
+        d.tick()
+        r = release.get(self.desk, 1)
+        self.assertEqual(r["state"], "running")
+        self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        release.change(self.desk, 1, lambda x: {"started": x["started"] - 61})  # a minute and more went by
+        start = time.time()
+        r = self.settle_release(d, 1)
+        self.assertLess(time.time() - start, 15)
+        self.assertEqual(r["state"], "failed", r)
+        self.assertEqual(r["problem"], "stopped at the lane's time limit (1 min)")
+        self.assertIn("started", r["tail"])
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_ended"), {"key": "k", "session": None})]
+        self.assertIn("FAILED: stopped at the lane's time limit (1 min)", heard[0])
+
+    def test_a_release_runs_with_hansas_environment_not_the_lanes(self):
+        from hansa import release
+        env = self.tmp / "env.txt"
+        self.with_release(f"env > {env}", env={"LANE_ONLY_VAR": "from-the-lane"})
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        with unittest.mock.patch.dict(os.environ, {"HANSA_OWN_VAR": "from-hansa"}):
+            r = self.settle_release(Dispatcher(self.desk), 1)
+        self.assertEqual(r["state"], "done", r)
+        seen = dict(x.split("=", 1) for x in env.read_text().splitlines() if "=" in x)
+        self.assertNotIn("LANE_ONLY_VAR", seen)
+        self.assertEqual((seen.get("HANSA_OWN_VAR"), seen.get("HANSA_RELEASE")), ("from-hansa", "1"))
+        self.assertEqual(seen.get("HANSA_RELEASE_COMMIT"), r["commit"])
+
+    def test_a_release_and_a_merge_on_one_repository_wait_for_each_other(self):
+        from hansa import release
+        go = self.tmp / "go"
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.with_release(f"while [ ! -f {go} ]; do sleep 0.1; done")
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        # a merge asked while it runs waits for it
+        told = self.hansa("merge", tid)
+        self.assertIn(f"{tid} is not merged yet", told)
+        self.assertIn("release #1 of lane a", told)
+        self.assertEqual(self.desk.meta(tid)["state"], "merging")
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "merging")
+        self.assertIn("release #1 of lane a", views.merge_check_text(self.desk, self.desk.meta(tid)))
+        go.write_text("")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+        # a release approved while a merge check runs there waits for it; the merge moves the base, so it is void
+        s = self.desk.settings()
+        s["lanes"]["a"].update(check=f"while [ ! -f {go}2 ]; do sleep 0.1; done")
+        self.assertEqual(self.desk.save_settings(s), [])
+        t2 = self.desk.new_task("Add more.txt")
+        self.desk.update(t2, lane="a")
+        os.environ["FAKE_HELLO"] = "more.txt"
+        (self.tmp / (go.name + "2")).write_text("")
+        self.assertEqual(self.settle(d, t2)["state"], "done")
+        (self.tmp / (go.name + "2")).unlink()
+        self.commit_in_repo("base.txt", "moved\n")  # the base moved: the merge is checked first
+        self.hansa("merge", t2)
+        d.tick()
+        self.assertEqual((self.desk.meta(t2).get("merge_check") or {}).get("phase"), "running")
+        self.hansa("release", "a")
+        rid = release.releases(self.desk)[-1]["id"]
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(release.get(self.desk, rid)["state"], "approved")
+        self.assertIn(f"waits for {t2}'s merge check", self.hansa("release"))
+        (self.tmp / (go.name + "2")).write_text("")
+        self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
+        d.tick()
+        self.assertIn("main moved since it was asked", release.get(self.desk, rid)["void"])
+
+    def test_the_coordinator_cannot_change_the_principals_release_settings(self):
+        s = self.desk.settings()
+        self.assertEqual((s["releases_without_asking"], s["release_forbidden"]), ([], []))
+        for k, v in (("releases_without_asking", ["a"]), ("release_forbidden", ["secret"])):
+            s = self.desk.settings()
+            s[k] = v
+            said = self.desk.save_settings(s, by="coordinator")
+            self.assertTrue(any(k in x and "principal's" in x for x in said), said)
+            self.assertEqual(self.desk.settings()[k], [])
+        for field in ("releases_without_asking", "release_forbidden"):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main(["--desk", str(self.desk.root), "lane", "set", "a", field, "a"])
+        # the page sets them, and the coordinator's own changes leave them as they are
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"], release_forbidden=["secret"])),
+                         {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "git push origin main")
+        self.hansa("concurrency", "2")
+        s = self.desk.settings()
+        self.assertEqual((s["releases_without_asking"], s["release_forbidden"], s["lanes"]["a"]["release"]),
+                         (["a"], ["secret"], "git push origin main"))
+        self.assertFalse(self.page_save(lambda s: s.update(release_forbidden=["two\nlines"]))["ok"])
+        self.assertFalse(self.page_save(lambda s: s.update(releases_without_asking=["Not A Lane"]))["ok"])
+        told = self.hansa("explain")
+        self.assertIn("you cannot set them", told)
+        self.assertIn("for lanes a, which the principal lets go out without asking", told)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ import threading
 import urllib.parse
 from pathlib import Path
 
-from . import cost, views
+from . import cost, release, views
 from .desk import Desk, deny_split, public_settings, read_json, read_split
 from .run import check_provider
 
@@ -165,6 +165,10 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     return self._send(200, {"ok": True})
                 if path == "/api/check":
                     return self._send(200, check_provider(desk, body["provider"]))
+                if path == "/api/release/answer":  # the principal's yes or no, to the release as the page showed it
+                    return self._send(200, release.answer(desk, int(body["id"]), body.get("yes") is True,
+                                                          str(body.get("reason") or ""), str(body.get("commit") or ""),
+                                                          str(body.get("command") or ""), by="page"))
                 if path == "/api/ask/close":
                     desk.close_ask(int(body["id"]), body.get("answer", ""), by="page")
                     return self._send(200, {"ok": True})
