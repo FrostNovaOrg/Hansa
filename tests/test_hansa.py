@@ -4411,8 +4411,10 @@ class DeskTest(unittest.TestCase):
                 s["lanes"]["a"]["write"] = [path]
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and path in told[0] and why in told[0], (path, told))
-            s["lanes"]["a"]["write"] = [str(home / ".M2"), str(up(good))]
+            s["lanes"]["a"]["write"] = [str(home / ".M2" / "REPOSITORY"), str(home / ".CACHE" / "Pip"), str(up(good))]
             self.assertEqual(validate(s, self.desk.root), [])
+            s["lanes"]["a"]["write"] = [str(home / "LIBRARY" / "x")]  # the rule for the home folder, in any case
+            self.assertEqual(len(validate(s, self.desk.root)), 1)
 
     def test_the_machine_owners_claude_code_folder_is_never_let_read_nor_a_name_a_rule_cannot_hold(self):
         home = self.tmp / "home"
@@ -4524,7 +4526,7 @@ class DeskTest(unittest.TestCase):
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and path in told[0] and why.replace("the desk", "the desk's") in told[0],
                                 (path, told))
-            s["lanes"]["a"]["write"] = [data + str(home / ".m2"), str(home / ".m2"), str(good)]
+            s["lanes"]["a"]["write"] = [data + str(home / ".m2" / "repository"), str(home / ".m2" / "repository"), str(good)]
             told = validate(s, self.desk.root)
             self.assertTrue(len(told) == 1 and data in told[0] and "the system's own" in told[0], told)
 
@@ -4666,7 +4668,8 @@ class DeskTest(unittest.TestCase):
             s["lanes"]["a"]["write"] = [path]
             told = validate(s, self.desk.root)
             self.assertTrue(len(told) == 1 and f"write cannot include {path}: " in told[0] and why in told[0], (path, told))
-        self.assertEqual(write_problems([str(good), "/opt/include", "/usr/local/include/x", "/var/cache/x"]), [])
+        self.assertEqual(write_problems([str(good), "/opt/include", "/var/cache/x"]), [])
+        self.assertIn("it would open /usr, where programs are installed", write_problems(["/usr/local/include/x"])[0])
 
     def test_a_name_with_an_invisible_or_direction_changing_character_is_in_neither_list(self):
         good = (self.tmp / "opt").resolve()
@@ -5689,7 +5692,8 @@ class DeskTest(unittest.TestCase):
         for bad in (["m2"], ["~/.m2"], [str(cache), 3], "/opt/cache", [f"/opt/c{i}" for i in range(21)]):
             s["lanes"]["a"]["write"] = bad
             self.assertEqual(validate(s, self.desk.root),
-                             ["lane a: write must be a list of up to 20 full paths starting with /, such as /Users/me/.m2"])
+                             ["lane a: write must be a list of up to 20 full paths starting with /, such as "
+                              "/Users/me/.m2/repository"])
         # the desk (as given, resolved, inside it or around it) and the repository's .git
         for bad in (self.tmp / "desk", self.tmp / "desk" / "secrets", self.desk.root / ".hansa" / "runs", self.tmp,
                     self.tmp / "x" / ".." / "desk"):
@@ -5718,7 +5722,7 @@ class DeskTest(unittest.TestCase):
             return validate(s, self.desk.root)
 
         with as_home(home, PATH=f"{bin_}:relative/bin:/usr/bin"):
-            for ok in (home / ".m2", home / ".cache" / "pip", self.tmp / "tools" / "cache"):  # a tool's cache
+            for ok in (home / ".m2" / "repository", home / ".cache" / "pip", self.tmp / "tools" / "cache"):  # a tool's cache
                 self.assertEqual(refused(ok), [], ok)
             for x in (home, self.tmp, self.tmp.parent):  # the home folder, or above it (before the desk)
                 self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {home}, "
@@ -5744,7 +5748,7 @@ class DeskTest(unittest.TestCase):
             for x in (home / ".claude", home / ".claude" / "hooks", home / ".claude" / ".." / ".claude"):
                 self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {home / '.claude'}, "
                                               "the machine owner's Claude Code folder"], x)
-            self.assertEqual(refused(home / ".claude-cache"), [])  # another folder, by its name
+            self.assertEqual(refused(home / "claude-cache"), [])  # another folder, by its name
             # a name the sandbox may read as a pattern, there or not, or where a link leads
             odd = [home / n for n in ("a)b", "(x", "star*", "what?", "[br", "br]", "{a,b", "b}")]
             (home / "odd (1)").mkdir()
@@ -5757,7 +5761,7 @@ class DeskTest(unittest.TestCase):
                 told = refused(x)
                 self.assertTrue(len(told) == 1 and f"write cannot include {json.dumps(x)}: it has a line break" in told[0],
                                 (x, told))
-            s["lanes"]["a"]["write"] = [str(home / ".m2"), str(home / "star*")]  # the good one beside it
+            s["lanes"]["a"]["write"] = [str(home / ".m2" / "repository"), str(home / "star*")]  # the good one beside it
             self.assertEqual(len(validate(s, self.desk.root)), 1)
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / "star*")])
@@ -5895,8 +5899,9 @@ class DeskTest(unittest.TestCase):
             self.refused_and_left_out("/srv/x/tools/xdg-cache/claude-cli-nodejs", "Claude Code's own files")
             # a build or test tool's cache, in the home folder or outside it, beside the programs too
             fine = ["/srv/x/tools/xdg-cache/pnpm", "/srv/x/tools/xdg-cache/pip", "/srv/x/tools/cache", "/var/cache/x",
-                    "/opt/build-cache", str(home / ".m2"), str(home / ".npm"), str(home / ".gradle"),
-                    str(home / ".cache" / "pip"), str(home / ".local" / "share" / "pnpm"), str(tools / "cache"),
+                    "/opt/build-cache", str(home / ".m2" / "repository"), str(home / ".npm" / "_cacache"),
+                    str(home / ".gradle" / "caches"), str(home / ".cache" / "pip"),
+                    str(home / ".local" / "share" / "pnpm" / "store"), str(tools / "cache"),
                     str(brew / "var" / "cache"), str(self.tmp / "nodejs" / "cache"), str(home / "Library" / "Caches" / "pip")]
             self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
@@ -5916,12 +5921,12 @@ class DeskTest(unittest.TestCase):
         bad = {**{home / n: shell for n in (".bashrc", ".bash_profile", ".profile", ".zshrc", ".zshenv", ".zprofile",
                                            ".zlogin", ".bash_login", ".config/fish/conf.d")},
                self.tmp / "lrc": shell,
-               home / ".gitconfig": git, home / ".config" / "git": git, home / ".config" / "git" / "hooks": git,
+               home / ".gitconfig": git, home / ".config" / "git": "it would open", home / ".config" / "git" / "hooks": git,
                home / ".tmux.conf": tmux, home / ".config" / "tmux": tmux,
                home / ".local" / "share" / "claude": "Claude Code's own files",
-               home / ".local" / "share": "Claude Code's own files",
+               home / ".local" / "share": "it would open",
                home / ".cache" / "claude-cli-nodejs" / "x": "Claude Code's own files",
-               home / ".cache": "Claude Code's own files",
+               home / ".cache": "it would open",
                home / "Library" / "Caches" / "claude-cli-nodejs": "Claude Code's own files",
                home / ".srt-settings.json": "srt's settings", home / ".hansa" / "followers": "hansa's own files",
                "/etc/gitconfig": "it would open /etc", "/usr/lib/x": "it would open /usr/lib"}
@@ -5945,6 +5950,93 @@ class DeskTest(unittest.TestCase):
                                self.tmp / "z" / ".zshenv": shell, self.tmp / "env.sh": shell}.items():
                     self.refused_and_left_out(x, why)
                 self.assertEqual(write_problems([str(self.tmp / "xdg" / "pip"), str(self.tmp / "z" / "cache")]), [])
+
+    def test_a_lanes_write_list_holds_in_the_home_folder_only_caches_and_plain_folders(self):
+        from hansa import run
+        from hansa.desk import PACKAGE_CACHES
+        home = (self.tmp / "home").resolve()
+        (home / "work").mkdir(parents=True)
+        (home / "work" / "lz").symlink_to(home / ".zsh")
+        (self.tmp / "lbun").symlink_to(home / ".bun")
+        (home / ".cache").mkdir()
+        (home / ".cache" / "ln").symlink_to(home / ".nvm")
+        only = f"it is inside {home}, the home folder, where a write list may hold only"
+        hidden = [".zsh", ".bun", ".zcompdump", ".gitconfig.local", ".nvm", ".pyenv", ".p10k.zsh", ".m2", ".gradle",
+                  ".npm", ".local/share/pnpm", ".cargo/bin", ".config/x", ".local/bin", ".bun/install",
+                  "work/.hidden", "work/plain/.venv/lib", "work/lz", ".cache/ln", "Applications", "Applications/X.app"]
+        with as_home(home):
+            for x in [home / n for n in hidden] + [self.tmp.resolve() / "lbun"]:
+                told = self.refused_and_left_out(x, only)
+                self.assertIn("such as ~/work/cache; or point the tool at a cache folder of the lane's own", told)
+                self.assertIn("~/.m2/repository", told)  # what can be written instead
+            for x in ("Library/Anything", "Library/LaunchAgents", "Library/Application Support/x"):
+                self.refused_and_left_out(home / x, str(home / "Library") if sys.platform == "darwin" else only)
+            self.refused_and_left_out(home / "node_modules", "a folder node loads packages from")
+            self.assertEqual(set(PACKAGE_CACHES), {
+                ".m2/repository", ".gradle/caches", ".npm/_cacache", ".pnpm-store", ".local/share/pnpm/store",
+                ".cargo/registry", ".cargo/git", "go/pkg/mod", ".nuget/packages", ".ivy2/cache", ".conan2/p",
+                ".bun/install/cache"})
+            fine = [str(home / c) for c in PACKAGE_CACHES] + [str(home / n) for n in (
+                ".m2/repository/org", ".cargo/git/db", ".cache/pip", ".cache/pip/http", "Library/Caches/pip",
+                "work/cache", "go", "build cache")]
+            providers = self.desk.settings()["providers"]
+            for x in fine + ["/srv/x/tools/xdg-cache/pnpm"]:
+                self.assertEqual(write_problems([x], str(self.repo), self.desk.root, providers), [], x)
+            self.hansa("lane", "set", "a", "write", *fine)
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["write"], fine)
+            self.assertEqual(run.write_list(self.desk, self.desk.settings()["lanes"]["a"]), (fine, []))
+
+    def test_a_lanes_write_list_opens_no_place_programs_are_installed(self):
+        home = (self.tmp / "home").resolve()
+        home.mkdir()
+        prefix = (self.tmp / "brewp").resolve()  # Homebrew somewhere of its own: brew on the PATH says where
+        (prefix / "Homebrew" / "bin").mkdir(parents=True)
+        (prefix / "bin").mkdir()
+        (prefix / "Homebrew" / "bin" / "brew").write_text("#!/bin/sh\n")
+        (prefix / "Homebrew" / "bin" / "brew").chmod(0o755)
+        (prefix / "bin" / "brew").symlink_to("../Homebrew/bin/brew")
+        (self.tmp / "lshare").symlink_to(prefix / "share")
+        where = "where programs are installed: what is there runs outside the sandbox"
+        bad = {prefix / "Library" / "Homebrew": prefix, prefix / "share" / "zsh" / "site-functions": prefix,
+               prefix / "var" / "cache": prefix, prefix / "Homebrew": prefix, self.tmp.resolve() / "lshare" / "zsh": prefix,
+               "/opt/homebrew/Library/Homebrew": "/opt/homebrew", "/opt/homebrew/share/zsh/site-functions": "/opt/homebrew",
+               "/opt/homebrew/Caskroom": "/opt/homebrew", "/home/linuxbrew/.linuxbrew/share": "/home/linuxbrew/.linuxbrew",
+               "/Applications/Xcode.app/Contents/Developer/usr/bin/git": "/Applications",
+               "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources":
+                   "/Applications",
+               "/Library/Developer/CommandLineTools/usr/bin": "/Library", "/usr/local/lib": "/usr",
+               "/usr/local/share/zsh/site-functions": "/usr", "/usr/local/Cellar": "/usr", "/usr/share/x": "/usr",
+               "/nix/store": "/nix", "/snap/node": "/snap", "/var/lib/x": "/var/lib"}
+        with as_home(home, PATH=f"{prefix / 'bin'}:/usr/bin:/bin"):
+            for x, top in bad.items():
+                if sys.platform == "darwin" and str(x).startswith("/home/"):  # there /home is the system's own
+                    top = self.refused_and_left_out(x, "") and "/usr"
+                told = self.refused_and_left_out(x, "it would open " if top != "/usr" else "")
+                if top not in ("/Applications", "/Library", "/usr") or "/usr/local/share" in str(x):  # else a nearer fence may say it
+                    self.assertIn(f"it would open {top}, {where}", told)
+            fine = ["/srv/x/tools/xdg-cache/pnpm", "/tmp/cache", "/opt/cache", "/var/cache/x", "/mnt/big/cache",
+                    str(self.tmp.resolve() / "elsewhere" / "cache"), str(home / "work" / "cache")]
+            self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
+        # an account of the system's, whose home folder is where programs are installed too: its own rule holds there
+        with as_home("/var/lib/builder"):
+            self.assertEqual(write_problems(["/var/lib/builder/work/cache", "/var/lib/builder/.cache/pip"]), [])
+            for x in ("/var/lib/builder/.zsh", "/var/lib/other", "/var/lib/builder", "/var/lib"):
+                self.assertEqual(len(write_problems([x])), 1, x)
+
+    def test_a_name_that_normalizes_to_a_pattern_character_is_in_neither_list(self):
+        good = (self.tmp / "opt").resolve()
+        good.mkdir()
+        why = "has one of ()[]{}*?\\ or a look-alike of one"
+        for c in ("\uff3c", "\ufe68", "\uff0a", "\uff08", "\ufe5b", "\uff1f"):
+            there = good / f"a{c}b"
+            there.mkdir()
+            (self.tmp / "lodd").symlink_to(there)
+            for path in (str(there), str(good / "new" / f"{c}x"), str(self.tmp.resolve() / "lodd")):  # where a link leads
+                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+                self.assertTrue(not told["ok"] and any(why in p for p in told["problems"]), (ascii(path), told))
+                self.refused_and_left_out(path, why)
+            (self.tmp / "lodd").unlink()
+        self.assertEqual(write_problems([str(good / "caf\u00e9"), str(good / "\u30ad\u30e3\u30c3\u30b7\u30e5")]), [])
 
     def test_the_home_folder_is_the_accounts_whatever_home_says(self):
         from hansa import run
@@ -6008,6 +6100,228 @@ class DeskTest(unittest.TestCase):
             self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
             self.assertTrue(any(why in x and "skipped" in x for x in r.stderr.splitlines()), (ascii(c), r.stderr))
             (self.tmp / "lodd").unlink()
+
+    def test_a_worker_on_a_key_provider_cannot_read_another_providers_claude_code_folder(self):
+        seen, cc = self.tmp / "argv.jsonl", self.tmp / "logins" / "cc"
+        cc.mkdir(parents=True)
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(cc)  # the subscription's login and session records
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"].update(providers=["mimo"], setup="true", check="true", env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-other-company-01")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["provider"]), ("done", "mimo"), m)
+        worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]["denyRead"]
+        setup, check = [c["settings"]["filesystem"]["denyRead"] for c in self.srt_calls()]
+        for deny in (worker, setup, check):
+            self.assertIn(str(cc), deny)  # not the provider this run uses
+            self.assertIn(str(Path.home() / ".claude"), deny)  # the machine owner's, whatever the providers use
+            self.assertIn(str(self.desk.state_dir / "claude-mimo"), deny)  # its own, as before
+
+    def test_more_logins_and_keys_are_kept_from_workers_and_the_macos_ones_only_on_macos(self):
+        from hansa import run
+        from hansa.desk import read_split
+        home, p = Path.home(), self.desk.settings()["providers"]["claude"]
+        everywhere = (".ssh", ".tsh", ".tbot", ".codex", ".gemini", ".cursor", ".grok", ".config/gcloud", ".azure", ".oci",
+                      ".git-credentials", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml",
+                      ".gem/credentials", ".config/hub", ".config/glab-cli", ".terraform.d", ".vault-token",
+                      ".password-store", ".local/share/keyrings", ".config/op", ".mozilla", ".config/google-chrome",
+                      ".config/chromium", ".bash_history", ".zsh_history", ".python_history", ".psql_history")
+        mac = ("Library/Keychains", "Library/Cookies", "Library/Application Support/Claude",
+               "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
+               "Library/Application Support/BraveSoftware", "Library/Application Support/Microsoft Edge",
+               "Library/Application Support/Arc", "Library/Application Support/Firefox", "Library/Safari",
+               "Library/Messages", "Library/Mail")
+        for system in ("linux", "darwin"):
+            with unittest.mock.patch.object(sys, "platform", system):
+                lane = self.desk.settings()["lanes"]["a"]
+                deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
+                srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            for f in everywhere:
+                self.assertIn(str(home / f), deny, (system, f))
+            for f in mac:
+                (self.assertIn if system == "darwin" else self.assertNotIn)(str(home / f), deny, (system, f))
+            # nothing a build or test tool reads
+            for f in (".gitconfig", ".m2", ".gradle", ".cargo", ".cargo/config.toml", ".npm", ".cache", ".config", "Library"):
+                self.assertNotIn(str(home / f), deny, (system, f))
+        # the write list and the coordinator's read list refuse the new names, as they did the old
+        for f in (".tsh", ".cargo/credentials.toml", ".cargo", ".config/gcloud/x"):
+            self.assertIn("a login or key that workers may not read", write_problems([str(home / f)])[0], f)
+            self.assertIn("a login or key", read_split([str(home / f)])[1][0], f)
+        self.assertEqual(write_problems([str(home / ".cargo" / "registry"), str(home / ".m2" / "repository")]), [])
+        # the coordinator's Read tool is denied them too, but no Claude Code folder: its memory lives in one
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
+        for f in (".ssh", ".tsh", ".config/gcloud"):
+            self.assertIn(f"Read(//{str(home / f).lstrip('/')}/**)", denied)
+        self.assertIn(f"Read(//{str(home / '.git-credentials').lstrip('/')})", denied)  # a file, by its own path
+        (self.assertIn if sys.platform == "darwin" else self.assertNotIn)(
+            f"Read(//{str(home / 'Library/Keychains').lstrip('/')}/**)", denied)
+        self.assertNotIn(f"Read(//{str(home / '.claude').lstrip('/')}/**)", denied)
+        told = self.hansa("explain", "lane", "a")
+        self.assertIn("may not read", told)
+        self.assertIn("~/.tsh", told)
+
+    def test_what_the_principal_keeps_from_workers_reaches_every_sandbox_and_every_read_tool(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        keys, token = (self.tmp / "my project" / "keys").resolve(), self.tmp.resolve() / "token.txt"  # one not there yet
+        keys.mkdir(parents=True)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+        told = self.page_save(lambda s: s.update(workers_may_not_read=[str(keys), str(token), str(keys) + "/"]))
+        self.assertEqual(told, {"ok": True, "problems": []})
+        shown = public_settings(self.desk)
+        self.assertEqual(shown["settings"]["workers_may_not_read"], [str(keys), str(token), str(keys) + "/"])
+        self.assertEqual(shown["deny_skipped"], [])
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("S.workers_may_not_read", "T.workersMayNotRead", "DENY_SKIPPED = r.deny_skipped"):
+            self.assertIn(x, ui)
+        self.assertEqual(ui.count("workersMayNotRead:"), 2)  # said in both languages
+        rules = [f"Read(//{str(keys).lstrip('/')})", f"Read(//{str(keys).lstrip('/')}/**)",
+                 f"Read(//{str(token).lstrip('/')})", f"Read(//{str(token).lstrip('/')}/**)"]
+        # the coordinator cannot set it, and its own changes leave it as the principal set it
+        self.hansa("lane", "set", "a", "setup", "true")
+        self.hansa("lane", "set", "a", "check", "true")
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual(len(self.desk.settings()["workers_may_not_read"]), 3)
+        # a worker and a verifier: the sandbox of their commands, and their Read tool
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["no_read_left_out"], [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        task, verify = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
+        self.assertIn("checking another worker's finished task", verify[verify.index("--append-system-prompt") + 1])
+        for argv in (task, verify):
+            deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
+            self.assertEqual((deny.count(str(keys)), deny.count(str(token))), (1, 1))
+            for r in rules:
+                self.assertIn(r, self.denied_by(argv))
+        # the setup and the check of each (srt's settings)
+        calls = self.srt_calls()
+        self.assertEqual(len(calls), 3)  # the task's setup and check, the verification's setup
+        for c in calls:
+            self.assertIn(str(keys), c["settings"]["filesystem"]["denyRead"])
+            self.assertIn(str(token), c["settings"]["filesystem"]["denyRead"])
+        # a design session
+        self.desk.update(tid, lane="a", provider="claude", session_id="sid-d", model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        design = argv[argv.index("--disallowedTools") + 1:argv.index("--allowedTools")]
+        box = json.loads(Path(argv[argv.index("hansa-setup") + 7]).read_text())  # its setup's sandbox (srt's settings)
+        self.assertIn(str(keys), box["filesystem"]["denyRead"])
+        for r in rules:
+            self.assertIn(r, design)
+        # the coordinator
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for x in rules:
+            self.assertIn(x, r.stdout.split("--disallowedTools")[1].split("--model")[0])
+        # where the coordinator looks
+        told = self.hansa("explain", "lane", "a")
+        self.assertIn(f"folders and files the principal keeps from workers", told)
+        self.assertIn(f"{keys}, {token}", told)
+        self.assertIn("you cannot set", told)
+        # no write list, no folder the coordinator reads and no lane's repository is one, inside one or above one
+        for x in (keys, keys / "sub", keys.parent, token):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(x)])
+            self.assertIn("which the principal keeps workers from reading", str(e.exception.code), x)
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("write", []), [])
+        (keys / "sub").mkdir()
+        for x in (keys, keys / "sub", keys.parent):
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(x)]))
+            self.assertFalse(told["ok"], x)
+            self.assertIn("which is on the list of what workers may not read", told["problems"][0])
+        s = self.desk.settings()
+        s["lanes"]["a"]["repo"] = str(keys / "sub")
+        self.assertTrue(any("repo cannot be" in x and "the principal keeps workers from reading" in x
+                            for x in validate(s, self.desk.root)))
+        # settings saved before there was such a list work as before
+        s = self.desk.settings()
+        del s["workers_may_not_read"]
+        write_json(self.desk.settings_path, s)
+        self.assertEqual(validate(json.loads(self.desk.settings_path.read_text()), self.desk.root), [])
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+        tid = self.desk.new_task("Add more.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertNotIn(str(keys), self.sandbox_of(argv)["filesystem"]["denyRead"])
+        self.assertIn(str(self.desk.secrets_dir), self.sandbox_of(argv)["filesystem"]["denyRead"])
+        self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=31))["ok"])
+
+    def test_what_workers_cannot_be_kept_from_reading_is_refused_on_saving_and_left_out_at_start(self):
+        home, tools = Path(os.path.expanduser("~")), self.tmp.resolve() / "tools"
+        (tools / "bin").mkdir(parents=True)
+        seen, good, tmp = self.tmp / "argv.jsonl", self.tmp.resolve() / "keys", self.tmp.resolve()
+        link = self.tmp / "link-to-repo"
+        link.symlink_to(self.repo)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        bad = {"relative/path": "must be a full path", "/": "the whole machine",
+               str(home): "the home folder", str(home.parent): "the home folder",
+               str(self.desk.root): "the desk, or a folder above it", str(tmp): "the desk, or a folder above it",
+               str(self.repo.resolve()): "lane a's repository", str(link): "lane a's repository",  # where a link leads
+               str(tools / "bin"): "a folder on the PATH", str(tools): "a folder on the PATH",
+               f"{tmp}/a\nb": "control character", f"{tmp}/be\x07ll": "control character",
+               f"{tmp}/a​b": "invisible or direction-changing", f"{tmp}/star*": "read as a pattern",
+               f"{tmp}/(x)": "read as a pattern"}
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{tools / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[str(good), path]))
+                self.assertFalse(told["ok"], path)
+                self.assertEqual(len(told["problems"]), 1, (path, told))
+                self.assertIn(why, told["problems"][0], path)
+                self.assertIn("workers cannot be kept from reading", told["problems"][0])
+                self.assertEqual(self.desk.settings()["workers_may_not_read"], [])  # nothing was saved
+            self.assertFalse(self.page_save(lambda s: s.update(workers_may_not_read="/opt/keys"))["ok"])
+            self.assertFalse(self.page_save(lambda s: s.update(workers_may_not_read=[["/opt/keys"]]))["ok"])
+            self.assertFalse(self.page_save(lambda s: s.update(workers_may_not_read=["/k"] * 51))["ok"])
+            # inside a PATH folder, the desk or the repository, and one that is not there: accepted
+            fine = [str(good), str(tools / "bin" / "sub"), str(self.repo.resolve() / "private"), "/nowhere/at/all"]
+            self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
+            # written into settings.json another way: a run leaves each out and says so in the task
+            s = self.desk.settings()
+            s["workers_may_not_read"] = [*bad, str(good)]
+            write_json(self.desk.settings_path, s)
+            self.assertEqual(len(public_settings(self.desk)["deny_skipped"]), len(bad))  # the page says which
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "done", m)
+            argv = json.loads(seen.read_text().splitlines()[-1])
+            deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
+            self.assertIn(str(good), deny)
+            self.assertFalse(set(bad) & set(deny), deny)
+            self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
+                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir)])
+            self.assertEqual(len(m["no_read_left_out"]), len(bad))
+            shown = views.show_text(self.desk, tid)
+            for path, why in bad.items():
+                lines = [x for x in shown.splitlines() if why in x and x.startswith(tuple(
+                    f"what workers may not read: left out of this run: {p}: " for p in (path, json.dumps(path))))]
+                self.assertEqual(len(lines), 1, (path, shown))
+            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(bad))
+            told = self.hansa("explain", "lane", "a")
+            self.assertIn(f"not applied: {home}: it is {home}, the home folder", told)
+            # the coordinator's start leaves them out too, and says so
+            r = self.echo_coordinator()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
+            self.assertIn(f"Read(//{str(good).lstrip('/')}/**)", denied)
+            self.assertNotIn(f"Read(//{str(home).lstrip('/')}/**)", denied)
+            self.assertNotIn("Read(///**)", denied)
+            self.assertIn(f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it; skipped",
+                          r.stderr)
+            self.assertEqual(len(self.events("no_read_skipped")), len(bad))
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change

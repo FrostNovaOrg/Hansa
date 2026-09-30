@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 
 from . import build, cost, installed, installed_text, notify
-from .desk import Desk, is_git_rule, read_json, read_split, write_json
+from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, read_json, read_split,
+                   write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
                   server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
@@ -471,6 +472,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append("  this is the machine's problem, not the task's: srt, which runs the lane's setup, could not run "
                    "on the server, so the worker never started (hansa explain server)")
     out += [f"write list: {x}" for x in m.get("write_left_out") or []]
+    out += [f"what workers may not read: {x}" for x in m.get("no_read_left_out") or []]
     for a in m.get("attempts", []):
         out.append(f"earlier try on {a['provider']}: {a['error']}")
     report = report_of(desk, tid)
@@ -708,9 +710,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " what it refuses shows up in hansa show):",
             "    any command inside the sandbox, but it changes files only in the lane's worktree, its own"
             " temporary folder (made for each run and removed when it ends) and the folders listed below;"
-            " it cannot read the desk's keys and state or common credential files (.ssh, .aws, .netrc and the"
-            " like); it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
+            " it cannot read the desk's keys and state or what is listed below; it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
             " reset, branch and the like), which commits its changes",
+            *no_read_lines(desk, s),
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
             "  folders a worker may also write (a build or test tool's cache): "
@@ -824,12 +826,31 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         "pause/resume."])
 
 
+def no_read_lines(desk: Desk, s: dict) -> list:
+    """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read."""
+    homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
+    kept, left = kept_from_workers(s, desk.root)
+    mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
+           if sys.platform == "darwin" else "")
+    return ["  what its workers and verifiers, its setup and its check may not read (the sandbox refuses it to any"
+            " command; a name that does not exist is refused all the same):",
+            f"    the desk's keys and state: {desk.secrets_dir}, {desk.state_dir}",
+            f"    every provider's Claude Code folder, whichever provider the run uses: {', '.join(homes)}; and ~/.claude",
+            "    logins, keys, tokens, browsing data, messages and histories under the home folder (built in): "
+            f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}",
+            "    folders and files the principal keeps from workers (set on the web page, Settings; you cannot set"
+            " it: hansa ask; Read is denied there to you, workers, verifiers and design sessions as well; no"
+            " lane's repository or write list may be one, inside one or above one): " + (", ".join(kept) or "none"),
+            *(f"      not applied: {x.removeprefix('workers cannot be kept from reading ')}" for x in left)]
+
+
 def read_lines(desk: Desk, s: dict) -> list:
     """For hansa explain: the folders outside the desk the coordinator reads without asking, and those listed
     that it is not given."""
     # as the start checks them (cli.read_folders): with the Claude Code folder this session runs from
     own = [os.path.abspath(os.path.expanduser(os.environ["CLAUDE_CONFIG_DIR"]))] if os.environ.get("CLAUDE_CONFIG_DIR") else []
-    good, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], own)
+    good, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], own,
+                               kept_from_workers(s, desk.root)[0])
     return ["folders outside the desk you (and your helpers) read without asking, besides the lanes' repositories: "
             + (", ".join(good) or "none") + " (set by the principal on the web page; reading only: you cannot "
             "edit there; a change holds from the next hansa coordinator start; when you keep needing one, hansa ask)",

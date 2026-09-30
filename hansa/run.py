@@ -26,7 +26,8 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import HOME_SECRETS, Desk, account_home, claude_home, program_candidates, is_git_rule, now, read_json, write_json, write_problems
+from .desk import (DENY_AT, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
+                   program_candidates, read_json, write_json, write_problems)
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -435,6 +436,12 @@ def git(*args, cwd, env=None) -> str:
 
 def rule(tool: str, path: Path) -> str:
     return f"{tool}(//{str(path).lstrip('/')}/**)"
+
+
+def no_read_rules(paths) -> list:
+    """Rules that deny Claude Code's Read tool each path, a file or a folder with all under it, as given and
+    where its link leads."""
+    return [r for x in full_paths(paths) for r in (f"Read(//{x.lstrip('/')})", rule("Read", x))]
 
 
 def refused_by(m: dict) -> set:
@@ -882,8 +889,10 @@ def write_list(desk: Desk, lane: dict) -> tuple:
     elsewhere since, would still open what the sandbox keeps closed."""
     good, left = [], []
     given = lane.get("write", [])
+    s = desk.settings()
+    kept = kept_from_workers(s, desk.root)[0]
     for x in given if isinstance(given, list) else [given]:
-        said = write_problems([x], lane.get("repo"), desk.root, desk.settings()["providers"])
+        said = write_problems([x], lane.get("repo"), desk.root, s["providers"], kept)
         if said:
             left.append(f"left out of this run: {said[0].removeprefix('write cannot include ')} "
                         "(the write list is changed with hansa lane set)")
@@ -892,15 +901,29 @@ def write_list(desk: Desk, lane: dict) -> tuple:
     return good, left
 
 
+def no_read(desk: Desk) -> tuple:
+    """What the principal keeps workers from reading (settings, workers_may_not_read), as a run may be given
+    it: (the paths that pass the checks now, a line for each left out). The list is checked on saving, but a
+    lane's repository or a folder on the PATH may have come under one since."""
+    good, said = kept_from_workers(desk.settings(), desk.root)
+    return good, [f"left out of this run: {x.removeprefix(DENY_AT)} (the principal changes the list on the web "
+                  "page, Settings)" for x in said]
+
+
 def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
-    check (srt): (the hosts it may reach, {"denyRead": the desk's keys and state, the provider's login and
-    credential files, "denyWrite": git's data, "allowWrite": the lane's write list}). Each adds the
-    worktree and a temporary folder to what may be written."""
+    check (srt): (the hosts it may reach, {"denyRead": the desk's keys and state, every provider's Claude
+    Code folder (the login and the session records of whoever runs on it) and ~/.claude, whichever provider
+    this run uses, the built-in logins and keys, and what the principal keeps from workers, "denyWrite":
+    git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
+    may be written."""
     make_git_write_deny(wt)  # before anything starts in the sandbox
     home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
-    deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
-                       *(home / f for f in HOME_SECRETS)])
+    homes = [config_home(desk, pname, p)]
+    homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
+                          if isinstance(q, dict) and isinstance(q.get("config_dir", ""), str)) if h.is_absolute()]
+    deny = full_paths([desk.secrets_dir, desk.state_dir, *homes, home / ".claude",
+                       *(home / f for f in home_secrets()), *no_read(desk)[0]])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
     return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
                                            "allowWrite": full_paths(write_list(desk, lane)[0])}
@@ -1698,7 +1721,11 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     desk.update(tid, write_left_out=left)
     for line in left:
         desk.event("write_left_out", task=tid, lane=lane_name, why=line)
-    argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
+    kept, not_kept = no_read(desk)  # what the principal keeps from workers: the sandbox's denyRead, and Read
+    desk.update(tid, no_read_left_out=not_kept)
+    for line in not_kept:
+        desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
+    argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir), *no_read_rules(kept),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
@@ -1760,8 +1787,10 @@ def design_command(desk: Desk, tid: str):
         extra += command_rules(lane["check"])
     argv += isolated(wt)
     tmp = make_worker_tmp(desk, tid)  # its own, as a worker's: what it leaves running there is found at its end (sweep)
+    kept, not_kept = no_read(desk)
+    desk.update(tid, no_read_left_out=not_kept)
     argv += ["--append-system-prompt", system,
-             "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir),
+             "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir), *no_read_rules(kept),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
     env = {**provider_env(desk, pname, p), **lane.get("env", {}), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,

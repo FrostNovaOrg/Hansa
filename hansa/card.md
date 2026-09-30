@@ -80,7 +80,13 @@ it a worker may run any command, but it changes files only in its worktree, its
 own temporary folder (made for each run and removed when it ends) and the lane's
 write list (an entry that no longer passes hansa's checks when the run starts is
 left out, and `hansa show` says so); it cannot read the desk's keys and
-state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
+state, any provider's Claude Code folder or `~/.claude`, the logins, keys,
+tokens, browsers' profiles, messages and shell histories hansa knows under the
+home folder (`.ssh`, `.aws`, `.netrc`, `.tsh`, other AI tools' folders, cloud
+tools' and registries' credentials, password stores and the like; on macOS the
+keychains, cookies, mail and apps' data of that kind under `~/Library` too), or
+what the principal lists on the web page as not for workers to read
+(`hansa explain lane L` lists it all); it reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
 worker and its check after it, both in the lane's sandbox too (run by `srt`,
@@ -308,32 +314,50 @@ here; work that needs code changed or a browser goes to a worker.
   lane set` then prints what listens there. `hansa explain lane L` says which
   holds on this machine.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
-  `/Users/me/.m2`) is the folders its workers, setup and check may write besides
-  the worktree and their temporary folder. Use it when a build or test tool needs its cache folder
-  (Maven's `~/.m2`, npm's `~/.npm`, pip's `~/.cache/pip`, Gradle's `~/.gradle`):
-  add that tool's own folder, never the whole home folder. hansa refuses a path
-  that would open what the sandbox keeps closed or what hansa runs: the home
-  folder or above it, the desk, the lane's repository, a provider's Claude Code
-  folder and `~/.claude`, credential files such as `~/.ssh`, folders on the
-  `PATH` or above them, a hidden folder at the top (`/.x`), `/System`, `/dev`,
-  `/proc` and `/sys`, and on macOS `/Volumes`, `/Library/Keychains` and
-  `~/Library` (but not folders inside `~/Library/Caches`); what runs outside
-  the sandbox: where `claude`, `git`, `srt`, `node`, `tmux`, hansa and its
-  python are installed (`~/.local/share/claude`, Homebrew's `Cellar`, `lib`,
-  `etc` and `opt`, an npm `node_modules` folder, git's exec path, python's
-  library and `site-packages`, the user's too), Claude Code's cache
-  (`claude-cli-nodejs`), the files those programs read when they start (the
-  shell's `~/.zshrc`, `~/.bashrc`, `~/.profile` and the like, `~/.gitconfig`
-  and `~/.config/git`, `~/.tmux.conf` and `~/.config/tmux`), `/etc` and the
-  system's library folders, each with what is inside it and the folders above
-  it (so not all of `~/.cache` or `~/.local`: the tool's own folder in it); and
-  a path with `( ) [ ] { } * ?` or a backslash or an invisible character (a
-  space other than the plain one too) in a name, which the sandbox may read as
-  a pattern or you as another name. The home folder is the account's, whatever
-  `HOME` says. Tell the principal what you added and why.
+  `/Users/me/.m2/repository`) is the folders its workers, setup and check may
+  write besides the worktree and their temporary folder. Use it when a build or
+  test tool needs its cache folder. The rule, in two lines:
+  - in the home folder, only a tool's own folder under `~/.cache` (or
+    `~/Library/Caches`), the listed package caches, or a plain folder (no name
+    below the home folder starts with a dot) outside `~/Library` and
+    `~/Applications`, such as `~/work/cache`;
+  - outside it, anywhere but where programs are installed: a tools folder such
+    as `/srv/x/tools/xdg-cache/pnpm`, another volume, `/tmp`.
+
+  The listed package caches: `~/.m2/repository`, `~/.gradle/caches`,
+  `~/.npm/_cacache`, `~/.pnpm-store`, `~/.local/share/pnpm/store`,
+  `~/.cargo/registry`, `~/.cargo/git`, `~/go/pkg/mod`, `~/.nuget/packages`,
+  `~/.ivy2/cache`, `~/.conan2/p`, `~/.bun/install/cache` (so not `~/.m2`,
+  `~/.npm`, `~/.gradle` or `~/.cargo` whole, and no other hidden folder:
+  shells, git and the tools hansa runs outside the sandbox read those when
+  they start). Where programs are installed: the Homebrew prefix
+  (`/opt/homebrew`, `/home/linuxbrew/.linuxbrew`, wherever `brew` is), `/usr`,
+  `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, and where `claude`,
+  `git`, `srt`, `node`, `tmux`, hansa and its python really live (the install
+  folder, what is inside it and the folders above it). Better than sharing the
+  user's cache: point the tool at a cache folder of the lane's own with the
+  lane's env (`hansa lane set L env GRADLE_USER_HOME=...`, `npm_config_cache`,
+  `CARGO_HOME`, `GOMODCACHE`, `PIP_CACHE_DIR`, Maven's `-Dmaven.repo.local` and
+  the like) and list that folder.
+  The other refusals hold on top: the home folder or above it, the desk, the
+  lane's repository, a provider's Claude Code folder and `~/.claude`, Claude
+  Code's cache (`claude-cli-nodejs`, so not all of `~/.cache`), a login, key or
+  history workers may not read such as `~/.ssh` or `~/.cargo/credentials`, what
+  the principal keeps workers from reading, folders on the `PATH` or above
+  them, a hidden folder at the top (`/.x`), `/System`, `/dev`, `/proc`, `/sys`
+  and `/etc`, on macOS `/Volumes`; and a path with `( ) [ ] { } * ?` or a
+  backslash, a look-alike of one of them (a name that NFKC-normalizes to one),
+  or an invisible character (a space other than the plain one too) in a name,
+  which the sandbox may read as a pattern or you as another name. Each refusal
+  says what it would open. The home folder is the account's, whatever `HOME`
+  says. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
-  cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in
+  cost audit, the folders you read without asking, and the folders and files
+  workers may not read (no worker, verifier, setup or check reads them, and
+  Read is denied there to you and to design sessions too; no lane's repository
+  or write list may be one, inside one or above one).
+  Ask with `hansa ask`; do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.
 
 ## Facts you can rely on
