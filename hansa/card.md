@@ -59,6 +59,8 @@ make Claude Code ask the principal. hansa's own options make them unneeded:
 `hansa git L show REV:A REV:B` shows several files in one call,
 `hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once, and
 `hansa show ID --report` and `hansa diff ID --stat` keep the output short.
+The principal can let you read folders outside the desk without asking (`hansa
+explain` lists them); ask with `hansa ask` when you keep needing one.
 
 ## Writing a task
 Say what to change, where, and how the worker can check it (a command, a file to
@@ -76,7 +78,8 @@ browser, hansa says so and queues nothing.
 Workers run in Claude Code's sandbox, which the operating system enforces. Inside
 it a worker may run any command, but it changes files only in its worktree, its
 own temporary folder (made for each run and removed when it ends) and the lane's
-write list; it cannot read the desk's keys and
+write list (an entry that no longer passes hansa's checks when the run starts is
+left out, and `hansa show` says so); it cannot read the desk's keys and
 state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
@@ -311,8 +314,12 @@ here; work that needs code changed or a browser goes to a worker.
   add that tool's own folder, never the whole home folder. hansa refuses a path
   that would open what the sandbox keeps closed or what hansa runs: the home
   folder or above it, the desk, the lane's repository, a provider's Claude Code
-  folder, credential files such as `~/.ssh`, and folders on the `PATH` or above
-  them. Tell the principal what you added and why.
+  folder and `~/.claude`, credential files such as `~/.ssh`, folders on the
+  `PATH` or above them, a hidden folder at the top (`/.x`), `/System`, `/dev`,
+  `/proc` and `/sys`, and on macOS `/Volumes`, `/Library/Keychains` and
+  `~/Library` (but not `~/Library/Caches`); and a path with `( ) [ ] { } *` or
+  `?` or an invisible character in a name, which the sandbox may read as a
+  pattern or you as another name. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in

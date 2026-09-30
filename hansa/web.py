@@ -16,7 +16,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import cost, views
-from .desk import Desk, public_settings, read_json
+from .desk import Desk, public_settings, read_json, read_split
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
@@ -62,6 +62,10 @@ def _save_settings(desk: Desk, body: dict) -> dict:
         if isinstance(new, dict):
             on_disk = desk.settings()
             new = {**new, **{k: on_disk[k] for k in NOT_FROM_PAGE if k in on_disk}}
+            if new.get("coordinator_read", []) != on_disk.get("coordinator_read"):  # each must be there now
+                gone = read_split(new.get("coordinator_read", []), desk.root, new.get("providers"))[1]
+                if gone:
+                    return {"ok": False, "problems": gone}
         problems = desk.save_settings(new, by="page", rev=body.get("rev"))
     if not problems:
         for name in desk.settings()["lanes"]:

@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from . import account, build, cost, installed_text, notes, notify, views
-from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, write_json
+from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, read_split, stored, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_target, not_looking, proc_start, provider_env, pulse,
@@ -896,12 +896,19 @@ def cmd_coordinator(a):
     env["HANSA_DESK"] = str(desk.root)
     # the lanes' checkouts are readable for planning and review; workers do the editing
     repos = [r for r in plan["repos"] if os.path.isabs(r)]
-    no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
+    # the folders the principal lets it read without asking, given as the repositories are. Checked again as
+    # whoever starts the session: the plan may be the account's to write, and root's home and login are not its
+    shut, said = read_folders(desk, plan, env, theirs)
+    for line in said:
+        print(f"hansa: {line}; skipped (the principal changes the list on the page, Settings)", file=sys.stderr)
+    dirs = [*repos, *(d for d in shut if d not in repos)]
+    shut = [*shut, *(r for r in (stored(os.path.realpath(d)) for d in shut) if r not in shut)]  # where a link leads, too
+    no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir, *shut]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
     claude = claude_bin()
     if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
         env["DISABLE_AUTOUPDATER"] = "1"
-    argv = [claude] + (["--add-dir", *repos] if repos else []) + ["--disallowedTools", *no_edit, *no_builtin]
+    argv = [claude] + (["--add-dir", *dirs] if dirs else []) + ["--disallowedTools", *no_edit, *no_builtin]
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
@@ -920,6 +927,19 @@ def cmd_coordinator(a):
     argv += _notified(desk, rest, clear)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + rest, env)
+
+
+def read_folders(desk: Desk, plan: dict, env: dict, theirs: str = "") -> tuple:
+    """The folders of the plan the session may be given to read, and what was said of those it is not: what
+    the desk's owner found (coordinator_desk), then the same checks as the user starting the session, with the
+    Claude Code folder it runs from."""
+    given = plan.get("read") if isinstance(plan.get("read"), list) else []
+    refused = plan.get("read_refused") if isinstance(plan.get("read_refused"), list) else []
+    said = [x for x in refused if isinstance(x, str)]
+    own = [os.path.abspath(os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude"))]
+    # root does not read the account's settings: the account's hansa looked at the providers' folders
+    good, more = read_split(given, desk.root, None if theirs else desk.settings()["providers"], own)
+    return good, [*said, *(m for m in more if m not in said)]
 
 
 def can_update(claude: str) -> bool:
@@ -1033,8 +1053,12 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
             desk.event("helper_retired", file=name)
     desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
     write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": now()})
+    read, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"])
+    for line in refused:
+        desk.event("coordinator_read_skipped", why=line)
     return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
-            "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p)}
+            "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p),
+            "read": read, "read_refused": refused}
 
 
 def cmd_coordinator_desk(a):
