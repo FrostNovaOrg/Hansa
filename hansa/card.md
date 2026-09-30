@@ -226,7 +226,9 @@ with `hansa ask --close N "why"`), the server stopped (or,
 still running, finished no round for 5 minutes: busy or stuck), and then that it
 runs again. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next
-command. A session started with `hansa coordinator` is posted to by itself;
+command. hansa gathers what it tells an idle session for up to five minutes, so
+events that end close together come as one message; a busy session gets them
+at once. A session started with `hansa coordinator` is posted to by itself;
 otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
 posts to. While it posts to yours, do not keep `hansa wait` running in the
 background. Tasks and requests you made come to you; those made elsewhere
