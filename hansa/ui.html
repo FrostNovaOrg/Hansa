@@ -102,7 +102,15 @@ const T = ZH ? {
   mcRunning:n => `合并验收已跑了 ${n} 分钟`, mcQueuedBusy:(lane, id) => `合并验收在排队：等工作线 ${lane} 空出来（现在在做 ${id}）`,
   mcQueuedSoon:"合并验收在排队：工作线空着，几秒内开始", mcQueuedNoServer:"合并验收在排队：后台没在运行，开始不了",
   mcAgain:"（又一次：验收期间基础分支变了）",
-  checkMinutes:(c, n) => `验收已跑 ${c} 分钟（一共 ${n} 分钟）`
+  checkMinutes:(c, n) => `验收已跑 ${c} 分钟（一共 ${n} 分钟）`,
+  releases:"发布", releaseWaiting:"等你点头才会发布", releaseRecent:"最近的发布", releaseCommand:"命令（hansa 用这台机器的账户在沙箱外运行，能用账户的登录和网络）",
+  releaseNote:"说明", releaseCommits:(n, since) => since ? `自上次发布 #${since} 以来的 ${n} 个提交` : `最近 ${n} 个提交（这条工作线还没发布过）`,
+  releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
+  releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼",
+  releaseListed:"这条工作线不用问你就发布（设置里列着它）",
+  releasesWithoutAsking:"不用问你就能发布的工作线（每行一个工作线名；空＝每次发布都要你点头）",
+  releaseForbidden:"不许发出去的字眼（每行一个词或短语，不分大小写；在要发出去的提交新增的行和提交说明里查，查到就拒绝发布）",
+  laneRelease:"发布命令：你在这页点头后由 hansa 运行，把基础分支发出去（空＝没有）", f_release:"发布命令"
 } : {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
@@ -151,7 +159,15 @@ const T = ZH ? {
   mcRunning:n => `merge check running for ${n} min`, mcQueuedBusy:(lane, id) => `merge check queued: waits for lane ${lane}, busy with ${id}`,
   mcQueuedSoon:"merge check queued: starts within seconds", mcQueuedNoServer:"merge check queued: the server is not running",
   mcAgain:" (again: the base moved while it was checked)",
-  checkMinutes:(c, n) => `${c} min so far (${n} min in all)`
+  checkMinutes:(c, n) => `${c} min so far (${n} min in all)`,
+  releases:"Releases", releaseWaiting:"Waiting for your yes", releaseRecent:"Recent releases", releaseCommand:"Command (hansa runs it as this machine's account, outside the sandbox, with its logins and network)",
+  releaseNote:"Note", releaseCommits:(n, since) => since ? `${n} commit(s) since release #${since}` : `the last ${n} commit(s) (no release of this lane went out before)`,
+  releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
+  releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out",
+  releaseListed:"this lane goes out without asking you (it is on your list in Settings)",
+  releasesWithoutAsking:"Lanes whose releases go out without asking you (one lane name per line; blank = every release waits for your yes)",
+  releaseForbidden:"Words or phrases no release may send out (one per line, any case; looked for in the lines the outgoing commits add and in their messages; a hit refuses the release)",
+  laneRelease:"Release command: hansa runs it after your yes on this page, to send the base branch out (blank = none)", f_release:"release"
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
@@ -229,6 +245,7 @@ async function loadStatus() {
       st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
                 : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)],
       h("span", {class:"muted"}, `${T.last24h}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd.toFixed(2)} ${T.listValue}`))),
+    releasesSection(st.releases || []),
     section(T.lanes, table([T.lane, T.order, T.now], st.lanes.map(l => [l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : l.trying ? T.trying : T.free]))),
     st.running.length ? section(T.running, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
       st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""),
@@ -265,6 +282,36 @@ async function loadStatus() {
       Object.entries(e).filter(([k]) => k !== "ts" && k !== "event").map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")))))
   );
 }
+function releaseBlock(r) {
+  const reason = h("input", {placeholder:T.releaseReason, style:"flex:1"});
+  const answer = yes => api("/api/release/answer", {id:r.id, yes, reason:reason.value, commit:r.commit, command:r.command})
+    .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
+  const named = new Set(r.named || []);
+  return h("div", {class:"lane"},
+    h("div", {class:"row"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane} · ${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10))),
+      h("span", {class:"muted"}, when(r.asked))),
+    r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
+    h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
+    r.moved ? h("div", {class:"bad"}, T.releaseMoved + r.moved) : null,
+    h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release)),
+    h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
+    h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
+    h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.files || []).map(f => named.has(f)
+      ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))),
+    h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", onclick: () => answer(true)}, T.releaseYes),
+      reason, h("button", {onclick: () => answer(false)}, T.releaseNo)));
+}
+function releasesSection(rel) {
+  const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
+  if (!rel.length) return null;
+  return section(T.releases, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
+    others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
+      "#" + r.id, r.lane, h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"mono"}, r.command),
+      h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused"].includes(r.state) ? "bad" : "muted"},
+        r.what, r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
+        (r.hits || []).length ? h("div", {class:"mono"}, T.releaseHits + ":", r.hits.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line}`))) : null,
+        (r.tail || []).length && r.state === "failed" ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null)]))] : null);
+}
 function checkButton(name, after) {
   const b = h("button", {onclick: async () => { b.disabled = true; b.textContent = T.checking;
     let r = null;
@@ -285,9 +332,9 @@ async function loadSettings(problems) {
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
-  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, preview:T.preview, setup:T.setup};
+  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, preview:T.preview, setup:T.setup, release:T.laneRelease};
 /* The recent-changes list names the field briefly; a network or write change has no field, only its event. */
-const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, preview:T.f_preview, network:T.network, write:T.write};
+const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, preview:T.f_preview, release:T.f_release, network:T.network, write:T.write};
 const changedField = e => e.event === "lane_network_changed" ? "network" : e.event === "lane_write_changed" ? "write" : e.field;
 function laneValue(k, v) {
   if (v == null || v === "" || (Array.isArray(v) && !v.length) || (typeof v === "object" && !Object.keys(v).length)) return T.none;
@@ -363,6 +410,11 @@ function renderSettings(problems) {
       T.workersMayNotRead, h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput: e => {
         S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.workers_may_not_read || []).join("\n")),
       ...(DENY_SKIPPED.length ? [T.workersMayNotReadSkipped, h("ul", {}, DENY_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))),
+    section(T.releases, h("div", {class:"grid"},
+      T.releasesWithoutAsking, h("textarea", {placeholder:"a", oninput: e => {
+        S.releases_without_asking = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.releases_without_asking || []).join("\n")),
+      T.releaseForbidden, h("textarea", {placeholder:"internal-only", oninput: e => {
+        S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.release_forbidden || []).join("\n")))),
     section(T.prices, h("p", {class:"muted"}, T.pricesNote),
       table([T.model, T.in, T.out, T.cacheRead, T.cacheWrite, T.cacheWrite1h, ""], Object.entries(S.prices).map(([m, p]) =>
         [m, bind(p, "in", "number"), bind(p, "out", "number"), bind(p, "cache_read", "number"), bind(p, "cache_write", "number"),
