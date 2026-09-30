@@ -730,19 +730,24 @@ def cmd_release(a):
                     session=notify.session_here())
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}, "
             + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
-               f"its last {r['count']} commit(s) (no release of it went out before)")
-            + f", {r['files_count']} file(s) changed; command: {r['command']}")
+               f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
+            + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']}")
     if r["state"] == "forbidden":
         raise SystemExit(desk.redact(
-            f"hansa: {head}\nrefused: the commits going out hold words the principal keeps from going out (the web "
-            f"page, Settings), so nothing waits for the principal and nothing runs:\n{release.hits_text(r['hits'])}\n"
+            f"hansa: {head}\nrefused: what goes out holds words the principal keeps from going out (the web page, "
+            f"Settings), so nothing waits for the principal and nothing runs:\n{release.hits_text(r['hits'])}\n"
             f"Take them out of the history of {r['base']} (hansa add a task for it, if it is in the code; a word in "
-            f"a commit message stays in the history), or ask the principal with hansa ask."))
+            f"a commit message or a file name stays in the history) or out of the release command, or ask the "
+            f"principal with hansa ask."))
     heard = notify.hears(desk)
     after = ("hansa tells this session when it is answered and when it ends" if heard else
              "hansa release shows how it goes")
     if r["state"] == "approved":
-        print(desk.redact(f"{head}\nlane {a.lane} is on the principal's list of lanes released without asking: hansa "
+        paused = desk.paused()
+        print(desk.redact(f"{head}\nlane {a.lane} is on the principal's list of lanes released without asking, but the "
+                          f"desk is paused ({paused}): while it is, only a release the principal said yes to runs, so "
+                          f"this one waits until the desk is resumed. {after}" if paused else
+                          f"{head}\nlane {a.lane} is on the principal's list of lanes released without asking: hansa "
                           f"serve runs the command in {r['repo']} within seconds. {after}"))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
@@ -1770,10 +1775,11 @@ def main(argv=None):
             "after the principal's yes on the page), or list the releases")
     p.description = ("hansa release L [note]: ask for a release of lane L's base branch as it is now. hansa records "
                      "the commit, the lane's release command (hansa lane set L release \"...\"), the note, the commits "
-                     "since the lane's last release that went out (the last 20 when there is none) and the files they "
-                     "change; a word the principal keeps from going out, in a line they add or a commit message, "
-                     "refuses it. It waits for the principal's yes on the web page (unless the principal lists the "
-                     "lane as released without asking); then hansa serve runs the command in the lane's repository, as "
+                     "that go out (on no remote-tracking branch and not in the lane's last release) and the files they "
+                     "change; a word the principal keeps from going out, in the command line or in a line, a file name "
+                     "or a message of any of those commits, refuses it. It waits for the principal's yes on the web "
+                     "page (unless the principal lists the lane as released without asking and the desk is not "
+                     "paused); then hansa serve runs the command in the lane's repository, as "
                      "the desk's account, outside the sandbox, with hansa's environment and the lane's minutes as its "
                      "limit, and only while the base branch and the command are what the principal saw. hansa release "
                      "alone lists the open and recent releases. Only the coordinator asks")

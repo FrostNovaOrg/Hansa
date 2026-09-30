@@ -172,12 +172,17 @@ page gives.
   there; a lane's release command (a push, a wait for CI such as `gh run watch
   --exit-status`, a deploy script) is how the base branch goes out. `hansa
   release L` records the request: the commit, the command, the note, the
-  commits since the lane's last release that went out (the last 20 when there
-  is none) and the files they change, a file the command names (such as
-  `./deploy.sh`) marked. A word from the principal's list of words no release
-  may send out, in a line those commits add or in their messages, refuses it.
-  Otherwise the page shows it with Release and Refuse; a lane the principal
-  lists as released without asking needs no answer. hansa serve runs the
+  commits that go out (on no remote-tracking branch of the repository and not
+  in the lane's last release; the whole history when it has no
+  remote-tracking branch) and the files they change, a file the command names
+  (such as `./deploy.sh`) marked. A word from the principal's list of words no
+  release may send out, in the command line or in a line, a file name or a
+  message of any outgoing commit (all are checked; matched within one line,
+  in text read as UTF-8), refuses it. A command that holds a known key is
+  refused when it is set. Otherwise the page shows it with Release and Refuse;
+  a lane the principal lists as released without asking needs no answer while
+  its repository, base branch and command are what they were when the list
+  was saved, and while the desk is not paused. hansa serve runs the
   command only then, and only while the base branch and the command are still
   what the principal saw (else the request is void and the coordinator asks
   again): in the lane's repository at that commit, as the desk's account,
