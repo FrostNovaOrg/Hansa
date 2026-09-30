@@ -130,7 +130,14 @@ page gives.
   with, what is inside them and the folders above them. A lane writes only
   folders of its own: the user's caches (`~/.cache`, `~/Library/Caches`,
   `~/.m2/repository`, `~/.npm/_cacache` and the rest) cannot be listed, since
-  they are shared with what runs outside the sandbox. The desk, the lane's
+  they are shared with what runs outside the sandbox, and neither can the
+  common tool homes with plain names (`~/go`, `~/miniconda3`, `~/anaconda3`,
+  `~/miniforge3`, `~/mambaforge`) or what is inside them. That list is not
+  complete: hansa cannot see what your own shell, git or tools name in plain
+  folders of the home folder (a conda install, a git hooks folder, a file
+  your shell sources), so do not list such a folder. `hansa explain lane L`
+  marks each entry a run would leave out, with why. A lane's env names may be
+  in either case (`npm_config_cache`). The desk, the lane's
   repository, Claude Code's folders, credential files and other names for the
   whole disk are refused as before, and so is a name with `( ) [ ] { } * ?`,
   a backslash, a look-alike of one, or an invisible character. Point a tool at

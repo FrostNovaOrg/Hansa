@@ -35,7 +35,7 @@ import unicodedata
 from pathlib import Path
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
-ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # either case: npm_config_cache and http_proxy are ordinary names
 RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
 # A host a lane's workers may reach during a task: registry.npmjs.org, *.pypi.org, localhost:3000
 LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -829,6 +829,14 @@ def _run_fence(home: str) -> list:
 # app's updater, corepack's node, what brew installs from, the user's own builds), so what a worker writes
 # there reaches it. A lane gets a cache folder of its own instead.
 HOME_APPS = ("Library", "Applications")
+# Plain names in the home folder that are a tool's own: what is there is shared with what runs outside the
+# sandbox (the user's own builds, a shell that starts conda). These are the common ones, not a complete list:
+# hansa cannot see what the user's shell, git or tools name in a plain folder.
+TOOL_HOMES = {"go": "Go's default GOPATH, whose pkg/mod is the module cache the user's own builds share",
+              "miniconda3": "a conda install, whose programs the user's shell runs",
+              "anaconda3": "a conda install, whose programs the user's shell runs",
+              "miniforge3": "a conda install, whose programs the user's shell runs",
+              "mambaforge": "a conda install, whose programs the user's shell runs"}
 # Outside it, the places programs are installed, whole: what is there runs outside the sandbox sooner or later
 INSTALL_TOPS = ("/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/opt/local", "/opt/X11", "/usr", "/Applications",
                 "/Library", "/nix", "/snap", "/var/lib")
@@ -941,6 +949,8 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> li
     fenced += [(d, _on_path, f"it is inside {d}, a folder on the PATH hansa runs with: a program there runs "
                              f"outside the sandbox ({ELSEWHERE})") for d in on_path]
     fenced += _install_fence(home)
+    fenced += [(os.path.join(home, n), _overlaps, f"it would open {os.path.join(home, n)}, {what}; {OWN_FOLDER}")
+               for n, what in TOOL_HOMES.items()]
     fenced.append((home, _home_closed, f"it is inside {home}, the home folder, where a write list may hold only "
                                        f"{home_rule()}; {OWN_FOLDER}"))
     p = []

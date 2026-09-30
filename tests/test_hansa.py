@@ -5999,8 +5999,8 @@ class DeskTest(unittest.TestCase):
                         self.assertNotIn("can be listed)", told[0].replace("nothing in it can be listed", ""))
             self.refused_and_left_out(home / "node_modules", "a folder node loads packages from")
             self.assertFalse(hasattr(desk, "PACKAGE_CACHES") or hasattr(desk, "HOME_CACHES"))  # no exception by name
-            fine = [str(home / n) for n in ("hansa-cache/a/pip", "hansa-cache/a/npm", "work/cache", "go", "go/pkg/mod",
-                                            "build cache")]
+            fine = [str(home / n) for n in ("hansa-cache/a/pip", "hansa-cache/a/npm", "work/cache", "gopher",
+                                            "work/go/pkg/mod", "build cache")]
             providers = self.desk.settings()["providers"]
             for x in fine + ["/srv/x/tools/xdg-cache/pnpm", "/tmp/cache"]:
                 self.assertEqual(write_problems([x], str(self.repo), self.desk.root, providers), [], x)
@@ -6020,6 +6020,62 @@ class DeskTest(unittest.TestCase):
                        run.srt_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
                 self.assertIn(str(home / "hansa-cache" / "a" / "pip"), fs["allowWrite"])
                 self.assertNotIn(str(home / ".cache" / "pip"), fs["allowWrite"])
+
+    def test_a_lanes_write_list_opens_no_well_known_tool_home_with_a_plain_name(self):
+        home = (self.tmp / "home").resolve()
+        (home / "work").mkdir(parents=True)
+        (home / "work" / "lgo").symlink_to(home / "go")
+        with as_home(home):
+            for top in ("go", "miniconda3", "anaconda3", "miniforge3", "mambaforge"):
+                for x in (home / top, home / top / "pkg" / "mod", home / top / "bin"):
+                    told = self.refused_and_left_out(x, f"it would open {home / top}, ")
+                    self.assertIn("~/hansa-cache/<lane>/<tool>", told)
+            self.assertIn("Go's default GOPATH", self.refused_and_left_out(home / "work" / "lgo" / "pkg", str(home / "go")))
+            self.assertIn("a conda install", write_problems([str(home / "miniconda3" / "envs")])[0])
+            fine = [str(home / n) for n in ("gopher", "go-cache", "work/go", "miniconda3x", "hansa-cache/a/go")]
+            self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
+
+    def test_a_lanes_env_names_may_be_lower_case_and_the_managed_ones_stay_refused_as_spelled(self):
+        from hansa import run
+        names = {"npm_config_cache": "/c/npm", "npm_config_store_dir": "/c/pnpm", "http_proxy": "http://p:1",
+                 "PIP_CACHE_DIR": "/c/pip", "Mixed_Case9": "x", "_x": "y"}
+        self.hansa("lane", "set", "a", "env", *[f"{k}={v}" for k, v in names.items()])
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["env"], names)
+        s = self.desk.settings()
+        for bad in ("9x", "a-b", "a.b", "a b", "", "é"):
+            s["lanes"]["a"]["env"] = {bad: "x"}
+            self.assertEqual(validate(s, self.desk.root), [f"lane a: env {bad} must be NAME=text"])
+        for managed in ("CLAUDE_CONFIG_DIR", "HANSA_TASK", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+            s["lanes"]["a"]["env"] = {managed: "x"}
+            self.assertEqual(validate(s, self.desk.root), [f"lane a: env {managed} is set from the provider, not the lane"])
+        for other in ("claude_config_dir", "hansa_task", "anthropic_api_key"):  # another spelling: another variable
+            s["lanes"]["a"]["env"] = {other: "x"}
+            self.assertEqual(validate(s, self.desk.root), [])
+
+    def test_explain_lane_marks_a_write_entry_a_run_would_leave_out(self):
+        home = (self.tmp / "home").resolve()
+        home.mkdir()
+        own, pip = str(home / "hansa-cache" / "a" / "pip"), str(home / ".cache" / "pip")
+        with as_home(home):
+            s = self.desk.settings()
+            s["lanes"]["a"]["write"] = [own]
+            write_json(self.desk.settings_path, s)
+            text = views.explain_text(self.desk, "lane", "a")
+            self.assertIn(f"  folders a worker may also write (a build or test tool's cache): {own}\n", text)
+            self.assertNotIn("a run leaves out", text)
+            s["lanes"]["a"]["write"] = [pip, own, str(home / "go" / "pkg" / "mod")]  # saved before the fences
+            write_json(self.desk.settings_path, s)
+            lines = views.explain_text(self.desk, "lane", "a").splitlines()
+            at = lines.index(f"  folders a worker may also write (a build or test tool's cache): {own}")
+            self.assertTrue(lines[at + 1].startswith(f"    a run leaves out {pip}: it is inside {home}, the home folder, "
+                                                     "where a write list may hold only plain folders"), lines[at + 1])
+            self.assertTrue(lines[at + 2].startswith(f"    a run leaves out {home / 'go' / 'pkg' / 'mod'}: it would open "
+                                                     f"{home / 'go'}, Go's default GOPATH"), lines[at + 2])
+            self.assertTrue(lines[at + 1].endswith("(the write list is changed with hansa lane set)"))
+            s["lanes"]["a"]["write"] = [pip]
+            write_json(self.desk.settings_path, s)
+            self.assertIn("  folders a worker may also write (a build or test tool's cache): none\n    a run leaves out ",
+                          views.explain_text(self.desk, "lane", "a"))
 
     def test_a_lanes_write_list_opens_nothing_inside_a_folder_on_the_path(self):
         home, bin_ = (self.tmp / "home").resolve(), (self.tmp / "home").resolve() / "bin"

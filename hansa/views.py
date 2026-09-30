@@ -14,7 +14,7 @@ from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, ke
                    write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
-                  server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
+                  server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -679,6 +679,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             return f"no lane {name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}"
         wt = desk.worktrees_dir / name
         brief = desk.lanes_dir / name / "brief.md"
+        may_write, left_out = write_list(desk, ln)  # as a run is given it: a fence may have come since it was saved
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
@@ -716,7 +717,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
             "  folders a worker may also write (a build or test tool's cache): "
-            + (", ".join(ln.get("write", [])) or "none"),
+            + (", ".join(may_write) or "none"),
+            *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in left_out],
             "  allowed commands (for design sessions only, which run outside the sandbox and may run these plus"
             " their own git add, commit and merge; workers run any command in theirs):"
             + ("" if ln.get("allow") else " none"),

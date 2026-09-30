@@ -333,9 +333,17 @@ here; work that needs code changed or a browser goes to a worker.
   tools hansa runs read hidden files when they start. Give the lane a folder
   of its own, such as `~/hansa-cache/<lane>/<tool>`, list it, and point the
   tool there with the lane's env.
+  The well-known tool homes with plain names are refused too, with what is
+  inside them: `~/go` (Go's default GOPATH, whose `pkg/mod` the user's own
+  builds share), `~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `~/mambaforge`.
+  Those are the common ones, not a complete list: hansa cannot see what your
+  own shell, git or tools name in plain folders of the home folder (a conda
+  install, a git hooks folder, a file your shell sources), so do not list such
+  a folder.
+  `hansa explain lane L` marks each entry a run would leave out, with why.
   The env names that point common tools at a folder (`hansa lane set L env
   NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
-  `PIP_CACHE_DIR`; npm `npm_config_cache`; pnpm's store `npm_config_store_dir`;
+  `PIP_CACHE_DIR`; npm `npm_config_cache` (env names may be lower case); pnpm's store `npm_config_store_dir`;
   yarn `YARN_CACHE_FOLDER`; cargo `CARGO_HOME`; go `GOMODCACHE` and `GOCACHE`;
   gradle `GRADLE_USER_HOME`; maven `MAVEN_OPTS=-Dmaven.repo.local=...`; ccache
   `CCACHE_DIR`.
