@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import build, cost, installed, installed_text, notify
+from . import build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, read_json, read_split,
                    write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
@@ -90,9 +90,15 @@ def merge_check_busy_with(desk: Desk, m: dict, tasks: list | None = None):
 def merge_check_waits_for(desk: Desk, m: dict, tasks: list | None = None) -> str:
     """The merge check on the same repository and base branch that a queued one waits for, in words ("t0123's
     merge check on lane a"); '' when it is first in line."""
-    x = merge_check_ahead(desk.settings(), m, tasks if tasks is not None else desk.tasks())
+    s = desk.settings()
+    x = merge_check_ahead(s, m, tasks if tasks is not None else desk.tasks())
     what = "merge" if ((x or {}).get("merge_check") or {}).get("plain") else "merge check"
-    return f"{x['id']}'s {what} on lane {x.get('lane')}" if x else ""
+    if x:
+        return f"{x['id']}'s {what} on lane {x.get('lane')}"
+    lane = s["lanes"].get(m.get("lane"))
+    r = release.running_on(desk, lane["repo"]) if lane and m["state"] == "merging" and \
+        (m.get("merge_check") or {}).get("phase", "queued") == "queued" else None
+    return release.running_text(r) if r else ""
 
 
 def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
@@ -298,6 +304,8 @@ def status(desk: Desk) -> dict:
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in tasks if m["state"] == "failed"][-5:],
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
+        # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
+        "releases": release.page_rows(desk, s, tasks),
         # for the page: the latest requests the coordinator closed itself in the past week, with its reason
         "asks_closed": [{k: a.get(k) for k in ("id", "text", "closed", "reason")} for a in desk.asks()
                         if a.get("closed_by") == "coordinator" and a["closed"] >= time.time() - 7 * 86400][-5:],
@@ -368,6 +376,10 @@ def status_text(st: dict) -> str:
     wn, wm = (max((len(p[k]) for p in st["providers"]), default=0) for k in ("name", "model"))
     for p in st["providers"]:
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {p['problem'] or 'ready'}")
+    if [r for r in st.get("releases") or [] if r["state"] in release.OPEN]:
+        out.append("releases (hansa release):")
+        out += [f"  #{r['id']} lane {r['lane']} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
+                if r["state"] in release.OPEN]
     if st["asks"]:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
@@ -727,6 +739,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             + ("" if ln.get("allow") else " none"),
             *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
+            *release.lane_lines(desk, name, ln),
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             f" read and change them with hansa lane brief {name})"])
     if what == "provider":
@@ -791,7 +804,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "it; hansa notify lists them.",
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
             "could not start), a verification's verdict, a design session that ended, a queued merge check that "
-            "ended, a request the principal answered or closed (with the answer), a provider that an open request names "
+            "ended, a request the principal answered or closed (with the answer), the principal's answer to a release "
+            "(hansa release), a release that ended (done, or failed with its exit code and last lines) or became void, "
+            "a provider that an open request names "
             "becoming ready when it was not as the request was made (once; the request may be done; looked at when a "
             "key, the settings or a check change it, so one ready again only because its rest ran out gets the note "
             "in hansa status but no post), hansa serve stopping or "
@@ -833,7 +848,18 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         *read_lines(desk, s),
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
-        "pause/resume."])
+        "pause/resume.",
+        release_settings_line(s)])
+
+
+def release_settings_line(s: dict) -> str:
+    """For hansa explain: the principal's release settings."""
+    listed = s.get("releases_without_asking") or []
+    words = s.get("release_forbidden") or []
+    return ("Releases (hansa release L) go out only after the principal's yes on the page"
+            + (f", but for lanes {', '.join(listed)}, which the principal lets go out without asking" if listed else "")
+            + f"; {len(words)} word(s) the principal keeps from going out are checked first. Both lists are the "
+            "principal's, on the web page; you cannot set them (hansa ask). Do not push or deploy yourself.")
 
 
 def no_read_lines(desk: Desk, s: dict) -> list:

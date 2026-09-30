@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, build, cost, installed_text, notes, notify, views
+from . import account, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
                    kept_from_workers, now, read_json, read_split, stored, write_json)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
@@ -361,8 +361,9 @@ def cmd_merge(a):
         # it, so this merge waits its turn in the same line
         s = desk.settings()
         at = merge_target(s, m["lane"])
-        if any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
-               for x in desk.tasks()):
+        releasing = release.running_on(desk, repo)  # nor while a release runs there: it sends out what it saw
+        if releasing or any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
+                            for x in desk.tasks()):
             despite = bool((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked)
             m = desk.update(a.id, state="merging", merge_check_result=None, **sess, merge_check={
                 "phase": "queued", "queued": now(), "moves": 0, "plain": True,
@@ -378,7 +379,8 @@ def cmd_merge(a):
             checks = any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
                          and not (x.get("merge_check") or {}).get("plain") for x in desk.tasks())
             there = ("while a merge check runs or waits there" if checks else
-                     "while other merges wait there (none of them needs a check)")
+                     "while other merges wait there (none of them needs a check)" if not releasing else
+                     f"and not while a release runs on {repo}")
             print(f"{a.id} is not merged yet: merges go into {base} one at a time {there}, in the order they were "
                   f"asked, so it waits for {ahead}. When its turn comes, hansa merges it "
                   f"{then}. {_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
@@ -714,6 +716,40 @@ def cmd_ask(a):
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
                                   session=notify.session_here())
     print(f"ask #{n} is on the principal's page")
+
+
+def cmd_release(a):
+    desk = Desk.find(a.desk)
+    if not a.lane:
+        print(desk.redact(release.list_text(desk)))
+        return
+    if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
+        raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
+                         "cannot. Say in your report that it may be ready to go out")
+    r = release.ask(desk, a.lane, " ".join(a.note), by=os.environ.get("HANSA_ROLE", "cli"),
+                    session=notify.session_here())
+    head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}, "
+            + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
+               f"its last {r['count']} commit(s) (no release of it went out before)")
+            + f", {r['files_count']} file(s) changed; command: {r['command']}")
+    if r["state"] == "forbidden":
+        raise SystemExit(desk.redact(
+            f"hansa: {head}\nrefused: the commits going out hold words the principal keeps from going out (the web "
+            f"page, Settings), so nothing waits for the principal and nothing runs:\n{release.hits_text(r['hits'])}\n"
+            f"Take them out of the history of {r['base']} (hansa add a task for it, if it is in the code; a word in "
+            f"a commit message stays in the history), or ask the principal with hansa ask."))
+    heard = notify.hears(desk)
+    after = ("hansa tells this session when it is answered and when it ends" if heard else
+             "hansa release shows how it goes")
+    if r["state"] == "approved":
+        print(desk.redact(f"{head}\nlane {a.lane} is on the principal's list of lanes released without asking: hansa "
+                          f"serve runs the command in {r['repo']} within seconds. {after}"))
+        return
+    named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
+    print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
+                      f"it, and only while {r['base']} is still at {r['commit'][:10]} and the command is the same. "
+                      f"Do not push or deploy yourself. {after}; tell the principal, in the conversation, that it waits "
+                      f"for them."))
 
 
 def cmd_notify(a):
@@ -1101,7 +1137,8 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 LANE_LISTS = ("providers", "allow", "network", "write")
 LANE_NUMBERS = ("max_turns", "timeout_min")
-LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "preview", "setup", "max_turns", "timeout_min", "note")
+LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "preview", "setup", "release", "max_turns",
+               "timeout_min", "note")
 OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -1338,6 +1375,12 @@ def cmd_lane(a):
         desk.event("lane_command_changed", lane=a.name, field=a.field, old=old, new=value)
         print(f"The lane's {a.field} runs outside the worker, so this change is recorded. Tell the principal, in "
               f"the conversation, what you changed and why.")
+    if a.field == "release" and old != value:
+        desk.event("lane_command_changed", lane=a.name, field="release", old=old, new=value)
+        print(f"The lane's release command sends its base branch out: hansa runs it as the desk's account, outside "
+              f"the sandbox, only after the principal says yes on the page, so this change is recorded and a release "
+              f"asked with the old command no longer runs. Tell the principal, in the conversation, what you changed "
+              f"and why. Ask for a release with: hansa release {a.name} \"<note>\"")
     if a.field == "network" and set(old) != set(value):  # the same hosts in another order change nothing
         desk.event("lane_network_changed", lane=a.name, old=old, new=value)
         print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "
@@ -1723,6 +1766,19 @@ def main(argv=None):
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")
     add("resume", cmd_resume, "let new tasks start again")
+    p = add("release", cmd_release, "ask for a release of a lane's base branch (its release command, run by hansa "
+            "after the principal's yes on the page), or list the releases")
+    p.description = ("hansa release L [note]: ask for a release of lane L's base branch as it is now. hansa records "
+                     "the commit, the lane's release command (hansa lane set L release \"...\"), the note, the commits "
+                     "since the lane's last release that went out (the last 20 when there is none) and the files they "
+                     "change; a word the principal keeps from going out, in a line they add or a commit message, "
+                     "refuses it. It waits for the principal's yes on the web page (unless the principal lists the "
+                     "lane as released without asking); then hansa serve runs the command in the lane's repository, as "
+                     "the desk's account, outside the sandbox, with hansa's environment and the lane's minutes as its "
+                     "limit, and only while the base branch and the command are what the principal saw. hansa release "
+                     "alone lists the open and recent releases. Only the coordinator asks")
+    p.add_argument("lane", nargs="?")
+    p.add_argument("note", nargs="*")
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
             "Code session this is run from")
     p.add_argument("action", nargs="?", choices=["on", "off"])
@@ -1778,8 +1834,9 @@ def main(argv=None):
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; base, check, preview, setup and note take one value (none: empty); max_turns and "
-        "timeout_min take one whole number. " +
+        "lane's env; base, check, preview, setup, release and note take one value (none: empty); max_turns and "
+        "timeout_min take one whole number. release is the command line that sends the base branch out (git push "
+        "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). " +
         "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
@@ -1872,7 +1929,7 @@ def main(argv=None):
     argv, rest = _split_claude_args(sys.argv[1:] if argv is None else list(argv))
     a, extra = ap.parse_known_args(argv)
     # words after an option belong to the note: hansa retry ID --fresh "note" as well as hansa retry ID "note" --fresh
-    if extra and getattr(a, "cmd", "") in ("retry", "verify") and not any(x.startswith("-") for x in extra):
+    if extra and getattr(a, "cmd", "") in ("retry", "verify", "release") and not any(x.startswith("-") for x in extra):
         a.note += extra
     elif extra and getattr(a, "cmd", "") == "diff" and not any(x.startswith("-") for x in extra):
         a.paths += extra  # hansa diff ID --stat PATH as well as hansa diff ID PATH --stat

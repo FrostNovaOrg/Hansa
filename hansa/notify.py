@@ -4,7 +4,8 @@ Every interactive Claude Code session listens on a local Unix socket, its inbox:
 there arrives in the session as a message from another session. A follower is a small background process
 per session and desk. It reads the desk's event log from where it left off, picks what the coordinator
 waits for (a task ended, a verification or design session ended, a queued merge check ended, the principal
-answered a request, a provider an open request names became ready, the server stopped), and posts it to that session's inbox. It ends when the session's
+answered a request, a provider an open request names became ready, the principal answered a release, a release
+ended or became void, the server stopped), and posts it to that session's inbox. It ends when the session's
 process does. While the session is idle it gathers for up to five minutes (Gather), since each post to an idle
 session starts a turn; a busy session gets the lines at once, between its steps.
 
@@ -260,6 +261,8 @@ def _item(desk: Desk, e: dict):
                 + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
                 + " (the principal closes a request on the page; if it is done, close it: hansa ask --close N \"why\")",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
+    if kind in ("release_answered", "release_ended", "release_void", "release_forbidden") and not e.get("quiet"):
+        return _release_item(desk, e)
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
                              "hansa explain server"), None, True, None
@@ -269,6 +272,38 @@ def _item(desk: Desk, e: dict):
         return ("srt",), (f"hansa serve could not run srt ({said}), so the lanes' setups and checks cannot run "
                           "· next: hansa explain server"), None, True, None
     return None
+
+
+def _release_item(desk: Desk, e: dict):
+    """A release the principal answered, that ended, or that became void or was refused for its words."""
+    from . import release
+    r = release.get(desk, e.get("id"))
+    if not r:
+        return None
+    rid, lane = r["id"], r.get("lane")
+    head = f"release #{rid} of lane {lane} ({r.get('base')} at {str(r.get('commit', ''))[:10]})"
+    kind = e.get("event")
+    if kind == "release_answered":
+        key = ("release-answer", rid)
+        line = (f"{head}: the principal said yes; hansa serve runs `{r.get('command')}` now · you are told when it ends"
+                if e.get("yes") else
+                f"{head}: the principal refused it" + (f": {e.get('reason')}" if e.get("reason") else "")
+                + " · nothing was run; do not push or deploy it yourself")
+    elif kind == "release_ended":
+        key = ("release", rid)
+        tail = " | ".join((r.get("tail") or [])[-5:])
+        line = (f"{head} done: `{r.get('command')}` exited 0" if e.get("ok") else
+                f"{head} FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
+                + (f": {e.get('problem')}" if e.get("problem") else "") + (f" · last lines: {tail}" if tail else "")
+                + " · next: hansa release; fix what failed, then ask again: hansa release " + str(lane))
+    elif kind == "release_void":
+        key = ("release", rid)
+        line = f"{head} is void: {e.get('why')}; nothing was run · next: ask again, hansa release {lane}"
+    else:
+        key = ("release", rid)
+        line = (f"{head} refused: the commits going out hold words the principal keeps from going out · next: "
+                f"hansa release lists where")
+    return key, line, r.get("session"), False, None
 
 
 def items_for(desk: Desk, events: list, me: dict) -> list:

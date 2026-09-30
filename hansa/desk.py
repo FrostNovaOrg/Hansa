@@ -12,7 +12,9 @@ Layout (everything under one directory):
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
     .hansa/                 runtime state: provider cooling, heartbeat, web token and port, and runs/<id>/
-                         (what a task's processes write, until hansa publishes it without keys)
+                         (what a task's processes write, until hansa publishes it without keys);
+                         releases.json and releases/<id>.log (hansa release: the requests, the
+                         principal's answers, and each release's output without keys)
 """
 from __future__ import annotations
 
@@ -48,6 +50,9 @@ MAX_READ = 20
 # and the backslash, which a pattern reads as "take the next character as it is"
 RULE_BREAKERS = "()[]{}*?\\"
 MAX_DENY = 50
+MAX_WORDS = 200  # the words no release may send out (release_forbidden)
+# Settings only the principal saves, on the page: no command of the coordinator's changes them
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden")
 # Files and folders under the home folder of the user hansa runs as that no worker command may read: logins,
 # keys and tokens for other services, browsing data and messages. Nothing a build or test tool needs to read
 # (not .gitconfig, .m2, .gradle, .cargo/config.toml, .npm); a name that does not exist costs nothing. The
@@ -167,6 +172,12 @@ def default_settings() -> dict:
         # them (desk.HOME_SECRETS and the like): full paths, a machine's own folders of keys, say. Read is
         # denied there to every Claude Code run hansa starts, the coordinator too. The principal's, on the page.
         "workers_may_not_read": [],
+        # Lanes whose releases (hansa release) go out without the principal's yes on the page: lane names. The
+        # principal's, on the page; empty: every release waits for the yes.
+        "releases_without_asking": [],
+        # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add or in
+        # their messages refuses the release. The principal's, on the page.
+        "release_forbidden": [],
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -213,7 +224,7 @@ def validate(s: dict, root=None) -> list:
     if not isinstance(s, dict):
         return ["settings must be an object"]
     known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser", "coordinator_read", "workers_may_not_read"}
+             "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     # which of them may be read is looked at when the page saves a changed list, and when the coordinator
     # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
@@ -228,6 +239,14 @@ def validate(s: dict, root=None) -> list:
         p.append(DENY_LIST_WHY)
         kept = []
     kept = deny_split(kept, root)[0]  # whatever the lanes: a lane's repository gives way to the list, below
+    listed = s.get("releases_without_asking", [])
+    if not isinstance(listed, list) or len(listed) > 100 or not all(isinstance(x, str) and NAME.match(x) for x in listed):
+        p.append("the lanes released without asking must be a list of lane names, one per line")
+    words = s.get("release_forbidden", [])
+    if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
+            isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
+        p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
+                 "line, each up to 200 characters")
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -276,7 +295,7 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "preview", "setup",
-                           "max_turns", "timeout_min", "note"}
+                           "release", "max_turns", "timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -307,7 +326,7 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: env must be an object")
         else:
             p += [f"{at}: env {k} {why}" for k, why in env_problems(env, root)]
-        for field in ("check", "preview", "setup"):
+        for field in ("check", "preview", "setup", "release"):
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
         if not _is_int(ln.get("max_turns", 300), 1, 1000):
@@ -1227,10 +1246,15 @@ class Desk:
             if rev is not None and rev != self.settings_rev():
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
+            old = self.settings()
+            if by != "page":  # the principal's alone: a command that changes them changes nothing
+                theirs = [k for k in PRINCIPAL_ONLY if new.get(k, []) != old.get(k, [])]
+                if theirs:
+                    return [f"{k} is the principal's, set only on the web page (Settings); ask with hansa ask"
+                            for k in theirs]
             problems = validate(new, self.root)
             if problems:
                 return problems
-            old = self.settings()
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
             write_json(self.settings_path, new)
         self.event("settings_saved", by=by, changed=changed)
