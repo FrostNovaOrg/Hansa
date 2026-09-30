@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 
 from . import build, cost, installed, installed_text, notify, release
-from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, read_json, read_split,
-                   write_json)
+from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_lanes, read_json,
+                   read_split, write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -849,10 +849,14 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
 
 def release_settings_line(s: dict) -> str:
     """For hansa explain: the principal's release settings."""
-    listed = s.get("releases_without_asking") or []
+    listed = [n for n in listed_lanes(s) if release.lane_listed(s, n)]
+    changed = [n for n in listed_lanes(s) if n not in listed]
     words = s.get("release_forbidden") or []
     return ("Releases (hansa release L) go out only after the principal's yes on the page"
-            + (f", but for lanes {', '.join(listed)}, which the principal lets go out without asking" if listed else "")
+            + (f", but for lanes {', '.join(listed)}, which the principal lets go out without asking while the desk is "
+               "not paused" if listed else "")
+            + (f" (lanes {', '.join(changed)} are on that list, but their repository, base branch or release command "
+               "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
             + f"; {len(words)} word(s) the principal keeps from going out are checked first. Both lists are the "
             "principal's, on the web page; you cannot set them (hansa ask). Do not push or deploy yourself.")
 

@@ -53,6 +53,9 @@ MAX_DENY = 50
 MAX_WORDS = 200  # the words no release may send out (release_forbidden)
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden")
+# What the principal's list of lanes released without asking records of each lane, as the page saves it: a lane
+# goes out without asking only while it still has them
+LISTED_AS = ("repo", "base", "release")
 # Files and folders under the home folder of the user hansa runs as that no worker command may read: logins,
 # keys and tokens for other services, browsing data and messages. Nothing a build or test tool needs to read
 # (not .gitconfig, .m2, .gradle, .cargo/config.toml, .npm); a name that does not exist costs nothing. The
@@ -172,8 +175,9 @@ def default_settings() -> dict:
         # them (desk.HOME_SECRETS and the like): full paths, a machine's own folders of keys, say. Read is
         # denied there to every Claude Code run hansa starts, the coordinator too. The principal's, on the page.
         "workers_may_not_read": [],
-        # Lanes whose releases (hansa release) go out without the principal's yes on the page: lane names. The
-        # principal's, on the page; empty: every release waits for the yes.
+        # Lanes whose releases (hansa release) go out without the principal's yes on the page: each one as the page
+        # saved it, {lane, repo, base, release}; a lane that no longer has that repository, base branch and release
+        # command waits for the yes. The principal's, on the page; empty: every release waits for the yes.
         "releases_without_asking": [],
         # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add or in
         # their messages refuses the release. The principal's, on the page.
@@ -240,7 +244,7 @@ def validate(s: dict, root=None) -> list:
         kept = []
     kept = deny_split(kept, root)[0]  # whatever the lanes: a lane's repository gives way to the list, below
     listed = s.get("releases_without_asking", [])
-    if not isinstance(listed, list) or len(listed) > 100 or not all(isinstance(x, str) and NAME.match(x) for x in listed):
+    if not isinstance(listed, list) or len(listed) > 100 or not all(_listed_ok(x) for x in listed):
         p.append("the lanes released without asking must be a list of lane names, one per line")
     words = s.get("release_forbidden", [])
     if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
@@ -704,6 +708,59 @@ def claude_home(state_dir, name: str, p: dict) -> Path:
     if p.get("kind") == "subscription":
         return Path(p.get("config_dir") or os.path.expanduser("~/.claude"))
     return Path(state_dir) / f"claude-{name}"
+
+
+def _listed_ok(x) -> bool:
+    """An entry of releases_without_asking: a lane name as the page sends it, or as recorded when the page saved it."""
+    if isinstance(x, str):
+        return bool(NAME.match(x))
+    return (isinstance(x, dict) and set(x) <= {"lane", *LISTED_AS} and isinstance(x.get("lane"), str)
+            and bool(NAME.match(x["lane"])) and all(isinstance(x.get(k, ""), str) and len(x.get(k, "")) <= 4000
+                                                     for k in LISTED_AS))
+
+
+def listed_as(ln: dict | None) -> dict:
+    """What the principal's list of lanes released without asking records of a lane when the page saves it: its
+    repository, base branch and release command (empty when there is no such lane)."""
+    if not isinstance(ln, dict) or not isinstance(ln.get("repo"), str):
+        return {"repo": "", "base": "", "release": ""}
+    return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
+            "release": str(ln.get("release") or "")}
+
+
+def record_listed(listed, lanes: dict) -> list:
+    """The page's save of the list: a lane name it sends is recorded with what the lane is now; an entry recorded
+    before is kept as it was."""
+    if not isinstance(listed, list):
+        return listed
+    return [{"lane": x, **listed_as(lanes.get(x))} if isinstance(x, str) and NAME.match(x) else x for x in listed]
+
+
+def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
+    """'' while a lane on the principal's list of lanes released without asking is what it was when the page saved
+    the list; otherwise what is no longer so (zh: in Chinese, for the page)."""
+    lane = entry if isinstance(entry, str) else entry.get("lane") if isinstance(entry, dict) else None
+    if not isinstance(entry, dict):
+        return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
+                "the list was saved before hansa recorded each lane's repository, base branch and release command")
+    ln = s.get("lanes", {}).get(lane)
+    if not ln:
+        return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
+    if not entry.get("repo"):
+        return f"保存清单时工作线 {lane} 还不在桌面上" if zh else f"lane {lane} was not on the desk when the list was saved"
+    now_as = listed_as(ln)
+    changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
+                                    ("release", ("release command", "发布命令"))) if entry.get(k, "") != now_as[k]]
+    if not changed:
+        return ""
+    return (f"保存清单之后它的{'和'.join(w[1] for w in changed)}变了" if zh else
+            f"its {' and '.join(w[0] for w in changed)} changed since the list was saved")
+
+
+def listed_lanes(s: dict) -> list:
+    """The lane names on the principal's list of lanes released without asking, as the page shows them."""
+    listed = s.get("releases_without_asking") or []
+    return [x if isinstance(x, str) else x.get("lane", "") for x in listed if isinstance(x, (str, dict))]
 
 
 def _has_control(x: str) -> bool:
@@ -1252,7 +1309,10 @@ class Desk:
                 if theirs:
                     return [f"{k} is the principal's, set only on the web page (Settings); ask with hansa ask"
                             for k in theirs]
-            problems = validate(new, self.root)
+            else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
+                lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
+                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes)}
+            problems = validate(new, self.root) + self.keys_in_release(old, new)
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -1260,6 +1320,22 @@ class Desk:
         self.event("settings_saved", by=by, changed=changed)
         self.ready_news()
         return []
+
+    def keys_in_release(self, old: dict, new: dict) -> list:
+        """A new or changed release command that holds a key the desk knows: refused, as the command is stored and
+        shown as written (in the settings, on the page, in hansa release)."""
+        lanes, before = new.get("lanes"), old.get("lanes") or {}
+        out = []
+        for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
+            cmd = ln.get("release") if isinstance(ln, dict) else None
+            if not isinstance(cmd, str) or cmd == (before.get(name) or {}).get("release"):
+                continue
+            found = self.keys_in(cmd)
+            if found:
+                out.append(f"lanes.{name}: the release command holds the key of {', '.join(found)}, and a release "
+                           "command is stored and shown as written; have the command read the key from where the "
+                           "tool keeps it (its own login or configuration file, or a file the command reads) instead")
+        return out
 
     # -- keys -------------------------------------------------------------
     def key_file(self, provider: str) -> Path:
@@ -1525,5 +1601,10 @@ def public_settings(desk: Desk) -> dict:
     kept, not_kept = kept_from_workers(s, desk.root)
     skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)[1]
     # saved entries of what workers may not read that no run applies now (a lane's repository under one, say)
+    # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:
+    # their releases wait for the yes until the list is saved again
+    listed = s.get("releases_without_asking") if isinstance(s.get("releases_without_asking"), list) else []
+    unmatched = [{"lane": x if isinstance(x, str) else x.get("lane"), "why": why, "why_zh": listed_mismatch(s, x, True)}
+                 for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped,
-            "deny_skipped": not_kept}
+            "deny_skipped": not_kept, "release_unmatched": unmatched}

@@ -300,7 +300,7 @@ def _release_item(desk: Desk, e: dict):
         line = f"{head} is void: {e.get('why')}; nothing was run · next: ask again, hansa release {lane}"
     else:
         key = ("release", rid)
-        line = (f"{head} refused: the commits going out hold words the principal keeps from going out · next: "
+        line = (f"{head} refused: what goes out holds words the principal keeps from going out · next: "
                 f"hansa release lists where")
     return key, line, r.get("session"), False, None
 

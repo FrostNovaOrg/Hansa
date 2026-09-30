@@ -178,17 +178,30 @@ to a public repository, a deploy to production) waits for the principal:
 - Set the lane's release command once: `hansa lane set L release "<command>"`,
   one shell command line, such as `git push origin main`, or a push, a wait
   for CI (`gh run watch --exit-status ...`) and a deploy script. The change is
-  recorded; tell the principal what it runs and why.
+  recorded; tell the principal what it runs and why. A command that holds one
+  of the desk's keys is refused (it is stored and shown as written): have it
+  read the key from where the tool keeps it.
 - When the base branch holds what should go out, ask: `hansa release L
   "<note>"`. hansa records the commit, the command, your note, the commits
-  since the lane's last release that went out (the last 20 when there is none)
-  and the files they change. If a line those commits add, or one of their
-  messages, holds a word the principal keeps from going out, the release is
-  refused at once, with the lines found: take them out of the base branch's
-  history (a task), or ask the principal.
+  that go out (reachable from the commit, on no remote-tracking branch of the
+  repository and not in the lane's last release; the whole history when the
+  repository has no remote-tracking branch) and the files they change. If the
+  command line, or a line those commits add, the name of a file they add or
+  change, or one of their messages holds a word the principal keeps from going
+  out, the release is refused at once, with the places found: take them out of
+  the base branch's history (a task) or of the command, or ask the principal.
+  All the outgoing commits are checked (the page shows at most 200, and says
+  how many were checked). A word is matched within one line only (a phrase
+  split over a line break is not found), and only in text hansa can read as
+  UTF-8 (a UTF-16 file is not looked into): the check is a net, not a proof.
 - It then waits for the principal's yes on the page, unless the principal lists
-  the lane as released without asking. Tell them in the conversation that it
-  waits. A new `hansa release L` replaces one still waiting.
+  the lane as released without asking. That list holds each lane as it was when
+  the principal saved it: a lane whose repository, base branch or release
+  command changed since (or that was removed and added again) waits for the yes
+  until the principal saves the list again. While the desk is paused, only a
+  release the principal said yes to runs: a listed lane's waits until it is
+  resumed. Tell the principal in the conversation that it waits. A new
+  `hansa release L` replaces one still waiting.
 - Only after the yes does `hansa serve` run the command: in the lane's
   repository at that commit, as the desk's account, outside the sandbox, with
   hansa's own environment (not the lane's env), the lane's `timeout_min` as its

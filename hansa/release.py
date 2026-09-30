@@ -3,11 +3,13 @@ principal says yes on the page.
 
 The coordinator sets a lane's release command (`hansa lane set L release "..."`) and asks for a release of the
 base branch as it is now with `hansa release L [note]`. hansa records the request in .hansa/releases.json, which
-no agent may edit: the lane, the commit, the command line, the note, the commits since the lane's last release
-that went out (the last 20 when there is none) and the files they change. Before the request waits for the
-principal, the added lines and the messages of those commits are checked against the principal's
+no agent may edit: the lane, the commit, the command line, the note, the commits that go out (reachable from the
+commit, on no remote-tracking branch of the repository and not in the lane's last release that went out) and the
+files they change. Before the request waits for the principal, the command line, the lines those commits add,
+the names of the files they add or change, and their messages are checked against the principal's
 release_forbidden words; a hit refuses it. The principal answers on the page (Release, or Refuse with a
-reason); a lane on the principal's releases_without_asking list needs no answer. hansa serve runs an approved
+reason); a lane on the principal's releases_without_asking list needs no answer while it is what the list
+recorded when the page saved it, and while the desk is not paused. hansa serve runs an approved
 release in the lane's repository, as the desk's account, outside the sandbox, with hansa's own environment (not
 the lane's env) and the lane's timeout_min, and only while the base branch and the command line are still what
 the principal saw: otherwise the request is void, says why, and the coordinator asks again. Its output is kept,
@@ -23,16 +25,16 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
 
-from .desk import Desk, now, read_json, write_json
+from .desk import Desk, listed_mismatch, now, read_json, write_json
 from .run import (LOOK_LIMIT, CannotLook, alive, git, has_ended, leader, merge_target, pids_with_arg, proc_start,
                   stop)
 
 OPEN = ("waiting", "approved", "starting", "running")
-SINCE_NONE = 20  # commits shown when the lane has no release that went out
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
 MOST_FILES = 500
 MOST_HITS = 20
@@ -83,8 +85,10 @@ def repo_key(repo) -> str:
 
 
 def lane_listed(s: dict, lane: str) -> bool:
-    """Whether the principal lets this lane's releases go out without asking."""
-    return lane in (s.get("releases_without_asking") or [])
+    """Whether the principal lets this lane's releases go out without asking: the lane is on the list, and has the
+    repository, base branch and release command it had when the page saved the list."""
+    return any(isinstance(x, dict) and x.get("lane") == lane and not listed_mismatch(s, x)
+               for x in s.get("releases_without_asking") or [])
 
 
 def running_on(desk: Desk, repo) -> dict | None:
@@ -107,7 +111,9 @@ def merging_on(desk: Desk, s: dict, repo, tasks=None):
 
 # -- what goes out ---------------------------------------------------------------------------------------------
 def _range(since: str, commit: str) -> list:
-    return [f"{since}..{commit}"] if since else ["-n", str(SINCE_NONE), commit]
+    """The commits that go out: reachable from the release commit, on no remote-tracking branch of the repository
+    (the whole history when it has none) and not in the lane's last release."""
+    return [commit, *([f"^{since}"] if since else []), "--not", "--remotes", "--"]
 
 
 def _git_bytes(repo, *args) -> str:
@@ -120,6 +126,26 @@ def _git_bytes(repo, *args) -> str:
     return r.stdout.decode("utf-8", "replace")
 
 
+def _git_lines(repo, *args):
+    """git's output as _git_bytes reads it, line by line, without holding it all: the whole history can go out."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "-c", "core.quotePath=false", *args], cwd=str(repo), stdout=subprocess.PIPE,
+                             stderr=err, stdin=subprocess.DEVNULL)
+        try:
+            for raw in p.stdout:
+                yield raw[:-1].decode("utf-8", "replace") if raw.endswith(b"\n") else raw.decode("utf-8", "replace")
+        except GeneratorExit:  # enough was read
+            p.kill()
+            raise
+        finally:
+            p.stdout.close()
+            p.wait()
+        if p.returncode:
+            err.seek(0)
+            raise RuntimeError(f"git {' '.join(args[:2])} failed: "
+                               f"{err.read().decode('utf-8', 'replace').strip()[:300]}")
+
+
 def outgoing(repo, since: str, commit: str) -> tuple:
     """The commits that go out ({sha, subject}, newest first) and the files they change."""
     rng = _range(since, commit)
@@ -129,11 +155,11 @@ def outgoing(repo, since: str, commit: str) -> tuple:
     return commits, sorted({x for x in names.splitlines() if x})
 
 
-def _added(text: str):
+def _added(lines):
     """(commit, file, line) for each line the patches of `git log -p --format=%x00%H -U0` add."""
     sha = path = None
     old = new = 0
-    for line in text.split("\n"):
+    for line in lines:
         if old > 0 or new > 0:  # inside a hunk: counted, so an added line that reads like a header is still one
             if line.startswith("+"):
                 new -= 1
@@ -155,15 +181,15 @@ def _added(text: str):
                 new = int(m[2]) if m[2] is not None else 1
 
 
-def forbidden_in(repo, since: str, commit: str, words: list) -> list:
-    """Where the outgoing commits hold one of the principal's forbidden words (any case): in the lines they add
-    and in their messages. [{word, commit, where, line}], each place once, at most MOST_HITS."""
+def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") -> tuple:
+    """Where what goes out holds one of the principal's forbidden words (any case, within one line, in text read as
+    UTF-8): the release command line, and every outgoing commit's message, the names of the files it adds or
+    changes (a renamed one by its new name) and the lines it adds. ([{word, commit, where, line}], each place
+    once, at most MOST_HITS; how many commits were checked)."""
     words = [w for w in words if isinstance(w, str) and w.strip()]
-    if not words:
-        return []
     folded = [(w, w.casefold()) for w in words]
     rng = _range(since, commit)
-    hits, seen = [], set()
+    hits, seen, checked = [], set(), 0
 
     def look(sha, where, line):
         low = line.casefold()
@@ -173,15 +199,29 @@ def forbidden_in(repo, since: str, commit: str, words: list) -> list:
                 hits.append({"word": w, "commit": sha or "", "where": where, "line": line.strip()[:300]})
                 return
 
-    for chunk in _git_bytes(repo, "log", "--format=%H%x1f%B%x1e", *rng).split("\x1e"):
-        sha, _, body = chunk.strip("\n").partition("\x1f")
-        for line in body.splitlines():
+    for line in command.splitlines():
+        look("", "release command", line)
+    sha = None
+    for line in _git_lines(repo, "log", "--format=%x00%H%n%B", *rng):
+        if line.startswith("\0"):
+            sha, checked = line[1:].strip(), checked + 1
+        elif folded:
             look(sha, "commit message", line)
-    patch = _git_bytes(repo, "log", "-p", "-m", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
+    if not folded:
+        return [], checked
+    for line in _git_lines(repo, "log", "-m", "--format=%x00%H", "--name-only", "--no-renames", "--diff-filter=d", *rng):
+        if line.startswith("\0"):
+            sha = line[1:].strip()
+        elif line:
+            look(sha, "file name", line)
+    patch = _git_lines(repo, "log", "-p", "-m", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--unified=0", "--no-renames", "--format=%x00%H", *rng)
     for sha, path, line in _added(patch):
         look(sha, path or "?", line)
-    return hits[:MOST_HITS]
+        if len(hits) >= MOST_HITS:
+            patch.close()
+            break
+    return hits[:MOST_HITS], checked
 
 
 def hits_text(hits: list) -> str:
@@ -237,14 +277,14 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None) -> di
         since = prev["commit"] if prev and _has_commit(repo, prev["commit"]) else ""
         try:
             commits, files = outgoing(repo, since, commit)
-            hits = forbidden_in(repo, since, commit, s.get("release_forbidden") or [])
+            hits, checked = forbidden_in(repo, since, commit, s.get("release_forbidden") or [], command)
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
         listed = lane_listed(s, lane)
         r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "repo": repo_key(repo),
              "base": base, "commit": commit, "command": command, "note": desk.redact(note.strip()), "asked": now(),
              "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
-             "count": len(commits), "commits": commits[:MOST_COMMITS], "files": files[:MOST_FILES],
+             "count": len(commits), "checked": checked, "commits": commits[:MOST_COMMITS], "files": files[:MOST_FILES],
              "files_count": len(files), "named": named_files(command, files[:MOST_FILES]),
              "state": "forbidden" if hits else "approved" if listed else "waiting",
              **({"hits": hits} if hits else {}), **({"without_asking": True, "answered": now()} if listed and not hits
@@ -253,7 +293,8 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None) -> di
         if not hits:  # a newer request replaces one still waiting for the principal
             for x in rs:
                 if x.get("lane") == lane and x.get("state") == "waiting":
-                    x.update(state="void", void=f"replaced by release #{r['id']}", ended=now())
+                    x.update(state="void", void=f"replaced by release #{r['id']}", void_zh=f"被发布 #{r['id']} 取代",
+                             ended=now())
                     replaced.append(x["id"])
         rs.append(r)
         _write(desk, rs)
@@ -267,28 +308,33 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None) -> di
 
 
 # -- the principal's answer ----------------------------------------------------------------------------------------
-def stale(desk: Desk, s: dict, r: dict) -> str:
+def stale(desk: Desk, s: dict, r: dict, zh: bool = False) -> str:
     """Why a release is no longer what the principal saw (the lane gone, its release command or base branch
-    changed, the base branch moved); '' when it still is."""
+    changed, the base branch moved); '' when it still is. zh: in Chinese, for the page."""
     ln = s["lanes"].get(r.get("lane"))
     if not ln:
-        return f"lane {r.get('lane')} is no longer on the desk"
+        return f"工作线 {r.get('lane')} 已不在桌面上" if zh else f"lane {r.get('lane')} is no longer on the desk"
     if (ln.get("release") or "") != r.get("command"):
-        return (f"lane {r['lane']}'s release command changed since it was asked: it is now "
-                f"{ln.get('release') or '(none)'!r}, not {r.get('command')!r}")
+        now_as, then = ln.get("release") or ("（无）" if zh else "(none)"), r.get("command")
+        return (f"工作线 {r['lane']} 的发布命令在请求之后改了：现在是 {now_as!r}，不是 {then!r}" if zh else
+                f"lane {r['lane']}'s release command changed since it was asked: it is now {now_as!r}, not {then!r}")
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
-        return f"lane {r['lane']}'s repository or base branch changed since it was asked"
+        return (f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了" if zh else
+                f"lane {r['lane']}'s repository or base branch changed since it was asked")
     try:
         tip = git("rev-parse", "--verify", f"refs/heads/{r['base']}^{{commit}}", cwd=r["repo"])
     except (RuntimeError, OSError) as e:
-        return desk.redact(f"{r['base']} cannot be read in {r['repo']} ({e})")[:400]
+        return desk.redact(f"{r['base']} 在 {r['repo']} 里读不出来（{e}）" if zh else
+                           f"{r['base']} cannot be read in {r['repo']} ({e})")[:400]
     if tip != r.get("commit"):
-        return f"{r['base']} moved since it was asked: it is at {tip[:10]} now, not {r['commit'][:10]}"
+        return (f"{r['base']} 在请求之后动了：现在在 {tip[:10]}，不是 {r['commit'][:10]}" if zh else
+                f"{r['base']} moved since it was asked: it is at {tip[:10]} now, not {r['commit'][:10]}")
     return ""
 
 
-def void(desk: Desk, rid, why: str, states=("waiting", "approved")) -> dict | None:
-    r = change(desk, rid, lambda x: {"state": "void", "void": why, "ended": now()} if x.get("state") in states else None)
+def void(desk: Desk, rid, why: str, states=("waiting", "approved"), why_zh: str = "") -> dict | None:
+    r = change(desk, rid, lambda x: {"state": "void", "void": why, **({"void_zh": why_zh} if why_zh else {}),
+                                     "ended": now()} if x.get("state") in states else None)
     if r:
         desk.event("release_void", id=rid, lane=r.get("lane"), why=why)
     return r
@@ -314,7 +360,7 @@ def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", comma
             return {"ok": True}
         why = stale(desk, desk.settings(), r)
         if why:
-            void(desk, rid, why, ("waiting",))
+            void(desk, rid, why, ("waiting",), stale(desk, desk.settings(), r, zh=True))
             return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}. Nothing was run; the "
                                                            "coordinator is told, and asks again"]}
         change(desk, rid, lambda x: {"state": "approved", "answered": now(), "answered_by": by,
@@ -332,34 +378,44 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         if not r or r.get("state") != "approved":
             return None
         s = desk.settings()
-        if r.get("without_asking") and not lane_listed(s, r["lane"]):  # the principal took the lane off the list
+        if r.get("without_asking") and not lane_listed(s, r["lane"]):  # off the list, or no longer what it recorded
             change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
             desk.event("release_waits", id=rid, lane=r["lane"], why="the lane is no longer on the principal's list "
-                                                                       "of lanes released without asking")
+                                                                       "of lanes released without asking, or no longer "
+                                                                       "what the list recorded")
             return None
-        why = stale(desk, s, r)
+        if r.get("without_asking") and desk.paused():  # while paused, only a release the principal said yes to
+            return None
+        why, why_zh = stale(desk, s, r), stale(desk, s, r, zh=True)
         if not why:
             try:
                 current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=r["repo"])
                 dirty = git("status", "--porcelain", "--untracked-files=no", cwd=r["repo"])
             except (RuntimeError, OSError) as e:
-                current, dirty, why = r["base"], "", desk.redact(f"the checkout at {r['repo']} cannot be read ({e})")
+                current, dirty = r["base"], ""
+                why = desk.redact(f"the checkout at {r['repo']} cannot be read ({e})")
+                why_zh = desk.redact(f"{r['repo']} 的检出读不出来（{e}）")
             if not why and current != r["base"]:
                 why = (f"the checkout at {r['repo']} is on {current}, not {r['base']}, so the command would not run at "
                        f"the commit the principal saw; the principal needs to switch it back")
+                why_zh = (f"{r['repo']} 的检出在 {current} 上，不在 {r['base']} 上，命令不会在你看到的那个提交上运行；"
+                          f"需要你把它切回去")
             elif not why and dirty:
                 why = (f"the checkout at {r['repo']} has uncommitted changes, so the command would not run on exactly "
                        f"the commit the principal saw")
+                why_zh = f"{r['repo']} 的检出有没提交的改动，命令不会正好在你看到的那个提交上运行"
         if why:
-            void(desk, rid, why, ("approved",))
+            void(desk, rid, why, ("approved",), why_zh)
             return None
         try:
-            hits = forbidden_in(r["repo"], r.get("since") or "", r["commit"], s.get("release_forbidden") or [])
+            hits, checked = forbidden_in(r["repo"], r.get("since") or "", r["commit"], s.get("release_forbidden") or [],
+                                         r["command"])
         except RuntimeError as e:
-            void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",))
+            void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
+                 desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
             return None
         if hits:  # a word the principal added since it was asked
-            change(desk, rid, lambda x: {"state": "forbidden", "hits": hits, "ended": now()})
+            change(desk, rid, lambda x: {"state": "forbidden", "hits": hits, "checked": checked, "ended": now()})
             desk.event("release_forbidden", id=rid, lane=r["lane"], commit=r["commit"], found=len(hits))
             return None
         d = log_dir(desk)
@@ -369,7 +425,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         env = {**os.environ, "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"]}
         for k in ("HANSA_TASK", "HANSA_MERGING"):
             env.pop(k, None)
-        change(desk, rid, lambda x: {"state": "starting", "launch": token, "started": now()})
+        change(desk, rid, lambda x: {"state": "starting", "launch": token, "started": now(), "checked": checked})
         with open(d / f"{rid}.log", "wb") as out:
             proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["command"], str(d / f"{rid}.exit")],
                                     cwd=r["repo"], env=env, stdin=subprocess.DEVNULL, stdout=out,
@@ -476,41 +532,71 @@ def when(t) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) if t else ""
 
 
-def waits_text(desk: Desk, s: dict, r: dict, tasks=None) -> str:
-    """What an approved release waits for, in words."""
+def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> str:
+    """What an approved release waits for, in words (zh: in Chinese, for the page)."""
+    paused = desk.paused()
+    if r.get("without_asking") and paused:
+        return (f"等桌面恢复（桌面已暂停：{paused}）：暂停时只运行你点过头的发布" if zh else
+                f"waits until the desk is resumed (it is paused: {paused}): while it is paused, only a release the "
+                "principal said yes to runs")
     other = next((x for x in releases(desk) if x.get("state") in ("starting", "running") and x.get("repo") == r.get("repo")
                   and x["id"] != r["id"]), None)
     if other:
-        return f"waits for release #{other['id']} of lane {other.get('lane')} on the same repository"
+        return (f"等同一仓库上工作线 {other.get('lane')} 的发布 #{other['id']} 结束" if zh else
+                f"waits for release #{other['id']} of lane {other.get('lane')} on the same repository")
     m = merging_on(desk, s, r.get("repo"), tasks)
     if m:
-        return f"waits for {m['id']}'s merge check on lane {m.get('lane')}, on the same repository"
+        return (f"等同一仓库上工作线 {m.get('lane')} 的 {m['id']} 合并验收结束" if zh else
+                f"waits for {m['id']}'s merge check on lane {m.get('lane')}, on the same repository")
     from .run import not_looking
-    return not_looking(desk) or "starts when hansa serve next looks (within seconds)"
+    gone = not_looking(desk)
+    if zh:
+        return "后台（hansa serve）没在运行或卡住了，开始不了" if gone else "hansa serve 下次查看时开始（几秒内）"
+    return gone or "starts when hansa serve next looks (within seconds)"
 
 
-def state_text(desk: Desk, r: dict, s: dict | None = None) -> str:
+def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> str:
+    """A release's state in words (zh: in Chinese, for the page)."""
     st = r.get("state")
     if st == "waiting":
-        return "waiting for the principal's yes on the page"
+        return "等你在网页上点头" if zh else "waiting for the principal's yes on the page"
     if st == "approved":
+        if zh:
+            how = ("不用问你就发布（这条工作线在你的清单上）" if r.get("without_asking")
+                   else f"你在 {when(r.get('answered'))} 点了头")
+            return f"{how}；{waits_text(desk, s or desk.settings(), r, zh=True)}"
         how = "released without asking (the lane is on the principal's list)" if r.get("without_asking") \
             else f"the principal said yes {when(r.get('answered'))}"
         return f"{how}; {waits_text(desk, s or desk.settings(), r)}"
     if st in ("starting", "running"):
-        return f"running since {when(r.get('started'))}"
+        return f"从 {when(r.get('started'))} 起在运行" if zh else f"running since {when(r.get('started'))}"
     if st == "done":
-        return f"done {when(r.get('ended'))} (exit 0, {r.get('seconds', 0)} s)"
+        return (f"{when(r.get('ended'))} 完成（退出码 0，{r.get('seconds', 0)} 秒）" if zh else
+                f"done {when(r.get('ended'))} (exit 0, {r.get('seconds', 0)} s)")
     if st == "failed":
+        if zh:
+            return (f"{when(r.get('ended'))} 失败" + (f"（退出码 {r['exit']}）" if r.get("exit") is not None else "")
+                    + (f"：{r['problem']}" if r.get("problem") else ""))
         return (f"FAILED {when(r.get('ended'))}" + (f" (exit {r['exit']})" if r.get("exit") is not None else "")
                 + (f": {r['problem']}" if r.get("problem") else ""))
     if st == "refused":
+        if zh:
+            return f"你在 {when(r.get('answered'))} 拒绝了" + (f"：{r['reason']}" if r.get("reason") else "")
         return f"refused by the principal {when(r.get('answered'))}" + (f": {r['reason']}" if r.get("reason") else "")
     if st == "void":
-        return f"void: {r.get('void')}; nothing was run"
+        return f"作废：{r.get('void_zh') or r.get('void')}；什么都没运行" if zh else f"void: {r.get('void')}; nothing was run"
     if st == "forbidden":
-        return f"refused: the commits going out hold words the principal keeps from going out ({len(r.get('hits', []))} place(s))"
+        n = len(r.get("hits", []))
+        return (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
+                f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")
     return st or "?"
+
+
+def checked_text(r: dict) -> str:
+    """How many outgoing commits were checked for forbidden words, and how many of them the request shows."""
+    n = r.get("checked", r.get("count", 0))
+    shown = len(r.get("commits") or [])
+    return (f"{n} outgoing commit(s) checked for forbidden words" + (f" (the first {shown} shown)" if shown < n else ""))
 
 
 def line(desk: Desk, r: dict, s: dict | None = None) -> str:
@@ -534,6 +620,7 @@ def list_text(desk: Desk) -> str:
         for r in group:
             out.append("  " + line(desk, r, s))
             out.append(f"      command: {r.get('command')}" + (f" · note: {r['note']}" if r.get("note") else ""))
+            out.append(f"      {checked_text(r)}")
             if r.get("state") in ("done", "failed") and r.get("tail"):
                 out += [f"      | {x}" for x in r["tail"][-5:]]
             if r.get("state") == "forbidden":
@@ -552,9 +639,17 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
                          "branch's commit, as the desk's account, outside the sandbox, with hansa's environment (not "
                          "the lane's env) and the lane's minutes as its limit, only after the principal says yes on "
                          "the page" + (": this lane is on the principal's list of lanes released without asking"
-                                       if lane_listed(s, name) else "") + ")"
+                                       if lane_listed(s, name) else unlisted(s, name)) + ")"
                          if ln.get("release") else f"none (set one with hansa lane set {name} release \"<command>\")"),
         "  last release: " + (line(desk, last, s) if last else "none")]
+
+
+def unlisted(s: dict, name: str) -> str:
+    """For hansa explain lane: a lane on the principal's list that no longer goes out without asking, and why."""
+    why = next((listed_mismatch(s, x) for x in s.get("releases_without_asking") or []
+                if (x if isinstance(x, str) else x.get("lane") if isinstance(x, dict) else None) == name), "")
+    return (f": this lane is on the principal's list of lanes released without asking, but {why}, so its releases "
+            "wait for the yes until the principal saves the list again") if why else ""
 
 
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:
@@ -568,9 +663,10 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         row = {k: r.get(k) for k in ("id", "lane", "base", "commit", "command", "note", "state", "asked", "answered",
                                      "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
                                      "named", "hits", "ended", "without_asking", "since_release")}
-        row["what"] = state_text(desk, r, s)
+        row["checked"] = r.get("checked", r.get("count"))
+        row["what"], row["what_zh"] = state_text(desk, r, s), state_text(desk, r, s, zh=True)
         row["tail"] = (r.get("tail") or [])[-TAIL:]
         if r.get("state") == "waiting":
-            row["moved"] = stale(desk, s, r)
+            row["moved"], row["moved_zh"] = stale(desk, s, r), stale(desk, s, r, zh=True)
         out.append(row)
     return out
