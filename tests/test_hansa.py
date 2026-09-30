@@ -100,6 +100,19 @@ if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "stop_reason": "content_filter",
                       "result": "The request was rejected because it was considered high risk", "num_turns": 1}))
     sys.exit(0)
+if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a provider failure its first `times` times
+    what, times, count = os.environ["FAKE_NET"].split(":", 2)
+    n = int(open(count).read()) if os.path.exists(count) else 0
+    open(count, "w").write(str(n + 1))
+    if n < int(times):
+        open("partial.txt", "w").write("half done\n")
+        status = int(what) if what.isdigit() else None
+        text = {"econnreset": "API Error: Connection dropped (ECONNRESET)", "529": "API Error: Repeated 529 Overloaded errors",
+                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error"}[what]
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                          "api_error_status": 429 if what == "quota" else status,
+                          "result": text, "session_id": "s-net", "num_turns": 3}))
+        sys.exit(1)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
     t = os.environ.get("CLAUDE_CODE_TMPDIR", "")
     open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
@@ -2766,6 +2779,78 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["provider"], "claude")
         self.assertEqual(m["attempts"][0]["provider"], "mimo")
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "mimo"))
+
+    def net_lane(self, what: str, times: int) -> Path:
+        count = self.tmp / f"net-{what}-{times}"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_NET": f"{what}:{times}:{count}"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        return count
+
+    def test_a_dropped_connection_is_tried_once_more_then_fails_plainly(self):
+        from hansa import run
+        for what, why in (("econnreset", "the connection to the provider failed (Connection dropped)"),
+                          ("529", "the provider was overloaded (HTTP 529)"),
+                          ("500", "the provider had a server error (HTTP 500)")):
+            with self.subTest(what, times=1):
+                count = self.net_lane(what, 1)
+                tid = self.desk.new_task("Add hello.txt")
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual((m["state"], m["provider"], m["error"]), ("done", "claude", ""), m)
+                self.assertEqual(count.read_text(), "2")
+                self.assertEqual([(a["provider"], a["error"], a["kind"]) for a in m["attempts"]], [("claude", why, "network")])
+                self.assertEqual(m["files"], ["hello.txt"])  # what the first run left is not in the second's change
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")  # it does not rest
+                self.assertIn(f"earlier try on claude: {why}", views.show_text(self.desk, tid))
+                self.assertEqual(main(["--desk", str(self.desk.root), "merge", tid]), 0)
+            with self.subTest(what, times=2):
+                count = self.net_lane(what, 2)
+                tid = self.desk.new_task("Add hello.txt")
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "failed", m)
+                self.assertEqual(count.read_text(), "2")  # once more, not a third time
+                self.assertEqual(len(m["attempts"]), 2)
+                self.assertEqual(m["error"], f"claude: {why}; the connection to the provider failed twice, so hansa "
+                                 "stopped trying. This is the machine's or the provider's problem, not the task's: "
+                                 f'when the connection is back, hansa retry {tid} "try again"')
+                self.assertNotIn("success", m["error"])
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        for text in ("API Error: Connection error.", "API Error: socket hang up", "API Error: Request timed out.",
+                     'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+                     "API Error: 502 Bad Gateway"):
+            self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
+        self.assertEqual(run.network_reason({"is_error": False, "result": "Fixed the ECONNRESET on a dropped connection"}, ""), "")
+        self.assertEqual(run.network_reason({"is_error": True, "result": "I could not do it"}, ""), "")
+
+    def test_a_verification_that_lost_the_connection_twice_says_how_to_run_it_again(self):
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.net_lane("econnreset", 2)
+        self.assertEqual(main(["--desk", str(self.desk.root), "verify", tid]), 0)
+        vid = [m["id"] for m in self.desk.tasks() if m.get("kind") == "verify"][0]
+        m = self.settle(Dispatcher(self.desk), vid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(m["error"].endswith(f"when the connection is back, hansa verify {tid}"), m["error"])
+
+    def test_a_quota_error_and_a_plain_failure_are_not_a_connection_failure(self):
+        count = self.net_lane("quota", 1)
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["attempts"][0]["error"], m["attempts"][0].get("kind")),
+                         ("queued", "out of quota (HTTP 429)", None), m)
+        self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "claude"))
+        self.desk.set_provider_state("claude", cool_until=0, reason="")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        count = self.net_lane("plain", 1)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
+        self.assertEqual(count.read_text(), "1")
 
     def test_rejected_key_rests_provider_until_a_new_key(self):
         s = self.desk.settings()

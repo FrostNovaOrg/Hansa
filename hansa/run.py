@@ -36,6 +36,13 @@ QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
+# The connection to the provider failed, or the provider did (overloaded, a server error): nothing the task
+# did, and nothing that says the provider's key or quota is wrong. The task is tried once more by itself.
+NETWORK = re.compile(r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|"
+                     r"Connection (dropped|error|reset|closed|refused|timed out)|socket hang up|fetch failed|"
+                     r"(request|connection|API Error:?)[^\n]{0,40}?tim(ed[ -]?out|eout)|"
+                     r"overloaded_error|\boverloaded\b|API Error: 5\d\d\b", re.I)
+OVERLOADED_STATUS = 529
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
               "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
@@ -1851,6 +1858,27 @@ def unusable_reason(run: dict, err: str):
     return "", ""
 
 
+def network_reason(run: dict, err: str) -> str:
+    """How the connection to the provider, or the provider itself, failed when the run ended on that and not
+    on the task: "the connection to the provider failed (ECONNRESET)", say. '' when it ended otherwise."""
+    if not run.get("is_error"):
+        return ""
+    status = run.get("api_error_status")
+    if status == OVERLOADED_STATUS:
+        return f"the provider was overloaded (HTTP {status})"
+    if isinstance(status, int) and 500 <= status <= 599:
+        return f"the provider had a server error (HTTP {status})"
+    m = NETWORK.search(str(run.get("result") or "") or err)
+    if not m:
+        return ""
+    found = m.group(0)
+    if re.search(r"overloaded|529", found, re.I):
+        return f"the provider was overloaded ({found})"
+    if re.fullmatch(r"API Error: 5\d\d", found, re.I):
+        return f"the provider had a server error ({found})"
+    return f"the connection to the provider failed ({found})"
+
+
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
@@ -1932,6 +1960,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     if setup:
         fields["setup_exit"] = int(setup.group(1))
     kind, why = ("", "") if meta.get("cancel") or setup or changed else unusable_reason(run, err)
+    # a report written before the connection went is the worker's finished work: that run ends as it did
+    net = "" if kind or late else network_reason(run, err)
     if changed:
         state, error = "failed", changed
     elif meta.get("cancel"):
@@ -1962,10 +1992,22 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state = "queued" if len(attempts) < 3 else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "gave up after 3 tries")
+    elif net:  # tried once more on the same provider, which does not rest for it
+        again = any(a.get("kind") == "network" for a in attempts)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": net, "kind": "network"})
+        state = "failed" if again else "queued"
+        retry = (f"hansa verify {meta['parent']}" if meta.get("kind") == "verify" and meta.get("parent")
+                 else f'hansa retry {tid} "try again"')
+        error = f"{meta['provider']}: {net}; " + (
+            "queued again once" if state == "queued" else
+            "the connection to the provider failed twice, so hansa stopped trying. This is the machine's or the "
+            f"provider's problem, not the task's: when the connection is back, {retry}")
     elif run.get("is_error") or run.get("subtype") not in ("success", None) or not run:
         state = "failed"
         lines = (result or err).strip().splitlines()
-        error = f"{run.get('subtype') or 'error'}: {lines[-1][:200] if lines else f'no output (exit {returncode})'}"
+        subtype = run.get("subtype") or "error"  # Claude Code says "success" of a run that ended on an error
+        error = (f"{'error' if subtype == 'success' else subtype}: "
+                 f"{lines[-1][:200] if lines else f'no output (exit {returncode})'}")
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
