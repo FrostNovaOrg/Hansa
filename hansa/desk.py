@@ -318,9 +318,61 @@ def _seen(path: str) -> tuple:
     return (st.st_dev, st.st_ino, tuple(reversed(rest)))
 
 
+# macOS keeps what is not the system's on a volume of its own, mounted here: /System/Volumes/Data/Users/me is
+# /Users/me. Its root is another file than /, so going up from a folder spelled from / never meets it
+DATA = "/System/Volumes/Data"
+
+
+def _off_data(path: str) -> str:
+    """A full path under macOS's data volume as the path from /; '' for any other."""
+    names, at = [], path
+    while at != "/":
+        try:
+            if os.path.samefile(at, DATA):
+                return "/" + "/".join(reversed(names))
+        except (OSError, ValueError):
+            pass
+        at, name = os.path.split(at)
+        names.append(name)
+    return ""
+
+
 def _forms(path: str) -> set:
-    """A full path as given and with links resolved."""
-    return {os.path.normpath(path), os.path.realpath(path)}
+    """A full path as given and with links resolved; on macOS, one under the data volume also as the path
+    from /."""
+    out = {os.path.normpath(path), os.path.realpath(path)}
+    if sys.platform == "darwin":
+        out |= {w for w in map(_off_data, out) if w}
+    return out
+
+
+def _data_fence() -> list:
+    """On macOS: the data volume and the folders above it hold everything, the home folder too."""
+    return [(DATA, _above, f"it would open {DATA}, the volume macOS keeps everything on, the home folder too")] \
+        if sys.platform == "darwin" else []
+
+
+def stored(path: str) -> str:
+    """A full path in the spelling the disk stores: each name that exists as its folder lists it (the case
+    kept where the disk ignores case). Links are not followed."""
+    out = "/"
+    for name in os.path.normpath(path).split("/"):
+        if not name:
+            continue
+        try:
+            names = os.listdir(out)
+            if name not in names:
+                me = os.lstat(os.path.join(out, name))
+                fold = lambda n: unicodedata.normalize("NFD", n).casefold()
+                for n in [n for n in names if fold(n) == fold(name)] or names:
+                    st = os.lstat(os.path.join(out, n))
+                    if (st.st_dev, st.st_ino) == (me.st_dev, me.st_ino):
+                        name = n
+                        break
+        except OSError:
+            pass
+        out = os.path.join(out, name)
+    return out
 
 
 def _chain(path: str) -> set:
@@ -360,7 +412,7 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
     home = os.path.expanduser("~")
-    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as")]
+    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_data_fence()]
     if root:
         fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
     if isinstance(repo, str) and repo.startswith("/"):
@@ -403,7 +455,7 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
         return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
     home = os.path.expanduser("~")
     fenced = [("/", _above, "it is the whole machine"),
-              (home, _above, f"it would open {home}, the home folder of the user hansa runs as")]
+              (home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_data_fence()]
     if root:
         fenced.append((str(root), _overlaps, f"it would open {root}, the desk, which holds the keys and hansa's state"))
     for name, pv in (providers if isinstance(providers, dict) else {}).items():
@@ -433,7 +485,7 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
             p.append(f"{at}: {why}")
         elif _seen(x) not in seen:  # one folder once, however it is spelled
             seen.add(_seen(x))
-            good.append(os.path.normpath(x))
+            good.append(stored(x))  # as the disk spells it: what Claude Code is given, and the Edit denial
     return good, p
 
 

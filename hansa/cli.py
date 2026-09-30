@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from . import account, build, cost, installed_text, notes, notify, views
-from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, read_split, write_json
+from .desk import EFFORTS, Desk, default_lane, default_settings, json_text, now, read_json, read_split, stored, write_json
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_target, not_looking, proc_start, provider_env, pulse,
@@ -902,7 +902,7 @@ def cmd_coordinator(a):
     for line in said:
         print(f"hansa: {line}; skipped (the principal changes the list on the page, Settings)", file=sys.stderr)
     dirs = [*repos, *(d for d in shut if d not in repos)]
-    shut = [*shut, *(r for r in map(os.path.realpath, shut) if r not in shut)]  # where a link leads, too
+    shut = [*shut, *(r for r in (stored(os.path.realpath(d)) for d in shut) if r not in shut)]  # where a link leads, too
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir, *shut]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
     claude = claude_bin()

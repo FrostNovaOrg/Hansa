@@ -4348,6 +4348,76 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"without asking, besides the lanes' repositories: {good} (", told)
         self.assertIn(f"not given: {own / 'projects'}: it would open {own}, the Claude Code folder", told)
 
+    def test_macos_data_volume_opens_nothing_in_either_list(self):
+        data = "/System/Volumes/Data"
+        if sys.platform != "darwin" or not os.path.isdir(data):
+            self.skipTest("only macOS has /System/Volumes/Data")
+        home = (self.tmp / "home").resolve()
+        (home / ".ssh").mkdir(parents=True)
+        good = (self.tmp / "opt").resolve()
+        good.mkdir()
+        if not os.path.isdir(data + str(home)):
+            self.skipTest("the tests' folder is not on the data volume")
+        bad = {data: data, data + "/": data, "/System/Volumes": data, "/System": data, "/SYSTEM/Volumes/../Volumes": data,
+               data + str(home): "home folder", data + str(home.parent): "home folder",
+               data + str(home / ".ssh"): "login or key", data + str(home / ".aws" / "sso"): "login or key",
+               data + str(home / ".claude"): "Claude Code folder", data + str(self.desk.root / "secrets"): "the desk"}
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+                self.assertFalse(told["ok"], path)
+                self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
+            s = self.desk.settings()
+            s["coordinator_read"] = [*bad, data + str(good)]  # a good folder spelled through the volume is given
+            write_json(self.desk.settings_path, s)
+            r = self.echo_coordinator()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"--add-dir {self.repo.resolve()} {data}{good} --disallowedTools", r.stdout)
+            for path, why in bad.items():
+                self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
+                                (path, r.stderr))
+            told = self.hansa("explain")
+            for path in bad:
+                self.assertIn(f"not given: {path}: ", told)
+            s["coordinator_read"] = []
+            for path, why in bad.items():
+                s["lanes"]["a"]["write"] = [path]
+                told = validate(s, self.desk.root)
+                self.assertTrue(len(told) == 1 and path in told[0] and why.replace("the desk", "the desk's") in told[0],
+                                (path, told))
+            s["lanes"]["a"]["write"] = [data + str(home / ".m2"), data + str(good)]
+            self.assertEqual(validate(s, self.desk.root), [])
+
+    def test_a_read_folder_is_given_to_claude_code_as_the_disk_spells_it(self):
+        if not self.ignores_case():
+            self.skipTest("this disk tells names apart by case")
+        good = (self.tmp / "Opt" / "include").resolve()
+        good.mkdir(parents=True)
+        (self.tmp / "LK").symlink_to(str(good).upper())  # a link, and where it leads, in other spellings
+        typed = [str(good.parent).upper() + "/INCLUDE/", str(self.tmp / "lk")]
+        self.assertEqual(self.page_save(lambda s: s.update(coordinator_read=typed)), {"ok": True, "problems": []})
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)  # the link is the same folder
+        rules = r.stdout.split("--disallowedTools")[1].split()
+        self.assertIn(f"Edit(//{str(good).lstrip('/')}/**)", rules)
+        self.assertFalse([x for x in rules if "INCLUDE" in x or "OPT" in x], rules)
+        self.assertIn(f"besides the lanes' repositories: {good} (", self.hansa("explain"))
+        s = self.desk.settings()
+        s["coordinator_read"] = [str(self.tmp / "lk")]  # the link alone: by its stored name, and where it leads
+        write_json(self.desk.settings_path, s)
+        rules = self.echo_coordinator().stdout.split("--disallowedTools")[1].split()
+        self.assertIn(f"Edit(//{str(self.tmp / 'LK').lstrip('/')}/**)", rules)
+        self.assertIn(f"Edit(//{str(good).lstrip('/')}/**)", rules)
+
+    def test_hansa_explain_says_a_list_of_read_folders_that_is_not_a_list_in_whole_words(self):
+        s = self.desk.settings()
+        s["coordinator_read"] = "/opt/include"
+        write_json(self.desk.settings_path, s)
+        told = self.hansa("explain")
+        self.assertIn("  not given: the folders the coordinator may read must be a list of up to 20 full paths", told)
+        self.assertNotIn("not given: d must", told)
+
     def test_root_gives_the_coordinator_the_folders_of_the_accounts_plan_and_checks_them_again(self):
         self.as_root()
         self.stand_in_runuser()
@@ -5323,6 +5393,41 @@ class DeskTest(unittest.TestCase):
         self.assertIn("/opt/cache", box["filesystem"]["allowWrite"])
         self.assertIn(str(self.desk.secrets_dir), box["filesystem"]["denyRead"])  # the denials stay as they were
         self.assertIn(str(self.repo.resolve() / ".git" / "refs"), box["filesystem"]["denyWrite"])
+
+    def test_a_run_leaves_out_a_saved_write_folder_that_no_longer_passes_the_fences(self):
+        from hansa import run
+        cache, lk = self.tmp / "m2", self.tmp / "lk"
+        cache.mkdir()
+        (self.tmp / "other").mkdir()
+        lk.symlink_to(self.tmp / "other")
+        self.hansa("lane", "set", "a", "write", str(cache), str(lk))
+        lane = self.desk.settings()["lanes"]["a"]
+        p = self.desk.settings()["providers"]["claude"]
+        self.assertEqual(run.write_list(self.desk, lane), ([str(cache), str(lk)], []))
+        lk.unlink()
+        lk.symlink_to(self.desk.secrets_dir)  # pointed elsewhere since it was saved
+        good, left = run.write_list(self.desk, lane)
+        self.assertEqual(good, [str(cache)])
+        self.assertEqual(len(left), 1)
+        self.assertIn(f"left out of this run: {lk}: it is the desk's", left[0])
+        for fs in (run.sandbox_settings(self.desk, lane, "claude", p, self.repo)["sandbox"]["filesystem"],
+                   run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
+            self.assertIn(str(cache), fs["allowWrite"])
+            self.assertFalse({str(lk), str(self.desk.secrets_dir)} & set(fs["allowWrite"]), fs["allowWrite"])
+        # a list saved before a fence was there: written as it then was
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [str(Path.home() / ".claude" / "hooks"), str(self.tmp / "star*"), str(cache)]
+        write_json(self.desk.settings_path, s)
+        good, left = run.write_list(self.desk, s["lanes"]["a"])
+        self.assertEqual((good, len(left)), ([str(cache)], 2))
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["write_left_out"], left)  # a line in the task for each
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"write list: left out of this run: {Path.home() / '.claude' / 'hooks'}: it would open", shown)
+        self.assertIn(f"write list: left out of this run: {self.tmp / 'star*'}: a name in it", shown)
+        self.assertEqual([e["task"] for e in self.events("write_left_out")], [tid, tid])
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change

@@ -470,6 +470,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if m.get("machine_problem") and m["state"] == "failed":
         out.append("  this is the machine's problem, not the task's: srt, which runs the lane's setup, could not run "
                    "on the server, so the worker never started (hansa explain server)")
+    out += [f"write list: {x}" for x in m.get("write_left_out") or []]
     for a in m.get("attempts", []):
         out.append(f"earlier try on {a['provider']}: {a['error']}")
     report = report_of(desk, tid)
@@ -832,7 +833,7 @@ def read_lines(desk: Desk, s: dict) -> list:
     return ["folders outside the desk you (and your helpers) read without asking, besides the lanes' repositories: "
             + (", ".join(good) or "none") + " (set by the principal on the web page; reading only: you cannot "
             "edit there; a change holds from the next hansa coordinator start; when you keep needing one, hansa ask)",
-            *(f"  not given: {r[len('the coordinator cannot be let read '):]}" for r in refused)]
+            *(f"  not given: {r.removeprefix('the coordinator cannot be let read ')}" for r in refused)]
 
 
 def try_text(lane: str, t: dict) -> str:

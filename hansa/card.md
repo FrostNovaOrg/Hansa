@@ -78,7 +78,8 @@ browser, hansa says so and queues nothing.
 Workers run in Claude Code's sandbox, which the operating system enforces. Inside
 it a worker may run any command, but it changes files only in its worktree, its
 own temporary folder (made for each run and removed when it ends) and the lane's
-write list; it cannot read the desk's keys and
+write list (an entry that no longer passes hansa's checks when the run starts is
+left out, and `hansa show` says so); it cannot read the desk's keys and
 state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
