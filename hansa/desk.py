@@ -24,8 +24,10 @@ import json
 import os
 import re
 import secrets as _secrets
+import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -37,6 +39,9 @@ HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
 MAX_HOSTS = 50
 MAX_WRITE = 20
 MAX_READ = 20
+# Characters a folder the coordinator is let read may not have in its path: it goes into a permission rule,
+# Edit(//path/**), where these mean something else
+RULE_BREAKERS = "()[]{}*?"
 # Files under the home folder of the user hansa runs as that no worker command may read: logins and
 # keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
 # are added per run (run.sandbox_settings); no lane's write list may reach any of them.
@@ -120,9 +125,12 @@ def validate(s: dict, root=None) -> list:
     known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
-    # whether each is there is looked at when the page saves and when the coordinator starts: a folder
-    # removed later does not make the settings invalid
-    p += read_split(s.get("coordinator_read", []), root, s.get("providers"), must_exist=False)[1]
+    # which of them may be read is looked at when the page saves a changed list, and when the coordinator
+    # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
+    # said on the page, and does not keep other settings or the coordinator's lane changes from saving
+    given = s.get("coordinator_read", [])
+    if not isinstance(given, list) or len(given) > MAX_READ or not all(isinstance(x, str) for x in given):
+        p.append(f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line")
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -269,14 +277,73 @@ def is_host(h) -> bool:
     return bool(m) and (m["port"] is None or 0 < int(m["port"]) < 65536)
 
 
-def _overlaps(a: str, b: str) -> bool:
-    """Whether one of two full paths is the other or inside it."""
-    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
+def _folds(folder: str, st) -> bool:
+    """Whether the volume an existing folder is on ignores case: a name there spelled in the other case is
+    the same file."""
+    dev = st.st_dev
+    if dev not in _FOLDS:
+        found, at = None, folder
+        while found is None and at != "/":
+            up, name = os.path.split(at)
+            try:
+                if os.stat(at).st_dev != dev:
+                    break
+                if name.swapcase() != name:
+                    found = os.path.samefile(at, os.path.join(up, name.swapcase()))
+            except OSError:
+                found = False if name.swapcase() != name else None
+            at = up
+        _FOLDS[dev] = sys.platform in ("darwin", "win32") if found is None else found
+    return _FOLDS[dev]
+
+
+_FOLDS: dict = {}
+
+
+def _seen(path: str) -> tuple:
+    """A full path as the disk sees it: which file its deepest existing folder is (os.stat, so through links
+    and in any spelling), and the names below that do not exist, in one case where the volume ignores case."""
+    rest = []
+    while True:
+        try:
+            st = os.stat(path)
+            break
+        except (OSError, ValueError):
+            if path == "/":
+                return (0, 0, tuple(reversed(rest)))
+            path, name = os.path.split(path)
+            rest.append(name)
+    if rest and _folds(path, st):
+        rest = [unicodedata.normalize("NFD", n).casefold() for n in rest]
+    return (st.st_dev, st.st_ino, tuple(reversed(rest)))
+
+
+def _forms(path: str) -> set:
+    """A full path as given and with links resolved."""
+    return {os.path.normpath(path), os.path.realpath(path)}
+
+
+def _chain(path: str) -> set:
+    """A full path and each folder above it, as the disk sees them."""
+    out = set()
+    for v in _forms(path):
+        while True:
+            out.add(_seen(v))
+            if v == os.path.dirname(v):
+                break
+            v = os.path.dirname(v)
+    return out
 
 
 def _above(a: str, b: str) -> bool:
-    """Whether full path a is b or a folder above it."""
-    return a == b or b.startswith(a.rstrip("/") + "/")
+    """Whether full path a is b or a folder above it, as the disk sees them: in any spelling, case the volume
+    ignores, or through a link."""
+    return any(_seen(v) in _chain(b) for v in _forms(a))
+
+
+def _overlaps(a: str, b: str) -> bool:
+    """Whether one of two full paths is the other or inside it."""
+    return _above(a, b) or _above(b, a)
 
 
 def claude_home(state_dir, name: str, p: dict) -> Path:
@@ -314,19 +381,18 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
                for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     p = []
     for x in paths:
-        mine = {os.path.normpath(x), os.path.realpath(x)}  # each as given and with links resolved
         for f, hit, why in fenced:
-            if any(hit(v, g) for v in mine for g in {os.path.normpath(f), os.path.realpath(f)}):
+            if hit(x, f):  # as the disk sees both: as given and with links resolved, in any case it ignores
                 p.append(f"write cannot include {x}: {why}")
                 break
     return p
 
 
-def read_split(paths, root=None, providers=None, own=(), must_exist=True) -> tuple:
+def read_split(paths, root=None, providers=None, own=()) -> tuple:
     """The folders the principal lets the coordinator read without asking: (those it may be given, what is
     wrong with the others, one line each). None may open what hansa keeps from it: the home folder as a
     whole, the desk (its keys and state), a Claude Code folder (a provider's, and `own`: the one its own
-    session runs from), a login or key. Each is looked at as given and with links resolved."""
+    session runs from, and ~/.claude always), a login or key. Each is compared as the disk sees it (_above)."""
     if not isinstance(paths, list) or len(paths) > MAX_READ:
         return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
     home = os.path.expanduser("~")
@@ -342,22 +408,25 @@ def read_split(paths, root=None, providers=None, own=(), must_exist=True) -> tup
                 fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Claude Code folder"))
     fenced += [(str(h), _overlaps, f"it would open {h}, the Claude Code folder the coordinator runs from")
                for h in own]
+    mine = os.path.join(home, ".claude")  # whichever folder the providers and the session use
+    fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key")
                for f in HOME_SECRETS]
-    good, p = [], []
+    good, p, seen = [], [], set()
     for x in paths:
         at = f"the coordinator cannot be let read {x if isinstance(x, str) else json.dumps(x)}"
         if not isinstance(x, str) or not x.startswith("/") or "\0" in x or "\n" in x or len(x) > 1000:
             p.append(f"{at}: it must be a full path starting with /, such as /opt/include")
             continue
-        mine = {os.path.normpath(x), os.path.realpath(x)}
-        why = next((why for f, hit, why in fenced
-                    if any(hit(v, g) for v in mine for g in {os.path.normpath(f), os.path.realpath(f)})), "")
-        if not why and must_exist and not os.path.isdir(x):
+        why = next((why for f, hit, why in fenced if hit(x, f)), "")
+        if not why and any(c in v for v in _forms(x) for c in RULE_BREAKERS):
+            why = f"a name in it (or where its link leads) has one of {RULE_BREAKERS}, which a permission rule cannot hold"
+        if not why and not os.path.isdir(x):
             why = "it is a file, not a folder" if os.path.exists(x) else "there is no such folder"
         if why:
             p.append(f"{at}: {why}")
-        elif os.path.normpath(x) not in good:
+        elif _seen(x) not in seen:  # one folder once, however it is spelled
+            seen.add(_seen(x))
             good.append(os.path.normpath(x))
     return good, p
 
@@ -687,4 +756,6 @@ def public_settings(desk: Desk) -> dict:
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev}
+    # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
+    skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"])[1]
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped}

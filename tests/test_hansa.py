@@ -4228,6 +4228,126 @@ class DeskTest(unittest.TestCase):
                             (path, r.stderr))
         self.assertEqual(len(self.events("coordinator_read_skipped")), len(bad))
 
+    def ignores_case(self) -> bool:
+        return os.path.exists(str(self.tmp).swapcase()) and os.path.samefile(self.tmp, str(self.tmp).swapcase())
+
+    def test_no_spelling_in_another_case_opens_a_fenced_folder_where_the_disk_ignores_case(self):
+        if not self.ignores_case():
+            self.skipTest("this disk tells names apart by case")
+        home = self.tmp / "home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".claude" / "projects").mkdir(parents=True)
+        good = self.tmp / "opt"
+        good.mkdir()
+        up = lambda p: Path(p).parent / Path(p).name.upper()
+        bad = {str(up(home)): "home folder", str(up(self.tmp)): "home folder",
+               str(home / ".SSH"): "login or key", str(up(home) / ".ssh"): "login or key",
+               str(home / ".AWS"): "login or key",  # not there: by its name, in any case
+               str(home / ".Config"): "login or key", str(home / ".CLAUDE"): "Claude Code folder",
+               str(home / ".Claude" / "PROJECTS"): "Claude Code folder",
+               str(up(self.desk.root)): "the desk", str(self.desk.root / "SECRETS"): "the desk",
+               str(up(self.desk.root) / "Notes"): "the desk"}
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+                self.assertFalse(told["ok"], path)
+                self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
+            self.assertEqual(self.page_save(lambda s: s.update(coordinator_read=[str(up(good))])), {"ok": True, "problems": []})
+            s = self.desk.settings()
+            s["coordinator_read"] = [*bad, str(good), str(up(good))]
+            write_json(self.desk.settings_path, s)
+            r = self.echo_coordinator()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)  # one folder once
+            for path, why in bad.items():
+                self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
+                                (path, r.stderr))
+            # a lane's write list: the same spellings
+            s = self.desk.settings()
+            s["coordinator_read"] = []
+            for path, why in {str(up(home)): "home folder", str(home / ".SSH"): "login or key",
+                              str(home / ".AWS" / "sso"): "login or key", str(home / ".CLAUDE"): "Claude Code folder",
+                              str(up(self.desk.root)): "the desk's", str(self.desk.root / "SECRETS"): "the desk's",
+                              str(self.repo / ".GIT" / "hooks"): ".git folder",
+                              str(up(self.repo)): "the lane's repository"}.items():
+                s["lanes"]["a"]["write"] = [path]
+                told = validate(s, self.desk.root)
+                self.assertTrue(len(told) == 1 and path in told[0] and why in told[0], (path, told))
+            s["lanes"]["a"]["write"] = [str(home / ".M2"), str(up(good))]
+            self.assertEqual(validate(s, self.desk.root), [])
+
+    def test_the_machine_owners_claude_code_folder_is_never_let_read_nor_a_name_a_rule_cannot_hold(self):
+        home = self.tmp / "home"
+        (home / ".claude" / "projects").mkdir(parents=True)
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "logins" / "cc")  # not ~/.claude
+        self.assertEqual(self.desk.save_settings(s), [])
+        odd = [self.tmp / n for n in ("a)b (x", "star*", "what?", "[br]", "{a,b}")]
+        for d in odd:
+            d.mkdir()
+        (self.tmp / "plain").symlink_to(odd[0])
+        good = self.tmp / "opt"
+        good.mkdir()
+        bad = {str(home / ".claude"): "machine owner's Claude Code folder",
+               str(home / ".claude" / "projects"): "machine owner's Claude Code folder",
+               **{str(d): "permission rule" for d in odd}, str(self.tmp / "plain"): "permission rule"}
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+                self.assertFalse(told["ok"], path)
+                self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
+            s = self.desk.settings()
+            s["coordinator_read"] = [*bad, str(good)]
+            write_json(self.desk.settings_path, s)
+            r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
+        for path, why in bad.items():
+            self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
+                            (path, r.stderr))
+
+    def test_a_saved_folder_that_went_bad_is_said_on_the_page_and_keeps_nothing_else_from_saving(self):
+        good, other = self.tmp / "opt", self.tmp / "other"
+        good.mkdir()
+        other.mkdir()
+        link = self.tmp / "lk"
+        link.symlink_to(good)
+        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(link), str(good)]))["ok"])
+        self.assertEqual(public_settings(self.desk)["read_skipped"], [])
+        link.unlink()
+        link.symlink_to(self.desk.secrets_dir)  # pointed elsewhere after it was saved
+        shown = public_settings(self.desk)
+        self.assertEqual(shown["problems"], [])
+        self.assertEqual(len(shown["read_skipped"]), 1)
+        self.assertIn(f"{link}: it would open {self.desk.root}, the desk", shown["read_skipped"][0])
+        self.assertIn("READ_SKIPPED = r.read_skipped", (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+        self.assertEqual(self.page_save(lambda s: s.update(cool_minutes=45)), {"ok": True, "problems": []})  # another setting
+        self.hansa("concurrency", "3")  # the coordinator's changes
+        self.assertEqual(self.desk.settings()["concurrency"], 3)
+        self.assertEqual(self.desk.settings()["cool_minutes"], 45)
+        told = self.page_save(lambda s: s.update(coordinator_read=[str(link), str(good), str(other)]))  # the list itself
+        self.assertFalse(told["ok"])
+        self.assertIn(str(link), told["problems"][0])
+        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(good), str(other)]))["ok"])
+        self.assertEqual(public_settings(self.desk)["read_skipped"], [])
+
+    def test_hansa_explain_checks_the_folders_the_coordinator_reads_as_its_start_does(self):
+        own = self.tmp / "own-claude"
+        (own / "projects").mkdir(parents=True)
+        good = self.tmp / "opt"
+        good.mkdir()
+        s = self.desk.settings()
+        s["coordinator_read"] = [str(own / "projects"), str(good)]
+        write_json(self.desk.settings_path, s)
+        with unittest.mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(own)}):
+            r = self.echo_coordinator()
+            told = self.hansa("explain")
+        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
+        self.assertIn(f"{own / 'projects'}: it would open {own}, the Claude Code folder the coordinator runs from; skipped",
+                      r.stderr)
+        self.assertIn(f"without asking, besides the lanes' repositories: {good} (", told)
+        self.assertIn(f"not given: {own / 'projects'}: it would open {own}, the Claude Code folder", told)
+
     def test_root_gives_the_coordinator_the_folders_of_the_accounts_plan_and_checks_them_again(self):
         self.as_root()
         self.stand_in_runuser()

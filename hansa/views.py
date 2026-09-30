@@ -3,6 +3,7 @@ Each view returns plain data; the *_text helpers turn it into short lines."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -825,7 +826,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
 def read_lines(desk: Desk, s: dict) -> list:
     """For hansa explain: the folders outside the desk the coordinator reads without asking, and those listed
     that it is not given."""
-    good, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"])
+    # as the start checks them (cli.read_folders): with the Claude Code folder this session runs from
+    own = [os.path.abspath(os.path.expanduser(os.environ["CLAUDE_CONFIG_DIR"]))] if os.environ.get("CLAUDE_CONFIG_DIR") else []
+    good, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], own)
     return ["folders outside the desk you (and your helpers) read without asking, besides the lanes' repositories: "
             + (", ".join(good) or "none") + " (set by the principal on the web page; reading only: you cannot "
             "edit there; a change holds from the next hansa coordinator start; when you keep needing one, hansa ask)",
