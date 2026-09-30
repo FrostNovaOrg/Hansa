@@ -4411,8 +4411,10 @@ class DeskTest(unittest.TestCase):
                 s["lanes"]["a"]["write"] = [path]
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and path in told[0] and why in told[0], (path, told))
-            s["lanes"]["a"]["write"] = [str(home / ".M2" / "REPOSITORY"), str(home / ".CACHE" / "Pip"), str(up(good))]
+            s["lanes"]["a"]["write"] = [str(home / "Hansa-Cache" / "A" / "Pip"), str(up(good))]
             self.assertEqual(validate(s, self.desk.root), [])
+            s["lanes"]["a"]["write"] = [str(home / ".M2" / "REPOSITORY"), str(home / ".CACHE" / "Pip")]  # a user's caches
+            self.assertEqual(len(validate(s, self.desk.root)), 2)
             s["lanes"]["a"]["write"] = [str(home / "LIBRARY" / "x")]  # the rule for the home folder, in any case
             self.assertEqual(len(validate(s, self.desk.root)), 1)
 
@@ -4526,7 +4528,7 @@ class DeskTest(unittest.TestCase):
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and path in told[0] and why.replace("the desk", "the desk's") in told[0],
                                 (path, told))
-            s["lanes"]["a"]["write"] = [data + str(home / ".m2" / "repository"), str(home / ".m2" / "repository"), str(good)]
+            s["lanes"]["a"]["write"] = [data + str(home / "work" / "cache"), str(home / "work" / "cache"), str(good)]
             told = validate(s, self.desk.root)
             self.assertTrue(len(told) == 1 and data in told[0] and "the system's own" in told[0], told)
 
@@ -4612,13 +4614,17 @@ class DeskTest(unittest.TestCase):
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and f"write cannot include {path}: it would open {why}" in told[0],
                                 (path, told))
-            s["lanes"]["a"]["write"] = [str(good), str(lib / "Caches" / "pip"), "/Volumes/Build/cache",
-                                        str(lib / "Caches" / "new" / "x")]
-            self.assertEqual(validate(s, self.desk.root), [])  # another volume, and a tool's cache not yet made
-            for x in (lib / "Caches", self.tmp / "lc"):  # all of Caches holds Claude Code's own, which runs outside
+            s["lanes"]["a"]["write"] = [str(good), "/Volumes/Build/cache"]
+            self.assertEqual(validate(s, self.desk.root), [])  # another volume
+            # the write list takes nothing in ~/Library: its Caches are shared with what runs outside the sandbox
+            for x in (lib / "Caches", self.tmp / "lc", lib / "Caches" / "pip", lib / "Caches" / "new" / "x",
+                      lib / "Caches" / "Homebrew", lib / "Caches" / "com.anthropic.claudefordesktop.ShipIt"):
                 s["lanes"]["a"]["write"] = [str(x)]
                 told = validate(s, self.desk.root)
-                self.assertTrue(len(told) == 1 and f"it would open {lib / 'Caches' / 'claude-cli-nodejs'}" in told[0], told)
+                self.assertTrue(len(told) == 1 and f"it would open {lib}, which holds" in told[0], told)
+                self.assertIn("nothing in it can be listed", told[0])
+                self.assertIn("~/hansa-cache/<lane>/<tool>", told[0])
+                self.assertNotIn("Caches and folders inside it can be listed", told[0])
 
     def test_other_names_for_the_whole_disk_open_nothing_in_either_list(self):
         good = (self.tmp / "opt").resolve()
@@ -5693,7 +5699,7 @@ class DeskTest(unittest.TestCase):
             s["lanes"]["a"]["write"] = bad
             self.assertEqual(validate(s, self.desk.root),
                              ["lane a: write must be a list of up to 20 full paths starting with /, such as "
-                              "/Users/me/.m2/repository"])
+                              "/Users/me/hansa-cache/a/pip"])
         # the desk (as given, resolved, inside it or around it) and the repository's .git
         for bad in (self.tmp / "desk", self.tmp / "desk" / "secrets", self.desk.root / ".hansa" / "runs", self.tmp,
                     self.tmp / "x" / ".." / "desk"):
@@ -5722,7 +5728,7 @@ class DeskTest(unittest.TestCase):
             return validate(s, self.desk.root)
 
         with as_home(home, PATH=f"{bin_}:relative/bin:/usr/bin"):
-            for ok in (home / ".m2" / "repository", home / ".cache" / "pip", self.tmp / "tools" / "cache"):  # a tool's cache
+            for ok in (home / "hansa-cache" / "a" / "pip", home / "work" / "cache", self.tmp / "tools" / "cache"):  # a tool's cache
                 self.assertEqual(refused(ok), [], ok)
             for x in (home, self.tmp, self.tmp.parent):  # the home folder, or above it (before the desk)
                 self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {home}, "
@@ -5738,7 +5744,11 @@ class DeskTest(unittest.TestCase):
                 d = bin_ if x != Path("/usr") else "/usr/bin"
                 self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {d}, "
                                               "a folder on the PATH hansa runs with"], x)
-            self.assertEqual(refused(bin_ / "sub"), [])  # inside a PATH folder is not above one
+            for x in (bin_ / "git", bin_ / "sub", bin_ / "sub" / "x"):  # inside one: a program hansa may run
+                self.assertEqual(refused(x), [
+                    f"lane a: write cannot include {x}: it is inside {bin_}, a folder on the PATH hansa runs with: "
+                    "a program there runs outside the sandbox (a cache folder goes elsewhere, such as a tools "
+                    "folder of the desk's, another volume or /tmp)"], x)
             for x in (self.repo, self.repo / "src"):  # the lane's repository, or inside it
                 self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {s['lanes']['a']['repo']}, "
                                               "the lane's repository; workers change code only in their worktree"])
@@ -5753,7 +5763,7 @@ class DeskTest(unittest.TestCase):
             odd = [home / n for n in ("a)b", "(x", "star*", "what?", "[br", "br]", "{a,b", "b}")]
             (home / "odd (1)").mkdir()
             (home / "plain").symlink_to(home / "odd (1)")
-            for x in (*odd, home / ".cache" / "v*" / "pip", home / "odd (1)", home / "plain"):
+            for x in (*odd, home / "cache" / "v*" / "pip", home / "odd (1)", home / "plain"):
                 told = refused(x)
                 self.assertTrue(len(told) == 1 and f"write cannot include {x}: " in told[0]
                                 and "may read as a pattern" in told[0], (x, told))
@@ -5761,7 +5771,7 @@ class DeskTest(unittest.TestCase):
                 told = refused(x)
                 self.assertTrue(len(told) == 1 and f"write cannot include {json.dumps(x)}: it has a line break" in told[0],
                                 (x, told))
-            s["lanes"]["a"]["write"] = [str(home / ".m2" / "repository"), str(home / "star*")]  # the good one beside it
+            s["lanes"]["a"]["write"] = [str(home / "work" / "cache"), str(home / "star*")]  # the good one beside it
             self.assertEqual(len(validate(s, self.desk.root)), 1)
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / "star*")])
@@ -5897,12 +5907,10 @@ class DeskTest(unittest.TestCase):
                 told = self.refused_and_left_out(x, why)
                 self.assertIn("outside the sandbox" if "git reads" not in why else "a command git runs", told)
             self.refused_and_left_out("/srv/x/tools/xdg-cache/claude-cli-nodejs", "Claude Code's own files")
-            # a build or test tool's cache, in the home folder or outside it, beside the programs too
+            # a build or test tool's cache, in a plain folder of the home folder or outside it, beside the programs too
             fine = ["/srv/x/tools/xdg-cache/pnpm", "/srv/x/tools/xdg-cache/pip", "/srv/x/tools/cache", "/var/cache/x",
-                    "/opt/build-cache", str(home / ".m2" / "repository"), str(home / ".npm" / "_cacache"),
-                    str(home / ".gradle" / "caches"), str(home / ".cache" / "pip"),
-                    str(home / ".local" / "share" / "pnpm" / "store"), str(tools / "cache"),
-                    str(brew / "var" / "cache"), str(self.tmp / "nodejs" / "cache"), str(home / "Library" / "Caches" / "pip")]
+                    "/opt/build-cache", str(home / "hansa-cache" / "a" / "pip"), str(home / "work" / "cache"),
+                    str(tools / "cache"), str(brew / "var" / "cache"), str(self.tmp / "nodejs" / "cache")]
             self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(share / "claude" / "versions")])
@@ -5927,7 +5935,8 @@ class DeskTest(unittest.TestCase):
                home / ".local" / "share": "it would open",
                home / ".cache" / "claude-cli-nodejs" / "x": "Claude Code's own files",
                home / ".cache": "it would open",
-               home / "Library" / "Caches" / "claude-cli-nodejs": "Claude Code's own files",
+               home / "Library" / "Caches" / "claude-cli-nodejs":  # on macOS all of ~/Library is closed before it
+                   "it would open" if sys.platform == "darwin" else "Claude Code's own files",
                home / ".srt-settings.json": "srt's settings", home / ".hansa" / "followers": "hansa's own files",
                "/etc/gitconfig": "it would open /etc", "/usr/lib/x": "it would open /usr/lib"}
         loads = "which the python that runs hansa loads modules from"
@@ -5951,40 +5960,87 @@ class DeskTest(unittest.TestCase):
                     self.refused_and_left_out(x, why)
                 self.assertEqual(write_problems([str(self.tmp / "xdg" / "pip"), str(self.tmp / "z" / "cache")]), [])
 
-    def test_a_lanes_write_list_holds_in_the_home_folder_only_caches_and_plain_folders(self):
-        from hansa import run
-        from hansa.desk import PACKAGE_CACHES
+    def test_a_lanes_write_list_holds_in_the_home_folder_only_plain_folders(self):
+        from hansa import desk, run
         home = (self.tmp / "home").resolve()
         (home / "work").mkdir(parents=True)
         (home / "work" / "lz").symlink_to(home / ".zsh")
         (self.tmp / "lbun").symlink_to(home / ".bun")
+        (self.tmp / "lpip").symlink_to(home / ".cache" / "pip")
         (home / ".cache").mkdir()
         (home / ".cache" / "ln").symlink_to(home / ".nvm")
-        only = f"it is inside {home}, the home folder, where a write list may hold only"
+        only = f"it is inside {home}, the home folder, where a write list may hold only plain folders"
         hidden = [".zsh", ".bun", ".zcompdump", ".gitconfig.local", ".nvm", ".pyenv", ".p10k.zsh", ".m2", ".gradle",
                   ".npm", ".local/share/pnpm", ".cargo/bin", ".config/x", ".local/bin", ".bun/install",
                   "work/.hidden", "work/plain/.venv/lib", "work/lz", ".cache/ln", "Applications", "Applications/X.app"]
+        # a user's caches: shared with what runs outside the sandbox (an updater, corepack, the user's own builds)
+        caches = [".cache/pip", ".cache/pip/http", ".cache/node", ".cache/node/corepack", ".cache/codex-runtimes",
+                  ".m2/repository", ".m2/repository/org", ".gradle/caches", ".npm/_cacache", ".pnpm-store",
+                  ".local/share/pnpm/store", ".cargo/registry", ".cargo/git/db", ".nuget/packages", ".ivy2/cache",
+                  ".conan2/p", ".bun/install/cache"]
         with as_home(home):
-            for x in [home / n for n in hidden] + [self.tmp.resolve() / "lbun"]:
+            for x in [home / n for n in hidden + caches] + [self.tmp.resolve() / "lbun", self.tmp.resolve() / "lpip"]:
                 told = self.refused_and_left_out(x, only)
-                self.assertIn("such as ~/work/cache; or point the tool at a cache folder of the lane's own", told)
-                self.assertIn("~/.m2/repository", told)  # what can be written instead
-            for x in ("Library/Anything", "Library/LaunchAgents", "Library/Application Support/x"):
-                self.refused_and_left_out(home / x, str(home / "Library") if sys.platform == "darwin" else only)
+                self.assertIn("such as ~/work/cache: a user's caches", told)
+                self.assertIn("are shared with what runs outside the sandbox; give the lane a folder of its own, such "
+                              "as ~/hansa-cache/<lane>/<tool>, and point the tool there with the lane's env: "
+                              "PIP_CACHE_DIR, npm_config_cache", told)  # what can be written instead
+            in_library = ("Library/Anything", "Library/LaunchAgents", "Library/Application Support/x", "Library/Caches/pip",
+                          "Library/Caches/Homebrew", "Library/Caches/com.anthropic.claudefordesktop.ShipIt")
+            for x in in_library:
+                told = self.refused_and_left_out(home / x, str(home / "Library") if sys.platform == "darwin" else only)
+                self.assertNotIn("Caches and folders inside it can be listed", told)  # they cannot
+                self.assertIn("~/hansa-cache/<lane>/<tool>", told)
+            for system in ("linux", "darwin"):  # on either system, whichever fence says it
+                with unittest.mock.patch.object(sys, "platform", system):
+                    for x in in_library:
+                        told = write_problems([str(home / x)])
+                        self.assertTrue(len(told) == 1 and "~/hansa-cache/<lane>/<tool>" in told[0], (system, told))
+                        self.assertNotIn("can be listed)", told[0].replace("nothing in it can be listed", ""))
             self.refused_and_left_out(home / "node_modules", "a folder node loads packages from")
-            self.assertEqual(set(PACKAGE_CACHES), {
-                ".m2/repository", ".gradle/caches", ".npm/_cacache", ".pnpm-store", ".local/share/pnpm/store",
-                ".cargo/registry", ".cargo/git", "go/pkg/mod", ".nuget/packages", ".ivy2/cache", ".conan2/p",
-                ".bun/install/cache"})
-            fine = [str(home / c) for c in PACKAGE_CACHES] + [str(home / n) for n in (
-                ".m2/repository/org", ".cargo/git/db", ".cache/pip", ".cache/pip/http", "Library/Caches/pip",
-                "work/cache", "go", "build cache")]
+            self.assertFalse(hasattr(desk, "PACKAGE_CACHES") or hasattr(desk, "HOME_CACHES"))  # no exception by name
+            fine = [str(home / n) for n in ("hansa-cache/a/pip", "hansa-cache/a/npm", "work/cache", "go", "go/pkg/mod",
+                                            "build cache")]
             providers = self.desk.settings()["providers"]
-            for x in fine + ["/srv/x/tools/xdg-cache/pnpm"]:
+            for x in fine + ["/srv/x/tools/xdg-cache/pnpm", "/tmp/cache"]:
                 self.assertEqual(write_problems([x], str(self.repo), self.desk.root, providers), [], x)
             self.hansa("lane", "set", "a", "write", *fine)
             self.assertEqual(self.desk.settings()["lanes"]["a"]["write"], fine)
             self.assertEqual(run.write_list(self.desk, self.desk.settings()["lanes"]["a"]), (fine, []))
+            # a list saved earlier, when ~/.cache/pip passed: left out at a run's start, with a line; the rest stays
+            s = self.desk.settings()
+            s["lanes"]["a"]["write"] = [str(home / ".cache" / "pip"), str(home / "hansa-cache" / "a" / "pip")]
+            write_json(self.desk.settings_path, s)
+            good, left = run.write_list(self.desk, s["lanes"]["a"])
+            self.assertEqual(good, [str(home / "hansa-cache" / "a" / "pip")])
+            self.assertEqual(len(left), 1)
+            self.assertIn(f"left out of this run: {home / '.cache' / 'pip'}: {only}", left[0])
+            p = s["providers"]["claude"]
+            for fs in (run.sandbox_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo)["sandbox"]["filesystem"],
+                       run.srt_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
+                self.assertIn(str(home / "hansa-cache" / "a" / "pip"), fs["allowWrite"])
+                self.assertNotIn(str(home / ".cache" / "pip"), fs["allowWrite"])
+
+    def test_a_lanes_write_list_opens_nothing_inside_a_folder_on_the_path(self):
+        home, bin_ = (self.tmp / "home").resolve(), (self.tmp / "home").resolve() / "bin"
+        bin_.mkdir(parents=True)
+        tools = (self.tmp / "srv" / "tools").resolve()
+        (tools / "bin").mkdir(parents=True)
+        (self.tmp / "lbin").symlink_to(tools / "bin")
+        with as_home(home, PATH=f"{bin_}:{tools / 'bin'}:/usr/bin:/bin"):
+            for x, d in {bin_ / "git": bin_, bin_ / "sub" / "x": bin_, tools / "bin" / "git": tools / "bin",
+                         tools / "bin" / "new" / "tool": tools / "bin",
+                         self.tmp.resolve() / "lbin" / "git": tools / "bin"}.items():  # a git hansa would run
+                told = self.refused_and_left_out(x, f"it is inside {d}, a folder on the PATH hansa runs with")
+                self.assertIn("a program there runs outside the sandbox (a cache folder goes elsewhere", told)
+            for x, d in {bin_: bin_, tools / "bin": tools / "bin", tools: tools / "bin"}.items():  # the folder, and above
+                self.refused_and_left_out(x, f"it would open {d}, a folder on the PATH hansa runs with")
+            self.assertEqual(len(write_problems(["/bin/sh"])), 1)
+            fine = [str(tools / "xdg-cache" / "pnpm"), str(tools / "cache"), str(home / "work" / "cache"), "/tmp/cache"]
+            self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
+        with as_home(home, PATH="/:/usr/bin"):  # a PATH that names the top closes no more than the top
+            self.assertEqual(write_problems(["/tmp/cache", str(home / "work" / "cache")]), [])
+            self.assertEqual(len(write_problems(["/"])), 1)
 
     def test_a_lanes_write_list_opens_no_place_programs_are_installed(self):
         home = (self.tmp / "home").resolve()
@@ -6006,7 +6062,9 @@ class DeskTest(unittest.TestCase):
                    "/Applications",
                "/Library/Developer/CommandLineTools/usr/bin": "/Library", "/usr/local/lib": "/usr",
                "/usr/local/share/zsh/site-functions": "/usr", "/usr/local/Cellar": "/usr", "/usr/share/x": "/usr",
-               "/nix/store": "/nix", "/snap/node": "/snap", "/var/lib/x": "/var/lib"}
+               "/nix/store": "/nix", "/snap/node": "/snap", "/var/lib/x": "/var/lib",
+               "/opt/local": "/opt/local", "/opt/local/var/macports/build": "/opt/local", "/opt/local/bin/git": "/opt/local",
+               "/opt/X11": "/opt/X11", "/opt/X11/lib": "/opt/X11", "/opt/X11/share/cache": "/opt/X11"}
         with as_home(home, PATH=f"{prefix / 'bin'}:/usr/bin:/bin"):
             for x, top in bad.items():
                 if sys.platform == "darwin" and str(x).startswith("/home/"):  # there /home is the system's own
@@ -6014,13 +6072,16 @@ class DeskTest(unittest.TestCase):
                 told = self.refused_and_left_out(x, "it would open " if top != "/usr" else "")
                 if top not in ("/Applications", "/Library", "/usr") or "/usr/local/share" in str(x):  # else a nearer fence may say it
                     self.assertIn(f"it would open {top}, {where}", told)
+            for x in ("/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x"):  # the system's own: says where a cache goes
+                self.assertIn("(a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or "
+                              "/tmp)", self.refused_and_left_out(x, "the system's own settings, libraries or programs"))
             fine = ["/srv/x/tools/xdg-cache/pnpm", "/tmp/cache", "/opt/cache", "/var/cache/x", "/mnt/big/cache",
                     str(self.tmp.resolve() / "elsewhere" / "cache"), str(home / "work" / "cache")]
             self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
         # an account of the system's, whose home folder is where programs are installed too: its own rule holds there
         with as_home("/var/lib/builder"):
-            self.assertEqual(write_problems(["/var/lib/builder/work/cache", "/var/lib/builder/.cache/pip"]), [])
-            for x in ("/var/lib/builder/.zsh", "/var/lib/other", "/var/lib/builder", "/var/lib"):
+            self.assertEqual(write_problems(["/var/lib/builder/work/cache", "/var/lib/builder/hansa-cache/a/pip"]), [])
+            for x in ("/var/lib/builder/.zsh", "/var/lib/builder/.cache/pip", "/var/lib/other", "/var/lib/builder", "/var/lib"):
                 self.assertEqual(len(write_problems([x])), 1, x)
 
     def test_a_name_that_normalizes_to_a_pattern_character_is_in_neither_list(self):
@@ -6151,7 +6212,7 @@ class DeskTest(unittest.TestCase):
         for f in (".tsh", ".cargo/credentials.toml", ".cargo", ".config/gcloud/x"):
             self.assertIn("a login or key that workers may not read", write_problems([str(home / f)])[0], f)
             self.assertIn("a login or key", read_split([str(home / f)])[1][0], f)
-        self.assertEqual(write_problems([str(home / ".cargo" / "registry"), str(home / ".m2" / "repository")]), [])
+        self.assertEqual(write_problems([str(home / "hansa-cache" / "a" / "cargo"), str(home / "work" / "m2")]), [])
         # the coordinator's Read tool is denied them too, but no Claude Code folder: its memory lives in one
         r = self.echo_coordinator()
         self.assertEqual(r.returncode, 0, r.stderr)

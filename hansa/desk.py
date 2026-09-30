@@ -491,19 +491,23 @@ def _in_library(path: str, lib: str) -> bool:
     return False
 
 
-def _mac_fence(home: str) -> list:
+def _mac_fence(home: str, write: bool = False) -> list:
     """On macOS: the data volume and the folders above it hold everything, the home folder too; /Volumes
     holds a link to / and /.vol reaches any folder by its number; ~/Library holds the keychains, apps' own
-    data and what runs at login."""
+    data and what runs at login. write: for a lane's write list, which takes nothing in ~/Library (its
+    Caches hold what runs outside the sandbox: apps' updaters, what brew installs from); the coordinator's
+    read list takes its Caches."""
     if sys.platform != "darwin":
         return []
     lib = os.path.join(home, "Library")
+    held = f"it would open {lib}, which holds the keychains, apps' own data and what runs at login"
     return [(DATA, _above, f"it would open {DATA}, the volume macOS keeps everything on, the home folder too"),
             ("/Volumes", _above, "it would open /Volumes, which holds every volume, the one with the home folder too "
                                  "(a folder on another volume, such as /Volumes/Build/cache, can be listed)"),
             ("/.vol", _overlaps, "it would open /.vol, where macOS reaches any folder by its number, the home folder too"),
-            (lib, _in_library, f"it would open {lib}, which holds the keychains, apps' own data and what runs at "
-                               f"login (only {os.path.join(lib, 'Caches')} and folders inside it can be listed)")]
+            (lib, _overlaps, f"{held}, and caches shared with what runs outside the sandbox (nothing in it can "
+                             f"be listed; {OWN_FOLDER})") if write else
+            (lib, _in_library, f"{held} (only {os.path.join(lib, 'Caches')} and folders inside it can be listed)")]
 
 
 # Other names for the whole disk. Some systems reach any folder under a folder at the top: macOS by path under
@@ -519,6 +523,12 @@ SYSTEM_TOPS = ("/System", "/dev", "/proc", "/sys")
 # that the system shows under another device or number, a subvolume or a snapshot) is not known: a folder
 # listed there opens what is under it. The principal, who alone sets these lists for reading, must not list
 # one; the coordinator can put a lane's write list there only if such a mount already exists on the machine.
+
+
+# What a refusal of a cache folder says to list instead
+ELSEWHERE = "a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or /tmp"
+OWN_FOLDER = ("give the lane a folder of its own, such as ~/hansa-cache/<lane>/<tool>, and point the tool there with "
+              "the lane's env: PIP_CACHE_DIR, npm_config_cache, CARGO_HOME, GRADLE_USER_HOME and the like")
 
 
 def _top_hidden(path: str, _=None) -> bool:
@@ -807,29 +817,28 @@ def _run_fence(home: str) -> list:
                 fence(d, why)
     for d in SYSTEM_STARTS + (MAC_STARTS if sys.platform == "darwin" else ()):
         out.append((d, _overlaps, f"it would open {d}, the system's own settings, libraries or programs, which "
-                                  "every program reads when it starts, outside the sandbox too"))
+                                  f"every program reads when it starts, outside the sandbox too ({ELSEWHERE})"))
     return out + beside  # a folder beside a program last: what is named for what it holds says more
 
 
-# Inside the home folder a lane's write list may hold only these, and folders inside them: a tool's own folder
-# under a cache folder, a package cache by its name, and folders that are not hidden outside ~/Library and
-# ~/Applications. The rest of the home folder is closed as a class, not by name: a shell's startup file can
-# read any file there, so no list of the names that run outside the sandbox would be complete.
-HOME_CACHES = (".cache", "Library/Caches")
-PACKAGE_CACHES = (".m2/repository", ".gradle/caches", ".npm/_cacache", ".pnpm-store", ".local/share/pnpm/store",
-                  ".cargo/registry", ".cargo/git", "go/pkg/mod", ".nuget/packages", ".ivy2/cache", ".conan2/p",
-                  ".bun/install/cache")
+# Inside the home folder a lane's write list may hold only plain folders: no name between the home folder and
+# the entry starts with a dot, and none is inside ~/Library or ~/Applications. The rest of the home folder is
+# closed as a class, not by name: a shell's startup file can read any file there, so no list of the names that
+# run outside the sandbox would be complete. A user's caches are closed with it (~/.cache, ~/Library/Caches,
+# ~/.m2/repository, ~/.npm/_cacache and the rest): they are shared with what runs outside the sandbox (an
+# app's updater, corepack's node, what brew installs from, the user's own builds), so what a worker writes
+# there reaches it. A lane gets a cache folder of its own instead.
 HOME_APPS = ("Library", "Applications")
 # Outside it, the places programs are installed, whole: what is there runs outside the sandbox sooner or later
-INSTALL_TOPS = ("/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/usr", "/Applications", "/Library", "/nix", "/snap",
-                "/var/lib")
+INSTALL_TOPS = ("/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/opt/local", "/opt/X11", "/usr", "/Applications",
+                "/Library", "/nix", "/snap", "/var/lib")
 
 
 def _home_closed(path: str, home: str) -> bool:
-    """Whether a full path, as given or where its link leads, is inside the home folder and not one of what a
-    write list may hold there."""
+    """Whether a full path, as given or where its link leads, is inside the home folder and not a plain folder
+    there."""
     homes = {_seen(w) for w in _forms(home)}
-    at = lambda names: {_seen(os.path.join(w, n)) for w in _forms(home) for n in names}
+    apps = {_seen(os.path.join(w, n)) for w in _forms(home) for n in HOME_APPS}
     for v in _forms(path):
         ups = _ups(v)
         seen = [_seen(u) for u in ups]
@@ -837,20 +846,22 @@ def _home_closed(path: str, home: str) -> bool:
         if not i:  # outside the home folder, or the home folder itself (its own fence)
             continue
         names = ups[0][len(ups[i].rstrip("/")):].strip("/").split("/")
-        if at(HOME_CACHES) & set(seen[1:i]) or at(PACKAGE_CACHES) & set(seen[:i]):
-            continue
-        if not any(n.startswith(".") for n in names) and not at(HOME_APPS) & set(seen[:i]):
-            continue
-        return True
+        if any(n.startswith(".") for n in names) or apps & set(seen[:i]):
+            return True
     return False
 
 
 def home_rule() -> str:
     """What a lane's write list may hold inside the home folder, in words."""
-    caches = " or ".join("~/" + c for c in HOME_CACHES[:2 if sys.platform == "darwin" else 1])
-    return (f"a tool's own folder under {caches}, a package cache ({', '.join('~/' + c for c in PACKAGE_CACHES)}) "
-            "or a folder that is not hidden (no name below the home folder starts with a dot) outside ~/Library "
-            "and ~/Applications, such as ~/work/cache")
+    return ("plain folders (no name below the home folder starts with a dot, and not inside ~/Library or "
+            "~/Applications), such as ~/work/cache: a user's caches (~/.cache, ~/Library/Caches, ~/.m2/repository, "
+            "~/.npm and the like) are shared with what runs outside the sandbox")
+
+
+def _on_path(path: str, folder: str) -> bool:
+    """Whether a full path is a folder on the PATH, above it, or inside it: a program put there is one hansa
+    may run outside the sandbox. A PATH that names / closes only / (the fences for the rest stand)."""
+    return _above(path, folder) or (folder != "/" and _above(folder, path))
 
 
 def brew_prefixes() -> list:
@@ -876,8 +887,7 @@ def _install_fence(home: str) -> list:
     def hit(path, top):
         return any(_overlaps(v, top) and not homes & {_seen(u) for u in _ups(v)[1:]} for v in _forms(path))
 
-    why = ("where programs are installed: what is there runs outside the sandbox (a cache folder goes elsewhere, "
-           "such as a tools folder of the desk's, another volume or /tmp)")
+    why = f"where programs are installed: what is there runs outside the sandbox ({ELSEWHERE})"
     return [(d, hit, f"it would open {d}, {why}") for d in dict.fromkeys([*brew_prefixes(), *INSTALL_TOPS])]
 
 
@@ -898,11 +908,12 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> li
     the principal keeps workers from reading (deny_split's good ones)."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
-        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2/repository"]
+        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/hansa-cache/a/pip"]
     if not paths:
         return []
     home = account_home()
-    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_mac_fence(home)]
+    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"),
+              *_mac_fence(home, write=True)]
     if root:
         fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
     if isinstance(repo, str) and repo.startswith("/"):
@@ -923,13 +934,15 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> li
                                                   "that workers may not read") for f in home_secrets()]
     fenced += [(d, _overlaps, f"it would open {d}, which the principal keeps workers from reading") for d in denied]
     fenced += _top_fence()
-    fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
-               for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    on_path = [_plain(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with") for d in on_path]
     fenced += _run_fence(home)
+    # after the programs hansa knows, which say more: whatever else is in a PATH folder, there or not yet
+    fenced += [(d, _on_path, f"it is inside {d}, a folder on the PATH hansa runs with: a program there runs "
+                             f"outside the sandbox ({ELSEWHERE})") for d in on_path]
     fenced += _install_fence(home)
     fenced.append((home, _home_closed, f"it is inside {home}, the home folder, where a write list may hold only "
-                                       f"{home_rule()}; or point the tool at a cache folder of the lane's own "
-                                       "with the lane's env (GRADLE_USER_HOME, npm_config_cache and the like)"))
+                                       f"{home_rule()}; {OWN_FOLDER}"))
     p = []
     for x in paths:
         if _has_control(x):  # as the read list: a line break would split one entry into two where it is written
