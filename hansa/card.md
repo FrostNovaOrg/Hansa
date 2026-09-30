@@ -315,9 +315,11 @@ here; work that needs code changed or a browser goes to a worker.
   that would open what the sandbox keeps closed or what hansa runs: the home
   folder or above it, the desk, the lane's repository, a provider's Claude Code
   folder and `~/.claude`, credential files such as `~/.ssh`, folders on the
-  `PATH` or above them, and on macOS `/Volumes`, `/.vol` and `~/Library` (but
-  not `~/Library/Caches`); and a path with `( ) [ ] { } *` or `?` in a name, which
-  the sandbox may read as a pattern. Tell the principal what you added and why.
+  `PATH` or above them, a hidden folder at the top (`/.x`), `/System`, `/dev`,
+  `/proc` and `/sys`, and on macOS `/Volumes`, `/Library/Keychains` and
+  `~/Library` (but not `~/Library/Caches`); and a path with `( ) [ ] { } *` or
+  `?` or an invisible character in a name, which the sandbox may read as a
+  pattern or you as another name. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in

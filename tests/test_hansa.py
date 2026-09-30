@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hansa import account, cli, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
-from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa: E402
+from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
                        waiting_reason)
 from hansa.web import start_web  # noqa: E402
@@ -4368,11 +4368,12 @@ class DeskTest(unittest.TestCase):
                 self.assertFalse(told["ok"], path)
                 self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
             s = self.desk.settings()
-            s["coordinator_read"] = [*bad, data + str(good)]  # a good folder spelled through the volume is given
+            bad[data + str(good)] = "the system's own"  # a good folder is listed from /, not through the volume
+            s["coordinator_read"] = [*bad, str(good)]
             write_json(self.desk.settings_path, s)
             r = self.echo_coordinator()
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"--add-dir {self.repo.resolve()} {data}{good} --disallowedTools", r.stdout)
+            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
             for path, why in bad.items():
                 self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
                                 (path, r.stderr))
@@ -4385,8 +4386,9 @@ class DeskTest(unittest.TestCase):
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and path in told[0] and why.replace("the desk", "the desk's") in told[0],
                                 (path, told))
-            s["lanes"]["a"]["write"] = [data + str(home / ".m2"), data + str(good)]
-            self.assertEqual(validate(s, self.desk.root), [])
+            s["lanes"]["a"]["write"] = [data + str(home / ".m2"), str(home / ".m2"), str(good)]
+            told = validate(s, self.desk.root)
+            self.assertTrue(len(told) == 1 and data in told[0] and "the system's own" in told[0], told)
 
     def test_a_path_with_slashes_doubled_at_its_start_is_answered_like_the_path_it_is(self):
         good = (self.tmp / "opt").resolve()
@@ -4472,6 +4474,87 @@ class DeskTest(unittest.TestCase):
                                 (path, told))
             s["lanes"]["a"]["write"] = [str(x) for x in fine] + ["/Volumes/Build/cache", str(lib / "Caches" / "new" / "x")]
             self.assertEqual(validate(s, self.desk.root), [])  # another volume, and a tool's cache not yet made
+
+    def test_other_names_for_the_whole_disk_open_nothing_in_either_list(self):
+        good = (self.tmp / "opt").resolve()
+        good.mkdir()
+        hidden, own = "its first folder below / is hidden", "the system's own"
+        bad = {"/.cache-of-mine": hidden, "/.cache-of-mine/x/y": hidden, "//.hidden/": hidden, "/opt/../.x": hidden,
+               "/dev": own, "/dev/fd": own, "/proc": own, "/proc/1/root": own, "/proc/self/root/opt": own,
+               "/sys": own, "/sys/kernel": own}
+        if sys.platform != "darwin":  # there the volume everything is on is named first
+            bad.update({"/System": own, "/System/Library": own})
+        else:
+            bad.update({"/System/Library": own, "/System/Volumes/Data" + str(good): own, "/SYSTEM/library/": own,
+                        "/Library/Keychains": "/Library/Keychains", "/Library": "/Library/Keychains",
+                        "/LIBRARY/keychains/x": "/Library/Keychains"})
+            for top in ("/.nofollow", "/.resolve"):
+                if os.path.isdir(top):
+                    (self.tmp / f"l{top[2:]}").symlink_to(top)
+                    bad.update({top: hidden, top.upper() + "/": hidden, top + str(good): hidden,
+                                str(self.tmp / f"l{top[2:]}"): hidden})
+            if os.path.isdir("/.resolve/1"):
+                bad["/.resolve/1" + str(good)] = hidden
+            root = next((str(v) for v in Path("/Volumes").iterdir() if v.is_symlink() and os.path.samefile(v, "/")), "") \
+                if os.path.isdir("/Volumes") else ""
+            if root and not set(root) & set("()[]{}*?") and os.path.isdir("/.nofollow"):
+                bad[root + "/.nofollow"] = hidden
+        (self.tmp / "ldev").symlink_to("/dev")
+        bad[str(self.tmp / "ldev")] = own
+        for path, why in bad.items():
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+            self.assertFalse(told["ok"], path)
+            self.assertTrue(any(f"read {path}: " in p and why in p for p in told["problems"]), (path, told))
+        s = self.desk.settings()
+        names = list(bad)
+        for some in (names[i:i + 19] for i in range(0, len(names), 19)):  # a list holds 20 at most
+            s["coordinator_read"] = [*some, str(good)]
+            write_json(self.desk.settings_path, s)
+            r = self.echo_coordinator()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
+            told = self.hansa("explain")
+            for path in some:
+                self.assertTrue(any(f"read {path}: " in x and "skipped" in x for x in r.stderr.splitlines()),
+                                (path, r.stderr))
+                self.assertIn(f"not given: {path}: ", told)
+        s["coordinator_read"] = []
+        for path, why in bad.items():
+            s["lanes"]["a"]["write"] = [path]
+            told = validate(s, self.desk.root)
+            self.assertTrue(len(told) == 1 and f"write cannot include {path}: " in told[0] and why in told[0], (path, told))
+        self.assertEqual(write_problems([str(good), "/opt/include", "/usr/local/include/x", "/var/cache/x"]), [])
+
+    def test_a_name_with_an_invisible_or_direction_changing_character_is_in_neither_list(self):
+        good = (self.tmp / "opt").resolve()
+        good.mkdir()
+        odd = self.tmp.resolve() / "inc\u200blude"
+        odd.mkdir()
+        (self.tmp / "lodd").symlink_to(odd)
+        bad = [str(odd), str(good) + "\u202e", str(good / "\ufeffx" / "y"), str(self.tmp.resolve() / "a\u2066b\u2069"),
+               str(good) + "/\u00adx", str(self.tmp.resolve() / "lodd")]  # and a link that leads to such a name
+        why = "invisible or direction-changing character"
+        for path in bad:
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+            self.assertFalse(told["ok"], ascii(path))
+            self.assertTrue(any(f"read {json.dumps(path)}: " in p and why in p for p in told["problems"]), told)
+        s = self.desk.settings()
+        s["coordinator_read"] = [*bad, str(good)]
+        write_json(self.desk.settings_path, s)
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
+        told = self.hansa("explain")
+        for path in bad:
+            self.assertTrue(any(f"read {json.dumps(path)}: " in x and "skipped" in x for x in r.stderr.splitlines()),
+                            (ascii(path), r.stderr))
+            self.assertIn(f"not given: {json.dumps(path)}: ", told)
+        s["coordinator_read"] = []
+        for path in bad:
+            s["lanes"]["a"]["write"] = [str(good), path]
+            told = validate(s, self.desk.root)
+            self.assertTrue(len(told) == 1 and f"write cannot include {json.dumps(path)}: " in told[0] and why in told[0],
+                            (ascii(path), told))
 
     def test_a_read_folder_is_given_to_claude_code_as_the_disk_spells_it(self):
         if not self.ignores_case():

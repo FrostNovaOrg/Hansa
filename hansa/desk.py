@@ -390,6 +390,47 @@ def _mac_fence(home: str) -> list:
                                f"login (only {os.path.join(lib, 'Caches')} and folders inside it can be listed)")]
 
 
+# Other names for the whole disk. Some systems reach any folder under a folder at the top: macOS by path under
+# /.nofollow and /.resolve, by number under /.vol, and under /System/Volumes/Data; Linux under /proc/<pid>/root.
+# Each is another file than /, so going up from a fenced folder never meets it. The class is refused, not the
+# names: a first folder below / that is hidden, and the system's own folders. None is a place for a header
+# library or a build cache.
+SYSTEM_TOPS = ("/System", "/dev", "/proc", "/sys")
+#
+# What the fences cannot see: a folder is known as a fenced one (or one above it) when it is the same file, by
+# device and number, as a folder met going up from the fenced one's path. The same disk mounted a second time
+# somewhere else with a root that is another file (another mount of the volume, a bind mount or a share of it
+# that the system shows under another device or number, a subvolume or a snapshot) is not known: a folder
+# listed there opens what is under it. The principal, who alone sets these lists for reading, must not list
+# one; the coordinator can put a lane's write list there only if such a mount already exists on the machine.
+
+
+def _top_hidden(path: str, _=None) -> bool:
+    """Whether the first folder below / of a full path, as given or where its link leads, is hidden."""
+    return any(v.startswith("/.") for v in _forms(path))
+
+
+def _top_fence() -> list:
+    """The folders at the top that are other names for the whole disk, or the system's own."""
+    out = [("/", _top_hidden, "its first folder below / is hidden (its name starts with a dot): such a folder "
+                              "can be another name for the whole disk, as /.vol, /.nofollow and /.resolve are on macOS")]
+    out += [(d, _overlaps, f"it is {d} or inside it, the system's own, where the whole disk can be reached under "
+                           "another name") for d in SYSTEM_TOPS]
+    if sys.platform == "darwin":
+        out.append(("/Library/Keychains", _overlaps, "it would open /Library/Keychains, the machine's keychains"))
+    return out
+
+
+def _has_format(path: str) -> bool:
+    """Whether a full path, as given or where its link leads, has an invisible or direction-changing character
+    (a Unicode format character, such as U+200B, U+202E or U+FEFF): it would not read as what it is."""
+    return any(unicodedata.category(c) == "Cf" for v in _forms(path) for c in v)
+
+
+FORMAT_WHY = ("a name in it (or where its link leads) has an invisible or direction-changing character, so it "
+              "does not read as what it is")
+
+
 def stored(path: str) -> str:
     """A full path in the spelling the disk stores: each name that exists as its folder lists it (the case
     kept where the disk ignores case). Links are not followed."""
@@ -467,12 +508,16 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
     fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key "
                                                   "that workers may not read") for f in HOME_SECRETS]
+    fenced += _top_fence()
     fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
                for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     p = []
     for x in paths:
         if _has_control(x):  # as the read list: a line break would split one entry into two where it is written
             p.append(f"write cannot include {json.dumps(x)}: it has a line break or another control character")
+            continue
+        if _has_format(x):
+            p.append(f"write cannot include {json.dumps(x)}: {FORMAT_WHY}")
             continue
         for f, hit, why in fenced:
             if hit(x, f):  # as the disk sees both: as given and with links resolved, in any case it ignores
@@ -509,11 +554,15 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
     fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key")
                for f in HOME_SECRETS]
+    fenced += _top_fence()
     good, p, seen = [], [], set()
     for x in paths:
         at = f"the coordinator cannot be let read {x if isinstance(x, str) else json.dumps(x)}"
         if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
             p.append(f"{at}: it must be a full path starting with /, such as /opt/include")
+            continue
+        if _has_format(x):
+            p.append(f"the coordinator cannot be let read {json.dumps(x)}: {FORMAT_WHY}")
             continue
         why = next((why for f, hit, why in fenced if hit(x, f)), "")
         if not why and any(c in v for v in _forms(x) for c in RULE_BREAKERS):
