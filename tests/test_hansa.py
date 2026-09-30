@@ -5,6 +5,7 @@ import functools
 import io
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -300,6 +301,24 @@ def stop_started_on(desk_root: Path, since: float, wait=10) -> None:
 
 def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+
+
+
+@contextlib.contextmanager
+def as_home(home, **env):
+    """With this folder as the home folder of the account the tests run as, in the password database (where
+    hansa takes it from) and in $HOME; for a hansa started as a command too (tests/fakehome)."""
+    real = pwd.getpwuid
+
+    def getpwuid(uid):
+        pw = real(uid)
+        return pwd.struct_passwd((*pw[:5], str(home), *pw[6:]))
+
+    fake = str(Path(__file__).resolve().parent / "fakehome")
+    path = fake + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
+    with unittest.mock.patch.dict(os.environ, {"HOME": str(home), "HANSA_TESTS_HOME": str(home), "PYTHONPATH": path,
+                                               **env}), unittest.mock.patch("pwd.getpwuid", getpwuid):
+        yield
 
 
 class DeskTest(unittest.TestCase):
@@ -4366,7 +4385,7 @@ class DeskTest(unittest.TestCase):
                str(home / ".Claude" / "PROJECTS"): "Claude Code folder",
                str(up(self.desk.root)): "the desk", str(self.desk.root / "SECRETS"): "the desk",
                str(up(self.desk.root) / "Notes"): "the desk"}
-        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+        with as_home(home):
             for path, why in bad.items():
                 told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
                 self.assertFalse(told["ok"], path)
@@ -4410,7 +4429,7 @@ class DeskTest(unittest.TestCase):
         bad = {str(home / ".claude"): "machine owner's Claude Code folder",
                str(home / ".claude" / "projects"): "machine owner's Claude Code folder",
                **{str(d): "permission rule" for d in odd}, str(self.tmp / "plain"): "permission rule"}
-        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+        with as_home(home):
             for path, why in bad.items():
                 told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
                 self.assertFalse(told["ok"], path)
@@ -4481,7 +4500,7 @@ class DeskTest(unittest.TestCase):
                data + str(home): "home folder", data + str(home.parent): "home folder",
                data + str(home / ".ssh"): "login or key", data + str(home / ".aws" / "sso"): "login or key",
                data + str(home / ".claude"): "Claude Code folder", data + str(self.desk.root / "secrets"): "the desk"}
-        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+        with as_home(home):
             for path, why in bad.items():
                 told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
                 self.assertFalse(told["ok"], path)
@@ -4566,7 +4585,7 @@ class DeskTest(unittest.TestCase):
         if root and not set(root) & set("()[]{}*?"):
             bad[root + "/Volumes"] = "/Volumes"
         fine = [good, lib / "Caches", lib / "Caches" / "pip", self.tmp / "lc"]
-        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+        with as_home(home):
             for path, why in bad.items():
                 told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
                 self.assertFalse(told["ok"], path)
@@ -4591,8 +4610,13 @@ class DeskTest(unittest.TestCase):
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and f"write cannot include {path}: it would open {why}" in told[0],
                                 (path, told))
-            s["lanes"]["a"]["write"] = [str(x) for x in fine] + ["/Volumes/Build/cache", str(lib / "Caches" / "new" / "x")]
+            s["lanes"]["a"]["write"] = [str(good), str(lib / "Caches" / "pip"), "/Volumes/Build/cache",
+                                        str(lib / "Caches" / "new" / "x")]
             self.assertEqual(validate(s, self.desk.root), [])  # another volume, and a tool's cache not yet made
+            for x in (lib / "Caches", self.tmp / "lc"):  # all of Caches holds Claude Code's own, which runs outside
+                s["lanes"]["a"]["write"] = [str(x)]
+                told = validate(s, self.desk.root)
+                self.assertTrue(len(told) == 1 and f"it would open {lib / 'Caches' / 'claude-cli-nodejs'}" in told[0], told)
 
     def test_other_names_for_the_whole_disk_open_nothing_in_either_list(self):
         good = (self.tmp / "opt").resolve()
@@ -5693,7 +5717,7 @@ class DeskTest(unittest.TestCase):
             s["lanes"]["a"]["write"] = [str(x)]
             return validate(s, self.desk.root)
 
-        with unittest.mock.patch.dict(os.environ, {"HOME": str(home), "PATH": f"{bin_}:relative/bin:/usr/bin"}):
+        with as_home(home, PATH=f"{bin_}:relative/bin:/usr/bin"):
             for ok in (home / ".m2", home / ".cache" / "pip", self.tmp / "tools" / "cache"):  # a tool's cache
                 self.assertEqual(refused(ok), [], ok)
             for x in (home, self.tmp, self.tmp.parent):  # the home folder, or above it (before the desk)
@@ -5791,6 +5815,199 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"write list: left out of this run: {Path.home() / '.claude' / 'hooks'}: it would open", shown)
         self.assertIn(f"write list: left out of this run: {self.tmp / 'star*'}: a name in it", shown)
         self.assertEqual([e["task"] for e in self.events("write_left_out")], [tid, tid])
+
+    def refused_and_left_out(self, path, why):
+        """A write folder is refused on saving, and one saved earlier is left out at a run's start with a line."""
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [str(path)]
+        told = validate(s, self.desk.root)
+        self.assertTrue(len(told) == 1 and "write cannot include " in told[0] and why in told[0], (path, told))
+        write_json(self.desk.settings_path, s)  # saved before the fence was there
+        good, left = run.write_list(self.desk, s["lanes"]["a"])
+        self.assertEqual(good, [], path)
+        self.assertTrue(len(left) == 1 and left[0].startswith("left out of this run: ") and why in left[0], (path, left))
+        p = s["providers"]["claude"]
+        for fs in (run.sandbox_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo)["sandbox"]["filesystem"],
+                   run.srt_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
+            self.assertNotIn(str(path), fs.get("allowWrite", []))
+        return told[0]
+
+    def programs_elsewhere(self):
+        """Stand-ins for the programs hansa runs, installed as they are on a real machine; the PATH that finds them."""
+        def program(at, text="#!/bin/sh\n"):
+            at.parent.mkdir(parents=True, exist_ok=True)
+            at.write_text(text)
+            at.chmod(0o755)
+            return at
+
+        tools, brew, share = self.tmp / "tools", self.tmp / "brew", self.tmp / "share"
+        for d in (tools / "bin", brew / "bin"):
+            d.mkdir(parents=True)
+        (tools / "bin" / "claude").symlink_to(program(share / "claude" / "versions" / "2.1.0"))  # a folder of versions
+        program(tools / "lib" / "node_modules" / "@anthropic-ai" / "sandbox-runtime" / "dist" / "cli.js")
+        (tools / "bin" / "srt").symlink_to("../lib/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js")  # an npm package
+        program(brew / "Cellar" / "tmux" / "3.4" / "bin" / "tmux")
+        (brew / "bin" / "tmux").symlink_to("../Cellar/tmux/3.4/bin/tmux")  # Homebrew
+        program(self.tmp / "nodejs" / "bin" / "node")
+        core = self.tmp / "gitp" / "libexec" / "git-core"
+        core.mkdir(parents=True)
+        real = shutil.which("git")  # it says where its own programs are, and is git for the rest
+        program(self.tmp / "gitp" / "bin" / "git", f"#!/bin/sh\n[ \"$1\" = --exec-path ] && echo {shlex.quote(str(core))} "
+                                                   f"&& exit 0\nexec {shlex.quote(real)} \"$@\"\n")
+        return os.pathsep.join(str(d) for d in (tools / "bin", brew / "bin", self.tmp / "nodejs" / "bin",
+                                                self.tmp / "gitp" / "bin", "/usr/bin", "/bin"))
+
+    def test_a_lanes_write_list_opens_no_program_that_runs_outside_the_sandbox(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        path = self.programs_elsewhere()
+        tools, brew, share, gitp = self.tmp / "tools", self.tmp / "brew", self.tmp / "share", self.tmp / "gitp"
+        (self.tmp / "lv").symlink_to(share / "claude" / "versions")
+        (self.tmp / "lpkg").symlink_to(tools / "lib" / "node_modules" / "@anthropic-ai")
+        os.environ.pop("HANSA_CLAUDE", None)
+        os.environ.pop("HANSA_TMUX", None)
+        bad = {share / "claude": f"it would open {share / 'claude'}, where claude is installed",
+               share / "claude" / "versions": f"it would open {share / 'claude'}, where claude is installed",
+               share / "claude" / "versions" / "2.1.1": f"it would open {share / 'claude'}, where claude is installed",
+               share: f"it would open {share / 'claude'}, where claude is installed",  # a folder above it
+               self.tmp / "lv": f"it would open {share / 'claude'}, where claude is installed",  # through a link
+               tools / "lib" / "node_modules": "where srt is installed",
+               tools / "lib" / "node_modules" / "@anthropic-ai" / "sandbox-runtime" / "dist": "where srt is installed",
+               tools / "lib" / "node_modules" / "left-pad": "where srt is installed",  # a package srt may load
+               self.tmp / "lpkg": "where srt is installed",
+               brew / "Cellar": f"it would open {brew / 'Cellar'}, where tmux is installed",
+               brew / "Cellar" / "tmux" / "3.4": f"it would open {brew / 'Cellar'}, where tmux is installed",
+               brew / "Cellar" / "libevent": f"it would open {brew / 'Cellar'}, where tmux is installed",
+               brew / "lib": f"it would open {brew / 'lib'}, where tmux is installed",
+               brew / "etc": f"it would open {brew / 'etc'}, where tmux is installed",
+               brew / "opt" / "libevent": f"it would open {brew / 'opt'}, where tmux is installed",
+               self.tmp / "nodejs" / "lib" / "node_modules": "which holds what node loads when it starts",
+               self.tmp / "nodejs" / "bin" / "node": "the program node, which runs outside the sandbox",
+               gitp / "libexec" / "git-core": "git's own programs",
+               gitp / "libexec": "git's own programs", gitp / "lib": "which holds what git loads when it starts",
+               gitp / "etc" / "gitconfig": "the settings git reads for the whole system",
+               gitp / "etc": "the settings git reads for the whole system"}
+        with as_home(home, PATH=path, XDG_CACHE_HOME="/srv/x/tools/xdg-cache"):
+            for x, why in bad.items():
+                told = self.refused_and_left_out(x, why)
+                self.assertIn("outside the sandbox" if "git reads" not in why else "a command git runs", told)
+            self.refused_and_left_out("/srv/x/tools/xdg-cache/claude-cli-nodejs", "Claude Code's own files")
+            # a build or test tool's cache, in the home folder or outside it, beside the programs too
+            fine = ["/srv/x/tools/xdg-cache/pnpm", "/srv/x/tools/xdg-cache/pip", "/srv/x/tools/cache", "/var/cache/x",
+                    "/opt/build-cache", str(home / ".m2"), str(home / ".npm"), str(home / ".gradle"),
+                    str(home / ".cache" / "pip"), str(home / ".local" / "share" / "pnpm"), str(tools / "cache"),
+                    str(brew / "var" / "cache"), str(self.tmp / "nodejs" / "cache"), str(home / "Library" / "Caches" / "pip")]
+            self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(share / "claude" / "versions")])
+            self.assertIn("where claude is installed", str(e.exception.code))
+            self.hansa("lane", "set", "a", "write", *fine)
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["write"], fine)
+
+    def test_a_lanes_write_list_opens_no_startup_or_settings_file_nor_where_python_loads_from(self):
+        import site
+        import sysconfig
+        import hansa as package
+        home = self.tmp / "home"
+        home.mkdir()
+        (self.tmp / "lrc").symlink_to(home / ".zshrc")
+        shell, git, tmux = "a shell's startup file", "git's settings", "tmux's settings"
+        bad = {**{home / n: shell for n in (".bashrc", ".bash_profile", ".profile", ".zshrc", ".zshenv", ".zprofile",
+                                           ".zlogin", ".bash_login", ".config/fish/conf.d")},
+               self.tmp / "lrc": shell,
+               home / ".gitconfig": git, home / ".config" / "git": git, home / ".config" / "git" / "hooks": git,
+               home / ".tmux.conf": tmux, home / ".config" / "tmux": tmux,
+               home / ".local" / "share" / "claude": "Claude Code's own files",
+               home / ".local" / "share": "Claude Code's own files",
+               home / ".cache" / "claude-cli-nodejs" / "x": "Claude Code's own files",
+               home / ".cache": "Claude Code's own files",
+               home / "Library" / "Caches" / "claude-cli-nodejs": "Claude Code's own files",
+               home / ".srt-settings.json": "srt's settings", home / ".hansa" / "followers": "hansa's own files",
+               "/etc/gitconfig": "it would open /etc", "/usr/lib/x": "it would open /usr/lib"}
+        loads = "which the python that runs hansa loads modules from"
+        version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+        user = home / ".local" / "lib" / f"python{version}" / "site-packages"
+        mods = {user: loads, user.parent: loads, user / "x": loads, home / ".local" / "lib": loads,
+                Path(sysconfig.get_paths()["stdlib"]): loads, Path(sysconfig.get_paths()["stdlib"]) / "json": loads,
+                Path(sysconfig.get_paths()["purelib"]): loads, Path(site.getsitepackages()[0]) / "pkg": loads,
+                Path(package.__file__).resolve().parent: "hansa's own code",
+                Path(package.__file__).resolve().parent / "sub": "hansa's own code"}
+        with as_home(home):
+            for x, why in {**bad, **mods}.items():
+                self.assertIn("it would open", self.refused_and_left_out(x, why))
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".m2"), str(home / ".zshenv")])
+            self.assertIn(shell, str(e.exception.code))
+            with unittest.mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "xdg"), "ZDOTDIR": str(self.tmp / "z"),
+                                                       "BASH_ENV": str(self.tmp / "env.sh")}):
+                for x, why in {self.tmp / "xdg" / "git": git, self.tmp / "xdg" / "tmux": tmux,
+                               self.tmp / "z" / ".zshenv": shell, self.tmp / "env.sh": shell}.items():
+                    self.refused_and_left_out(x, why)
+                self.assertEqual(write_problems([str(self.tmp / "xdg" / "pip"), str(self.tmp / "z" / "cache")]), [])
+
+    def test_the_home_folder_is_the_accounts_whatever_home_says(self):
+        from hansa import run
+        from hansa.desk import read_split
+        home, other = (self.tmp / "home").resolve(), (self.tmp / "elsewhere").resolve()
+        for d in (home / ".ssh", other / ".ssh", home / "Library" / "Keychains"):
+            d.mkdir(parents=True)
+        p = self.desk.settings()["providers"]["claude"]
+        with as_home(home), unittest.mock.patch.dict(os.environ, {"HOME": str(other)}):
+            self.assertEqual(os.path.expanduser("~"), str(other))
+            self.refused_and_left_out(home, f"it would open {home}, the home folder of the user hansa runs as")
+            self.refused_and_left_out(home / ".ssh", f"it would open {home / '.ssh'}, a login or key")
+            self.refused_and_left_out(home / ".zshrc", "a shell's startup file")
+            if sys.platform == "darwin":
+                self.refused_and_left_out(home / "Library" / "Keychains", f"it would open {home / 'Library'}")
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".ssh")])
+            self.assertIn("a login or key", str(e.exception.code))
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(home)]))  # the coordinator's read list
+            self.assertTrue(not told["ok"] and "the home folder of the user hansa runs as" in told["problems"][0], told)
+            self.assertIn("a login or key", read_split([str(home / ".ssh")])[1][0])
+            if sys.platform == "darwin":
+                self.assertIn(f"it would open {home / 'Library'}", read_split([str(home / "Library" / "Keychains")])[1][0])
+            self.assertEqual(read_split([str(other / ".ssh")]), ([str(other / ".ssh")], []))  # not the account's
+            for fs in (run.sandbox_settings(self.desk, {"network": []}, "claude", p, self.repo)["sandbox"]["filesystem"],
+                       run.srt_settings(self.desk, {"network": []}, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
+                self.assertIn(str(home / ".ssh"), fs["denyRead"])  # the sandbox's denials too
+                self.assertIn(str(home / ".npmrc"), fs["denyRead"])
+        # a hansa started as a command with HOME set elsewhere: the account's logins stay closed
+        mine = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        before = self.desk.settings_path.read_text()
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "lane", "set", "a", "write", str(mine / ".ssh")], capture_output=True, text=True,
+                           env={**os.environ, "HOME": str(other)}, timeout=120)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn(f"write cannot include {mine / '.ssh'}: it would open", r.stderr)
+        self.assertEqual(self.desk.settings_path.read_text(), before)
+
+    def test_a_name_with_a_backslash_or_a_character_that_shows_as_nothing_is_in_neither_list(self):
+        good = (self.tmp / "opt").resolve()
+        (good / "a b").mkdir(parents=True)  # the plain space is a name like another
+        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(good / "a b")]))["ok"])
+        self.assertEqual(write_problems([str(good / "a b")]), [])
+        unseen = "invisible or direction-changing character"
+        odd = {"\\": "has one of ()[]{}*?\\", "\u00a0": unseen, "\u2003": unseen, "\u202f": unseen, "\u3000": unseen,
+               "\u1680": unseen, "\u115f": unseen, "\u1160": unseen, "\u3164": unseen, "\uffa0": unseen, "\u2800": unseen}
+        for c, why in odd.items():
+            there = good / f"a{c}b"
+            there.mkdir()
+            (self.tmp / "lodd").symlink_to(there)
+            for path in (str(there), str(good / "new" / f"{c}x"), str(self.tmp.resolve() / "lodd")):  # where a link leads
+                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+                self.assertTrue(not told["ok"] and any(why in p for p in told["problems"]), (ascii(path), told))
+                self.refused_and_left_out(path, why)
+            s = self.desk.settings()
+            s["lanes"]["a"]["write"] = []
+            s["coordinator_read"] = [str(there), str(good)]  # written into settings.json another way
+            write_json(self.desk.settings_path, s)
+            r = self.echo_coordinator()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
+            self.assertTrue(any(why in x and "skipped" in x for x in r.stderr.splitlines()), (ascii(c), r.stderr))
+            (self.tmp / "lodd").unlink()
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change

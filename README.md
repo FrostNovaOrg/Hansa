@@ -110,6 +110,15 @@ page gives.
   `srt`): the lane's network and write lists hold for them too, so a setup that
   downloads needs its registry on the network list. Design sessions, which the
   principal works in directly, and the coordinator run outside it.
+  A write list holds a build or test tool's cache folders. hansa refuses on it
+  what would open the rest: the home folder of the account (whatever `HOME`
+  says) or above it, the desk, the lane's repository, Claude Code's folders,
+  credential files, folders on the `PATH`, other names for the whole disk, and
+  what runs outside the sandbox: where `claude`, `git`, `srt`, `node`, `tmux`,
+  hansa and its python are installed (with python's `site-packages`), and the
+  files they read when they start (the shell's startup files, git's and tmux's
+  settings, `/etc`); also a name with `( ) [ ] { } * ?`, a backslash or an
+  invisible character. `hansa/card.md` has the list.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not

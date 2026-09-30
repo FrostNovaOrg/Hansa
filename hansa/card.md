@@ -317,9 +317,20 @@ here; work that needs code changed or a browser goes to a worker.
   folder and `~/.claude`, credential files such as `~/.ssh`, folders on the
   `PATH` or above them, a hidden folder at the top (`/.x`), `/System`, `/dev`,
   `/proc` and `/sys`, and on macOS `/Volumes`, `/Library/Keychains` and
-  `~/Library` (but not `~/Library/Caches`); and a path with `( ) [ ] { } *` or
-  `?` or an invisible character in a name, which the sandbox may read as a
-  pattern or you as another name. Tell the principal what you added and why.
+  `~/Library` (but not folders inside `~/Library/Caches`); what runs outside
+  the sandbox: where `claude`, `git`, `srt`, `node`, `tmux`, hansa and its
+  python are installed (`~/.local/share/claude`, Homebrew's `Cellar`, `lib`,
+  `etc` and `opt`, an npm `node_modules` folder, git's exec path, python's
+  library and `site-packages`, the user's too), Claude Code's cache
+  (`claude-cli-nodejs`), the files those programs read when they start (the
+  shell's `~/.zshrc`, `~/.bashrc`, `~/.profile` and the like, `~/.gitconfig`
+  and `~/.config/git`, `~/.tmux.conf` and `~/.config/tmux`), `/etc` and the
+  system's library folders, each with what is inside it and the folders above
+  it (so not all of `~/.cache` or `~/.local`: the tool's own folder in it); and
+  a path with `( ) [ ] { } * ?` or a backslash or an invisible character (a
+  space other than the plain one too) in a name, which the sandbox may read as
+  a pattern or you as another name. The home folder is the account's, whatever
+  `HOME` says. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in

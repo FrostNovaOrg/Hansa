@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import HOME_SECRETS, Desk, claude_home, is_git_rule, now, read_json, write_json, write_problems
+from .desk import HOME_SECRETS, Desk, account_home, claude_home, program_candidates, is_git_rule, now, read_json, write_json, write_problems
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -292,8 +292,7 @@ LATE_NOTE = "\n\n(Written after that, when a background notice came in:)\n\n"
 
 
 def claude_bin() -> str:
-    for c in (os.environ.get("HANSA_CLAUDE"), shutil.which("claude"),
-              os.path.expanduser("~/.local/bin/claude")):
+    for c in program_candidates("claude"):
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
@@ -399,7 +398,7 @@ def srt_problem(desk: Desk, s: dict) -> str:
 
 
 def tmux_bin() -> str:
-    for c in (os.environ.get("HANSA_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+    for c in program_candidates("tmux"):
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("tmux was not found; a design session runs in tmux so the principal can join it")
@@ -899,7 +898,7 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     credential files, "denyWrite": git's data, "allowWrite": the lane's write list}). Each adds the
     worktree and a temporary folder to what may be written."""
     make_git_write_deny(wt)  # before anything starts in the sandbox
-    home = Path.home()
+    home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
     deny = full_paths([desk.secrets_dir, desk.state_dir, config_home(desk, pname, p),
                        *(home / f for f in HOME_SECRETS)])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
