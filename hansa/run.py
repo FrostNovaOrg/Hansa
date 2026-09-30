@@ -279,6 +279,7 @@ UPDATE_CLEAN_NOTE = """
 Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
 work; it merged without conflicts.
 """
+COMMAND_SHOWN = 600  # of a lane's setup or check command in a worker's instructions; a longer one is cut
 DESIGN_NOTE = "(A design session: the principal shaped this directly with it. Its last message:)\n\n"
 # The principal is in the session, so it commits each step itself and brings in the base.
 DESIGN_ALLOW = ["Bash(git add:*)", "Bash(git commit:*)", "Bash(git merge:*)"]
@@ -1607,6 +1608,36 @@ def browser_for(desk: Desk, tid: str, command: str):
     return cfg, ["mcp__browser", rule("Read", d)]
 
 
+def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "") -> str:
+    """What hansa runs around a task or verification worker, for its instructions: the lane's setup and
+    check as hansa runs them (the lane's env is set for the worker's commands too), keys hidden. A verifier
+    is told how the task's own run of the check ended only on the task's own lane, named by lane_name."""
+    def shown(command: str) -> str:
+        text = desk.redact(command)  # hidden before it is cut, so no part of a key is left
+        if len(text) > COMMAND_SHOWN:
+            return f"`{text[:COMMAND_SHOWN]}` (cut: the command is {len(text)} characters long)"
+        return f"`{text}`"
+    out = []
+    if lane.get("setup"):
+        out.append(f"- Before you started, hansa ran the lane's setup in this worktree: {shown(lane['setup'])}")
+    if not lane.get("check"):
+        out.append("- This lane has no check command: hansa runs nothing here after you end.")
+    elif meta.get("kind") == "verify":
+        parent = read_json(desk.tasks_dir / meta.get("parent", "-") / "meta.json") or {}
+        ran = parent.get("check") or {}
+        if parent.get("lane") != lane_name or ran.get("command") != lane["check"]:
+            ran = {}  # another lane's run (its env, its sandbox), or an older check: not this command's result
+        went = (" hansa could not run it for the task itself." if ran.get("could_not_run") else
+                f" The task's own run of it {'passed' if ran['ok'] else 'failed'}."
+                if ran.get("ok") in (True, False) else "")
+        out.append("- hansa judges a task here by the lane's check, run in its worktree in this sandbox: "
+                   f"{shown(lane['check'])}{went} You may run the same command yourself.")
+    else:
+        out.append("- After you end, hansa runs the lane's check here, in the same sandbox, and judges the "
+                   f"task by it: {shown(lane['check'])}")
+    return "".join(x + "\n" for x in out)
+
+
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
     cancelled while hansa prepared it."""
@@ -1624,6 +1655,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp))
+    system += around_note(desk, lane, meta, lane_name)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record

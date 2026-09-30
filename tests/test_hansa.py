@@ -4836,6 +4836,78 @@ class DeskTest(unittest.TestCase):
     def allowed_by(argv):
         return argv[argv.index("--allowedTools") + 1:]
 
+    def test_workers_and_verifiers_are_told_the_lanes_setup_and_check_as_hansa_runs_them(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        setup, check = f"echo installing --token {key}", "test -f hello.txt && echo 'tests  pass'"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(env={"FAKE_SHOW_ARGV": str(seen)}, setup=setup, check=check)
+        self.assertEqual(self.desk.save_settings(s), [])
+
+        def prompts(verdict=None):
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual((m["state"], m["check"]["command"]), ("done", self.desk.settings()["lanes"]["a"]["check"]), m)
+            if verdict is not None:
+                self.desk.change(tid, lambda m: {"check": {**m["check"], "ok": verdict}})
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "verify", tid])
+            self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+            return [a[a.index("--append-system-prompt") + 1] for a in map(json.loads, seen.read_text().splitlines()[-2:])]
+        task, verify = prompts()
+        hidden = "`echo installing --token [key of registry]`"
+        for prompt in (task, verify):
+            self.assertIn(f"hansa ran the lane's setup in this worktree: {hidden}", prompt)
+            self.assertIn(f"`{check}`", prompt)  # as run, its two spaces too
+            self.assertNotIn(key, prompt)
+        self.assertIn(f"After you end, hansa runs the lane's check here, in the same sandbox, and judges the task by it: `{check}`", task)
+        self.assertIn("checking another worker's finished task", verify)
+        self.assertIn(f"`{check}` The task's own run of it passed. You may run the same command yourself.", verify)
+        self.assertNotIn("After you end, hansa runs", verify)  # a verification is never checked
+        self.assertIn("The task's own run of it failed.", prompts(verdict=False)[1])
+
+        lane = {"check": "make test"}  # a check of another lane, or one changed since: hansa does not know how it went
+        other = self.desk.new_task("Done elsewhere")
+        verify = {"kind": "verify", "parent": other}
+        self.desk.update(other, lane="a", check={"command": "make other", "ok": True})
+        note = run.around_note(self.desk, lane, verify, "a")
+        self.assertIn("`make test` You may run", note)
+        self.desk.update(other, check={"command": "make test", "ok": True})
+        self.assertIn("`make test` The task's own run of it passed.", run.around_note(self.desk, lane, verify, "a"))
+        # the same text on another lane ran under that lane's env and sandbox: no result of it here
+        self.assertIn("`make test` You may run", run.around_note(self.desk, lane, verify, "b"))
+        self.assertNotIn("own run", run.around_note(self.desk, lane, {"kind": "verify", "parent": "t9999"}, "a"))
+        self.assertNotIn("setup", note)
+        # a check that could not run is the machine's problem: the verifier does not read that it failed
+        self.desk.update(other, check={"command": "make test", "ok": None, "could_not_run": True})
+        self.assertIn("`make test` hansa could not run it for the task itself. You may run",
+                      run.around_note(self.desk, lane, verify, "a"))
+        for record in ({"command": "make test"}, {"command": "make test", "ok": None}):  # no result known: none said
+            self.desk.update(other, check=record)
+            self.assertIn("`make test` You may run", run.around_note(self.desk, lane, verify, "a"))
+
+        long = "echo " + "x" * 700 + key  # a very long command is cut, after its keys are hidden
+        note = run.around_note(self.desk, {"check": long}, {})
+        self.assertIn(f"{'x' * (run.COMMAND_SHOWN - 5)}` (cut: the command is ", note)
+        self.assertLess(len(note), run.COMMAND_SHOWN + 200)
+        self.assertEqual(run.around_note(self.desk, {"check": "echo " + "x" * 594 + key}, {}).count(key[:6]), 0)
+
+        s = self.desk.settings()  # a lane without a check says so, in one line
+        s["lanes"]["a"].update(setup="", check="")
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt again")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        for a in map(json.loads, seen.read_text().splitlines()[-2:]):
+            prompt = a[a.index("--append-system-prompt") + 1]
+            self.assertIn("- This lane has no check command: hansa runs nothing here after you end.\n", prompt)
+            self.assertNotIn("lane's setup", prompt)
+
     def test_workers_may_run_any_command_in_the_sandbox_and_design_sessions_may_not(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
