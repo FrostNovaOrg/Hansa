@@ -102,7 +102,15 @@ page gives.
   report, inside Claude Code's sandbox, which the operating system enforces: any
   command, but files changed only in the worktree (and its temporary folder and
   the lane's write list, `hansa lane set L write ...`), no
-  reading of the desk's keys or of common credential files, no network but the
+  reading of the desk's keys and state, of any provider's Claude Code folder or
+  `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
+  shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
+  macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
+  AI tools, cloud tools, git and registry credentials, password stores and
+  keyrings, the keychains, cookies, mail and messages under `~/Library`), or of
+  the folders and files the principal lists on the page (Settings, "workers may
+  not read": this machine's own folders of keys; Read is denied there to every
+  Claude Code run hansa starts, the coordinator too), no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
   own branch, and merges only what the coordinator merges. The lane's setup,

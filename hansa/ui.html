@@ -86,6 +86,8 @@ const T = ZH ? {
   prices:"价目（美元／每百万 token）", in:"输入", out:"输出", cacheRead:"读缓存", cacheWrite:"写缓存", cacheWrite1h:"写缓存（1 小时）",
   addPrice:"加一个模型", pricesNote:"缓存价空着就按常见倍数算；第三方模型请填全。",
   coordinatorReadSkipped:"列表里这些现在不会给协调席（启动时跳过；请改掉或删掉）",
+  workersMayNotRead:"工作者不能读的文件夹和文件（每行一个完整路径；比如这台机器自己放密钥的文件夹。工作者、验证者、准备命令和检查命令的沙箱都读不到；hansa 启动的每个 Claude Code（协调席和设计会话也算）的 Read 工具也被拒绝。登录信息、密钥、浏览器数据等常见位置 hansa 已内置，不用再列）",
+  workersMayNotReadSkipped:"列表里这些现在没有生效（任务启动时跳过；请改掉或删掉）",
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
   last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
@@ -134,6 +136,8 @@ const T = ZH ? {
   prices:"Prices (USD per million tokens)", in:"Input", out:"Output", cacheRead:"Cache read", cacheWrite:"Cache write", cacheWrite1h:"Cache write (1h)",
   addPrice:"Add model", pricesNote:"Blank cache prices use the usual multiples; fill them in for third-party models.",
   coordinatorReadSkipped:"Listed but not given to the coordinator now (skipped at its start; change or remove them)",
+  workersMayNotRead:"Folders and files workers may not read (one full path per line; this machine's own folders of keys, say. The sandbox of every worker, verifier, setup and check refuses to read them, and so does the Read tool of every Claude Code run hansa starts, the coordinator and design sessions too. Common logins, keys and browsers' data are built in and need no entry)",
+  workersMayNotReadSkipped:"Listed but not applied now (left out when a run starts; change or remove them)",
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
   last24h:"Last 24 h", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
   days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
@@ -272,10 +276,10 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [];
+let S = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [];
 async function loadSettings(problems) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed&n=20")]);
-  S = r.settings; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || [];
+  S = r.settings; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || [];
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
@@ -355,7 +359,10 @@ function renderSettings(problems) {
       T.browserCmd, bind(S, "browser"),
       T.coordinatorRead, h("textarea", {placeholder:"/opt/include", oninput: e => {
         S.coordinator_read = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.coordinator_read || []).join("\n")),
-      ...(READ_SKIPPED.length ? [T.coordinatorReadSkipped, h("ul", {}, READ_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))),
+      ...(READ_SKIPPED.length ? [T.coordinatorReadSkipped, h("ul", {}, READ_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []),
+      T.workersMayNotRead, h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput: e => {
+        S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.workers_may_not_read || []).join("\n")),
+      ...(DENY_SKIPPED.length ? [T.workersMayNotReadSkipped, h("ul", {}, DENY_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))),
     section(T.prices, h("p", {class:"muted"}, T.pricesNote),
       table([T.model, T.in, T.out, T.cacheRead, T.cacheWrite, T.cacheWrite1h, ""], Object.entries(S.prices).map(([m, p]) =>
         [m, bind(p, "in", "number"), bind(p, "out", "number"), bind(p, "cache_read", "number"), bind(p, "cache_write", "number"),

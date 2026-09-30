@@ -16,7 +16,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import cost, views
-from .desk import Desk, public_settings, read_json, read_split
+from .desk import Desk, deny_split, public_settings, read_json, read_split
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
@@ -62,8 +62,16 @@ def _save_settings(desk: Desk, body: dict) -> dict:
         if isinstance(new, dict):
             on_disk = desk.settings()
             new = {**new, **{k: on_disk[k] for k in NOT_FROM_PAGE if k in on_disk}}
-            if new.get("coordinator_read", []) != on_disk.get("coordinator_read"):  # each must be there now
-                gone = read_split(new.get("coordinator_read", []), desk.root, new.get("providers"))[1]
+            kept, changed = [], new.get("workers_may_not_read", []) != on_disk.get("workers_may_not_read")
+            if isinstance(new.get("workers_may_not_read", []), list):
+                kept, bad = deny_split(new.get("workers_may_not_read", []), desk.root, new.get("lanes"))
+                if bad and changed:  # each must hold now; one that went bad later does not keep the rest from saving
+                    return {"ok": False, "problems": bad}
+            # each must be there now; and none may open what the list above, when it changed, closes
+            if changed or new.get("coordinator_read", []) != on_disk.get("coordinator_read"):
+                gone = read_split(new.get("coordinator_read", []), desk.root, new.get("providers"), denied=kept)[1]
+                if new.get("coordinator_read", []) == on_disk.get("coordinator_read"):  # only what the new list closes
+                    gone = [g for g in gone if "what workers may not read" in g]
                 if gone:
                     return {"ok": False, "problems": gone}
         problems = desk.save_settings(new, by="page", rev=body.get("rev"))
