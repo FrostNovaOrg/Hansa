@@ -42,11 +42,67 @@ MAX_READ = 20
 # Characters a folder the coordinator is let read may not have in its path: it goes into a permission rule,
 # Edit(//path/**), where these mean something else
 RULE_BREAKERS = "()[]{}*?"
-# Files under the home folder of the user hansa runs as that no worker command may read: logins and
-# keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
-# are added per run (run.sandbox_settings); no lane's write list may reach any of them.
-HOME_SECRETS = (".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc",
-                ".pypirc")
+MAX_DENY = 50
+# Files and folders under the home folder of the user hansa runs as that no worker command may read: logins,
+# keys and tokens for other services, browsing data and messages. Nothing a build or test tool needs to read
+# (not .gitconfig, .m2, .gradle, .cargo/config.toml, .npm); a name that does not exist costs nothing. The
+# desk's own secrets/ and .hansa/, every provider's Claude Code folder, ~/.claude and the principal's own list
+# (workers_may_not_read) are added per run (run.lane_sandbox); no lane's write list and no folder the
+# coordinator is let read may reach any of them. For every system:
+HOME_SECRETS = (
+    ".ssh", ".aws", ".config/gh", ".claude.json", ".netrc", ".gnupg", ".docker", ".kube", ".npmrc", ".pypirc",
+    # Teleport
+    ".tsh", ".tbot",
+    # other AI tools
+    ".codex", ".gemini", ".cursor", ".grok", ".qwen", ".continue", ".codeium", ".windsurf", ".aider",
+    ".config/github-copilot", ".config/opencode", ".local/share/opencode", ".config/goose", ".config/openai",
+    ".openai", ".anthropic", ".cache/huggingface/token", ".huggingface/token", ".kaggle", ".config/kaggle",
+    # cloud and hosting tools
+    ".config/gcloud", ".azure", ".oci", ".config/doctl", ".config/hcloud", ".config/scw", ".config/linode-cli",
+    ".aliyun", ".tccli", ".bluemix", ".fly", ".config/flyctl", ".config/netlify", ".config/vercel",
+    ".local/share/com.vercel.cli", ".wrangler", ".config/.wrangler", ".config/heroku", ".railway", ".config/stripe",
+    ".config/configstore/firebase-tools.json", ".s3cfg", ".boto", ".config/rclone", ".databrickscfg",
+    ".config/snowflake", ".snowsql", ".pulumi/credentials.json", ".terraform.d", ".terraformrc", ".vault-token",
+    ".config/sops", ".config/age", ".ngrok2", ".config/ngrok", ".sentryclirc", ".config/helm/registry",
+    ".config/containers/auth.json", ".config/tailscale", ".puppetlabs/token", ".chef",
+    # git and registry credentials
+    ".git-credentials", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml",
+    ".gem/credentials", ".config/hub", ".config/glab-cli", ".config/tea", ".composer/auth.json",
+    ".config/composer/auth.json", ".pub-cache/credentials.json", ".config/dart/pub-credentials.json",
+    ".sbt/.credentials", ".ivy2/.credentials", ".config/pypoetry/auth.toml", ".subversion/auth",
+    # databases' saved passwords
+    ".pgpass", ".my.cnf", ".mylogin.cnf",
+    # password stores and keyrings
+    ".password-store", ".local/share/keyrings", ".gnome2/keyrings", ".local/share/kwalletd", ".config/op",
+    ".config/1Password", ".config/Bitwarden", ".config/Bitwarden CLI", ".config/rbw", ".local/share/rbw",
+    ".local/share/gopass", ".config/keepassxc", ".config/keybase", ".local/share/keybase",
+    # browsers' profiles, mail and messages (Linux)
+    ".mozilla", ".config/google-chrome", ".config/google-chrome-beta", ".config/chromium", ".config/BraveSoftware",
+    ".config/microsoft-edge", ".config/vivaldi", ".config/opera", ".librewolf", ".zen", "snap/firefox",
+    "snap/chromium", ".thunderbird", ".config/Claude", ".config/Slack", ".config/discord", ".config/Signal",
+    ".local/share/TelegramDesktop", ".config/filezilla",
+    # shell and REPL histories
+    ".bash_history", ".zsh_history", ".zhistory", ".histfile", ".sh_history", ".zsh_sessions", ".bash_sessions",
+    ".local/share/fish/fish_history", ".local/share/atuin", ".python_history", ".psql_history", ".mysql_history",
+    ".sqlite_history", ".node_repl_history", ".irb_history", ".pry_history", ".rediscli_history", ".dbshell",
+    ".mongodb", ".scala_history", ".Rhistory", ".lesshst")
+# For macOS only: the keychains, cookies, the Claude desktop app's data, browsers' profiles, messages and mail
+MAC_SECRETS = (
+    "Library/Keychains", "Library/Cookies", "Library/HTTPStorages", "Library/Accounts",
+    "Library/Application Support/com.apple.TCC", "Library/Application Support/Claude",
+    "Library/Application Support/Google/Chrome", "Library/Application Support/Google/Chrome Beta",
+    "Library/Application Support/Google/Chrome Canary", "Library/Application Support/Chromium",
+    "Library/Application Support/BraveSoftware", "Library/Application Support/Microsoft Edge",
+    "Library/Application Support/Arc", "Library/Application Support/Firefox", "Library/Application Support/Vivaldi",
+    "Library/Application Support/com.operasoftware.Opera", "Library/Application Support/zen",
+    "Library/Safari", "Library/Containers/com.apple.Safari", "Library/Messages", "Library/Mail",
+    "Library/Containers/com.apple.mail", "Library/Group Containers/group.com.apple.notes", "Library/Thunderbird",
+    "Library/Application Support/Slack", "Library/Application Support/discord", "Library/Application Support/Signal",
+    "Library/Application Support/Telegram Desktop", "Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
+    "Library/Application Support/1Password", "Library/Group Containers/2BUA8C4S2C.com.1password",
+    "Library/Application Support/Bitwarden", "Library/Application Support/Bitwarden CLI",
+    "Library/Application Support/Keybase", "Library/Application Support/rclone",
+    "Library/Application Support/com.vercel.cli", "Library/Application Support/pypoetry/auth.toml")
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
@@ -56,6 +112,11 @@ MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
 # allowed commands matter only to its design sessions, which run outside the sandbox: workers run
 # any command inside their sandbox and need none. A lane lists only its own, such as its tests.
 DEFAULT_ALLOW: list = []
+
+
+def home_secrets() -> tuple:
+    """The built-in names, under the home folder, of what no worker may read on this system."""
+    return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
 
 
 def default_settings() -> dict:
@@ -77,6 +138,10 @@ def default_settings() -> dict:
         # Folders outside the desk the coordinator (and the helpers in its session) may read without
         # asking, as it reads the lanes' repositories: full paths. The principal's, on the page.
         "coordinator_read": [],
+        # Folders and files no worker, verifier, setup or check may read, besides what hansa always keeps from
+        # them (desk.HOME_SECRETS and the like): full paths, a machine's own folders of keys, say. Read is
+        # denied there to every Claude Code run hansa starts, the coordinator too. The principal's, on the page.
+        "workers_may_not_read": [],
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -123,7 +188,7 @@ def validate(s: dict, root=None) -> list:
     if not isinstance(s, dict):
         return ["settings must be an object"]
     known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser", "coordinator_read"}
+             "browser", "coordinator_read", "workers_may_not_read"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     # which of them may be read is looked at when the page saves a changed list, and when the coordinator
     # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
@@ -131,6 +196,13 @@ def validate(s: dict, root=None) -> list:
     given = s.get("coordinator_read", [])
     if not isinstance(given, list) or len(given) > MAX_READ or not all(isinstance(x, str) for x in given):
         p.append(f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line")
+    # as the read list: which of them hold is looked at when the page saves a changed list, and when a run starts
+    # (deny_split), where one that no longer passes is left out and said in the task
+    kept = s.get("workers_may_not_read", [])
+    if not isinstance(kept, list) or len(kept) > MAX_DENY or not all(isinstance(x, str) for x in kept):
+        p.append(DENY_LIST_WHY)
+        kept = []
+    kept = deny_split(kept, root)[0]  # whatever the lanes: a lane's repository gives way to the list, below
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -199,7 +271,11 @@ def validate(s: dict, root=None) -> list:
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
                      "*.pypi.org or localhost:3000")
-        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs)]
+        if isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
+            # the coordinator sets a lane's repository: none goes where the principal keeps workers from reading
+            p += [f"{at}: repo cannot be {ln['repo']}: it is {d} or inside it, which the principal keeps workers "
+                  "from reading (the web page, Settings)" for d in kept if _above(d, ln["repo"])][:1]
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept)]
         env = ln.get("env", {})
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -482,9 +558,10 @@ def _has_control(x: str) -> bool:
     return any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in x)
 
 
-def write_problems(paths, repo=None, root=None, providers=None) -> list:
+def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> list:
     """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
-    None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it."""
+    None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it. denied: what
+    the principal keeps workers from reading (deny_split's good ones)."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
@@ -507,7 +584,8 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
     mine = os.path.join(home, ".claude")  # whichever folder the providers use: its settings and hooks
     fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key "
-                                                  "that workers may not read") for f in HOME_SECRETS]
+                                                  "that workers may not read") for f in home_secrets()]
+    fenced += [(d, _overlaps, f"it would open {d}, which the principal keeps workers from reading") for d in denied]
     fenced += _top_fence()
     fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
                for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
@@ -530,11 +608,12 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
     return p
 
 
-def read_split(paths, root=None, providers=None, own=()) -> tuple:
+def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
     """The folders the principal lets the coordinator read without asking: (those it may be given, what is
     wrong with the others, one line each). None may open what hansa keeps from it: the home folder as a
     whole, the desk (its keys and state), a Claude Code folder (a provider's, and `own`: the one its own
-    session runs from, and ~/.claude always), a login or key. Each is compared as the disk sees it (_above)."""
+    session runs from, and ~/.claude always), a login or key, what the principal keeps workers from reading
+    (`denied`: no Claude Code run hansa starts reads it). Each is compared as the disk sees it (_above)."""
     if not isinstance(paths, list) or len(paths) > MAX_READ:
         return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
     home = os.path.expanduser("~")
@@ -553,7 +632,8 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
     mine = os.path.join(home, ".claude")  # whichever folder the providers and the session use
     fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key")
-               for f in HOME_SECRETS]
+               for f in home_secrets()]
+    fenced += [(d, _overlaps, f"it would open {d}, which is on the list of what workers may not read") for d in denied]
     fenced += _top_fence()
     good, p, seen = [], [], set()
     for x in paths:
@@ -575,6 +655,57 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
             seen.add(_seen(x))
             good.append(stored(x))  # as the disk spells it: what Claude Code is given, and the Edit denial
     return good, p
+
+
+DENY_LIST_WHY = (f"what workers may not read must be a list of up to {MAX_DENY} full paths, one per line")
+DENY_AT = "workers cannot be kept from reading "
+
+
+def deny_split(paths, root=None, lanes=None) -> tuple:
+    """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
+    wrong with the others, one line each). None may close what a worker needs in order to run: the home folder
+    or a folder above it, the desk or above it, a lane's repository or above it, a folder on the PATH or above
+    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted."""
+    if not isinstance(paths, list) or len(paths) > MAX_DENY:
+        return [], [DENY_LIST_WHY]
+    home = os.path.expanduser("~")
+    fenced = [("/", _above, "it is the whole machine"),
+              (home, _above, f"it is {home}, the home folder of the user hansa runs as, or a folder above it")]
+    if sys.platform == "darwin":
+        fenced.append((DATA, _above, f"it is {DATA}, the volume macOS keeps everything on, or a folder above it"))
+    if root:
+        fenced.append((str(root), _above, f"it is {root}, the desk, or a folder above it"))
+    for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
+        if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
+            fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
+    fenced += [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers could "
+                           "not run their tools") for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    good, p, seen = [], [], set()
+    for x in paths:
+        if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
+            p.append(f"{DENY_AT}{x if isinstance(x, str) and not _has_control(x) else json.dumps(x)}: it must be a "
+                     "full path starting with /, such as /Users/me/.config/myproject/keys, with no line break or "
+                     "other control character")
+            continue
+        if _has_format(x):
+            p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
+            continue
+        why = next((why for f, hit, why in fenced if hit(x, f)), "")
+        if not why and any(c in v for v in _forms(x) for c in RULE_BREAKERS):
+            why = (f"a name in it (or where its link leads) has one of {RULE_BREAKERS}, which the sandbox and a "
+                   "permission rule may read as a pattern")
+        if why:
+            p.append(f"{DENY_AT}{x}: {why}")
+        elif _seen(x) not in seen:  # one path once, however it is spelled
+            seen.add(_seen(x))
+            good.append(stored(x))
+    return good, p
+
+
+def kept_from_workers(s: dict, root=None) -> tuple:
+    """deny_split for a desk's settings: (what the principal keeps workers from reading, a line for each entry
+    of the list that is not applied)."""
+    return deny_split(s.get("workers_may_not_read", []), root, s.get("lanes"))
 
 
 def is_git_rule(rule: str) -> bool:
@@ -903,5 +1034,8 @@ def public_settings(desk: Desk) -> dict:
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
     # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
-    skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"])[1]
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped}
+    kept, not_kept = kept_from_workers(s, desk.root)
+    skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)[1]
+    # saved entries of what workers may not read that no run applies now (a lane's repository under one, say)
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped,
+            "deny_skipped": not_kept}

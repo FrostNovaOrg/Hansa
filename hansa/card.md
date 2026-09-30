@@ -80,7 +80,13 @@ it a worker may run any command, but it changes files only in its worktree, its
 own temporary folder (made for each run and removed when it ends) and the lane's
 write list (an entry that no longer passes hansa's checks when the run starts is
 left out, and `hansa show` says so); it cannot read the desk's keys and
-state or common credential files (`.ssh`, `.aws`, `.netrc` and the like), reaches
+state, any provider's Claude Code folder or `~/.claude`, the logins, keys,
+tokens, browsers' profiles, messages and shell histories hansa knows under the
+home folder (`.ssh`, `.aws`, `.netrc`, `.tsh`, other AI tools' folders, cloud
+tools' and registries' credentials, password stores and the like; on macOS the
+keychains, cookies, mail and apps' data of that kind under `~/Library` too), or
+what the principal lists on the web page as not for workers to read
+(`hansa explain lane L` lists it all); it reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
 worker and its check after it, both in the lane's sandbox too (run by `srt`,
@@ -314,7 +320,9 @@ here; work that needs code changed or a browser goes to a worker.
   add that tool's own folder, never the whole home folder. hansa refuses a path
   that would open what the sandbox keeps closed or what hansa runs: the home
   folder or above it, the desk, the lane's repository, a provider's Claude Code
-  folder and `~/.claude`, credential files such as `~/.ssh`, folders on the
+  folder and `~/.claude`, a login, key or history workers may not read such as
+  `~/.ssh` or `~/.cargo/credentials` (so list `~/.cargo/registry`, not
+  `~/.cargo`), what the principal keeps workers from reading, folders on the
   `PATH` or above them, a hidden folder at the top (`/.x`), `/System`, `/dev`,
   `/proc` and `/sys`, and on macOS `/Volumes`, `/Library/Keychains` and
   `~/Library` (but not `~/Library/Caches`); and a path with `( ) [ ] { } *` or
@@ -322,7 +330,11 @@ here; work that needs code changed or a browser goes to a worker.
   pattern or you as another name. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
-  cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in
+  cost audit, the folders you read without asking, and the folders and files
+  workers may not read (no worker, verifier, setup or check reads them, and
+  Read is denied there to you and to design sessions too; no lane's repository
+  or write list may be one, inside one or above one).
+  Ask with `hansa ask`; do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.
 
 ## Facts you can rely on

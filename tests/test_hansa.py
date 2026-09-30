@@ -5792,6 +5792,228 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"write list: left out of this run: {self.tmp / 'star*'}: a name in it", shown)
         self.assertEqual([e["task"] for e in self.events("write_left_out")], [tid, tid])
 
+    def test_a_worker_on_a_key_provider_cannot_read_another_providers_claude_code_folder(self):
+        seen, cc = self.tmp / "argv.jsonl", self.tmp / "logins" / "cc"
+        cc.mkdir(parents=True)
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(cc)  # the subscription's login and session records
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"].update(providers=["mimo"], setup="true", check="true", env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-other-company-01")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["provider"]), ("done", "mimo"), m)
+        worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]["denyRead"]
+        setup, check = [c["settings"]["filesystem"]["denyRead"] for c in self.srt_calls()]
+        for deny in (worker, setup, check):
+            self.assertIn(str(cc), deny)  # not the provider this run uses
+            self.assertIn(str(Path.home() / ".claude"), deny)  # the machine owner's, whatever the providers use
+            self.assertIn(str(self.desk.state_dir / "claude-mimo"), deny)  # its own, as before
+
+    def test_more_logins_and_keys_are_kept_from_workers_and_the_macos_ones_only_on_macos(self):
+        from hansa import run
+        from hansa.desk import read_split
+        home, p = Path.home(), self.desk.settings()["providers"]["claude"]
+        everywhere = (".ssh", ".tsh", ".tbot", ".codex", ".gemini", ".cursor", ".grok", ".config/gcloud", ".azure", ".oci",
+                      ".git-credentials", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml",
+                      ".gem/credentials", ".config/hub", ".config/glab-cli", ".terraform.d", ".vault-token",
+                      ".password-store", ".local/share/keyrings", ".config/op", ".mozilla", ".config/google-chrome",
+                      ".config/chromium", ".bash_history", ".zsh_history", ".python_history", ".psql_history")
+        mac = ("Library/Keychains", "Library/Cookies", "Library/Application Support/Claude",
+               "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
+               "Library/Application Support/BraveSoftware", "Library/Application Support/Microsoft Edge",
+               "Library/Application Support/Arc", "Library/Application Support/Firefox", "Library/Safari",
+               "Library/Messages", "Library/Mail")
+        for system in ("linux", "darwin"):
+            with unittest.mock.patch.object(sys, "platform", system):
+                lane = self.desk.settings()["lanes"]["a"]
+                deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
+                srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            for f in everywhere:
+                self.assertIn(str(home / f), deny, (system, f))
+            for f in mac:
+                (self.assertIn if system == "darwin" else self.assertNotIn)(str(home / f), deny, (system, f))
+            # nothing a build or test tool reads
+            for f in (".gitconfig", ".m2", ".gradle", ".cargo", ".cargo/config.toml", ".npm", ".cache", ".config", "Library"):
+                self.assertNotIn(str(home / f), deny, (system, f))
+        # the write list and the coordinator's read list refuse the new names, as they did the old
+        for f in (".tsh", ".cargo/credentials.toml", ".cargo", ".config/gcloud/x"):
+            self.assertIn("a login or key that workers may not read", write_problems([str(home / f)])[0], f)
+            self.assertIn("a login or key", read_split([str(home / f)])[1][0], f)
+        self.assertEqual(write_problems([str(home / ".cargo" / "registry"), str(home / ".m2")]), [])
+        # the coordinator's Read tool is denied them too, but no Claude Code folder: its memory lives in one
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
+        for f in (".ssh", ".tsh", ".config/gcloud"):
+            self.assertIn(f"Read(//{str(home / f).lstrip('/')}/**)", denied)
+        self.assertIn(f"Read(//{str(home / '.git-credentials').lstrip('/')})", denied)  # a file, by its own path
+        (self.assertIn if sys.platform == "darwin" else self.assertNotIn)(
+            f"Read(//{str(home / 'Library/Keychains').lstrip('/')}/**)", denied)
+        self.assertNotIn(f"Read(//{str(home / '.claude').lstrip('/')}/**)", denied)
+        told = self.hansa("explain", "lane", "a")
+        self.assertIn("may not read", told)
+        self.assertIn("~/.tsh", told)
+
+    def test_what_the_principal_keeps_from_workers_reaches_every_sandbox_and_every_read_tool(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        keys, token = (self.tmp / "my project" / "keys").resolve(), self.tmp.resolve() / "token.txt"  # one not there yet
+        keys.mkdir(parents=True)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+        told = self.page_save(lambda s: s.update(workers_may_not_read=[str(keys), str(token), str(keys) + "/"]))
+        self.assertEqual(told, {"ok": True, "problems": []})
+        shown = public_settings(self.desk)
+        self.assertEqual(shown["settings"]["workers_may_not_read"], [str(keys), str(token), str(keys) + "/"])
+        self.assertEqual(shown["deny_skipped"], [])
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("S.workers_may_not_read", "T.workersMayNotRead", "DENY_SKIPPED = r.deny_skipped"):
+            self.assertIn(x, ui)
+        self.assertEqual(ui.count("workersMayNotRead:"), 2)  # said in both languages
+        rules = [f"Read(//{str(keys).lstrip('/')})", f"Read(//{str(keys).lstrip('/')}/**)",
+                 f"Read(//{str(token).lstrip('/')})", f"Read(//{str(token).lstrip('/')}/**)"]
+        # the coordinator cannot set it, and its own changes leave it as the principal set it
+        self.hansa("lane", "set", "a", "setup", "true")
+        self.hansa("lane", "set", "a", "check", "true")
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual(len(self.desk.settings()["workers_may_not_read"]), 3)
+        # a worker and a verifier: the sandbox of their commands, and their Read tool
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["no_read_left_out"], [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        task, verify = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
+        self.assertIn("checking another worker's finished task", verify[verify.index("--append-system-prompt") + 1])
+        for argv in (task, verify):
+            deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
+            self.assertEqual((deny.count(str(keys)), deny.count(str(token))), (1, 1))
+            for r in rules:
+                self.assertIn(r, self.denied_by(argv))
+        # the setup and the check of each (srt's settings)
+        calls = self.srt_calls()
+        self.assertEqual(len(calls), 3)  # the task's setup and check, the verification's setup
+        for c in calls:
+            self.assertIn(str(keys), c["settings"]["filesystem"]["denyRead"])
+            self.assertIn(str(token), c["settings"]["filesystem"]["denyRead"])
+        # a design session
+        self.desk.update(tid, lane="a", provider="claude", session_id="sid-d", model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        design = argv[argv.index("--disallowedTools") + 1:argv.index("--allowedTools")]
+        box = json.loads(Path(argv[argv.index("hansa-setup") + 7]).read_text())  # its setup's sandbox (srt's settings)
+        self.assertIn(str(keys), box["filesystem"]["denyRead"])
+        for r in rules:
+            self.assertIn(r, design)
+        # the coordinator
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for x in rules:
+            self.assertIn(x, r.stdout.split("--disallowedTools")[1].split("--model")[0])
+        # where the coordinator looks
+        told = self.hansa("explain", "lane", "a")
+        self.assertIn(f"folders and files the principal keeps from workers", told)
+        self.assertIn(f"{keys}, {token}", told)
+        self.assertIn("you cannot set", told)
+        # no write list, no folder the coordinator reads and no lane's repository is one, inside one or above one
+        for x in (keys, keys / "sub", keys.parent, token):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(x)])
+            self.assertIn("which the principal keeps workers from reading", str(e.exception.code), x)
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("write", []), [])
+        (keys / "sub").mkdir()
+        for x in (keys, keys / "sub", keys.parent):
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(x)]))
+            self.assertFalse(told["ok"], x)
+            self.assertIn("which is on the list of what workers may not read", told["problems"][0])
+        s = self.desk.settings()
+        s["lanes"]["a"]["repo"] = str(keys / "sub")
+        self.assertTrue(any("repo cannot be" in x and "the principal keeps workers from reading" in x
+                            for x in validate(s, self.desk.root)))
+        # settings saved before there was such a list work as before
+        s = self.desk.settings()
+        del s["workers_may_not_read"]
+        write_json(self.desk.settings_path, s)
+        self.assertEqual(validate(json.loads(self.desk.settings_path.read_text()), self.desk.root), [])
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+        tid = self.desk.new_task("Add more.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertNotIn(str(keys), self.sandbox_of(argv)["filesystem"]["denyRead"])
+        self.assertIn(str(self.desk.secrets_dir), self.sandbox_of(argv)["filesystem"]["denyRead"])
+        self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=31))["ok"])
+
+    def test_what_workers_cannot_be_kept_from_reading_is_refused_on_saving_and_left_out_at_start(self):
+        home, tools = Path(os.path.expanduser("~")), self.tmp.resolve() / "tools"
+        (tools / "bin").mkdir(parents=True)
+        seen, good, tmp = self.tmp / "argv.jsonl", self.tmp.resolve() / "keys", self.tmp.resolve()
+        link = self.tmp / "link-to-repo"
+        link.symlink_to(self.repo)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        bad = {"relative/path": "must be a full path", "/": "the whole machine",
+               str(home): "the home folder", str(home.parent): "the home folder",
+               str(self.desk.root): "the desk, or a folder above it", str(tmp): "the desk, or a folder above it",
+               str(self.repo.resolve()): "lane a's repository", str(link): "lane a's repository",  # where a link leads
+               str(tools / "bin"): "a folder on the PATH", str(tools): "a folder on the PATH",
+               f"{tmp}/a\nb": "control character", f"{tmp}/be\x07ll": "control character",
+               f"{tmp}/a​b": "invisible or direction-changing", f"{tmp}/star*": "read as a pattern",
+               f"{tmp}/(x)": "read as a pattern"}
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{tools / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[str(good), path]))
+                self.assertFalse(told["ok"], path)
+                self.assertEqual(len(told["problems"]), 1, (path, told))
+                self.assertIn(why, told["problems"][0], path)
+                self.assertIn("workers cannot be kept from reading", told["problems"][0])
+                self.assertEqual(self.desk.settings()["workers_may_not_read"], [])  # nothing was saved
+            self.assertFalse(self.page_save(lambda s: s.update(workers_may_not_read="/opt/keys"))["ok"])
+            self.assertFalse(self.page_save(lambda s: s.update(workers_may_not_read=[["/opt/keys"]]))["ok"])
+            self.assertFalse(self.page_save(lambda s: s.update(workers_may_not_read=["/k"] * 51))["ok"])
+            # inside a PATH folder, the desk or the repository, and one that is not there: accepted
+            fine = [str(good), str(tools / "bin" / "sub"), str(self.repo.resolve() / "private"), "/nowhere/at/all"]
+            self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
+            # written into settings.json another way: a run leaves each out and says so in the task
+            s = self.desk.settings()
+            s["workers_may_not_read"] = [*bad, str(good)]
+            write_json(self.desk.settings_path, s)
+            self.assertEqual(len(public_settings(self.desk)["deny_skipped"]), len(bad))  # the page says which
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "done", m)
+            argv = json.loads(seen.read_text().splitlines()[-1])
+            deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
+            self.assertIn(str(good), deny)
+            self.assertFalse(set(bad) & set(deny), deny)
+            self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
+                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir)])
+            self.assertEqual(len(m["no_read_left_out"]), len(bad))
+            shown = views.show_text(self.desk, tid)
+            for path, why in bad.items():
+                lines = [x for x in shown.splitlines() if why in x and x.startswith(tuple(
+                    f"what workers may not read: left out of this run: {p}: " for p in (path, json.dumps(path))))]
+                self.assertEqual(len(lines), 1, (path, shown))
+            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(bad))
+            told = self.hansa("explain", "lane", "a")
+            self.assertIn(f"not applied: {home}: it is {home}, the home folder", told)
+            # the coordinator's start leaves them out too, and says so
+            r = self.echo_coordinator()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
+            self.assertIn(f"Read(//{str(good).lstrip('/')}/**)", denied)
+            self.assertNotIn(f"Read(//{str(home).lstrip('/')}/**)", denied)
+            self.assertNotIn("Read(///**)", denied)
+            self.assertIn(f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it; skipped",
+                          r.stderr)
+            self.assertEqual(len(self.events("no_read_skipped")), len(bad))
+
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change
         self.assertEqual(self.events("lane_write_changed"), [])
