@@ -4388,6 +4388,91 @@ class DeskTest(unittest.TestCase):
             s["lanes"]["a"]["write"] = [data + str(home / ".m2"), data + str(good)]
             self.assertEqual(validate(s, self.desk.root), [])
 
+    def test_a_path_with_slashes_doubled_at_its_start_is_answered_like_the_path_it_is(self):
+        good = (self.tmp / "opt").resolve()
+        good.mkdir()
+        two, three = "/" + str(good), "//" + str(good)
+        code = ("import sys, json; from hansa.desk import read_split, write_problems; "
+                "print(json.dumps([[read_split([x]), write_problems([x])] for x in sys.argv[1:]]))")
+        r = subprocess.run([sys.executable, "-c", code, "//", "//opt", "///opt", two, three],
+                           cwd=Path(__file__).resolve().parent.parent,
+                           capture_output=True, text=True, timeout=60)  # each ends: none walks upward for ever
+        self.assertEqual(r.returncode, 0, r.stderr)
+        top, *_, (read2, write2), (read3, write3) = json.loads(r.stdout)
+        self.assertIn("it is the whole machine", top[0][1][0])
+        self.assertIn("the home folder", top[1][0])
+        self.assertEqual((read2, write2, read3, write3), ([[str(good)], []], [], [[str(good)], []], []))
+        told = self.page_save(lambda s: s.update(coordinator_read=["//", two]))
+        self.assertTrue(not told["ok"] and any("read //: it is the whole machine" in x for x in told["problems"]), told)
+        s = self.desk.settings()
+        s["coordinator_read"] = ["//", "//nowhere", two, three]
+        write_json(self.desk.settings_path, s)
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)  # once, from /
+        self.assertTrue(any("read //: it is the whole machine" in x and "skipped" in x for x in r.stderr.splitlines()),
+                        r.stderr)
+        self.assertIn("not given: //nowhere: there is no such folder", self.hansa("explain"))
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "write", "//", "//x"])
+        self.assertIn("write cannot include //: it would open", str(e.exception.code))
+        self.hansa("lane", "set", "a", "write", two)
+
+    def test_macos_volumes_and_library_open_nothing_in_either_list(self):
+        if sys.platform != "darwin" or not os.path.isdir("/Volumes") or not os.path.isdir("/.vol"):
+            self.skipTest("only macOS has /Volumes, /.vol and ~/Library")
+        home = (self.tmp / "home").resolve()
+        lib = home / "Library"
+        for d in ("Keychains", "Application Support/Claude", "LaunchAgents", "Caches/pip"):
+            (lib / d).mkdir(parents=True)
+        good = (self.tmp / "opt").resolve()
+        good.mkdir()
+        for name, to in (("lv", "/Volumes"), ("lvol", "/.vol"), ("lk", lib / "Keychains"), ("lc", lib / "Caches")):
+            (self.tmp / name).symlink_to(to)
+        (lib / "Caches" / "out").symlink_to(lib / "LaunchAgents")
+        st = good.stat()
+        bad = {"/Volumes": "/Volumes", "/Volumes/": "/Volumes", "/VOLUMES": "/Volumes", str(self.tmp / "lv"): "/Volumes",
+               "/.vol": "/.vol", "/.vol/1/2": "/.vol", f"/.vol/{st.st_dev}/{st.st_ino}": "/.vol",
+               str(self.tmp / "lvol"): "/.vol",
+               str(lib): str(lib), str(home / "LIBRARY"): str(lib), str(lib / "Keychains"): str(lib),
+               str(lib / "Application Support" / "Claude"): str(lib), str(lib / "LaunchAgents"): str(lib),
+               str(lib / "Caches" / ".." / "Keychains"): str(lib), str(self.tmp / "lk"): str(lib),
+               str(lib / "Caches" / "out"): str(lib)}  # a link inside Caches that leads out of it
+        if os.path.isdir("/System/Volumes/Data/Volumes"):
+            bad["/System/Volumes/Data/Volumes"] = "/Volumes"
+            bad["/System/Volumes/Data" + str(lib / "Keychains")] = str(lib)
+        root = next((str(v) for v in Path("/Volumes").iterdir() if v.is_symlink() and os.path.samefile(v, "/")), "")
+        if root and not set(root) & set("()[]{}*?"):
+            bad[root + "/Volumes"] = "/Volumes"
+        fine = [good, lib / "Caches", lib / "Caches" / "pip", self.tmp / "lc"]
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+                self.assertFalse(told["ok"], path)
+                self.assertTrue(any(f"read {path}: it would open {why}" in p for p in told["problems"]), (path, told))
+            self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(x) for x in fine]))["ok"])
+            s = self.desk.settings()
+            for some in (list(bad)[:10], list(bad)[10:]):  # a list holds 20 at most
+                s["coordinator_read"] = [*some, *(str(x) for x in fine)]
+                write_json(self.desk.settings_path, s)
+                r = self.echo_coordinator()
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn(f"--add-dir {self.repo.resolve()} {good} {lib / 'Caches'} {lib / 'Caches' / 'pip'} "
+                              "--disallowedTools", r.stdout)  # the link to Caches is that folder: given once
+                told = self.hansa("explain")
+                for path in some:
+                    self.assertTrue(any(f"read {path}: " in x and "skipped" in x for x in r.stderr.splitlines()),
+                                    (path, r.stderr))
+                    self.assertIn(f"not given: {path}: ", told)
+            s["coordinator_read"] = []
+            for path, why in bad.items():
+                s["lanes"]["a"]["write"] = [path]
+                told = validate(s, self.desk.root)
+                self.assertTrue(len(told) == 1 and f"write cannot include {path}: it would open {why}" in told[0],
+                                (path, told))
+            s["lanes"]["a"]["write"] = [str(x) for x in fine] + ["/Volumes/Build/cache", str(lib / "Caches" / "new" / "x")]
+            self.assertEqual(validate(s, self.desk.root), [])  # another volume, and a tool's cache not yet made
+
     def test_a_read_folder_is_given_to_claude_code_as_the_disk_spells_it(self):
         if not self.ignores_case():
             self.skipTest("this disk tells names apart by case")
@@ -5370,6 +5455,10 @@ class DeskTest(unittest.TestCase):
                 told = refused(x)
                 self.assertTrue(len(told) == 1 and f"write cannot include {x}: " in told[0]
                                 and "may read as a pattern" in told[0], (x, told))
+            for x in (f"{home}/.m2\n/etc", f"{home}/.m2\r", f"{home}/be\x07ll", f"{home}/.m2\u2028"):  # as the read list
+                told = refused(x)
+                self.assertTrue(len(told) == 1 and f"write cannot include {json.dumps(x)}: it has a line break" in told[0],
+                                (x, told))
             s["lanes"]["a"]["write"] = [str(home / ".m2"), str(home / "star*")]  # the good one beside it
             self.assertEqual(len(validate(s, self.desk.root)), 1)
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:

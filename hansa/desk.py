@@ -283,8 +283,10 @@ def _folds(folder: str, st) -> bool:
     dev = st.st_dev
     if dev not in _FOLDS:
         found, at = None, folder
-        while found is None and at != "/":
+        while found is None:
             up, name = os.path.split(at)
+            if up == at:  # the top, however it is spelled
+                break
             try:
                 if os.stat(at).st_dev != dev:
                     break
@@ -309,9 +311,10 @@ def _seen(path: str) -> tuple:
             st = os.stat(path)
             break
         except (OSError, ValueError):
-            if path == "/":
+            up, name = os.path.split(path)
+            if up == path:  # the top, however it is spelled
                 return (0, 0, tuple(reversed(rest)))
-            path, name = os.path.split(path)
+            path = up
             rest.append(name)
     if rest and _folds(path, st):
         rest = [unicodedata.normalize("NFD", n).casefold() for n in rest]
@@ -323,40 +326,75 @@ def _seen(path: str) -> tuple:
 DATA = "/System/Volumes/Data"
 
 
+def _plain(path: str) -> str:
+    """A full path with . and .. and doubled slashes gone: one slash at its start too (normpath keeps two)."""
+    return "/" + os.path.normpath(path).lstrip("/")
+
+
+def _ups(path: str) -> list:
+    """A full path and each folder above it, up to /, as spelled. It ends for any path."""
+    out, at = [], _plain(path)
+    while True:
+        out.append(at)
+        up = os.path.dirname(at)
+        if up == at or len(up) >= len(at):
+            return out
+        at = up
+
+
 def _off_data(path: str) -> str:
     """A full path under macOS's data volume as the path from /; '' for any other."""
-    names, at = [], path
-    while at != "/":
+    path = _plain(path)
+    for at in _ups(path):
         try:
             if os.path.samefile(at, DATA):
-                return "/" + "/".join(reversed(names))
+                return _plain("/" + path[len(at):])
         except (OSError, ValueError):
             pass
-        at, name = os.path.split(at)
-        names.append(name)
     return ""
 
 
 def _forms(path: str) -> set:
     """A full path as given and with links resolved; on macOS, one under the data volume also as the path
     from /."""
-    out = {os.path.normpath(path), os.path.realpath(path)}
+    out = {_plain(path), _plain(os.path.realpath(path))}
     if sys.platform == "darwin":
         out |= {w for w in map(_off_data, out) if w}
     return out
 
 
-def _data_fence() -> list:
-    """On macOS: the data volume and the folders above it hold everything, the home folder too."""
-    return [(DATA, _above, f"it would open {DATA}, the volume macOS keeps everything on, the home folder too")] \
-        if sys.platform == "darwin" else []
+def _in_library(path: str, lib: str) -> bool:
+    """Whether a full path, as given or where its link leads, is ~/Library, above it, or inside it anywhere
+    but in its Caches (where build tools keep theirs)."""
+    fence, caches = _chain(lib), _seen(os.path.join(lib, "Caches"))
+    libs = {_seen(w) for w in _forms(lib)}
+    for v in _forms(path):
+        ups = {_seen(u) for u in _ups(v)}
+        if (_seen(v) in fence or libs & ups) and caches not in ups:
+            return True
+    return False
+
+
+def _mac_fence(home: str) -> list:
+    """On macOS: the data volume and the folders above it hold everything, the home folder too; /Volumes
+    holds a link to / and /.vol reaches any folder by its number; ~/Library holds the keychains, apps' own
+    data and what runs at login."""
+    if sys.platform != "darwin":
+        return []
+    lib = os.path.join(home, "Library")
+    return [(DATA, _above, f"it would open {DATA}, the volume macOS keeps everything on, the home folder too"),
+            ("/Volumes", _above, "it would open /Volumes, which holds every volume, the one with the home folder too "
+                                 "(a folder on another volume, such as /Volumes/Build/cache, can be listed)"),
+            ("/.vol", _overlaps, "it would open /.vol, where macOS reaches any folder by its number, the home folder too"),
+            (lib, _in_library, f"it would open {lib}, which holds the keychains, apps' own data and what runs at "
+                               f"login (only {os.path.join(lib, 'Caches')} and folders inside it can be listed)")]
 
 
 def stored(path: str) -> str:
     """A full path in the spelling the disk stores: each name that exists as its folder lists it (the case
     kept where the disk ignores case). Links are not followed."""
     out = "/"
-    for name in os.path.normpath(path).split("/"):
+    for name in _plain(path).split("/"):
         if not name:
             continue
         try:
@@ -377,14 +415,7 @@ def stored(path: str) -> str:
 
 def _chain(path: str) -> set:
     """A full path and each folder above it, as the disk sees them."""
-    out = set()
-    for v in _forms(path):
-        while True:
-            out.add(_seen(v))
-            if v == os.path.dirname(v):
-                break
-            v = os.path.dirname(v)
-    return out
+    return {_seen(u) for v in _forms(path) for u in _ups(v)}
 
 
 def _above(a: str, b: str) -> bool:
@@ -405,6 +436,11 @@ def claude_home(state_dir, name: str, p: dict) -> Path:
     return Path(state_dir) / f"claude-{name}"
 
 
+def _has_control(x: str) -> bool:
+    """Whether a path has a line break or another control character."""
+    return any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in x)
+
+
 def write_problems(paths, repo=None, root=None, providers=None) -> list:
     """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
     None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it."""
@@ -412,7 +448,7 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
     home = os.path.expanduser("~")
-    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_data_fence()]
+    fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_mac_fence(home)]
     if root:
         fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
     if isinstance(repo, str) and repo.startswith("/"):
@@ -435,6 +471,9 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
                for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     p = []
     for x in paths:
+        if _has_control(x):  # as the read list: a line break would split one entry into two where it is written
+            p.append(f"write cannot include {json.dumps(x)}: it has a line break or another control character")
+            continue
         for f, hit, why in fenced:
             if hit(x, f):  # as the disk sees both: as given and with links resolved, in any case it ignores
                 p.append(f"write cannot include {x}: {why}")
@@ -455,7 +494,7 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
         return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
     home = os.path.expanduser("~")
     fenced = [("/", _above, "it is the whole machine"),
-              (home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_data_fence()]
+              (home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_mac_fence(home)]
     if root:
         fenced.append((str(root), _overlaps, f"it would open {root}, the desk, which holds the keys and hansa's state"))
     for name, pv in (providers if isinstance(providers, dict) else {}).items():
@@ -473,7 +512,7 @@ def read_split(paths, root=None, providers=None, own=()) -> tuple:
     good, p, seen = [], [], set()
     for x in paths:
         at = f"the coordinator cannot be let read {x if isinstance(x, str) else json.dumps(x)}"
-        if not isinstance(x, str) or not x.startswith("/") or "\0" in x or "\n" in x or len(x) > 1000:
+        if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
             p.append(f"{at}: it must be a full path starting with /, such as /opt/include")
             continue
         why = next((why for f, hit, why in fenced if hit(x, f)), "")
