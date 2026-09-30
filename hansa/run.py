@@ -26,8 +26,8 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import (DENY_AT, Desk, claude_home, home_secrets, is_git_rule, kept_from_workers, now, read_json, write_json,
-                   write_problems)
+from .desk import (DENY_AT, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
+                   program_candidates, read_json, write_json, write_problems)
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -293,8 +293,7 @@ LATE_NOTE = "\n\n(Written after that, when a background notice came in:)\n\n"
 
 
 def claude_bin() -> str:
-    for c in (os.environ.get("HANSA_CLAUDE"), shutil.which("claude"),
-              os.path.expanduser("~/.local/bin/claude")):
+    for c in program_candidates("claude"):
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
@@ -400,7 +399,7 @@ def srt_problem(desk: Desk, s: dict) -> str:
 
 
 def tmux_bin() -> str:
-    for c in (os.environ.get("HANSA_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+    for c in program_candidates("tmux"):
         if c and os.access(c, os.X_OK):
             return c
     raise RuntimeError("tmux was not found; a design session runs in tmux so the principal can join it")
@@ -919,7 +918,7 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
     may be written."""
     make_git_write_deny(wt)  # before anything starts in the sandbox
-    home = Path.home()
+    home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
     homes = [config_home(desk, pname, p)]
     homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
                           if isinstance(q, dict) and isinstance(q.get("config_dir", ""), str)) if h.is_absolute()]

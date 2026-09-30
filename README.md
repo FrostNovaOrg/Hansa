@@ -118,6 +118,25 @@ page gives.
   `srt`): the lane's network and write lists hold for them too, so a setup that
   downloads needs its registry on the network list. Design sessions, which the
   principal works in directly, and the coordinator run outside it.
+  A write list holds a build or test tool's cache folders. The rule, in two
+  lines: in the home folder of the account (whatever `HOME` says), only a
+  tool's own folder under `~/.cache` or `~/Library/Caches`, the listed package
+  caches (`~/.m2/repository`, `~/.gradle/caches`, `~/.npm/_cacache`,
+  `~/.pnpm-store`, `~/.local/share/pnpm/store`, `~/.cargo/registry`,
+  `~/.cargo/git`, `~/go/pkg/mod`, `~/.nuget/packages`, `~/.ivy2/cache`,
+  `~/.conan2/p`, `~/.bun/install/cache`), or a plain folder (no name starting
+  with a dot) outside `~/Library` and `~/Applications`; outside the home
+  folder, anywhere but where programs are installed (the Homebrew prefix,
+  `/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, the
+  system's own folders, and where `claude`, `git`, `srt`, `node`, `tmux`,
+  hansa and its python really live). The desk, the lane's repository, Claude
+  Code's folders and cache, credential files, folders on the `PATH` and other
+  names for the whole disk are refused as before, and so is a name with
+  `( ) [ ] { } * ?`, a backslash, a look-alike of one, or an invisible
+  character. Rather than share the user's cache, point a tool at a cache
+  folder of the lane's own with the lane's env (`GRADLE_USER_HOME`,
+  `npm_config_cache`, `CARGO_HOME`, `GOMODCACHE`, `PIP_CACHE_DIR`,
+  `-Dmaven.repo.local` and the like). `hansa/card.md` has the list.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not

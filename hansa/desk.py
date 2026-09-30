@@ -24,7 +24,11 @@ import json
 import os
 import re
 import secrets as _secrets
+import shutil
+import site
+import subprocess
 import sys
+import sysconfig
 import threading
 import time
 import unicodedata
@@ -41,7 +45,8 @@ MAX_WRITE = 20
 MAX_READ = 20
 # Characters a folder the coordinator is let read may not have in its path: it goes into a permission rule,
 # Edit(//path/**), where these mean something else
-RULE_BREAKERS = "()[]{}*?"
+# and the backslash, which a pattern reads as "take the next character as it is"
+RULE_BREAKERS = "()[]{}*?\\"
 MAX_DENY = 50
 # Files and folders under the home folder of the user hansa runs as that no worker command may read: logins,
 # keys and tokens for other services, browsing data and messages. Nothing a build or test tool needs to read
@@ -378,6 +383,39 @@ def _folds(folder: str, st) -> bool:
 _FOLDS: dict = {}
 
 
+_LOOK = threading.local()
+
+
+def _once(fn):
+    """A look at a path, made once within one check of a list (_one_look): the fences ask the same of the same
+    paths many times over, and the disk does not change under one check."""
+    def look(path):
+        memo = getattr(_LOOK, "memo", None)
+        if memo is None:
+            return fn(path)
+        key = (fn.__name__, path)
+        if key not in memo:
+            memo[key] = fn(path)
+        return memo[key]
+    look.__name__, look.__doc__ = fn.__name__, fn.__doc__
+    return look
+
+
+def _one_look(fn):
+    """A check of a whole list, during which each path is looked at once (_once)."""
+    def check(*args, **kw):
+        if getattr(_LOOK, "memo", None) is not None:
+            return fn(*args, **kw)
+        _LOOK.memo = {}
+        try:
+            return fn(*args, **kw)
+        finally:
+            _LOOK.memo = None
+    check.__name__, check.__doc__ = fn.__name__, fn.__doc__
+    return check
+
+
+@_once
 def _seen(path: str) -> tuple:
     """A full path as the disk sees it: which file its deepest existing folder is (os.stat, so through links
     and in any spelling), and the names below that do not exist, in one case where the volume ignores case."""
@@ -407,6 +445,7 @@ def _plain(path: str) -> str:
     return "/" + os.path.normpath(path).lstrip("/")
 
 
+@_once
 def _ups(path: str) -> list:
     """A full path and each folder above it, up to /, as spelled. It ends for any path."""
     out, at = [], _plain(path)
@@ -430,6 +469,7 @@ def _off_data(path: str) -> str:
     return ""
 
 
+@_once
 def _forms(path: str) -> set:
     """A full path as given and with links resolved; on macOS, one under the data volume also as the path
     from /."""
@@ -497,10 +537,25 @@ def _top_fence() -> list:
     return out
 
 
+# Characters that show as nothing, or as a plain space, and are not format characters (those are refused by
+# their class, as are the spaces other than the plain one): the fillers, the blank braille pattern, the
+# variation selectors and the others Unicode says to leave out when it has no glyph for them
+INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x2800, 0x2800),
+             (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+             (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+
+
+def _invisible(c: str) -> bool:
+    """Whether a character is invisible or changes direction: a Unicode format character (such as U+200B,
+    U+202E or U+FEFF), a space other than the plain one (such as the no-break space U+00A0), or a filler."""
+    cat = unicodedata.category(c)
+    return cat == "Cf" or (cat == "Zs" and c != " ") or any(a <= ord(c) <= b for a, b in INVISIBLE)
+
+
 def _has_format(path: str) -> bool:
-    """Whether a full path, as given or where its link leads, has an invisible or direction-changing character
-    (a Unicode format character, such as U+200B, U+202E or U+FEFF): it would not read as what it is."""
-    return any(unicodedata.category(c) == "Cf" for v in _forms(path) for c in v)
+    """Whether a full path, as given or where its link leads, has an invisible or direction-changing
+    character: it would not read as what it is."""
+    return any(_invisible(c) for v in _forms(path) for c in v)
 
 
 FORMAT_WHY = ("a name in it (or where its link leads) has an invisible or direction-changing character, so it "
@@ -530,6 +585,7 @@ def stored(path: str) -> str:
     return out
 
 
+@_once
 def _chain(path: str) -> set:
     """A full path and each folder above it, as the disk sees them."""
     return {_seen(u) for v in _forms(path) for u in _ups(v)}
@@ -558,14 +614,294 @@ def _has_control(x: str) -> bool:
     return any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in x)
 
 
+def account_home() -> str:
+    """The home folder of the user hansa runs as, from the account (the password database), not from $HOME:
+    whoever starts a hansa command sets $HOME, and a fence that followed it would stand around another
+    folder than the one the logins, the settings and the programs are in."""
+    try:
+        import pwd
+        at = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):
+        at = ""
+    return at if at and at.startswith("/") else os.path.abspath(os.path.expanduser("~"))
+
+
+# The programs hansa, its server and the coordinator run outside the sandbox, besides the python hansa runs in
+PROGRAMS = ("claude", "git", "srt", "node", "tmux")
+
+
+def program_candidates(name: str) -> list:
+    """Where hansa looks for a program it runs, in order: the first that can be run is the one."""
+    if name == "claude":
+        return [os.environ.get("HANSA_CLAUDE"), shutil.which("claude"), os.path.expanduser("~/.local/bin/claude")]
+    if name == "tmux":
+        return [os.environ.get("HANSA_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+    return [shutil.which(name)]
+
+
+def program(name: str) -> str:
+    """The program as hansa finds it; '' when it is not on this machine."""
+    return next((c for c in program_candidates(name) if c and os.access(c, os.X_OK)), "")
+
+
+def _hops(path: str) -> list:
+    """A file's full path and each path its links lead through, the last with every link resolved."""
+    out = [_plain(os.path.abspath(path))]
+    for _ in range(40):
+        try:
+            to = os.readlink(out[-1])
+        except (OSError, ValueError):
+            break
+        out.append(_plain(os.path.join(os.path.dirname(out[-1]), to)))
+    real = _plain(os.path.realpath(path))
+    return out if real in out else out + [real]
+
+
+def _install(path: str) -> list:
+    """The folders a program at this path is installed in, when it is in a folder of versions or packages:
+    the folder that holds `versions` (~/.local/share/claude), Homebrew's Cellar with the folders beside it
+    that its programs load from, the folder of npm packages (node_modules: a package and the ones it needs)."""
+    names = path.split("/")
+    # a framework or an app: the bundle, which holds the program and what it loads
+    out = ["/".join(names[:i + 1]) for i, n in enumerate(names[:-1]) if i > 1 and n.endswith((".framework", ".app"))][:1]
+    for mark in ("Cellar", "node_modules", "versions"):
+        if mark in names[1:-1]:
+            i = names.index(mark, 1)
+            top = "/".join(names[:i]) or "/"
+            if mark == "versions":
+                return out + [top]
+            if mark == "Cellar":
+                return out + [os.path.join(top, d) for d in ("Cellar", "opt", "lib", "etc", "Frameworks")]
+            return out + [os.path.join(top, mark)]
+    return out
+
+
+_GIT: dict = {}
+
+
+def _git_exec_path(git: str) -> str:
+    """Where git keeps its own programs (git --exec-path), asked once for each git; '' when it does not say."""
+    key = (git, os.environ.get("GIT_EXEC_PATH"))
+    if key not in _GIT:
+        try:
+            r = subprocess.run([git, "--exec-path"], capture_output=True, text=True, errors="replace",
+                               stdin=subprocess.DEVNULL, timeout=30)
+            said = r.stdout.strip() if r.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            said = ""
+        _GIT[key] = said if said.startswith("/") and "\n" not in said else ""
+    return _GIT[key]
+
+
+# Files and folders in the home folder that a program hansa or the coordinator runs outside the sandbox reads
+# when it starts, and that can make it run a command: (what it is, the names)
+HOME_STARTS = (
+    ("a shell's startup file, which Claude Code takes the coordinator's shell settings from and runs",
+     (".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".zshrc", ".zshenv",
+      ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc", ".login", ".config/fish", ".oh-my-zsh")),
+    ("git's settings, where a hook or a monitor is a command git runs outside the sandbox",
+     (".gitconfig", ".config/git")),
+    ("tmux's settings, which run commands where the coordinator's and the design sessions' tmux starts",
+     (".tmux.conf", ".tmux", ".config/tmux")),
+    ("Claude Code's own files (its versions, or what it keeps between runs), which run outside the sandbox",
+     (".local/share/claude", ".local/state/claude", ".cache/claude", ".cache/claude-cli-nodejs",
+      "Library/Caches/claude-cli-nodejs")),
+    ("a folder node loads packages from, outside the sandbox too", (".node_modules", ".node_libraries", "node_modules")),
+    ("srt's settings, which say what its sandbox lets through", (".srt-settings.json",)),
+    ("hansa's own files in the home folder", (".hansa",)),
+)
+# The system's folders of settings, libraries and programs' own programs: every program reads them when it starts
+SYSTEM_STARTS = ("/etc", "/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/libexec", "/usr/local/lib")
+MAC_STARTS = ("/Library/LaunchAgents", "/Library/LaunchDaemons", "/Library/Application Support/ClaudeCode")
+
+
+def _run_fence(home: str) -> list:
+    """What runs outside the sandbox, which no lane's write list may open: a worker that could write there
+    would change what hansa, its server or the coordinator runs later, with their reach. The programs, each
+    found as hansa finds it (the PATH hansa runs with, links resolved), the folder each is installed in, and
+    the files each reads when it starts that can make it run a command."""
+    out, beside, up = [], [], _chain(home)
+
+    def fence(f, why, to=out):  # the file or folder, all inside it and each folder above it
+        f = _plain(f)
+        to = beside if f.endswith((".framework", ".app")) else to  # a bundle: after what is named inside it
+        wide = len(f.split("/")) < 3 or any(_seen(v) in up for v in _forms(f))  # at the top, or the home folder
+        to.append((f, _above if wide else _overlaps, f"it would open {f}, {why}"))
+
+    def installed(name, at):
+        hops = _hops(at)
+        for hop in hops:  # the folders first: a link is also the file it leads to, and the refusal names the folder
+            for d in _install(hop):
+                fence(d, f"where {name} is installed, which runs outside the sandbox")
+            folder = os.path.dirname(hop)
+            if os.path.basename(folder) in ("bin", "sbin"):
+                for d in ("lib", "lib64", "libexec"):
+                    fence(os.path.join(os.path.dirname(folder), d),
+                          f"which holds what {name} loads when it starts, outside the sandbox", beside)
+        for hop in reversed(hops):
+            fence(hop, f"the program {name}, which runs outside the sandbox")
+
+    for name in PROGRAMS:
+        at = program(name)
+        if at:
+            installed(name, at)
+    git = program("git")
+    own = _git_exec_path(git) if git else ""
+    if own:
+        fence(own, "git's own programs, which run outside the sandbox")
+        top = os.path.dirname(os.path.dirname(own))
+        if own.endswith("/libexec/git-core") and top != "/":
+            fence(os.path.join(top, "etc", "gitconfig"), "the settings git reads for the whole system, where a "
+                                                         "hook or a monitor is a command git runs")
+            fence(os.path.join(top, "share", "git-core"), "git's templates and settings, which hold hooks git runs")
+    # the python hansa runs in
+    if sys.executable:
+        installed("python", sys.executable)
+        for d in (os.path.dirname(sys.executable), os.path.dirname(os.path.dirname(sys.executable))):
+            fence(os.path.join(d, "pyvenv.cfg"), "which says where the python that runs hansa loads its library from")
+    for d in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
+        if d.startswith("/"):  # the prefix and above; what it holds is named below (other tools may share it)
+            for f in _install(os.path.join(_plain(os.path.realpath(d)), "bin", "python")):  # unless it is a bundle
+                fence(f, "where the python that runs hansa is installed")
+            out.append((_plain(d), _above, f"it would open {_plain(d)}, the prefix of the python that runs hansa"))
+            for sub in ("bin", "lib", "lib64", "libexec", "pyvenv.cfg"):
+                fence(os.path.join(d, sub), "part of the python that runs hansa", beside)
+    fence(os.path.dirname(os.path.abspath(__file__)), "hansa's own code")
+    version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    mods = [x for x in sys.path if x]
+    mods += [sysconfig.get_paths().get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")]
+    try:
+        mods += [*site.getsitepackages(), site.getusersitepackages()]
+    except (AttributeError, OSError, TypeError):  # a python started without its site module
+        pass
+    mods += [os.path.join(home, ".local", "lib", f"python{version}", "site-packages"),
+             os.path.join(home, "Library", "Python", version, "lib", "python", "site-packages")]
+    for d in dict.fromkeys(os.path.abspath(x) for x in mods if isinstance(x, str) and x.startswith("/")):
+        fence(d, "which the python that runs hansa loads modules from (a site-packages folder's .pth file runs "
+                 "in every python that starts)")
+    # what the programs read when they start
+    for why, names in HOME_STARTS:
+        for n in names:
+            fence(os.path.join(home, n), why)
+    if sys.platform == "darwin":
+        fence(os.path.join(home, "lib"), "where macOS looks for a library a program did not find, outside the sandbox too")
+    env = os.environ.get
+    for var, names, why in (("XDG_CONFIG_HOME", ("git",), HOME_STARTS[1][0]), ("XDG_CONFIG_HOME", ("tmux",), HOME_STARTS[2][0]),
+                            ("XDG_CONFIG_HOME", ("fish",), HOME_STARTS[0][0]),
+                            ("XDG_CACHE_HOME", ("claude", "claude-cli-nodejs"), HOME_STARTS[3][0]),
+                            ("XDG_DATA_HOME", ("claude",), HOME_STARTS[3][0]), ("XDG_STATE_HOME", ("claude",), HOME_STARTS[3][0]),
+                            ("ZDOTDIR", (".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout"), HOME_STARTS[0][0])):
+        if (env(var) or "").startswith("/"):
+            for n in names:
+                fence(os.path.join(env(var), n), why)
+    for var, why in (("ENV", HOME_STARTS[0][0]), ("BASH_ENV", HOME_STARTS[0][0]),
+                     ("GIT_CONFIG_GLOBAL", HOME_STARTS[1][0]), ("GIT_CONFIG_SYSTEM", HOME_STARTS[1][0])):
+        if (env(var) or "").startswith("/"):
+            fence(env(var), why)
+    for var, why in (("NODE_PATH", "a folder node loads packages from, outside the sandbox too"),
+                     ("LD_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too"),
+                     ("DYLD_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too"),
+                     ("DYLD_FALLBACK_LIBRARY_PATH", "a folder programs load libraries from, outside the sandbox too")):
+        for d in (env(var) or "").split(os.pathsep):
+            if d.startswith("/"):
+                fence(d, why)
+    for d in SYSTEM_STARTS + (MAC_STARTS if sys.platform == "darwin" else ()):
+        out.append((d, _overlaps, f"it would open {d}, the system's own settings, libraries or programs, which "
+                                  "every program reads when it starts, outside the sandbox too"))
+    return out + beside  # a folder beside a program last: what is named for what it holds says more
+
+
+# Inside the home folder a lane's write list may hold only these, and folders inside them: a tool's own folder
+# under a cache folder, a package cache by its name, and folders that are not hidden outside ~/Library and
+# ~/Applications. The rest of the home folder is closed as a class, not by name: a shell's startup file can
+# read any file there, so no list of the names that run outside the sandbox would be complete.
+HOME_CACHES = (".cache", "Library/Caches")
+PACKAGE_CACHES = (".m2/repository", ".gradle/caches", ".npm/_cacache", ".pnpm-store", ".local/share/pnpm/store",
+                  ".cargo/registry", ".cargo/git", "go/pkg/mod", ".nuget/packages", ".ivy2/cache", ".conan2/p",
+                  ".bun/install/cache")
+HOME_APPS = ("Library", "Applications")
+# Outside it, the places programs are installed, whole: what is there runs outside the sandbox sooner or later
+INSTALL_TOPS = ("/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/usr", "/Applications", "/Library", "/nix", "/snap",
+                "/var/lib")
+
+
+def _home_closed(path: str, home: str) -> bool:
+    """Whether a full path, as given or where its link leads, is inside the home folder and not one of what a
+    write list may hold there."""
+    homes = {_seen(w) for w in _forms(home)}
+    at = lambda names: {_seen(os.path.join(w, n)) for w in _forms(home) for n in names}
+    for v in _forms(path):
+        ups = _ups(v)
+        seen = [_seen(u) for u in ups]
+        i = next((i for i, x in enumerate(seen) if x in homes), 0)
+        if not i:  # outside the home folder, or the home folder itself (its own fence)
+            continue
+        names = ups[0][len(ups[i].rstrip("/")):].strip("/").split("/")
+        if at(HOME_CACHES) & set(seen[1:i]) or at(PACKAGE_CACHES) & set(seen[:i]):
+            continue
+        if not any(n.startswith(".") for n in names) and not at(HOME_APPS) & set(seen[:i]):
+            continue
+        return True
+    return False
+
+
+def home_rule() -> str:
+    """What a lane's write list may hold inside the home folder, in words."""
+    caches = " or ".join("~/" + c for c in HOME_CACHES[:2 if sys.platform == "darwin" else 1])
+    return (f"a tool's own folder under {caches}, a package cache ({', '.join('~/' + c for c in PACKAGE_CACHES)}) "
+            "or a folder that is not hidden (no name below the home folder starts with a dot) outside ~/Library "
+            "and ~/Applications, such as ~/work/cache")
+
+
+def brew_prefixes() -> list:
+    """Where Homebrew keeps what it installs, when it is on this machine: what `brew --prefix` gives, read
+    from where brew is on the PATH hansa runs with (brew is <prefix>/bin/brew, or a link to
+    <prefix>/Homebrew/bin/brew)."""
+    out = [os.environ.get("HOMEBREW_PREFIX") or ""]
+    brew = shutil.which("brew")
+    for hop in _hops(brew) if brew else []:
+        top = os.path.dirname(os.path.dirname(hop))
+        out.append(top)
+        if os.path.basename(top) == "Homebrew":  # the repository inside the prefix
+            out.append(os.path.dirname(top))
+    return [d for d in dict.fromkeys(_plain(d) for d in out if d.startswith("/")) if len(d.split("/")) > 2]
+
+
+def _install_fence(home: str) -> list:
+    """The places programs are installed, outside the home folder: none may be listed, nor a folder inside or
+    above one. A home folder that is itself inside one (an account of the system's, under /var/lib) keeps its
+    own rule."""
+    homes = {_seen(w) for w in _forms(home)}
+
+    def hit(path, top):
+        return any(_overlaps(v, top) and not homes & {_seen(u) for u in _ups(v)[1:]} for v in _forms(path))
+
+    why = ("where programs are installed: what is there runs outside the sandbox (a cache folder goes elsewhere, "
+           "such as a tools folder of the desk's, another volume or /tmp)")
+    return [(d, hit, f"it would open {d}, {why}") for d in dict.fromkeys([*brew_prefixes(), *INSTALL_TOPS])]
+
+
+def _breaks(path: str) -> bool:
+    """Whether a name in a full path, as given or where its link leads, has a pattern character, or one that
+    turns into one when the name is normalized (NFKC: the look-alike backslashes U+FF3C and U+FE68, the wide
+    brackets and stars)."""
+    return any(c in w for v in _forms(path) for w in (v, unicodedata.normalize("NFKC", v)) for c in RULE_BREAKERS)
+
+
+BREAKS_WHY = f"a name in it (or where its link leads) has one of {RULE_BREAKERS} or a look-alike of one"
+
+
+@_one_look
 def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> list:
     """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
     None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it. denied: what
     the principal keeps workers from reading (deny_split's good ones)."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
-        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2"]
-    home = os.path.expanduser("~")
+        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/.m2/repository"]
+    if not paths:
+        return []
+    home = account_home()
     fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_mac_fence(home)]
     if root:
         fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
@@ -589,6 +925,11 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> li
     fenced += _top_fence()
     fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
                for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    fenced += _run_fence(home)
+    fenced += _install_fence(home)
+    fenced.append((home, _home_closed, f"it is inside {home}, the home folder, where a write list may hold only "
+                                       f"{home_rule()}; or point the tool at a cache folder of the lane's own "
+                                       "with the lane's env (GRADLE_USER_HOME, npm_config_cache and the like)"))
     p = []
     for x in paths:
         if _has_control(x):  # as the read list: a line break would split one entry into two where it is written
@@ -602,12 +943,13 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=()) -> li
                 p.append(f"write cannot include {x}: {why}")
                 break
         else:
-            if any(c in v for v in _forms(x) for c in RULE_BREAKERS):  # the sandbox may read it as a pattern
-                p.append(f"write cannot include {x}: a name in it (or where its link leads) has one of "
-                         f"{RULE_BREAKERS}, which the sandbox may read as a pattern and open more than the one folder")
+            if _breaks(x):  # the sandbox may read it as a pattern
+                p.append(f"write cannot include {x}: {BREAKS_WHY}, which the sandbox may read as a pattern and "
+                         "open more than the one folder")
     return p
 
 
+@_one_look
 def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
     """The folders the principal lets the coordinator read without asking: (those it may be given, what is
     wrong with the others, one line each). None may open what hansa keeps from it: the home folder as a
@@ -616,7 +958,7 @@ def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
     (`denied`: no Claude Code run hansa starts reads it). Each is compared as the disk sees it (_above)."""
     if not isinstance(paths, list) or len(paths) > MAX_READ:
         return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
-    home = os.path.expanduser("~")
+    home = account_home()
     fenced = [("/", _above, "it is the whole machine"),
               (home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_mac_fence(home)]
     if root:
@@ -645,8 +987,8 @@ def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
             p.append(f"the coordinator cannot be let read {json.dumps(x)}: {FORMAT_WHY}")
             continue
         why = next((why for f, hit, why in fenced if hit(x, f)), "")
-        if not why and any(c in v for v in _forms(x) for c in RULE_BREAKERS):
-            why = f"a name in it (or where its link leads) has one of {RULE_BREAKERS}, which a permission rule cannot hold"
+        if not why and _breaks(x):
+            why = f"{BREAKS_WHY}, which a permission rule cannot hold"
         if not why and not os.path.isdir(x):
             why = "it is a file, not a folder" if os.path.exists(x) else "there is no such folder"
         if why:
@@ -661,6 +1003,7 @@ DENY_LIST_WHY = (f"what workers may not read must be a list of up to {MAX_DENY} 
 DENY_AT = "workers cannot be kept from reading "
 
 
+@_one_look
 def deny_split(paths, root=None, lanes=None) -> tuple:
     """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
     wrong with the others, one line each). None may close what a worker needs in order to run: the home folder
@@ -668,7 +1011,7 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
     it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted."""
     if not isinstance(paths, list) or len(paths) > MAX_DENY:
         return [], [DENY_LIST_WHY]
-    home = os.path.expanduser("~")
+    home = account_home()
     fenced = [("/", _above, "it is the whole machine"),
               (home, _above, f"it is {home}, the home folder of the user hansa runs as, or a folder above it")]
     if sys.platform == "darwin":
@@ -691,9 +1034,8 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
         why = next((why for f, hit, why in fenced if hit(x, f)), "")
-        if not why and any(c in v for v in _forms(x) for c in RULE_BREAKERS):
-            why = (f"a name in it (or where its link leads) has one of {RULE_BREAKERS}, which the sandbox and a "
-                   "permission rule may read as a pattern")
+        if not why and _breaks(x):
+            why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:
             p.append(f"{DENY_AT}{x}: {why}")
         elif _seen(x) not in seen:  # one path once, however it is spelled
