@@ -1597,9 +1597,10 @@ def browser_for(desk: Desk, tid: str, command: str):
     return cfg, ["mcp__browser", rule("Read", d)]
 
 
-def around_note(desk: Desk, lane: dict, meta: dict) -> str:
+def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "") -> str:
     """What hansa runs around a task or verification worker, for its instructions: the lane's setup and
-    check as hansa runs them (the lane's env is set for the worker's commands too), keys hidden."""
+    check as hansa runs them (the lane's env is set for the worker's commands too), keys hidden. A verifier
+    is told how the task's own run of the check ended only on the task's own lane, named by lane_name."""
     def shown(command: str) -> str:
         text = desk.redact(command)  # hidden before it is cut, so no part of a key is left
         if len(text) > COMMAND_SHOWN:
@@ -1611,11 +1612,15 @@ def around_note(desk: Desk, lane: dict, meta: dict) -> str:
     if not lane.get("check"):
         out.append("- This lane has no check command: hansa runs nothing here after you end.")
     elif meta.get("kind") == "verify":
-        ran = (read_json(desk.tasks_dir / meta.get("parent", "-") / "meta.json") or {}).get("check")
-        ran = ran if ran and ran.get("command") == lane["check"] else None  # else another lane's, or an older one
+        parent = read_json(desk.tasks_dir / meta.get("parent", "-") / "meta.json") or {}
+        ran = parent.get("check") or {}
+        if parent.get("lane") != lane_name or ran.get("command") != lane["check"]:
+            ran = {}  # another lane's run (its env, its sandbox), or an older check: not this command's result
+        went = (" hansa could not run it for the task itself." if ran.get("could_not_run") else
+                f" The task's own run of it {'passed' if ran['ok'] else 'failed'}."
+                if ran.get("ok") in (True, False) else "")
         out.append("- hansa judges a task here by the lane's check, run in its worktree in this sandbox: "
-                   f"{shown(lane['check'])}" + (f" The task's own run of it {'passed' if ran['ok'] else 'failed'}."
-                                                 if ran else "") + " You may run the same command yourself.")
+                   f"{shown(lane['check'])}{went} You may run the same command yourself.")
     else:
         out.append("- After you end, hansa runs the lane's check here, in the same sandbox, and judges the "
                    f"task by it: {shown(lane['check'])}")
@@ -1639,7 +1644,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp))
-    system += around_note(desk, lane, meta)
+    system += around_note(desk, lane, meta, lane_name)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record

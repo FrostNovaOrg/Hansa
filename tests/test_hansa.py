@@ -4752,14 +4752,23 @@ class DeskTest(unittest.TestCase):
 
         lane = {"check": "make test"}  # a check of another lane, or one changed since: hansa does not know how it went
         other = self.desk.new_task("Done elsewhere")
-        self.desk.update(other, check={"command": "make other", "ok": True})
-        note = run.around_note(self.desk, lane, {"kind": "verify", "parent": other})
+        verify = {"kind": "verify", "parent": other}
+        self.desk.update(other, lane="a", check={"command": "make other", "ok": True})
+        note = run.around_note(self.desk, lane, verify, "a")
         self.assertIn("`make test` You may run", note)
         self.desk.update(other, check={"command": "make test", "ok": True})
-        self.assertIn("`make test` The task's own run of it passed.",
-                      run.around_note(self.desk, lane, {"kind": "verify", "parent": other}))
-        self.assertNotIn("own run", run.around_note(self.desk, lane, {"kind": "verify", "parent": "t9999"}))
+        self.assertIn("`make test` The task's own run of it passed.", run.around_note(self.desk, lane, verify, "a"))
+        # the same text on another lane ran under that lane's env and sandbox: no result of it here
+        self.assertIn("`make test` You may run", run.around_note(self.desk, lane, verify, "b"))
+        self.assertNotIn("own run", run.around_note(self.desk, lane, {"kind": "verify", "parent": "t9999"}, "a"))
         self.assertNotIn("setup", note)
+        # a check that could not run is the machine's problem: the verifier does not read that it failed
+        self.desk.update(other, check={"command": "make test", "ok": None, "could_not_run": True})
+        self.assertIn("`make test` hansa could not run it for the task itself. You may run",
+                      run.around_note(self.desk, lane, verify, "a"))
+        for record in ({"command": "make test"}, {"command": "make test", "ok": None}):  # no result known: none said
+            self.desk.update(other, check=record)
+            self.assertIn("`make test` You may run", run.around_note(self.desk, lane, verify, "a"))
 
         long = "echo " + "x" * 700 + key  # a very long command is cut, after its keys are hidden
         note = run.around_note(self.desk, {"check": long}, {})
