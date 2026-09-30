@@ -59,6 +59,8 @@ make Claude Code ask the principal. hansa's own options make them unneeded:
 `hansa git L show REV:A REV:B` shows several files in one call,
 `hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once, and
 `hansa show ID --report` and `hansa diff ID --stat` keep the output short.
+The principal can let you read folders outside the desk without asking (`hansa
+explain` lists them); ask with `hansa ask` when you keep needing one.
 
 ## Writing a task
 Say what to change, where, and how the worker can check it (a command, a file to

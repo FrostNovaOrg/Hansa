@@ -32,6 +32,7 @@ from hansa.desk import Desk, now, public_settings, validate, write_json  # noqa:
 from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
                        waiting_reason)
 from hansa.web import start_web  # noqa: E402
+from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 
 def skip_unless_ports(test):
@@ -4141,6 +4142,117 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"Edit(//{str(self.repo.resolve()).lstrip('/')}/**)", r.stdout)
         deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
         self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", deny)
+
+    def page_save(self, change):
+        """Load the settings as the page does, change them, save (what POST /api/settings does); what the page
+        is told."""
+        loaded = json.loads(json.dumps(public_settings(self.desk)))
+        change(loaded["settings"])
+        return save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+
+    def echo_coordinator(self):
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        return subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                               "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+
+    def test_a_folder_the_principal_lets_the_coordinator_read_reaches_its_start_command(self):
+        inc = (self.tmp / "opt" / "include").resolve()
+        inc.mkdir(parents=True)
+        self.assertEqual(self.desk.settings()["coordinator_read"], [])
+        self.assertEqual(self.page_save(lambda s: s.update(coordinator_read=[str(inc)])), {"ok": True, "problems": []})
+        self.assertEqual(public_settings(self.desk)["settings"]["coordinator_read"], [str(inc)])  # the page shows it
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn("S.coordinator_read", ui)
+        self.assertIn("T.coordinatorRead", ui)
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.repo.resolve()} {inc} --disallowedTools", r.stdout)
+        self.assertIn(f"Edit(//{str(inc).lstrip('/')}/**)", r.stdout.split("--disallowedTools")[1].split("--model")[0])
+        self.assertNotIn("skipped", r.stderr)
+        told = self.hansa("explain")
+        self.assertIn(str(inc), told)
+        self.assertIn("principal", told)
+        self.assertIn("hansa ask", (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
+                      .split("read folders outside the desk without asking")[1][:120])
+        # the coordinator's own changes leave it as the principal set it
+        self.hansa("concurrency", "2")
+        self.assertEqual(self.desk.settings()["coordinator_read"], [str(inc)])
+        # a folder removed later: the settings still save, and the start skips it and says so
+        shutil.rmtree(inc)
+        self.hansa("concurrency", "1")
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(str(inc), r.stdout)
+        self.assertIn(f"{inc}: there is no such folder; skipped", r.stderr)
+        self.assertIn(f"not given: {inc}", self.hansa("explain"))
+
+    def test_folders_the_coordinator_may_not_be_let_read_are_refused_on_saving_and_skipped_at_start(self):
+        home = Path(os.path.expanduser("~"))
+        cc = self.tmp / "logins" / "cc"
+        (cc / "sessions").mkdir(parents=True)
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(cc)
+        self.assertEqual(self.desk.save_settings(s), [])
+        (self.tmp / "afile").write_text("x")
+        link = self.tmp / "link-to-secrets"
+        link.symlink_to(self.desk.secrets_dir)
+        bad = {"relative/path": "full path", str(self.tmp / "nowhere"): "no such folder",
+               str(self.tmp / "afile"): "not a folder", "/": "whole machine",
+               str(home): "home folder", str(home.parent): "home folder",
+               str(self.desk.root): "the desk", str(self.desk.secrets_dir): "the desk", str(self.tmp): "the desk",
+               str(link): "the desk",  # where a link leads
+               str(cc): "Claude Code folder", str(cc / "sessions"): "Claude Code folder",
+               str(cc.parent): "Claude Code folder",
+               str(home / ".ssh"): "login or key", str(home / ".ssh" / "keys"): "login or key",
+               str(home / ".config"): "login or key"}
+        good = self.tmp / "opt"
+        good.mkdir()
+        for path, why in bad.items():
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
+            self.assertFalse(told["ok"], path)
+            self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
+            self.assertEqual(self.desk.settings()["coordinator_read"], [])  # nothing was saved
+        self.assertFalse(self.page_save(lambda s: s.update(coordinator_read="/opt"))["ok"])
+        self.assertFalse(self.page_save(lambda s: s.update(coordinator_read=[["/opt"]]))["ok"])
+        # written into settings.json another way: the start skips each and says so, and gives the good one
+        s = self.desk.settings()
+        s["coordinator_read"] = [*bad, str(good)]
+        write_json(self.desk.settings_path, s)
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
+        for path, why in bad.items():
+            self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
+                            (path, r.stderr))
+        self.assertEqual(len(self.events("coordinator_read_skipped")), len(bad))
+
+    def test_root_gives_the_coordinator_the_folders_of_the_accounts_plan_and_checks_them_again(self):
+        self.as_root()
+        self.stand_in_runuser()
+        inc = self.tmp / "opt"
+        inc.mkdir()
+        s = self.desk.settings()
+        s["coordinator_read"] = [str(inc)]
+        self.assertEqual(self.desk.save_settings(s), [])
+        started = self.coordinator_as_root({})
+        argv = started["argv"]
+        self.assertEqual(argv[argv.index("--add-dir") + 1:argv.index("--disallowedTools")], [str(self.repo.resolve()), str(inc)])
+        self.assertIn(f"Edit(//{str(inc.resolve()).lstrip('/')}/**)", argv)
+        # a plan the account wrote itself: root looks again, with its own home and Claude Code folder
+        own = self.tmp / "root-claude"
+        own.mkdir()
+        plan = {"repos": [], "model": "opus", "effort": "", "env": {}, "read_refused": ["said by the account"],
+                "read": [str(inc), "-p", "rel", str(self.desk.root), "/", os.path.expanduser("~"), str(own), 7]}
+        done = unittest.mock.Mock(returncode=0, stdout=json.dumps(plan), stderr="")
+        err = io.StringIO()
+        with unittest.mock.patch.object(account, "run", lambda *a, **k: done), contextlib.redirect_stderr(err):
+            started = self.coordinator_as_root({"CLAUDE_CONFIG_DIR": str(own)})
+        argv = started["argv"]
+        self.assertEqual(argv[argv.index("--add-dir") + 1:argv.index("--disallowedTools")], [str(inc)])
+        self.assertEqual(len([x for x in err.getvalue().splitlines() if "skipped" in x]), 8)
+        self.assertIn("said by the account; skipped", err.getvalue())
 
     @staticmethod
     def covered(rules, tool, path) -> bool:

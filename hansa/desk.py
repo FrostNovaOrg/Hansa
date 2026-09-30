@@ -36,6 +36,7 @@ LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
 MAX_HOSTS = 50
 MAX_WRITE = 20
+MAX_READ = 20
 # Files under the home folder of the user hansa runs as that no worker command may read: logins and
 # keys for other services. The desk's own secrets/ and .hansa/ and the provider's Claude Code folder
 # are added per run (run.sandbox_settings); no lane's write list may reach any of them.
@@ -68,6 +69,9 @@ def default_settings() -> dict:
         # The command that starts a browser tool (an MCP server on stdio). The coordinator
         # gives it to one task at a time with `hansa add --browser`. Empty: no browser.
         "browser": "",
+        # Folders outside the desk the coordinator (and the helpers in its session) may read without
+        # asking, as it reads the lanes' repositories: full paths. The principal's, on the page.
+        "coordinator_read": [],
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -114,8 +118,11 @@ def validate(s: dict, root=None) -> list:
     if not isinstance(s, dict):
         return ["settings must be an object"]
     known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser"}
+             "browser", "coordinator_read"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
+    # whether each is there is looked at when the page saves and when the coordinator starts: a folder
+    # removed later does not make the settings invalid
+    p += read_split(s.get("coordinator_read", []), root, s.get("providers"), must_exist=False)[1]
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -313,6 +320,46 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
                 p.append(f"write cannot include {x}: {why}")
                 break
     return p
+
+
+def read_split(paths, root=None, providers=None, own=(), must_exist=True) -> tuple:
+    """The folders the principal lets the coordinator read without asking: (those it may be given, what is
+    wrong with the others, one line each). None may open what hansa keeps from it: the home folder as a
+    whole, the desk (its keys and state), a Claude Code folder (a provider's, and `own`: the one its own
+    session runs from), a login or key. Each is looked at as given and with links resolved."""
+    if not isinstance(paths, list) or len(paths) > MAX_READ:
+        return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
+    home = os.path.expanduser("~")
+    fenced = [("/", _above, "it is the whole machine"),
+              (home, _above, f"it would open {home}, the home folder of the user hansa runs as")]
+    if root:
+        fenced.append((str(root), _overlaps, f"it would open {root}, the desk, which holds the keys and hansa's state"))
+    for name, pv in (providers if isinstance(providers, dict) else {}).items():
+        if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
+                and (root or pv.get("kind") == "subscription"):
+            h = str(claude_home(Path(root or "/") / ".hansa", name, pv))
+            if h.startswith("/"):  # a relative config_dir is refused by validate
+                fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Claude Code folder"))
+    fenced += [(str(h), _overlaps, f"it would open {h}, the Claude Code folder the coordinator runs from")
+               for h in own]
+    fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key")
+               for f in HOME_SECRETS]
+    good, p = [], []
+    for x in paths:
+        at = f"the coordinator cannot be let read {x if isinstance(x, str) else json.dumps(x)}"
+        if not isinstance(x, str) or not x.startswith("/") or "\0" in x or "\n" in x or len(x) > 1000:
+            p.append(f"{at}: it must be a full path starting with /, such as /opt/include")
+            continue
+        mine = {os.path.normpath(x), os.path.realpath(x)}
+        why = next((why for f, hit, why in fenced
+                    if any(hit(v, g) for v in mine for g in {os.path.normpath(f), os.path.realpath(f)})), "")
+        if not why and must_exist and not os.path.isdir(x):
+            why = "it is a file, not a folder" if os.path.exists(x) else "there is no such folder"
+        if why:
+            p.append(f"{at}: {why}")
+        elif os.path.normpath(x) not in good:
+            good.append(os.path.normpath(x))
+    return good, p
 
 
 def is_git_rule(rule: str) -> bool:

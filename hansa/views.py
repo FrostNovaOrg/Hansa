@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import build, cost, installed, installed_text, notify
-from .desk import Desk, is_git_rule, read_json, write_json
+from .desk import Desk, is_git_rule, read_json, read_split, write_json
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
                   server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason)
@@ -816,9 +816,20 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
+        *read_lines(desk, s),
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
         "pause/resume."])
+
+
+def read_lines(desk: Desk, s: dict) -> list:
+    """For hansa explain: the folders outside the desk the coordinator reads without asking, and those listed
+    that it is not given."""
+    good, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"])
+    return ["folders outside the desk you (and your helpers) read without asking, besides the lanes' repositories: "
+            + (", ".join(good) or "none") + " (set by the principal on the web page; reading only: you cannot "
+            "edit there; a change holds from the next hansa coordinator start; when you keep needing one, hansa ask)",
+            *(f"  not given: {r[len('the coordinator cannot be let read '):]}" for r in refused)]
 
 
 def try_text(lane: str, t: dict) -> str:
