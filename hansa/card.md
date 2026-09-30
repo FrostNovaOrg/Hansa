@@ -313,8 +313,9 @@ here; work that needs code changed or a browser goes to a worker.
   add that tool's own folder, never the whole home folder. hansa refuses a path
   that would open what the sandbox keeps closed or what hansa runs: the home
   folder or above it, the desk, the lane's repository, a provider's Claude Code
-  folder, credential files such as `~/.ssh`, and folders on the `PATH` or above
-  them. Tell the principal what you added and why.
+  folder and `~/.claude`, credential files such as `~/.ssh`, and folders on the
+  `PATH` or above them; and a path with `( ) [ ] { } *` or `?` in a name, which
+  the sandbox may read as a pattern. Tell the principal what you added and why.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit. Ask with `hansa ask`; do not edit `settings.json`. Keys live in

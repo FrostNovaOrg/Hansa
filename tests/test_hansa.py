@@ -5287,6 +5287,24 @@ class DeskTest(unittest.TestCase):
                                               "the lane's repository; workers change code only in their worktree"])
             s["providers"]["claude"]["config_dir"] = ""  # ~/.claude by default
             self.assertIn("provider claude's Claude Code folder", refused(home / ".claude")[0])
+            s["providers"]["claude"]["config_dir"] = str(self.tmp / "cfg")  # elsewhere: ~/.claude all the same
+            for x in (home / ".claude", home / ".claude" / "hooks", home / ".claude" / ".." / ".claude"):
+                self.assertEqual(refused(x), [f"lane a: write cannot include {x}: it would open {home / '.claude'}, "
+                                              "the machine owner's Claude Code folder"], x)
+            self.assertEqual(refused(home / ".claude-cache"), [])  # another folder, by its name
+            # a name the sandbox may read as a pattern, there or not, or where a link leads
+            odd = [home / n for n in ("a)b", "(x", "star*", "what?", "[br", "br]", "{a,b", "b}")]
+            (home / "odd (1)").mkdir()
+            (home / "plain").symlink_to(home / "odd (1)")
+            for x in (*odd, home / ".cache" / "v*" / "pip", home / "odd (1)", home / "plain"):
+                told = refused(x)
+                self.assertTrue(len(told) == 1 and f"write cannot include {x}: " in told[0]
+                                and "may read as a pattern" in told[0], (x, told))
+            s["lanes"]["a"]["write"] = [str(home / ".m2"), str(home / "star*")]  # the good one beside it
+            self.assertEqual(len(validate(s, self.desk.root)), 1)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / "star*")])
+            self.assertIn("may read as a pattern", str(e.exception.code))
             before = self.desk.settings_path.read_text()
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".m2"), str(home)])

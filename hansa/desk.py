@@ -375,6 +375,8 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
             if h.startswith("/"):  # a relative config_dir is refused above
                 fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Claude Code folder, "
                                              "which workers may not read"))
+    mine = os.path.join(home, ".claude")  # whichever folder the providers use: its settings and hooks
+    fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key "
                                                   "that workers may not read") for f in HOME_SECRETS]
     fenced += [(d, _above, f"it would open {d}, a folder on the PATH hansa runs with")
@@ -385,6 +387,10 @@ def write_problems(paths, repo=None, root=None, providers=None) -> list:
             if hit(x, f):  # as the disk sees both: as given and with links resolved, in any case it ignores
                 p.append(f"write cannot include {x}: {why}")
                 break
+        else:
+            if any(c in v for v in _forms(x) for c in RULE_BREAKERS):  # the sandbox may read it as a pattern
+                p.append(f"write cannot include {x}: a name in it (or where its link leads) has one of "
+                         f"{RULE_BREAKERS}, which the sandbox may read as a pattern and open more than the one folder")
     return p
 
 
