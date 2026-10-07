@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_lanes, read_json,
-                   read_split, write_json)
+                   read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -234,6 +234,29 @@ def ready_news(desk: Desk) -> None:
         desk.event("ask_ready", provider=n, ids=ids)
 
 
+def project_file(desk: Desk) -> dict:
+    """notes/PROJECT.md, the project's own rules the card imports: whether the desk has it, and its size."""
+    p = desk.project_path
+    try:
+        data = p.read_bytes() if p.is_file() else None
+    except OSError:
+        data = None
+    if data is None:
+        return {"file": PROJECT_FILE, "present": False, "bytes": 0, "lines": 0, "long": False}
+    return {"file": PROJECT_FILE, "present": True, "bytes": len(data), "lines": data.count(b"\n")
+            + (not data.endswith(b"\n") and bool(data)), "long": len(data) > PROJECT_LONG}
+
+
+def project_text(pf: dict) -> str:
+    """hansa status's line on notes/PROJECT.md."""
+    if not pf["present"]:
+        return (f"project rules: no {pf['file']} (nothing loads with the card; the coordinator may write one, short: "
+                "the project's own rules)")
+    return (f"project rules: {pf['file']}, {pf['bytes']:,} bytes, {pf['lines']} lines, loaded with the card"
+            + (f"; long: the coordinator rereads it at every turn, so keep it under {PROJECT_LONG // 1024} KB"
+               if pf["long"] else ""))
+
+
 def status(desk: Desk) -> dict:
     s = desk.settings()
     tasks = desk.tasks()
@@ -262,6 +285,7 @@ def status(desk: Desk) -> dict:
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
+        "project": project_file(desk),  # notes/PROJECT.md, which the card imports
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -327,6 +351,7 @@ def status_text(st: dict) -> str:
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
+    out += [project_text(st["project"])] if st.get("project") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
