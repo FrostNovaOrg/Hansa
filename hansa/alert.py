@@ -10,7 +10,11 @@ Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and se
 as the desk's account, outside the sandbox, in the desk's folder, with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together) and the text on standard input (UTF-8,
 keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alerts that come within GATHER seconds
-of each other go out in one run (none waits more than MOST_WAIT); one run at a time (.hansa/alert.lock). A run
+of each other go out in one run (none waits more than MOST_WAIT); one run at a time (.hansa/alert.lock), and at
+most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run when the hour frees a run, with a
+line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
+(event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
+only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
 there is no retry: the next alert tries again. The text is in English: the page has no language setting (it
 follows the browser's language, which hansa does not know when it sends).
@@ -19,9 +23,12 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
+import math
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -34,6 +41,8 @@ MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
 MOST_TEXT = 1000  # characters on the command's standard input
 TAIL = 5  # lines of a failed run's output kept
+MOST_RUNS = 20  # runs an hour at most; beyond it, alerts are held and go out together
+HOUR = 3600
 STUCK_ALERT = 15 * 60  # seconds hansa serve finishes no round before the principal is alerted
 EVERY = 2.0  # seconds between the alert thread's looks
 
@@ -52,9 +61,39 @@ def command(s: dict) -> str:
     return a["command"].strip() if isinstance(a, dict) and isinstance(a.get("command"), str) else ""
 
 
+def _good(x) -> bool:
+    at = x.get("at") if isinstance(x, dict) else None
+    return (isinstance(at, (int, float)) and not isinstance(at, bool) and math.isfinite(at)
+            and isinstance(x.get("kind"), str) and isinstance(x.get("text"), str))
+
+
+def _read(desk: Desk) -> tuple:
+    """The queue's entries that can be read, and how many cannot (a hand edit: hansa writes it whole)."""
+    try:
+        raw = queue_file(desk).read_bytes()
+    except FileNotFoundError:
+        return [], 0
+    try:  # text that is not UTF-8 is read with replacement characters: one bad byte loses no alert
+        q = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return [], 1 if raw.strip() else 0
+    if not isinstance(q, list):
+        return [], 1
+    good = [x for x in q if _good(x)]
+    return good, len(q) - len(good)
+
+
 def queued(desk: Desk) -> list:
-    q = read_json(queue_file(desk), [])
-    return [x for x in q if isinstance(x, dict)] if isinstance(q, list) else []
+    return _read(desk)[0]
+
+
+def _clean(desk: Desk) -> list:
+    """Under the desk lock: the queue's good entries, with any that cannot be read dropped and recorded once."""
+    good, bad = _read(desk)
+    if bad:
+        write_json(queue_file(desk), good)
+        desk.event("alert_dropped", entries=bad, why="an entry of .hansa/alerts.json that cannot be read")
+    return good
 
 
 def add(desk: Desk, kind: str, text: str) -> bool:
@@ -62,7 +101,7 @@ def add(desk: Desk, kind: str, text: str) -> bool:
     if not command(desk.settings()):
         return False
     with desk.lock():
-        q = queued(desk)
+        q = _clean(desk)
         q.append({"kind": kind, "text": desk.redact(text), "at": time.time()})
         desk.state_dir.mkdir(exist_ok=True)
         write_json(queue_file(desk), q)
@@ -94,10 +133,13 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
-def text_of(desk: Desk, items: list) -> str:
-    """What the command reads on its standard input: one line per alert, keys removed, cut at MOST_TEXT characters."""
+def text_of(desk: Desk, items: list, held: int = 0) -> str:
+    """What the command reads on its standard input: one line per alert, keys removed, cut at MOST_TEXT characters.
+    held: how many of them the limit of MOST_RUNS runs an hour held back."""
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
     head = f"[hansa] desk {desk.root.name}"
+    if held:
+        head += f" ({held} held back by the limit of {MOST_RUNS} runs an hour)"
     text = (f"{head}: {lines[0]}" if len(lines) == 1 else
             f"{head}: {len(lines)} alerts\n" + "\n".join(f"- {x}" for x in lines))
     text = desk.redact(text)
@@ -110,20 +152,26 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT) -
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
     timed_out, code, out = False, None, b""
-    try:
-        proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=str(desk.root), env=env, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    # stdin and output are files, not pipes: the command's own exit ends the run, even when a child it left behind
+    # still holds them; only at the time limit is its whole group killed
+    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said:
+        given.write(text.encode("utf-8"))
+        given.seek(0)
         try:
-            out, _ = proc.communicate(text.encode("utf-8"), timeout=timeout)
-            code = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
-                out, _ = proc.communicate(timeout=5)
-    except OSError as e:
-        out = str(e).encode()
+            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=str(desk.root), env=env, stdin=given,
+                                    stdout=said, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                    proc.wait(timeout=5)
+            said.seek(0)
+            out = said.read()
+        except OSError as e:
+            out = str(e).encode()
     said = desk.redact(out.decode("utf-8", errors="replace")).strip().splitlines()[-TAIL:]
     tail = [x[:200] for x in said]
     return {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "tail": tail, "at": now(),
@@ -147,9 +195,24 @@ def _one_run(desk: Desk, wait: bool):
                 fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def _record(desk: Desk, result: dict, count: int) -> None:
-    last = read_json(last_file(desk), {}) or {}
-    rec = {"last": result, "failed": last.get("failed") if result["ok"] else result}
+def _last(desk: Desk) -> dict:
+    try:
+        rec = read_json(last_file(desk), {})
+    except ValueError:  # not UTF-8: a hand edit; hansa writes it whole
+        rec = {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def _runs(rec: dict, t: float) -> list:
+    """When the runs of the last hour began."""
+    runs = rec.get("runs")
+    return [x for x in runs if isinstance(x, (int, float)) and t - HOUR < x <= t] if isinstance(runs, list) else []
+
+
+def _record(desk: Desk, result: dict, count: int, began: float) -> None:
+    last = _last(desk)
+    rec = {"last": result, "failed": last.get("failed") if result["ok"] else result,
+           "runs": _runs(last, began) + [began]}
     write_json(last_file(desk), rec)
     if result["ok"]:
         desk.event("alert_sent", kinds=result["kinds"], alerts=count)
@@ -159,27 +222,41 @@ def _record(desk: Desk, result: dict, count: int) -> None:
 
 
 def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, timeout: float = TIMEOUT,
-             wait: bool = False) -> dict | None:
+             wait: bool = False, capped: bool = True) -> dict | None:
     """Send what is queued once it has gathered: when no alert came for `gather` seconds, or the first has waited
-    `most_wait`. The result of the run; None when nothing went out."""
+    `most_wait`; and, when capped, only if fewer than MOST_RUNS runs began in the last hour (else they wait, and go
+    out together when the hour frees a run). The result of the run; None when nothing went out."""
     with _one_run(desk, wait) as mine:
         if not mine:
             return None
-        q = queued(desk)
-        if not q:
+        good, bad = _read(desk)
+        if bad:
+            with desk.lock():
+                good = _clean(desk)
+        if not good:
             return None
         t = time.time()
-        if t - max(x.get("at") or 0 for x in q) < gather and t - min(x.get("at") or t for x in q) < most_wait:
+        if t - max(x["at"] for x in good) < gather and t - min(x["at"] for x in good) < most_wait:
+            return None
+        rec = _last(desk)
+        if capped and len(_runs(rec, t)) >= MOST_RUNS:
+            if not rec.get("held_since"):  # recorded once per hold
+                write_json(last_file(desk), {**rec, "held_since": t})
+                desk.event("alert_held", alerts=len(good), most_runs=MOST_RUNS)
             return None
         with desk.lock():
-            q = queued(desk)
+            q = _clean(desk)
             write_json(queue_file(desk), [])
         cmd = command(desk.settings())
         if not cmd or not q:  # cleared since they were queued: nothing to send them with
             return None
-        kinds = ",".join(dict.fromkeys(str(x.get("kind")) for x in q))
-        result = run(desk, cmd, kinds, text_of(desk, q), timeout)
-        _record(desk, result, len(q))
+        held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
+        held = len(q) if held_since else 0
+        if held_since:
+            write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
+        kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
+        result = run(desk, cmd, kinds, text_of(desk, q, held), timeout)
+        _record(desk, result, len(q), t)
         return result
 
 
@@ -188,7 +265,7 @@ def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
     if not command(desk.settings()):
         return {"ok": False, "problems": ["no alert command is set; save one first"]}
     add(desk, "test", "a test alert from the page: the alert command works")
-    result = send_due(desk, gather=0, timeout=timeout, wait=True)
+    result = send_due(desk, gather=0, timeout=timeout, wait=True, capped=False)  # the principal's own press
     return result or {"ok": False, "problems": ["the test alert was not sent"]}
 
 
@@ -231,8 +308,8 @@ def _when(t) -> str:
 
 def failure_line(desk: Desk) -> str:
     """For hansa status: the last failed alert run (when, exit code, a short tail); '' when none failed."""
-    rec = read_json(last_file(desk), {}) or {}
-    f = rec.get("failed") if isinstance(rec, dict) else None
+    rec = _last(desk)
+    f = rec.get("failed")
     if not isinstance(f, dict):
         return ""
     how = f"timed out after {TIMEOUT} s" if f.get("timed_out") else f"exit {f.get('exit')}"

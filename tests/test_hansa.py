@@ -9697,5 +9697,90 @@ class DeskTest(unittest.TestCase):
         r = alert.send_due(self.desk, gather=0)
         self.assertNotIn("sk-later-key", json.dumps(r) + self.desk.events_path.read_text() + self.hansa("status"))
 
+    def test_an_alert_queue_entry_that_cannot_be_read_is_dropped_once_and_the_others_go(self):
+        from hansa import alert
+        out = self.alert_fake()
+        q = [{"kind": "ask", "text": "first", "at": 0}, {"kind": "ask", "text": "bad time", "at": "soon"},
+             {"kind": "ask", "text": "no time"}, "not an entry", {"kind": "ask", "text": "second", "at": 1}]
+        alert.queue_file(self.desk).write_text(json.dumps(q))
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("- first\n- second", self.alerted(out)[-1]["text"])
+        [e] = self.events("alert_dropped")
+        self.assertEqual(e["entries"], 3)
+        # text that is not UTF-8 loses no alert, and a bad entry is recorded once, not on every look
+        raw = b'[{"kind": "ask", "text": "caf\xe9 \xff", "at": 0}, {"kind": "ask", "text": "x", "at": null}]'
+        alert.queue_file(self.desk).write_bytes(raw)
+        self.desk.add_ask("third")
+        self.assertEqual(len(self.events("alert_dropped")), 2)
+        self.assertEqual([x["text"] for x in alert.queued(self.desk)][-1], "request #1 waits for you on the page: third")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("caf", self.alerted(out)[-1]["text"])
+        self.assertIn("third", self.alerted(out)[-1]["text"])
+        for _ in range(3):
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.events("alert_dropped")), 2)
+        self.assertEqual(self.events("alert_error"), [])
+        # a whole file that is not JSON is dropped, once
+        alert.queue_file(self.desk).write_bytes(b"\xff{not json")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.events("alert_dropped")), 3)
+
+    def test_an_alert_command_that_exits_leaving_a_child_ends_with_its_own_exit(self):
+        from hansa import alert
+        mark = self.tmp / "child-done"
+        cmd = f"(sleep 3; touch {shlex.quote(str(mark))}) & echo sent; exit 0"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        self.desk.add_ask("are you there")
+        t0 = time.time()
+        r = alert.send_due(self.desk, gather=0, timeout=2)
+        self.assertLess(time.time() - t0, 1.5)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (True, 0, False, ["sent"]))
+        self.assertEqual(self.events("alert_failed"), [])
+        self.assertNotIn("FAILED", self.hansa("status"))
+        # the same, with the child holding stdin and output and the exit code its own
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "(sleep 5 &); echo nope; exit 6"})),
+                         {"ok": True, "problems": []})
+        self.desk.add_ask("again")
+        r = alert.send_due(self.desk, gather=0, timeout=2)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (False, 6, False, ["nope"]))
+        # the child is left alone: only the time limit kills the group
+        deadline = time.time() + 10
+        while not mark.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertTrue(mark.exists())
+
+    def test_at_most_twenty_alert_runs_an_hour_and_what_is_held_back_goes_out_together(self):
+        from hansa import alert
+        out = self.alert_fake()
+        t = time.time()
+        write_json(alert.last_file(self.desk), {"runs": [t - alert.HOUR - 5] + [t - 3000 + i for i in range(alert.MOST_RUNS - 1)]})
+        self.desk.add_ask("one")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])  # the 20th run of the hour
+        self.assertNotIn("held back", self.alerted(out)[-1]["text"])
+        self.assertEqual(len(alert._last(self.desk)["runs"]), alert.MOST_RUNS)  # the one over an hour old is gone
+        self.desk.add_ask("two")
+        self.desk.add_ask("three")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # the limit holds them
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        self.assertEqual(len(self.events("alert_held")), 1)  # recorded once per hold
+        self.assertEqual(len(self.alerted(out)), 1)
+        self.desk.add_ask("four")
+        # the hour frees a run: what was held goes out in one run, saying how many were held back
+        rec = alert._last(self.desk)
+        rec["runs"][0] = time.time() - alert.HOUR - 1
+        write_json(alert.last_file(self.desk), rec)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        a = self.alerted(out)[-1]
+        self.assertIn("(3 held back by the limit of 20 runs an hour)", a["text"])
+        self.assertIn("- request #2 waits for you on the page: two", a["text"])
+        self.assertIn("four", a["text"])
+        self.assertEqual(alert.queued(self.desk), [])
+        self.desk.add_ask("five")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # full again
+        self.assertTrue(alert.test(self.desk)["ok"])  # the principal's own test press is not held
+        self.assertIn("five", self.alerted(out)[-1]["text"])
+
 if __name__ == "__main__":
     unittest.main()

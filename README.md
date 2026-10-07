@@ -218,8 +218,12 @@ page gives.
   the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
   `ask`, `server_stuck`, `test`; comma-separated when several go out together)
   and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
-  characters. It has 30 seconds. Alerts within 20 seconds of each other go out
-  in one run, one run at a time. A run that fails or times out is recorded
+  characters. It has 30 seconds; its own exit ends the run, even if it leaves a
+  child running, and only at the limit is its process group killed. Alerts
+  within 20 seconds of each other go out in one run, one run at a time, and at
+  most 20 runs an hour: beyond that, alerts are held and go out together in one
+  run when the hour frees a run, with a line saying how many were held back
+  (the page's test button is not held). A run that fails or times out is recorded
   (event `alert_failed`) and `hansa status` shows the last failure with its exit
   code and last lines; there is no retry: the next alert tries again. The page
   has a button that sends a test alert; no coordinator command sends one.
