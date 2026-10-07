@@ -138,6 +138,14 @@ if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given
     open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
+if os.environ.get("FAKE_SEE_PREVIEW"):  # "pid file:out file": whether the preview hansa started runs as the worker does
+    pidf, outf = os.environ["FAKE_SEE_PREVIEW"].split(":")
+    pid = int(open(pidf).read()) if os.path.exists(pidf) else 0
+    try:
+        group = os.getpgid(pid) if pid else None
+    except OSError:
+        group = None
+    open(outf, "w").write(json.dumps({"up": group is not None, "group": group, "mine": os.getpgrp()}))
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -7675,6 +7683,190 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(cfg["mcpServers"]["browser"]["args"][1:], [str(self.desk.tasks_dir / "t0001" / "browser"),
                                                                     "/usr/bin/env true"])
         self.assertIn("with a browser", views.show_text(self.desk, "t0001"))
+
+    def preview_lane(self, preview: str, wait: int = 20, **env):
+        """Lane a with a browser on the desk, this preview, and the stand-in worker telling (FAKE_SEE_PREVIEW) whether
+        the preview runs as it works; the preview writes its pid to self.tmp/preview.pid. hansa starts the preview as
+        on macOS. Returns (the argv file, the file the worker writes what it saw to)."""
+        seen, saw = self.tmp / "argv.jsonl", self.tmp / "saw-preview.json"
+        s = self.desk.settings()
+        s["browser"] = "/usr/bin/env true"
+        s["lanes"]["a"].update(preview=f"echo $$ > {shlex.quote(str(self.tmp / 'preview.pid'))}; {preview}",
+                               preview_wait_s=wait, env={"FAKE_SHOW_ARGV": str(seen),
+                                                         "FAKE_SEE_PREVIEW": f"{self.tmp / 'preview.pid'}:{saw}", **env})
+        self.assertEqual(self.desk.save_settings(s), [])
+        starts = unittest.mock.patch("hansa.run.PREVIEW_STARTS", True)
+        starts.start()
+        self.addCleanup(starts.stop)
+        self.addCleanup(self.kill_preview)
+        return seen, saw
+
+    def preview_pid(self) -> int:
+        f = self.tmp / "preview.pid"
+        return int(f.read_text()) if f.exists() else 0
+
+    def kill_preview(self):
+        if self.preview_pid() > 0:  # never 0: that is this process's own group
+            try:
+                os.killpg(self.preview_pid(), signal.SIGKILL)
+            except OSError:
+                pass
+
+    def preview_gone(self, wait=15) -> bool:
+        from hansa import run
+        pid, end = self.preview_pid(), time.time() + wait
+        while time.time() < end:
+            if not run.alive(pid) or run._state(pid) == "Z":
+                return True
+            time.sleep(0.1)
+        return False
+
+    def add_browser_task(self) -> str:
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
+        return self.desk.tasks()[-1]["id"]
+
+    def test_preview_starts_in_srt_with_local_binding_for_it_alone_and_the_worker_gets_its_address(self):
+        seen, saw = self.preview_lane("echo booting; echo '  Local:   http://localhost:\x1b[1m5173\x1b[22m/'; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        [call] = [c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]
+        self.assertTrue(call["settings"]["network"]["allowLocalBinding"])  # for the preview's own process
+        self.assertEqual(call["settings"]["network"]["allowedDomains"], [])  # the lane's list, nothing added
+        self.assertEqual(Path(call["cwd"]).resolve(), (self.desk.worktrees_dir / "a").resolve())
+        self.assertEqual(call["env"].get("HANSA_TASK"), tid)
+        self.assertFalse({"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} & set(call["env"]))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        worker = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["network"]
+        self.assertNotIn("allowLocalBinding", worker)  # the worker's own sandbox stays as the lane sets it
+        prompt = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("the app\nis at http://localhost:5173/. Open that address in the browser.", prompt)
+        self.assertEqual(json.loads(saw.read_text())["up"], True)  # it ran while the worker did, in a group of its own
+        self.assertNotEqual(json.loads(saw.read_text())["group"], json.loads(saw.read_text())["mine"])
+        self.assertTrue(self.preview_gone())  # and was stopped when the worker ended
+        self.assertEqual((m["preview"]["ready"], m["preview"]["address"]), (True, "http://localhost:5173/"))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("preview (started by hansa for the browser): ready at http://localhost:5173/", shown)
+        self.assertIn(str(self.desk.tasks_dir / tid / "preview.log"), shown)
+        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.json").exists())
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview-sandbox.json").exists())
+        plain = self.desk.new_task("No browser")  # a task without a browser gets no preview
+        self.settle(Dispatcher(self.desk), plain)
+        self.assertEqual(len([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]), 1)
+        self.assertNotIn("preview", self.desk.meta(plain))
+
+    def test_preview_ready_once_a_port_it_names_answers(self):
+        skip_unless_ports(self)
+        self.preview_lane(f"exec {shlex.quote(sys.executable)} -u -c " + shlex.quote(
+            "import socket, time; s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(5); "
+            "print('listening on port', s.getsockname()[1]); time.sleep(600)"))
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertTrue(m["preview"]["ready"], m["preview"])
+        self.assertRegex(m["preview"]["address"], r"^http://localhost:\d+$")
+
+    def test_preview_not_ready_in_time_is_stopped_and_the_worker_told_with_its_last_lines(self):
+        seen, saw = self.preview_lane("echo installing; echo still compiling; exec sleep 600", wait=1)
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)  # the task goes on without it
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("and it did not\nstart: it was not ready within 1 seconds", prompt)
+        self.assertIn("    installing\n    still compiling\n", prompt)
+        self.assertEqual(json.loads(saw.read_text())["up"], False)  # stopped before the worker started
+        self.assertTrue(self.preview_gone())
+        self.assertFalse(m["preview"]["ready"])
+        self.assertIn("did not start: it was not ready within 1 seconds", views.show_text(self.desk, tid))
+        self.preview_lane("echo no address; exit 3")  # one that ends first
+        tid = self.add_browser_task()
+        self.settle(Dispatcher(self.desk), tid)
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("it ended (exit 3) before it was ready", prompt)
+        self.assertIn("    no address\n", prompt)
+
+    def test_preview_is_stopped_when_the_worker_fails_or_is_cancelled(self):
+        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_STOP_AT_TURNS="1")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(self.preview_gone())
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"])
+        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
+                          FAKE_TMP_WAIT="60")
+        (self.tmp / "preview.pid").unlink()
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        end = time.time() + 20
+        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.assertTrue(self.preview_pid() and not self.preview_gone(wait=0.5))
+        self.desk.update(tid, cancel=True)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertTrue(self.preview_gone())
+
+    def test_preview_left_by_a_worker_an_earlier_server_started_is_stopped(self):
+        self.preview_lane("echo http://localhost:8124; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
+                          FAKE_TMP_WAIT="60")
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        end = time.time() + 20
+        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        pid = self.desk.meta(tid)["pid"]
+        os.killpg(pid, signal.SIGKILL)  # the worker and what hansa ran around it, gone with no chance to stop it
+        d.procs[tid].wait()
+        self.assertFalse(self.preview_gone(wait=0.5))  # the preview, in a group of its own, still runs
+        m = self.settle(Dispatcher(self.desk), tid)  # a server started again
+        self.assertNotIn(m["state"], ("queued", "running"))
+        self.assertTrue(self.preview_gone())
+        self.assertTrue(m["preview"]["stopped"])
+        self.assertTrue((self.desk.tasks_dir / tid / "preview.log").exists())
+
+    def test_preview_output_is_kept_with_keys_removed(self):
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        self.preview_lane(f"echo token {key}; echo http://localhost:8125/; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        log = (self.desk.tasks_dir / tid / "preview.log").read_text()
+        self.assertIn("token [key of registry]", log)
+        self.assertNotIn(key, log)
+        self.assertNotIn(key, json.dumps(m))
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.log").exists())
+
+    def test_preview_is_not_started_on_linux_and_the_worker_is_told(self):
+        seen, _ = self.preview_lane("echo http://localhost:8126/; exec sleep 600")
+        with unittest.mock.patch("hansa.run.PREVIEW_STARTS", False):
+            tid = self.add_browser_task()
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]], [])
+        self.assertFalse(self.preview_pid())
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("hansa does not start it on Linux", prompt)
+        self.assertIn("not started: hansa does not start a preview on Linux", views.show_text(self.desk, tid))
+        lines = "\n".join(views.preview_text(False, self.desk.settings()["lanes"]["a"]))
+        self.assertIn("on Linux hansa does not start it", lines)
+        mac = "\n".join(views.preview_text(True, self.desk.settings()["lanes"]["a"]))
+        self.assertIn("can reach every service on this machine's loopback", mac)
+        self.assertIn("up to 20 s (preview_wait_s)", mac)
+        self.assertIn("preview: ", views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "preview_wait_s", "45")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["preview_wait_s"], 45)
+        with self.assertRaises(SystemExit):
+            self.hansa("lane", "set", "a", "preview_wait_s", "0")
+        self.hansa("lane", "set", "a", "preview_wait_s", "none")
+        self.assertNotIn("preview_wait_s", self.desk.settings()["lanes"]["a"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        said = " ".join(out.getvalue().split())
+        self.assertIn("On Linux hansa does not start it", said)
+        self.assertIn("can reach every service on the machine's loopback", said)
 
     def test_stopped_worker_still_hands_in_what_it_wrote(self):
         s = self.desk.settings()

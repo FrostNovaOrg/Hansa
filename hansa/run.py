@@ -268,6 +268,37 @@ PREVIEW_NOTE = """
 To look at the app, start it with `{preview}` (the Bash tool's background option) and open
 the address it prints in the browser.
 """
+# A task or verification with a browser, on a lane with a preview: hansa starts the preview before the worker
+# (with_preview, hansa/preview.py) and tells the worker how that went, with one of these.
+PREVIEW_READY_NOTE = """
+hansa started the lane's preview (`{preview}`) for you, in this worktree, before you started: the app
+is at @ADDRESS@. Open that address in the browser. It runs until you end, and hansa stops it then;
+do not start it again. It runs from this worktree, so a preview that reloads on changes shows
+yours. Your own commands may not reach it: look at it with the browser.
+"""
+PREVIEW_NOT_READY_NOTE = """
+hansa tried to start the lane's preview (`{preview}`) for you before you started, and it did not
+start: @WHY@ (it had {seconds} seconds to print an http://localhost:PORT address). hansa stopped it.
+Its last lines:
+@LINES@Do not try to start it yourself; say in your report that the preview did not start, with
+those lines, and do what you can without it.
+"""
+PREVIEW_LINUX_NOTE = """
+This lane has a preview (`{preview}`), but hansa does not start it on Linux: there the sandbox it would
+run in has a network of its own, so the browser, which runs outside it, could not reach the app. Do not
+try to start it yourself; say in your report that you could not look at the app, and do what you can
+without it.
+"""
+PREVIEW_FAILED_NOTE = """
+This lane has a preview (`{preview}`), but hansa could not start it: {why}. Do not try to start it
+yourself; say in your report that the preview did not start, and do what you can without it.
+"""
+PREVIEW_WAIT_S = 120  # how long a preview has to be ready when its lane sets no preview_wait_s
+# Whether hansa starts a lane's preview for a task with a browser: on macOS only. There srt's local binding lets
+# the preview bind the machine's loopback, where the browser reaches it (and the preview reaches every service on
+# it). On Linux srt runs the command with a network namespace of its own (bubblewrap's --unshare-net), and local
+# binding does nothing: a server bound inside is on the sandbox's own loopback, which nothing outside can reach.
+PREVIEW_STARTS = sys.platform == "darwin"
 NO_BROWSER_NOTE = """
 No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
 in words what changed and where they can see it.
@@ -1078,30 +1109,32 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> d
     }}
 
 
-def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str) -> dict:
+def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str, local: bool = False) -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
-    worktree, the temporary folder `tmp` and the lane's write list."""
+    worktree, the temporary folder `tmp` and the lane's write list. local: with local binding whatever the
+    lane's network list says (a preview hansa starts, and nothing else)."""
     hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
-    if any(is_local(h) for h in hosts):
+    if local or any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True
     return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp]) + fs["allowWrite"],
                                                "denyRead": fs["denyRead"], "denyWrite": fs["denyWrite"]}}
 
 
-def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
-    """What a lane's setup or check (`name`) runs in: (srt, its settings file in the task's raw folder,
+def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path, local: bool = False) -> tuple:
+    """What a lane's setup, check or preview (`name`) runs in: (srt, its settings file in the task's raw folder,
     a temporary folder made for this run, for the command's TMPDIR). srt ignores the TMPDIR it is given
     and sets its own from CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the folder.
     Whoever runs the command removes the folder after it; finish and finish_check remove one left behind.
-    srt is tried first with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs."""
+    srt is tried first with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs.
+    local: local binding for this one command (srt_settings)."""
     try:
         check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     tmp = tempfile.mkdtemp(prefix=f"hansa-{name}-")
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
-    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp))
+    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, local))
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), tmp]})
     try:
         srt = try_srt(desk, f, tmp, wt)
@@ -1112,9 +1145,9 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 
 
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
-    """The srt settings of a task's setup and check, once they have ended, the lane's env file, and their temporary folders
+    """The srt settings of a task's setup, check and preview, once they have ended, the lane's env file, and their temporary folders
     still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
-    for name in ("setup", "check"):
+    for name in ("setup", "check", "preview"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
     m = desk.meta(tid)
@@ -1739,6 +1772,66 @@ def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict
             line, tmp, srt, settings, *argv]
 
 
+def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
+    """The worker command for a task or verification with a browser on a lane with a preview: preceded by
+    hansa/preview.py, which starts the preview in srt with the lane's sandbox and local binding for it alone, waits
+    up to the lane's preview_wait_s for its address, tells the worker (PREVIEW_READY_NOTE, PREVIEW_NOT_READY_NOTE)
+    and stops it when the worker ends (end_preview, should it not). Where hansa does not start it (Linux, see
+    PREVIEW_STARTS) or cannot (srt does not run), the worker command alone, told why. Recorded on the task
+    (preview), for hansa show."""
+    shown = desk.redact(lane["preview"])
+    i = argv.index("--append-system-prompt") + 1
+    raw = desk.raw_dir(tid)
+    for f in ("preview.log", "preview.json"):
+        (raw / f).unlink(missing_ok=True)  # an earlier try's
+    if not PREVIEW_STARTS:
+        argv[i] += PREVIEW_LINUX_NOTE.format(preview=shown)
+        desk.update(tid, preview={"command": shown, "started": False,
+                                  "why": "hansa does not start a preview on Linux (hansa explain lane)"})
+        return argv
+    try:
+        srt, settings, tmp = in_srt(desk, tid, "preview", lane, pname, p, wt, local=True)
+    except Exception as e:  # noqa: BLE001 - the task goes on without it, told why
+        why = desk.redact(str(e))[:600]
+        argv[i] += PREVIEW_FAILED_NOTE.format(preview=shown, why=why)
+        desk.update(tid, preview={"command": shown, "started": False, "why": f"it could not start: {why}"})
+        return argv
+    seconds = lane.get("preview_wait_s", PREVIEW_WAIT_S)
+    desk.update(tid, preview={"command": shown, "started": True, "seconds": seconds})
+    return [sys.executable, str(Path(__file__).with_name("preview.py")), str(raw / "preview.log"),
+            str(raw / "preview.json"), str(seconds), srt, settings, tmp, tid, in_sandbox(desk, lane, lane["preview"]),
+            PREVIEW_READY_NOTE.format(preview=shown),
+            PREVIEW_NOT_READY_NOTE.format(preview=shown, seconds=seconds), "--", *argv]
+
+
+def end_preview(desk: Desk, tid: str) -> None:
+    """Stop the preview hansa started for this task, with its whole process group, if it still runs: the worker's
+    end stops it (hansa/preview.py), and this makes sure, also for a worker an earlier server started. Then its
+    output goes into the task's folder, keys removed, and what became of it onto the task (preview)."""
+    raw = desk.raw_dir(tid)
+    rec = read_json(raw / "preview.json", {}) or {}
+    pgid = rec.get("pgid")
+    if pgid and group_running(pgid):  # a group with a process in it keeps its number, so it is still the preview's
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                break
+            end = time.time() + SWEEP_GRACE
+            while group_running(pgid) and time.time() < end:
+                time.sleep(0.1)
+            if not group_running(pgid):
+                break
+    (raw / "preview.json").unlink(missing_ok=True)
+    m = desk.meta(tid)
+    if not (m.get("preview") or {}).get("started"):
+        return
+    publish(desk, tid, "preview.log")
+    desk.change(tid, lambda x: {"preview": {**(x.get("preview") or {}), "stopped": True,
+                                            **{k: rec[k] for k in ("ready", "address", "waited") if k in rec},
+                                            **({"why": desk.redact(rec["why"])} if rec.get("why") else {})}})
+
+
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
     """A task cancelled while hansa prepared it ends there, and its worker never starts."""
     m = desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled before it started",
@@ -1874,6 +1967,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
+    if meta.get("browser") and s.get("browser") and lane.get("preview"):  # started after the setup, and any merge
+        argv = with_preview(desk, tid, argv, lane, pname, p, wt)
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
@@ -2109,6 +2204,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
     done.unlink(missing_ok=True)
+    end_preview(desk, tid)  # before its temporary folder goes, and before the check runs in the worktree
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}

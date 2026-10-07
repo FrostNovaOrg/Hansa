@@ -75,7 +75,7 @@ const T = ZH ? {
   browserCmd:"浏览器工具的启动命令（协调席派活时可以给单件活开浏览器；空＝不提供浏览器）",
   coordinatorRead:"协调席（和它会话里的帮手）不用问就能读的文件夹（工作台以外；每行一个完整路径；只能读，不能改；下次启动 hansa coordinator 时生效）",
   design:"设计会话（你直接在里面跟它改一件功能，结束后交回协调席核对、合并）", join:"接进去的命令（在这台机器上运行）", shots:"截图（最新在前）",
-  designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看（空＝没有）",
+  designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看；带浏览器的活，hansa 在 macOS 上先替它跑起来（空＝没有）", previewWait:"起页面最多等几秒（空＝120）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
   providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
@@ -140,7 +140,7 @@ const T = ZH ? {
   browserCmd:"Browser tool command (the coordinator can give single tasks a browser; blank = none)",
   coordinatorRead:"Folders the coordinator (and the helpers in its session) may read without asking, outside the desk (one full path per line; reading only, no editing; holds from the next hansa coordinator start)",
   design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
-  designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it (blank = none)",
+  designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it; for a task with a browser, hansa starts it first, on macOS (blank = none)", previewWait:"Seconds the preview has to be ready (blank = 120)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
@@ -347,7 +347,7 @@ async function loadSettings(problems) {
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
-  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, merge_check:T.laneMergeCheck, merge_timeout_min:T.mergeTimeout, preview:T.preview, setup:T.setup,
+  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, merge_check:T.laneMergeCheck, merge_timeout_min:T.mergeTimeout, preview:T.preview, preview_wait_s:T.previewWait, setup:T.setup,
   release:T.laneRelease, targets:T.laneTargets};
 /* The recent-changes list names the field briefly; a network or write change has no field, only its event. */
 const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, merge_check:T.f_merge_check, preview:T.f_preview, release:T.f_release, network:T.network, write:T.write};
