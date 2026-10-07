@@ -830,6 +830,22 @@ class DeskTest(unittest.TestCase):
                       "  its last lines:\n", shown)
         self.assertEqual(shown.count("--- FAIL: TestC (0.00s)"), 1)  # once, among the last lines
 
+    def test_go_test_v_never_lifts_a_passing_test_of_the_same_name_in_another_package(self):
+        def package(name, fails, logs):
+            body = "".join(f"    {name}_test.go:{i}: {name} log line {i}\n" for i in range(logs))
+            if fails:
+                return (f"=== RUN   TestNew\n{body}    {name}_test.go:99: {name} REAL FAILURE\n--- FAIL: TestNew (0.00s)\n"
+                        f"FAIL\nFAIL\texample.com/m/{name}\t0.004s\n")
+            return f"=== RUN   TestNew\n{body}--- PASS: TestNew (0.00s)\nPASS\nok  \texample.com/m/{name}\t0.003s\n"
+        shown = self.failing_show(package("b", False, 30) + package("c", False, 30) + package("a", True, 2)
+                                  + "".join(f"=== RUN   TestD{i}\n--- PASS: TestD{i} (0.00s)\n" for i in range(8))
+                                  + "PASS\nok  \texample.com/m/d\t0.002s\n?   \texample.com/m/e\t[no test files]\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestNew\n        a_test.go:0: a log line 0\n"
+                      "        a_test.go:1: a log line 1\n        a_test.go:99: a REAL FAILURE\n"
+                      "    --- FAIL: TestNew (0.00s)\n  its last lines:\n", shown)
+        self.assertNotIn("b log line", shown)
+        self.assertNotIn("c log line", shown)
+
     def test_show_lifts_a_maven_compile_error_as_the_errors(self):
         err = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n  符号:   类 Foo{i}\n  位置: 类 a.App\n"
                       for i in range(5, 12))

@@ -56,6 +56,7 @@ MAVEN_ERROR = re.compile(r"^\[ERROR\] .+:\[\d+,\d+\] ")  # a compiler's error at
 GO_FAIL = re.compile(r"^\s*--- FAIL: (\S+)")  # go test, its messages above it (-v) or under it
 GO_PASS = re.compile(r"^\s*--- (PASS|SKIP): ")
 GO_RUN = re.compile(r"^=== (RUN|CONT|NAME|PAUSE)\s+(\S+)")
+GO_PACKAGE = re.compile(r"^(ok|FAIL|\?)\s+\S+\s+(\(cached\)|\d+(\.\d+)?s\b|\[[^\]]*\])")  # a package's result line
 GO_PANIC = re.compile(r"^panic: ")  # with the first part of its goroutine trace
 GO_BUILD = re.compile(r"^# \S+$")  # go's build errors of a package: file.go:line:col: message under it
 GO_ERROR = re.compile(r"^\S+\.go:\d+:\d+: ")
@@ -74,20 +75,27 @@ def failure_spans(lines: list) -> list:
     FAILURES and ERRORS sections (a part each test) and its short summary, Surefire's <<< FAILURE!/<<< ERROR!
     blocks with their stack traces, its Failures:/Errors: summary and its Tests run count, Maven's COMPILATION
     ERROR and its first path:[line,col] errors, go's --- FAIL blocks with the messages under them and, by the
-    names those fail, under each === RUN/CONT/NAME line of a failing test or subtest wherever it is, a go panic
-    with the first part of its trace, go's build errors, jest's FAIL file lines and ● blocks, Gradle's FAILED
-    tests. A line a runner marks as passing (go's --- PASS, say) is never one of them."""
+    names those fail, under each === RUN/CONT/NAME line of a failing test or subtest wherever it is in its package,
+    a go panic with the first part of its trace, go's build errors, jest's FAIL file lines and ● blocks, Gradle's
+    FAILED tests. A line a runner marks as passing (go's --- PASS, say) is never one of them."""
     spans, i, n, floor, errors, seen = [], 0, len(lines), 0, 0, set()
-    failing = {m.group(1) for x in lines if (m := GO_FAIL.match(x))}  # go's failing tests and subtests, by name
-    go_run, go_parts, part = set(), [], []  # go test -v prints a test's messages as it runs, under each === RUN,
-    for k, x in enumerate(lines + [""]):  # === CONT and === NAME line of its name, wherever: those of the failing
+    pkg, packages = [], 0  # go test ./... : a part each package, to its result line (ok, FAIL or ?), names
+    for x in lines:  # matched within it, since a name may pass in one package and fail in another
+        pkg.append(packages)
+        packages += bool(GO_PACKAGE.match(x))
+    failing, go_run = [set() for _ in range(packages + 1)], [set() for _ in range(packages + 1)]
+    for k, x in enumerate(lines):  # go's failing tests and subtests, by name
+        if m := GO_FAIL.match(x):
+            failing[pkg[k]].add(m.group(1))
+    go_parts, part = [], []  # go test -v prints a test's messages as it runs, under each === RUN, === CONT and
+    for k, x in enumerate(lines + [""]):  # === NAME line of its name, wherever in its package: the failing ones'
         m = GO_RUN.match(x)
         if m or not (x.strip() and x[:1].isspace()) or GO_FAIL.match(x) or GO_PASS.match(x):
             if len(part) > 1:  # its header, with the messages under it
                 go_parts.append(("test", part))
-            part = [k] if m and m.group(1) != "PAUSE" and m.group(2) in failing else []
+            part = [k] if m and m.group(1) != "PAUSE" and m.group(2) in failing[pkg[k]] else []
             if m:
-                go_run.add(m.group(2))
+                go_run[pkg[k]].add(m.group(2))
         elif part:
             part.append(k)
 
@@ -145,7 +153,7 @@ def failure_spans(lines: list) -> list:
                     keep.append(k)
                     passed = None
                 k += 1
-            if GO_FAIL.match(x).group(1) not in go_run:  # without go test -v: its messages under it, or just above
+            if GO_FAIL.match(x).group(1) not in go_run[pkg[i]]:  # without go test -v: its messages under it, or just above
                 while start > floor and indented(start - 1) and not GO_PASS.match(lines[start - 1]) and i - start < 20:
                     start -= 1
                 keep = list(range(start, i)) + keep
