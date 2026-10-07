@@ -519,6 +519,13 @@ def reset_time(text: str, at: float | None = None):
     """When a provider's usage limit resets, as its error says (see RESET_UNIX and the forms after it): a Unix
     time, or None when the error gives none, or hansa is unsure of the one it gives. A time without a zone is the
     machine's local time; a clock time alone is its next coming."""
+    try:
+        return _reset_time(text, at)
+    except Exception:  # noqa: BLE001 - a line hansa cannot read (an impossible offset, say): no reset time
+        return None
+
+
+def _reset_time(text, at):
     from datetime import datetime, timedelta
     at = time.time() if at is None else at
     text = str(text or "").replace(" ", " ").replace("\xa0", " ").replace("\xb7", " ")
@@ -543,12 +550,14 @@ def reset_time(text: str, at: float | None = None):
         found = when(*map(int, m.group(1, 2, 3, 4, 5)), int(m.group(6) or 0), _zone(m, 7))
     elif m := RESET_DAY.search(text):
         tz = _zone(m, 7)
-        year = int(m.group(3)) if m.group(3) else datetime.fromtimestamp(at, tz or None).year
         args = (MONTHS.index(m.group(1).lower()[:3]) + 1, int(m.group(2)), _hour(m.group(4), m.group(6)),
                 int(m.group(5) or 0), 0, tz)
-        found = when(year, *args)
-        if found is not None and not m.group(3) and found < at - 86400:  # Jan 2, read on Dec 31
-            found = when(year + 1, *args)
+        if m.group(3):
+            found = when(int(m.group(3)), *args)
+        else:  # the year that puts it nearest to now: Jan 2 read on Dec 31 is next year's, Dec 31 read on Jan 1 last
+            year = datetime.fromtimestamp(at, tz or None).year
+            near = [t for t in (when(y, *args) for y in (year - 1, year, year + 1)) if t is not None]
+            found = min(near, key=lambda t: abs(t - at)) if near else None
     elif (m := RESET_CLOCK.search(text)) and (m.group(2) or m.group(3)):  # "resets 3" alone is no time
         tz = _zone(m, 4)
         if tz is not False:
@@ -582,7 +591,11 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         until = t + 60 * KEY_REST_MINUTES
         desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
         return until
-    reset = reset_time(text, t)
+    try:
+        reset = reset_time(text, t)
+    except Exception as e:  # noqa: BLE001 - only a detail: the rest falls back to the fixed length
+        desk.event("detail_unread", provider=name, what="reset time", error=str(e)[:300])
+        reset = None
     if reset is not None:
         until = min(max(reset, t) + 60, t + REST_CAP)
         desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
@@ -2253,6 +2266,16 @@ def network_reason(run: dict, err: str) -> str:
     return f"the connection to the provider failed ({found})"
 
 
+def read_detail(desk: Desk, tid: str, what: str, default, fn, *args):
+    """fn(*args), a reading that only adds detail to a run's end; on an error, default, with the error in the
+    event log, so the run still ends."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001 - any error: the run ends on the plainest reading
+        desk.event("detail_unread", task=tid, what=what, error=f"{type(e).__name__}: {e}"[:300])
+        return default
+
+
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
@@ -2268,16 +2291,19 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
     p = desk.settings()["providers"].get(meta.get("provider"))
-    usage = usage_of(run)
+    usage = read_detail(desk, tid, "usage", {}, usage_of, run)
     if not usage and p:
-        usage = usage_from_record(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        usage = read_detail(desk, tid, "usage", {}, lambda: usage_from_record(
+            config_home(desk, meta["provider"], p), meta.get("session_id", "")))
     designing = meta.get("kind") == "design"
-    late = report_after_notices(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
+    late = read_detail(desk, tid, "report after notices", None, report_after_notices,
+                       config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
         if p and not designing and not stopped else None
     if late:
         report = late[0] + (LATE_NOTE + late[1] if late[1] else "")
     if stopped and not result.strip() and p:
-        notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
+                            meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
     if designing:
         texts, replies, _, _ = _record(config_home(desk, meta["provider"], p), meta.get("session_id", "")) if p \
@@ -2287,8 +2313,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         end_design(desk, meta)
     report = desk.redact(report)
     denied = run.get("permission_denials") or []
-    reasons = refusal_reasons(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
-        if p and denied else {}
+    reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
+                          meta.get("session_id", "")) if p and denied else {}
     (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
@@ -2296,9 +2322,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
               "usage": usage, "denials": [desk.redact(denial_of(x)) for x in denied],
               "denial_reasons": [desk.redact(reasons.get(x.get("tool_use_id"), "") if isinstance(x, dict) else "")
                                  for x in denied],
-              "background_left": [desk.redact(x) for x in background_left(config_home(desk, meta["provider"], p),
-                                                                          meta.get("session_id", ""))]
-              if p and not designing else []}
+              "background_left": [desk.redact(x) for x in read_detail(
+                  desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
+                  meta.get("session_id", ""))] if p and not designing else []}
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""

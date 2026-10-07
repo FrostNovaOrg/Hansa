@@ -325,7 +325,8 @@ lane, or waits for one.
   subscription's limit), a date and time (`resets Oct 9, 3pm (Europe/Berlin)`, `resets 2026-08-08 00:00
   UTC`), a Unix time (`usage limit reached|1760000000`, `resets_at`), a `retry-after` value given in the
   message, and "in N minutes" or "in N hours" (`Please try again in 20 minutes`). A time without a zone is
-  the machine's local time. A form hansa is unsure of gets the fixed length below.
+  the machine's local time; a month and day without a year is in the year that puts it nearest to now.
+  A form hansa is unsure of, a time already past, or a line it cannot read gets the fixed length below.
 - **Else for the provider's own rest**, `rest_minutes` on the page (1 to 44640, a month), or the desk's
   `cool_minutes` (30 by default) when it is empty. Fit it to the provider: a subscription's window is a
   few hours, an API key's limit may be per minute, a plan's allowance may be monthly.

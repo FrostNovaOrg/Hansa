@@ -3412,6 +3412,77 @@ class DeskTest(unittest.TestCase):
         self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; counted as a try)",
                       views.show_text(self.desk, tid))
 
+    def test_a_limit_line_with_an_impossible_offset_does_not_raise(self):
+        from hansa import run
+        for offset in ("+99:99", "+24:00", "-24:00", "+2400"):
+            with self.subTest(offset):
+                self.assertIsNone(run.reset_time(f"API Error: 429 quota exceeded; resets at 2026-10-08T20:00:00{offset}"))
+
+    def limit_run(self, text: str) -> dict:
+        """One run of the fake worker that hits a usage limit whose error says `text`; the task as it ends."""
+        self.net_lane("limit", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = text
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        return self.desk.meta(tid)
+
+    def test_a_limit_line_with_an_impossible_offset_still_ends_the_run(self):
+        t0 = time.time()
+        m = self.limit_run("API Error: 429 quota exceeded; resets at 2026-10-08T20:00:00+99:99")
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "fixed")
+        self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+
+    def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
+        from hansa import run
+
+        def broken(*_):
+            raise RuntimeError("a reader broke")
+        for name in ("usage_of", "reset_time", "background_left"):
+            patch = unittest.mock.patch.object(run, name, broken)
+            patch.start()
+            self.addCleanup(patch.stop)
+        t0 = time.time()
+        m = self.limit_run("You've hit your session limit · resets 3pm (Europe/Berlin)")
+        self.assertEqual(m["state"], "queued", m)  # the plainest reading: a limit, with the fixed rest
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        self.assertEqual((m["usage"], m["background_left"]), ({}, []))
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "fixed")
+        self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+        events = [json.loads(x) for x in self.desk.events_path.read_text().splitlines()]
+        unread = sorted(e["what"] for e in events if e["event"] == "detail_unread")
+        self.assertEqual(unread, ["background work left", "reset time", "usage"])
+        self.assertTrue(all("a reader broke" in e["error"] for e in events if e["event"] == "detail_unread"))
+
+    def test_a_month_and_day_takes_the_year_nearest_to_now(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from hansa import run
+        berlin = ZoneInfo("Europe/Berlin")
+        new_year = datetime(2027, 1, 1, 12, 0, tzinfo=berlin).timestamp()
+        self.assertIsNone(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)", new_year))
+        self.assertIsNone(run.reset_time("You've hit your weekly limit · resets Oct 7, 3pm (Europe/Berlin)",
+                                         datetime(2026, 10, 8, 12, 0, tzinfo=berlin).timestamp()))
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Jan 2, 3pm (Europe/Berlin)",
+                                        datetime(2026, 12, 31, 12, 0, tzinfo=berlin).timestamp()),
+                         datetime(2027, 1, 2, 15, 0, tzinfo=berlin).timestamp())
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)",
+                                        datetime(2026, 12, 30, 12, 0, tzinfo=berlin).timestamp()),
+                         datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
+        # within the hour hansa allows for a skewed clock, a time just past is still this year's
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)",
+                                        datetime(2026, 12, 31, 23, 30, tzinfo=berlin).timestamp()),
+                         datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
+
     def test_the_page_checks_a_provider_s_rest_minutes(self):
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
         self.assertIn('bind(p, "rest_minutes", "number")', ui)
