@@ -228,6 +228,8 @@ to a public repository, a deploy to production) waits for the principal:
   `hansa explain lane L` shows the command and the last release.
 - Never push or deploy yourself, not even when a release failed: fix what
   failed and ask again.
+- The principal may have alerts (their own command, run by hansa when a release
+  waits or ends, or you file a request); the coordinator does not send them.
 
 ## Hearing from hansa
 hansa posts to your session through its inbox when something needs you: a task

@@ -75,8 +75,9 @@ page gives.
 - The principal, on the page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices,
   whether the coordinator audits cost, the lanes whose releases go out without
-  asking and the words no release may send out. The page also shows what goes
-  on, and asks the principal about each release (below).
+  asking, the words no release may send out, and the alert command (below).
+  The page also shows what goes on, and asks the principal about each release
+  (below).
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
   provider order, allowed commands (for design sessions), network and write lists, environment,
   check, preview and setup commands, limits, and the merge check's own command and limit,
@@ -204,6 +205,25 @@ page gives.
   merge while a release runs. The coordinator hears when the principal answers
   and when the release ends. `hansa release` lists them; `hansa explain lane L`
   shows the command and the last release.
+- Alerts reach the principal away from the page. The principal may set one
+  alert command line on the page (Settings, Alerts), such as a script that
+  sends a phone message; the page records that it saved it, and when. Only the
+  page sets it: no `hansa` command sets, changes or clears it, and `hansa lane
+  set` has nothing like it. `hansa serve` runs it when a release starts waiting
+  for the principal's yes, when a release ends (done, failed, void or
+  forbidden), when a request to the principal is filed (`hansa ask`), and when
+  its own rounds have stopped for 15 minutes; not for ordinary task events,
+  which go to the coordinator. It runs as the desk's account, outside the
+  sandbox, in the desk's folder, with hansa's own environment (not a lane's),
+  the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
+  `ask`, `server_stuck`, `test`; comma-separated when several go out together)
+  and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
+  characters. It has 30 seconds. Alerts within 20 seconds of each other go out
+  in one run, one run at a time. A run that fails or times out is recorded
+  (event `alert_failed`) and `hansa status` shows the last failure with its exit
+  code and last lines; there is no retry: the next alert tries again. The page
+  has a button that sends a test alert; no coordinator command sends one.
+  `hansa explain` says whether a command is set and what it is.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not

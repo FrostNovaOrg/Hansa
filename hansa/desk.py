@@ -63,7 +63,9 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden")
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
+# The events that may call for an alert to the principal (alert.from_event)
+ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "ask")
 # What the principal's list of lanes released without asking records of each lane, as the page saves it: a lane
 # goes out without asking only while it still has them
 LISTED_AS = ("repo", "base", "release")
@@ -198,6 +200,9 @@ def default_settings() -> dict:
         # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add or in
         # their messages refuses the release. The principal's, on the page.
         "release_forbidden": [],
+        # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
+        # it. The principal's, on the page; empty: no alerts.
+        "alert": {"command": ""},
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -244,7 +249,8 @@ def validate(s: dict, root=None) -> list:
     if not isinstance(s, dict):
         return ["settings must be an object"]
     known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden"}
+             "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden",
+             "alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     # which of them may be read is looked at when the page saves a changed list, and when the coordinator
     # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
@@ -267,6 +273,10 @@ def validate(s: dict, root=None) -> list:
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
         p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
                  "line, each up to 200 characters")
+    al = s.get("alert", {"command": ""})
+    if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
+            or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
+        p.append("the alert command must be one shell command line (up to 1000 characters)")
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -754,6 +764,18 @@ def record_listed(listed, lanes: dict) -> list:
     if not isinstance(listed, list):
         return listed
     return [{"lane": x, **listed_as(lanes.get(x))} if isinstance(x, str) and NAME.match(x) else x for x in listed]
+
+
+def stamp_alert(given, before) -> object:
+    """The page's save of the alert command: who saved it and when, as hansa records them (not as the page sends
+    them); kept as they were while the command is unchanged."""
+    if not isinstance(given, dict) or not isinstance(given.get("command", ""), str):
+        return given  # refused by validate
+    before = before if isinstance(before, dict) else {}
+    cmd = given.get("command", "").strip()
+    if cmd == (before.get("command") or "").strip():
+        return {"command": cmd, **{k: before[k] for k in ("by", "at") if k in before}}
+    return {"command": cmd, "by": "page", "at": now()}
 
 
 def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
@@ -1395,8 +1417,9 @@ class Desk:
                             for k in theirs]
             else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
                 lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
-                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes)}
-            problems = validate(new, self.root) + self.keys_in_release(old, new)
+                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes),
+                       "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
+            problems = validate(new, self.root) + self.keys_in_release(old, new) + self.keys_in_alert(old, new)
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -1420,6 +1443,16 @@ class Desk:
                            "command is stored and shown as written; have the command read the key from where the "
                            "tool keeps it (its own login or configuration file, or a file the command reads) instead")
         return out
+
+    def keys_in_alert(self, old: dict, new: dict) -> list:
+        """A new or changed alert command that holds a key the desk knows: refused, as the command is stored and
+        shown as written (in the settings, on the page, in hansa explain)."""
+        cmd = (new.get("alert") or {}).get("command") if isinstance(new.get("alert"), dict) else None
+        if not isinstance(cmd, str) or cmd == ((old.get("alert") or {}).get("command")):
+            return []
+        found = self.keys_in(cmd)
+        return [f"the alert command holds the key of {', '.join(found)}, and it is stored and shown as written; have "
+                "the command read the key from a file instead"] if found else []
 
     # -- keys -------------------------------------------------------------
     def key_file(self, provider: str) -> Path:
@@ -1511,6 +1544,14 @@ class Desk:
         line = json.dumps({"ts": now(), "event": kind, **{k: clean(v) for k, v in fields.items()}}, ensure_ascii=False)
         with open(self.events_path, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+        if kind in ALERTED:  # what waits for the principal, for the principal's own alert command (hansa/alert.py)
+            from .alert import from_event
+            try:
+                from_event(self, kind, fields)
+            except Exception as e:  # noqa: BLE001 - an alert never keeps an event from being recorded
+                with open(self.events_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ts": now(), "event": "alert_error", "error": self.redact(str(e))[:300]},
+                                        ensure_ascii=False) + "\n")
 
     @contextlib.contextmanager
     def lock(self):

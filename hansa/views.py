@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import build, cost, installed, installed_text, notify, release
+from . import alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_lanes, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
@@ -287,6 +287,7 @@ def status(desk: Desk) -> dict:
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
+        "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -353,6 +354,7 @@ def status_text(st: dict) -> str:
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out += [project_text(st["project"])] if st.get("project") else []
+    out += [st["alert_failed"]] if st.get("alert_failed") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
@@ -888,7 +890,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
         "pause/resume.",
-        release_settings_line(s)])
+        release_settings_line(s),
+        alert.explain_line(s)])
 
 
 def release_settings_line(s: dict) -> str:
