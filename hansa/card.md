@@ -401,6 +401,9 @@ here; work that needs code changed or a browser goes to a worker.
   only on a Mac whose loopback holds nothing a worker must not reach; `hansa
   lane set` then prints what listens there. `hansa explain lane L` says which
   holds on this machine.
+- A Java or Maven lane: hansa sets Maven's proxy and Java's temporary folder in the sandbox by
+  itself; what the project and the lane need (Mockito as a Java agent, a Maven repository of the
+  lane's own, the network list) is in hansa's README, "Java and Maven in a lane". Gradle is not covered yet.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or

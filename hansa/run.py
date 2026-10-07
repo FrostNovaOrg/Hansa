@@ -283,7 +283,10 @@ UPDATE_CLEAN_NOTE = """
 Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
 work; it merged without conflicts.
 """
-COMMAND_SHOWN = 600  # of a lane's setup or check command in a worker's instructions; a longer one is cut
+# A lane's setup or check command up to this long (the page takes up to 1000 characters) is in a worker's
+# instructions whole; a longer one (saved some other way) is whole in a
+# file in the run's folder, which the instructions name (around_note)
+COMMAND_SHOWN = 4000
 DESIGN_NOTE = "(A design session: the principal shaped this directly with it. Its last message:)\n\n"
 # The principal is in the session, so it commits each step itself and brings in the base.
 DESIGN_ALLOW = ["Bash(git add:*)", "Bash(git commit:*)", "Bash(git merge:*)"]
@@ -930,29 +933,95 @@ def sandbox_env(desk: Desk, lane: dict) -> dict:
     return {k: v for k, v in lane_env(desk, lane)[0].items() if k not in RUN_TMP_VARS}
 
 
+# What runs in the sandbox before a lane's setup, check and merge check (in_sandbox), and in front of each of a
+# worker's Bash commands (env_file), after the lane's env is set: Java and Maven made to work there (README, "Java
+# and Maven in a lane"). The sandbox's proxy wants a user and password, which it puts only in HTTPS_PROXY and
+# HTTP_PROXY, and Maven reads neither: so a Maven global settings file in $TMPDIR names that proxy, for https and
+# http, and MAVEN_ARGS gets `-gs <it>`. Java ignores TMPDIR, and on macOS the sandbox does not let it write its
+# own: so JAVA_TOOL_OPTIONS, which every JVM reads, gets -Djava.io.tmpdir. What was there is kept, and nothing is
+# added twice. A part that cannot be done (no TMPDIR, no proxy, a path with a space) is skipped, never failing the
+# run; it prints nothing, and the password goes only into the file (by printf, a shell builtin, and awk's stdin:
+# on no command line). POSIX sh, that bash and zsh read alike; its names start with hansa_ and are unset after it.
+JAVA_PRELUDE = r"""hansa_x() { printf '%s' "$1" | LC_ALL=C awk 'BEGIN { RS = "\001"; h = "0123456789abcdef" }
+{ s = $0; o = ""
+  while ((i = index(s, "%")) > 0) {
+    a = index(h, tolower(substr(s, i + 1, 1))); b = index(h, tolower(substr(s, i + 2, 1)))
+    if (a && b) { o = o substr(s, 1, i - 1) sprintf("%c", (a - 1) * 16 + b - 1); s = substr(s, i + 3) }
+    else { o = o substr(s, 1, i); s = substr(s, i + 1) } }
+  s = o s; gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s)
+  gsub(/"/, "\\&quot;", s); gsub(/'\''/, "\\&apos;", s); printf "%s", s }' 2>/dev/null; }
+hansa_t=${TMPDIR:-}
+case $hansa_t in *[[:space:]]*) hansa_t= ;; esac
+[ -z "$hansa_t" ] || [ -d "$hansa_t" ] || hansa_t=
+if [ -n "$hansa_t" ]; then
+  case " ${JAVA_TOOL_OPTIONS:-} " in
+    *" -Djava.io.tmpdir=$hansa_t "*) ;;
+    *) JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-Djava.io.tmpdir=$hansa_t"; export JAVA_TOOL_OPTIONS ;;
+  esac
+fi
+hansa_p=${HTTPS_PROXY:-${HTTP_PROXY:-}}
+hansa_r=${hansa_p#*://}
+hansa_r=${hansa_r%%/*}
+hansa_u= hansa_w= hansa_h= hansa_o=
+case $hansa_r in
+  *@*) hansa_c=${hansa_r%@*}; hansa_r=${hansa_r##*@}; hansa_u=${hansa_c%%:*}
+       case $hansa_c in *:*) hansa_w=${hansa_c#*:} ;; esac ;;
+esac
+case $hansa_r in
+  *:*) hansa_h=${hansa_r%:*}; hansa_o=${hansa_r##*:} ;;
+  *) hansa_h=$hansa_r; case $hansa_p in https://*) hansa_o=443 ;; *) hansa_o=80 ;; esac ;;
+esac
+case $hansa_o in ''|*[!0-9]*) hansa_h= ;; esac
+if [ -n "$hansa_t" ] && [ -n "$hansa_p" ] && [ -n "$hansa_h" ]; then
+  hansa_f=${hansa_t%/}/hansa-maven-settings.xml
+  hansa_h=$(hansa_x "$hansa_h") hansa_u=$(hansa_x "$hansa_u") hansa_w=$(hansa_x "$hansa_w")
+  if (umask 077
+      { printf '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">\n  <proxies>\n'
+        for hansa_q in https http; do
+          printf '    <proxy>\n      <id>hansa-%s</id>\n      <active>true</active>\n      <protocol>%s</protocol>\n' "$hansa_q" "$hansa_q"
+          printf '      <host>%s</host>\n      <port>%s</port>\n' "$hansa_h" "$hansa_o"
+          [ -z "$hansa_u" ] || printf '      <username>%s</username>\n      <password>%s</password>\n' "$hansa_u" "$hansa_w"
+          printf '      <nonProxyHosts>localhost|127.0.0.1</nonProxyHosts>\n    </proxy>\n'
+        done
+        printf '  </proxies>\n</settings>\n'; } >"$hansa_f") 2>/dev/null; then
+    case " ${MAVEN_ARGS:-} " in
+      *" -gs $hansa_f "*) ;;
+      *) MAVEN_ARGS="${MAVEN_ARGS:+$MAVEN_ARGS }-gs $hansa_f"; export MAVEN_ARGS ;;
+    esac
+  fi
+fi
+unset hansa_t hansa_p hansa_r hansa_c hansa_u hansa_w hansa_h hansa_o hansa_f hansa_q; unset -f hansa_x
+"""
+
+
+def with_prelude(command: str) -> str:
+    """A command for /bin/sh -c with JAVA_PRELUDE run first, in the same sandbox: the command itself then runs
+    in a shell of its own, as it would alone, with what the prelude exported."""
+    return JAVA_PRELUDE + "exec /bin/sh -c " + shlex.quote(command)
+
+
 def in_sandbox(desk: Desk, lane: dict, command: str) -> str:
     """A lane's command (setup, check) as srt is given it to run with /bin/sh -c: with the lane's env set
-    inside the sandbox, by env there (`exec /usr/bin/env K=V ... /bin/sh -c COMMAND`). srt itself, the script
-    around it and the git it runs get hansa's environment, so nothing a lane's env names is looked up, loaded
-    or read outside the sandbox."""
+    inside the sandbox, by env there (`exec /usr/bin/env K=V ... /bin/sh -c COMMAND`), then JAVA_PRELUDE
+    (with_prelude). srt itself, the script around it and the git it runs get hansa's environment, so nothing a
+    lane's env names is looked up, loaded or read outside the sandbox."""
     env = sandbox_env(desk, lane)
     if not env:
-        return command
+        return with_prelude(command)
     return ("exec /usr/bin/env " + " ".join(shlex.quote(f"{k}={v}") for k, v in env.items())
-            + " /bin/sh -c " + shlex.quote(command))
+            + " /bin/sh -c " + shlex.quote(with_prelude(command)))
 
 
 def env_file(desk: Desk, tid: str, lane: dict) -> dict:
-    """How a worker's Bash commands get the lane's env: {"CLAUDE_ENV_FILE": a file of `export K='V'` lines},
-    {} when the lane sets nothing. Claude Code reads the file itself and runs its content in front of each
-    Bash command, inside its sandbox; Claude Code starts without the lane's env, so its own lookups (git, the
-    sandbox's helpers, its shell, MCP servers) use hansa's environment. The file is in the task's raw folder
-    (.hansa), which no worker can write or read."""
+    """How a worker's Bash commands get the lane's env and JAVA_PRELUDE: {"CLAUDE_ENV_FILE": a file of
+    `export K='V'` lines, then the prelude}. Claude Code reads the file itself (it is in the task's raw folder,
+    .hansa, which no worker can write or read) and runs its content in front of each Bash command, in the same
+    shell, inside its sandbox, where the sandbox's proxy variables and the command's TMPDIR are set. Claude
+    Code starts without the lane's env, so its own lookups (git, the sandbox's helpers, its shell, MCP servers)
+    use hansa's environment."""
     env = sandbox_env(desk, lane)
-    if not env:
-        return {}
     f = desk.raw_dir(tid) / "lane-env.sh"
-    f.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()), encoding="utf-8")
+    f.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + JAVA_PRELUDE, encoding="utf-8")
     return {"CLAUDE_ENV_FILE": str(f)}
 
 
@@ -1703,19 +1772,23 @@ def browser_for(desk: Desk, tid: str, command: str):
     return cfg, ["mcp__browser", rule("Read", d)]
 
 
-def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "") -> str:
+def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: str = "") -> str:
     """What hansa runs around a task or verification worker, for its instructions: the lane's setup and
     check as hansa runs them, and its merge check when that runs another command (the lane's env is set for the
-    worker's commands too), keys hidden. A verifier
+    worker's commands too), keys hidden, each whole. One longer than COMMAND_SHOWN is written whole to a file in
+    the run's folder `tmp` (make_worker_tmp), which the worker may read, and named. A verifier
     is told how the task's own run of the check ended only on the task's own lane, named by lane_name."""
-    def shown(command: str) -> str:
-        text = desk.redact(command)  # hidden before it is cut, so no part of a key is left
-        if len(text) > COMMAND_SHOWN:
-            return f"`{text[:COMMAND_SHOWN]}` (cut: the command is {len(text)} characters long)"
-        return f"`{text}`"
+    def shown(command: str, name: str) -> str:
+        text = desk.redact(command)
+        if len(text) <= COMMAND_SHOWN or not tmp:
+            return f"`{text}`"
+        f = Path(tmp) / f"lane-{name}-command.txt"
+        f.write_text(text + "\n", encoding="utf-8")
+        return (f"`{text[:200]} ...` (the command is {len(text)} characters long; it is whole in "
+                f"{f}, which you may read)")
     out = []
     if lane.get("setup"):
-        out.append(f"- Before you started, hansa ran the lane's setup in this worktree: {shown(lane['setup'])}")
+        out.append(f"- Before you started, hansa ran the lane's setup in this worktree: {shown(lane['setup'], 'setup')}")
     if not lane.get("check"):
         out.append("- This lane has no check command: hansa runs nothing here after you end.")
     elif meta.get("kind") == "verify":
@@ -1727,14 +1800,14 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "") -> str:
                 f" The task's own run of it {'passed' if ran['ok'] else 'failed'}."
                 if ran.get("ok") in (True, False) else "")
         out.append("- hansa judges a task here by the lane's check, run in its worktree in this sandbox: "
-                   f"{shown(lane['check'])}{went} You may run the same command yourself.")
+                   f"{shown(lane['check'], 'check')}{went} You may run the same command yourself.")
     else:
         out.append("- After you end, hansa runs the lane's check here, in the same sandbox, and judges the "
-                   f"task by it: {shown(lane['check'])}")
+                   f"task by it: {shown(lane['check'], 'check')}")
     if own_merge_check(lane):
         out.append("- Before it merges a task, not after the task ends, hansa runs the lane's merge check on the task "
                    "merged with the base branch, in this worktree and the same sandbox; a merge check that fails "
-                   f"merges nothing: {shown(lane['merge_check'])}")
+                   f"merges nothing: {shown(lane['merge_check'], 'merge-check')}")
     return "".join(x + "\n" for x in out)
 
 
@@ -1755,7 +1828,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp))
-    system += around_note(desk, lane, meta, lane_name)
+    system += around_note(desk, lane, meta, lane_name, tmp)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
