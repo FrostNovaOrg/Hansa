@@ -13,7 +13,7 @@ from . import build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_lanes, read_json,
                    read_split, write_json)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
-                  markers_text, merge_check_ahead, not_looking, progress_of, provider_problem, serve_code, server_state,
+                  markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, progress_of, provider_problem, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
@@ -21,7 +21,8 @@ STATES = {
     "running": "a worker is on it, or hansa is running the lane's check on its work",
     "done": "the worker finished; waiting for your review (hansa show / hansa merge / hansa retry)",
     "merging": ("hansa merge is checking it together with what the base gained since it was made: merged onto the "
-                "base as it is now, with the lane's check run there; it merges if that passes. Or it needs no check "
+                "base as it is now, with the lane's merge check (its check, unless it has a merge_check of its own) "
+                "run there; it merges if that passes. Or it needs no check "
                 "and waits its turn behind a merge check on the same base"),
     "failed": "the run ended with an error; hansa show says why",
     "merged": "merged into the lane's base branch",
@@ -110,7 +111,7 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
     if mc.get("phase") in ("starting", "running"):
         return (f"merge check running for {_mins(mc.get('started'))} min{again}: {m['id']} merged onto {base} at "
                 f"{mc.get('onto', '')[:10]}, then " + ("the lane's setup and " if mc.get("setup") else "")
-                + f"check: {mc.get('command', '')}")
+                + ("merge check" if mc.get("own") else "check") + f": {mc.get('command', '')}")
     ahead = merge_check_waits_for(desk, m, tasks)
     if mc.get("plain"):
         how = "without a check" + ("" if mc.get("despite") else f" if {base} has still not moved")
@@ -176,7 +177,7 @@ def merge_result_lines(m: dict) -> list:
         return [f"merge check: {r['note']}; nothing was merged", "  " + machine_hint(r)]
     how = f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})"
     hint = machine_hint(r)
-    return ([f"merge check ({where} and ran the lane's check there): {how}"
+    return ([f"merge check ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
              + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
             + ["  " + plain(x) for x in r.get("tail", [])] + (["  " + hint] if hint else []))
 
@@ -567,7 +568,10 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"check: running now: {m.get('check_command', '')}")
     elif m["state"] == "done" and m.get("commits") and not verifying:
         ln = desk.settings()["lanes"].get(m.get("lane"))
-        if ln is not None and not ln.get("check"):
+        if ln is not None and not ln.get("check") and ln.get("merge_check"):
+            out.append(f"check: none after each task. Lane {m['lane']} has only a merge check, which hansa merge runs "
+                       f"on this task merged with the base before it merges it: {ln['merge_check']}")
+        elif ln is not None and not ln.get("check"):
             out.append(f"check: none. Lane {m['lane']} has no check, so this task will be merged untested; set one "
                        f"with: hansa lane set {m['lane']} check \"<the command that runs the tests>\"")
     if m["state"] == "merging":
@@ -704,11 +708,21 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " (check included); set high, so reaching it means something went wrong",
             "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends,"
                                             " in the lane's sandbox;"
-                                            " hansa merge refuses a failed check; when the base has moved since a task"
-                                            " was made, hansa merge runs it on the two merged together first;"
-                                            " hansa merge ID --recheck runs it again that way in any case, for a"
-                                            " check that failed or could not run for the machine's sake)"
-                                            if ln.get("check") else "none, so its tasks are merged untested"),
+                                            " hansa merge refuses a failed check"
+                                            + ("" if own_merge_check(ln) else
+                                               "; when the base has moved since a task"
+                                               " was made, hansa merge runs it on the two merged together first;"
+                                               " hansa merge ID --recheck runs it again that way in any case, for a"
+                                               " check that failed or could not run for the machine's sake") + ")"
+                                            if ln.get("check") else "none" if ln.get("merge_check")
+                                            else "none, so its tasks are merged untested"),
+            *([f"  merge check before merging: {ln['merge_check']} (hansa merge runs it in place of the check, on"
+               " the task merged with the base as it is then, in the lane's worktree and sandbox after the lane's"
+               " setup, before it merges any task that changed something, whether or not the base has moved; it"
+               " merges exactly that if it passes; hansa merge ID --recheck runs it again in any case)"
+               f" · stopped at {merge_minutes(ln)} minutes"] if own_merge_check(ln) else
+              [f"  merge check before merging: the check, stopped at {merge_minutes(ln)} minutes"]
+              if ln.get("check") and ln.get("merge_timeout_min") else []),
             "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts,"
                                              " in the lane's sandbox, so one that downloads needs its registry on"
                                              " the network list;"
@@ -718,8 +732,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             *(["  the setup and check run in srt with the lane's sandbox: the network and write lists below"
                " hold for them as for workers",
                f"  to see that they work where tasks run, with no worker: hansa lane try {name} (after changing the"
-               " setup, check, network or write list, or moving the desk to another machine)"]
-              if ln.get("setup") or ln.get("check") else []),
+               " setup, check, network or write list, or moving the desk to another machine)"
+               + (f"; its merge check: hansa lane try {name} --merge-check" if own_merge_check(ln) else "")]
+              if ln.get("setup") or ln.get("check") or ln.get("merge_check") else []),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
@@ -903,10 +918,10 @@ def try_text(lane: str, t: dict) -> str:
            + (f" ({t['note']})" if t.get("note") else "")]
     for step, x in t.get("steps", {}).items():
         if not x["ran"]:
-            out.append(f"{step}: {x['command']}\n  did not run: the setup failed")
+            out.append(f"{step.replace('_', ' ')}: {x['command']}\n  did not run: the setup failed")
             continue
         how = "interrupted" if x["exit"] is None else f"exit {x['exit']}"
-        out.append(f"{step}: {x['command']}\n  {how}" + (f" in {x['seconds']}s" if x["seconds"] is not None else "")
+        out.append(f"{step.replace('_', ' ')}: {x['command']}\n  {how}" + (f" in {x['seconds']}s" if x["seconds"] is not None else "")
                    + (", last lines:" if x["tail"] else ", no output"))
         out += [f"    {plain(line, None)}" for line in x["tail"]]
     if t.get("clean"):

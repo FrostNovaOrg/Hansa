@@ -298,8 +298,8 @@ def validate(s: dict, root=None) -> list:
         if not isinstance(ln, dict):
             p.append(f"{at}: must be an object")
             continue
-        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "preview", "setup",
-                           "release", "max_turns", "timeout_min", "note"}
+        extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
+                           "preview", "setup", "release", "max_turns", "timeout_min", "merge_timeout_min", "note"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -330,13 +330,15 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: env must be an object")
         else:
             p += [f"{at}: env {k} {why}" for k, why in env_problems(env, root)]
-        for field in ("check", "preview", "setup", "release"):
+        for field in ("check", "merge_check", "preview", "setup", "release"):
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
         if not _is_int(ln.get("max_turns", 300), 1, 1000):
             p.append(f"{at}: max_turns must be from 1 to 1000")
         if not _is_int(ln.get("timeout_min", 240), 1, 1440):
             p.append(f"{at}: timeout_min must be from 1 to 1440")
+        if "merge_timeout_min" in ln and not _is_int(ln["merge_timeout_min"], 1, 1440):
+            p.append(f"{at}: merge_timeout_min must be from 1 to 1440")
 
     co = s.get("coordinator")
     if not isinstance(co, dict):

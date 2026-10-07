@@ -386,8 +386,8 @@ def srt_when(rec: dict) -> str:
 
 
 def srt_needed(s: dict) -> bool:
-    """Whether some lane has a setup or check command, which run in srt."""
-    return any(ln.get("setup") or ln.get("check") for ln in s["lanes"].values())
+    """Whether some lane has a setup, check or merge check command, which run in srt."""
+    return any(ln.get("setup") or ln.get("check") or ln.get("merge_check") for ln in s["lanes"].values())
 
 
 def srt_problem(desk: Desk, s: dict) -> str:
@@ -1702,7 +1702,8 @@ def browser_for(desk: Desk, tid: str, command: str):
 
 def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "") -> str:
     """What hansa runs around a task or verification worker, for its instructions: the lane's setup and
-    check as hansa runs them (the lane's env is set for the worker's commands too), keys hidden. A verifier
+    check as hansa runs them, and its merge check when that runs another command (the lane's env is set for the
+    worker's commands too), keys hidden. A verifier
     is told how the task's own run of the check ended only on the task's own lane, named by lane_name."""
     def shown(command: str) -> str:
         text = desk.redact(command)  # hidden before it is cut, so no part of a key is left
@@ -1727,6 +1728,10 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "") -> str:
     else:
         out.append("- After you end, hansa runs the lane's check here, in the same sandbox, and judges the "
                    f"task by it: {shown(lane['check'])}")
+    if own_merge_check(lane):
+        out.append("- Before it merges a task, not after the task ends, hansa runs the lane's merge check on the task "
+                   "merged with the base branch, in this worktree and the same sandbox; a merge check that fails "
+                   f"merges nothing: {shown(lane['merge_check'])}")
     return "".join(x + "\n" for x in out)
 
 
@@ -2223,8 +2228,11 @@ def finish_check(desk: Desk, tid: str) -> dict:
     return desk.meta(tid)
 
 
-# A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check,
-# or `hansa merge --recheck` of any task on such a lane (merge_check {recheck: True, by: who asked}).
+# A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check or a
+# merge_check, or of any task on a lane whose merge_check differs from its check (merge_needs_check), or
+# `hansa merge --recheck` of any task on such a lane (merge_check {recheck: True, by: who asked}). It runs the
+# lane's merge_check if it has one, else its check (merge_command), under merge_timeout_min if set, else
+# timeout_min (merge_minutes).
 # The task is "merging" meanwhile, with merge_check {phase: queued | starting | running, ...}; hansa serve
 # runs it when the lane is free, in the lane's worktree, and it ends in "merged", or back in "done" with
 # merge_check_result saying why nothing was merged. One runs at a time per repository and base branch, in
@@ -2238,6 +2246,33 @@ def base_moved(repo, tip: str, head: str) -> bool:
     """Whether the base (at tip) has commits the task's branch (at head) does not."""
     r = subprocess.run(["git", "merge-base", "--is-ancestor", tip, head], cwd=str(repo), capture_output=True)
     return r.returncode != 0
+
+
+def merge_command(lane: dict) -> str:
+    """The command a lane's merge check runs: its merge_check, else its check; '' when it has neither."""
+    return lane.get("merge_check") or lane.get("check") or ""
+
+
+def merge_minutes(lane: dict) -> int:
+    """A lane's merge check's time limit in minutes: its merge_timeout_min, else its timeout_min."""
+    return lane.get("merge_timeout_min") or lane.get("timeout_min", 240)
+
+
+def own_merge_check(lane: dict) -> bool:
+    """Whether the lane's merge check runs a command other than its check after each task, which the task's
+    own tree has therefore never passed."""
+    return bool(lane.get("merge_check")) and lane["merge_check"] != lane.get("check")
+
+
+def merge_needs_check(lane: dict, m: dict, repo, tip: str) -> str:
+    """Why merging this task needs a merge check first: "moved" when the base has commits its branch does not
+    (the two together were never checked), "own" when the lane's merge check runs its own command, which ran on
+    neither; '' when it needs none (no change, or no command to run)."""
+    if not merge_command(lane) or not m.get("commits"):
+        return ""
+    if base_moved(repo, tip, m["head"]):
+        return "moved"
+    return "own" if own_merge_check(lane) else ""
 
 
 def lane_occupied(m: dict) -> bool:
@@ -2358,16 +2393,18 @@ def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
                     {"state": "done", "merge_check": None, "merge_check_result": result})
     if m:
         desk.event("merge_check_ended", task=tid, ok=False, note=(result or {}).get("note", "cancelled"),
-                   **({"waited": True} if plain else {}))
+                   **({"waited": True} if plain else {}),
+                   **({"command": result["command"]} if (result or {}).get("command") else {}))
     return m
 
 
 def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
     """A merge that needed no check when it was asked, but waited its turn behind a merge check on the same
     repository and base branch (merge_check {plain: True}), now first in line: merged without a check if the
-    base has still not moved (or its lane has no check, or it was asked --despite-check). "check" when the base
-    has moved and the lane has a check: it is now a merge check like the others, still first in line; None
-    otherwise (merged, or back for review saying why nothing was merged)."""
+    base has still not moved (or its lane has no check, or it was asked --despite-check). "check" when it now
+    needs a merge check (merge_needs_check: the base has moved, or the lane's merge check was set meanwhile):
+    it is now a merge check like the others, still first in line; None otherwise (merged, or back for review
+    saying why nothing was merged)."""
     with desk.lock():  # a cancel or a key saved meanwhile lands before this or after it
         m = desk.meta(tid)
         mc = m.get("merge_check") or {}
@@ -2375,10 +2412,10 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             return None
         repo, name = lane["repo"], lane.get("base") or "main"
         tip = git("rev-parse", name, cwd=repo)
-        unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
+        unchecked = bool(merge_needs_check(lane, m, repo, tip))
         if unchecked and not mc.get("despite"):
             desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": 0})
-            desk.event("merge_check_queued", task=tid, onto=tip, waited=True)
+            desk.event("merge_check_queued", task=tid, onto=tip, waited=True, command=merge_command(lane))
             return "check"
         why = ""
         current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
@@ -2419,8 +2456,9 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
 
 def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     """Merge a task onto the base's current tip in the lane's worktree, then run the lane's setup (if it has
-    one) and check there, in srt, as after a task. Returns the process; None when it did not start
-    (cancelled meanwhile), or ended at once (a conflict; or no check any more, and so merged)."""
+    one) and merge check command (merge_command) there, in srt, as the check after a task. Returns the process;
+    None when it did not start (cancelled meanwhile), or ended at once (a conflict; or no command any more, and
+    so merged)."""
     raw = desk.raw_dir(tid)
     for f in ("merge-check.exit", "merge-setup.log.done", *MERGE_FILES):
         (raw / f).unlink(missing_ok=True)
@@ -2449,14 +2487,15 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         commit = wgit(desk, wt, "rev-parse", "HEAD")
-        if not lane.get("check"):  # the principal took the check away meanwhile: nothing to run
+        command = merge_command(lane)
+        if not command:  # the check and merge check were taken away meanwhile: nothing to run
             land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
                                    "at": now(), "seconds": 0, "tail": []})
             return None
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
         srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, p, wt)
-        argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "merge-check.exit"), tmp, srt,
+        argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, command), str(raw / "merge-check.exit"), tmp, srt,
                 settings]
         if lane.get("setup"):
             ssrt, ssettings, stmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
@@ -2464,14 +2503,15 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                     str(raw / "merge-check.err"), expected_git_line(desk, wt) or "(unknown, so no git runs here)",
                     stmp, ssrt, ssettings, *argv]
         env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
-        mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": lane["check"],
+        mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
+              "own": own_merge_check(lane),
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
         desk.update(tid, merge_check=mc)
         with open(raw / "merge-check.log", "wb") as out:
             proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
         desk.update(tid, merge_check={**mc, "phase": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
-    desk.event("merge_check_started", task=tid, lane=lane_name, onto=tip)
+    desk.event("merge_check_started", task=tid, lane=lane_name, onto=tip, command=command)
     return proc
 
 
@@ -2505,10 +2545,11 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         except GitFileChanged as e:
             note = git_file_changed(desk, tid, e)
     result = {"ok": code == 0 and not note, "exit": code, "note": note, "command": mc.get("command", ""),
+              **({"own": True} if mc.get("own") else {}),
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
-    desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note,
+    desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note, command=result["command"],
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     if mc.get("cancel"):
         return end_merge_check(desk, tid, None)
@@ -2565,15 +2606,17 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
                         merge_check_result=result, unverified=unverified_note(desk, m) or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
+               **({"command": result["command"]} if result.get("command") else {}),
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     return m
 
 
 # A try: `hansa lane try L` runs the lane's setup and check once, with no worker, to see that they work where
-# tasks run. hansa serve runs it (with the server's environment), when the lane is free, in the lane's worktree
+# tasks run; `hansa lane try L --merge-check` runs its setup and merge check command (merge_command) instead,
+# under the merge check's time limit (try {merge: True}). hansa serve runs it (with the server's environment), when the lane is free, in the lane's worktree
 # detached at the base's tip, and puts the worktree back clean at that tip after. .hansa/tries/<lane>.json holds
 # the try: {id, phase: queued | running | done, ...}, and when done its result, which the command waits for.
-TRY_STEPS = ("setup", "check")
+TRY_STEPS = ("setup", "check", "merge_check")
 
 
 def try_file(desk: Desk, lane_name: str) -> Path:
@@ -2638,11 +2681,13 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
         pname = (lane.get("providers") or [""])[0]  # the sandbox of the lane's first provider, as a task's
         p = s["providers"].get(pname) or {}
         token, args, tmps = f"hansa-try-{lane_name}-{uuid.uuid4().hex[:8]}", [], []
-        for step in TRY_STEPS:
-            if lane.get(step):
+        steps = {"setup": lane.get("setup", ""),
+                 **({"merge_check": merge_command(lane)} if t.get("merge") else {"check": lane.get("check", "")})}
+        for step, command in steps.items():
+            if command:
                 tmp = tempfile.mkdtemp(prefix=f"hansa-{step}-")
                 write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp))
-                args += [step, in_sandbox(desk, lane, lane[step]), str(d / f"{step}-sandbox.json"), tmp]
+                args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp]
                 tmps.append(tmp)
         env = {**base_env(), "TERM": "dumb"}
         try:  # srt first, with the first step's settings (as in_srt): when it cannot run, nothing runs
@@ -2655,7 +2700,7 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
                                       "note": desk.redact(f"could not run: {e}")[:600]})
             return None
         t = {**t, "phase": "running", "launch": token, "onto": tip, "worktree": str(wt), "started": now(),
-             "tmp": tmps, **{step: lane.get(step, "") for step in TRY_STEPS}}
+             "tmp": tmps, **steps}
         write_try(desk, lane_name, t)
         with open(d / "try.err", "wb") as err:
             proc = subprocess.Popen(["/bin/sh", "-c", TRY_SCRIPT, token, str(d), srt, *args], cwd=str(wt), env=env,
@@ -2949,7 +2994,7 @@ class Dispatcher:
             mc = m.get("merge_check") or {}
             if m["state"] != "merging" or mc.get("phase") != "running":
                 continue
-            limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
+            limit = 60 * merge_minutes(s["lanes"].get(m.get("lane"), {}))
             if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
                 desk.update(m["id"], merge_check={**mc, "timed_out": True})
                 stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
@@ -2990,7 +3035,7 @@ class Dispatcher:
             except SrtCannotRun as e:  # the machine's problem: nothing is merged, and nothing ran
                 remove_sandbox_tmp(desk, m["id"])
                 end_merge_check(desk, m["id"], {"ok": False, "at": now(), "could_not_run": True,
-                                                "command": s["lanes"][ln].get("check", ""), "tail": [],
+                                                "command": merge_command(s["lanes"][ln]), "tail": [],
                                                 "note": desk.redact(f"could not run: {e}")[:600]})
                 continue
             except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
@@ -3023,7 +3068,9 @@ class Dispatcher:
                     finish_try(desk, ln)
                     continue
             if t.get("phase") == "running" and not t.get("timed_out"):
-                if time.time() - (t.get("started") or time.time()) > 60 * s["lanes"].get(ln, {}).get("timeout_min", 240):
+                ln_s = s["lanes"].get(ln, {})
+                limit = merge_minutes(ln_s) if t.get("merge") else ln_s.get("timeout_min", 240)
+                if time.time() - (t.get("started") or time.time()) > 60 * limit:
                     write_try(desk, ln, {**t, "timed_out": True})
                     stop(t.get("pid"), t.get("pid_start", ""), self.try_procs.get(ln))
             if t.get("phase") != "queued":

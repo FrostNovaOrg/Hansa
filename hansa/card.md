@@ -43,8 +43,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane` | one line per lane: name, repository, base branch, provider order |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
 | `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, network, write, env, limits, standing instructions), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `preview`, `setup`, `release`, `note` (one value; none: empty), `max_turns`, `timeout_min` (a whole number) |
-| `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. Refused while a task holds the lane |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release`, `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min` (a whole number; none takes `merge_timeout_min` out) |
+| `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
@@ -144,8 +144,9 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   also have the `reviewer` helper read the change.
 
 ## Merging
-- When the lane's base has not moved since the task was made, or the lane has
-  no check, `hansa merge` merges at once. A lane without a check has its tasks
+- When the lane's base has not moved since the task was made and the lane has
+  no merge check of its own (below), or the lane has no check and no
+  `merge_check`, `hansa merge` merges at once. A lane without a check has its tasks
   merged untested: give it one with `hansa lane set L check "<command>"`.
 - When the base has moved (another task was merged meanwhile, say) and the lane
   has a check, the two together were never checked, and two changes that each
@@ -165,6 +166,18 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   there when the lane is free, and exactly that merged if the check passes. Use
   it for a task whose check failed or could not run for the machine's sake, once
   that is fixed. The event log records that the check was run again, and by whom.
+- A lane's merge check runs its check, under its `timeout_min`, unless the lane
+  has a command of its own for it: `hansa lane set L merge_check "<command>"`,
+  for what is too slow to run after every task (the whole build, packaging,
+  the slow suites), with its own limit, `hansa lane set L merge_timeout_min N`.
+  It runs exactly where the check would (the lane's worktree and sandbox, after
+  its setup, on the merged tree), but before every merge of a task that changed
+  something, whether or not the base has moved, since the task's own tree never
+  ran it; the check after each task still runs the check. A lane with only a
+  `merge_check` checks nothing after a task and runs it before each merge.
+  `hansa show`, `hansa status` and what you are told name the command that ran;
+  workers and verifiers are told it runs before merging, not after their task.
+  Try it with `hansa lane try L --merge-check`.
 - A conflict lists each conflicting file and the lines where the two sides
   meet. Settle it with `hansa retry <id> --update "<how to settle it>"`: the
   follow-up continues from the task's branch with the current base merged in;

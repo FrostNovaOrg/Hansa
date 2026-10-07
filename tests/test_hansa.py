@@ -1655,6 +1655,190 @@ class DeskTest(unittest.TestCase):
         self.assertFalse((self.repo / "hello.txt").exists())
         self.assertIn("still broken", views.show_text(self.desk, tid))
 
+    def merge_check_lane(self, **fields):
+        """Lane a with these fields set (None takes one out), and one finished task on it."""
+        s = self.desk.settings()
+        for k, v in fields.items():
+            if v is None:
+                s["lanes"]["a"].pop(k, None)
+            else:
+                s["lanes"]["a"][k] = v
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        return d, tid
+
+    def test_merge_check_settings_unset_keep_the_check_and_its_limit(self):
+        from hansa import run
+        lane = {"check": "make test", "timeout_min": 15}
+        self.assertEqual((run.merge_command(lane), run.merge_minutes(lane), run.own_merge_check(lane)),
+                         ("make test", 15, False))
+        self.assertEqual(run.merge_minutes({}), 240)
+        lane.update(merge_check="make dist", merge_timeout_min=30)
+        self.assertEqual((run.merge_command(lane), run.merge_minutes(lane), run.own_merge_check(lane)),
+                         ("make dist", 30, True))
+        self.assertFalse(run.own_merge_check({"check": "make test", "merge_check": "make test"}))  # the same command
+        self.assertTrue(run.own_merge_check({"merge_check": "make dist"}))  # a lane with only a merge check
+        self.assertEqual(run.merge_command({}), "")
+        # unset: a base that has not moved merges at once, with no merge check, as before
+        d, tid = self.merge_check_lane(check="test -f hello.txt")
+        calls = len(self.srt_calls())
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual(len(self.srt_calls()), calls)
+        self.assertNotIn("merge check", views.explain_text(self.desk, "lane", "a"))
+        for bad in (0, 1441, "30"):
+            s = self.desk.settings()
+            s["lanes"]["a"]["merge_timeout_min"] = bad
+            self.assertIn("lane a: merge_timeout_min must be from 1 to 1440", validate(s))
+
+    def test_a_lanes_merge_check_runs_its_own_command_before_merging_and_the_check_still_runs_after_a_task(self):
+        check, heavy = "test -f README.md", "echo packaged it; test -f hello.txt"
+        out = self.hansa("lane", "set", "a", "merge_check", heavy)
+        self.assertIn("hansa lane try a --merge-check", out)
+        self.assertEqual(self.events("lane_command_changed")[-1]["field"], "merge_check")
+        self.hansa("lane", "set", "a", "merge_timeout_min", "30")
+        d, tid = self.merge_check_lane(check=check)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["check"]["command"], check)  # after the task: the check, not the merge check
+        self.assertNotIn(heavy, [c["argv"][-1] for c in self.srt_calls()])
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn(f"  merge check before merging: {heavy} (hansa merge runs it in place of the check", explained)
+        self.assertIn("stopped at 30 minutes", explained)
+        self.assertIn("hansa lane try a --merge-check", explained)
+        tip, calls = self.git_out("rev-parse", "main"), len(self.srt_calls())
+        out = self.hansa("merge", tid)  # the base has not moved, but the merge check never ran on this tree
+        self.assertIn(f"{tid} is not merged yet: lane a has a merge check of its own, which hansa runs before every "
+                      f"merge, not after each task", out)
+        self.assertIn(f"runs the lane's merge check ({heavy}) there", out)
+        self.assertEqual(self.events("merge_check_queued")[-1]["command"], heavy)
+        d.tick()
+        running = views.show_text(self.desk, tid)
+        self.assertIn(f"then merge check: {heavy}", running)
+        self.assertIn(f"then merge check: {heavy}", views.status_text(views.status(self.desk)))
+        m = self.settle_merge(d, tid)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"], m["merge_check_result"]["command"]),
+                         ("merged", True, heavy), m)
+        self.assertEqual([c["argv"][-1] for c in self.srt_calls()[calls:]], [heavy])  # in the sandbox, as the check
+        self.assertEqual(Path(self.srt_calls()[-1]["cwd"]).resolve(), (self.desk.worktrees_dir / "a").resolve())
+        self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", "main").split()[1:], [tip, m["head"]])
+        self.assertIn(f"merge check: passed in ", views.show_text(self.desk, tid))
+        self.assertIn(f"): {heavy}", views.show_text(self.desk, tid))
+        self.assertEqual(self.events("merge_check_started")[-1]["command"], heavy)
+        self.assertEqual(self.events("merge_checked")[-1]["command"], heavy)
+        merged = self.events("task_merged")[-1]
+        self.assertEqual(merged["command"], heavy)
+        self.assertIn(f"after its merge check passed: Add hello.txt · its merge check ran: {heavy}",
+                      notify._item(self.desk, merged)[1])
+
+        # a merge check that fails names the command it ran, in hansa show and in the post
+        tid = self.desk.new_task("Add hello.txt again")
+        self.assertEqual(self.settle(d, tid)["check"]["ok"], True)
+        self.hansa("lane", "set", "a", "merge_check", "echo packaging broke; exit 4")
+        self.hansa("merge", tid)
+        m = self.settle_merge(d, tid)
+        self.assertEqual((m["state"], m["merge_check_result"]["exit"]), ("done", 4), m)
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("ran the lane's merge check there): FAILED (exit 4) in ", shown)
+        self.assertIn(": echo packaging broke; exit 4; nothing was merged", shown)
+        self.assertIn("packaging broke", shown)
+        ended = self.events("merge_check_ended")[-1]
+        self.assertIn("(it ran: echo packaging broke; exit 4)", notify._item(self.desk, ended)[1])
+        # --despite-check merges without it, and says which merge check it skipped
+        out = self.hansa("merge", tid, "--despite-check")
+        self.assertTrue(out.startswith(f"{tid} merged into main at "), out)
+        self.assertIn(" (without running the lane's merge check, echo packaging broke; exit 4)", out)
+        self.assertTrue(self.events("task_merged")[-1]["merge_not_checked"])
+
+    def test_a_merge_check_is_stopped_at_its_own_time_limit(self):
+        d, tid = self.merge_check_lane(check="true", merge_check="sleep 60", timeout_min=240, merge_timeout_min=7)
+        self.hansa("merge", tid)
+        d.tick()
+        mc = self.desk.meta(tid)["merge_check"]
+        self.assertEqual((mc["phase"], mc["command"]), ("running", "sleep 60"))
+        self.desk.update(tid, merge_check={**mc, "started": now() - 6.5 * 60})
+        d.tick()
+        self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))  # under its 7 minutes
+        self.desk.update(tid, merge_check={**self.desk.meta(tid)["merge_check"], "started": now() - 7.5 * 60})
+        m = self.settle_merge(d, tid)
+        r = m["merge_check_result"]
+        self.assertEqual((m["state"], r["ok"], r["note"], r["command"]),
+                         ("done", False, "stopped at the lane's time ceiling", "sleep 60"), m)
+        # unset, the merge check is stopped at the lane's timeout_min, the check after each task's limit
+        self.hansa("lane", "set", "a", "merge_timeout_min", "none")
+        self.assertNotIn("merge_timeout_min", self.desk.settings()["lanes"]["a"])
+        self.hansa("merge", tid, "--recheck")
+        d.tick()
+        mc = self.desk.meta(tid)["merge_check"]
+        self.desk.update(tid, merge_check={**mc, "started": now() - 60 * 60})
+        d.tick()
+        self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))  # 60 minutes: under 240
+        self.desk.update(tid, merge_check={**self.desk.meta(tid)["merge_check"], "started": now() - 241 * 60})
+        self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["note"], "stopped at the lane's time ceiling")
+
+    def test_a_lane_with_only_a_merge_check_checks_nothing_after_a_task_and_runs_it_before_each_merge(self):
+        from hansa import run
+        heavy = "test -f hello.txt"
+        d, tid = self.merge_check_lane(check="", merge_check=heavy)
+        m = self.desk.meta(tid)
+        self.assertIsNone(m.get("check"))  # nothing ran after the task
+        self.assertEqual(self.srt_calls(), [])
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"check: none after each task. Lane a has only a merge check, which hansa merge runs on this "
+                      f"task merged with the base before it merges it: {heavy}", shown)
+        self.assertNotIn("merged untested", shown)
+        self.assertIn("check after each task: none\n", views.explain_text(self.desk, "lane", "a"))
+        note = run.around_note(self.desk, self.desk.settings()["lanes"]["a"], {})
+        self.assertIn("- This lane has no check command: hansa runs nothing here after you end.\n", note)
+        self.assertIn(f"- Before it merges a task, not after the task ends, hansa runs the lane's merge check on the "
+                      f"task merged with the base branch, in this worktree and the same sandbox; a merge check that "
+                      f"fails merges nothing: `{heavy}`", note)
+        self.assertIn("lane a has a merge check of its own", self.hansa("merge", tid))
+        m = self.settle_merge(d, tid)
+        self.assertEqual((m["state"], m["merge_check_result"]["command"]), ("merged", heavy), m)
+        self.assertEqual([c["argv"][-1] for c in self.srt_calls()], [heavy])
+        # --recheck runs it too
+        tid = self.desk.new_task("Add hello.txt again")
+        self.settle(d, tid)
+        self.assertIn(f"{tid} is not merged yet: hansa runs the lane's merge check again",
+                      self.hansa("merge", tid, "--recheck"))
+        self.assertEqual(self.events("check_rerun_queued")[-1]["command"], heavy)
+        self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["command"], heavy)
+        self.assertEqual([c["argv"][-1] for c in self.srt_calls()], [heavy, heavy])
+        # a task that changed nothing needs no merge check
+        self.desk.update(tid, state="done", commits=0)
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_merge_checks_with_their_own_command_queue_per_repository_and_base(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        s = self.desk.settings()
+        s["concurrency"] = 2
+        for ln in ("a", "b"):
+            s["lanes"][ln]["merge_check"] = "test -f README.md && echo heavy"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("merge", t1)  # the base has not moved: both need their merge check all the same
+        out = self.hansa("merge", t2)
+        self.assertIn(f"One merge check runs at a time on main, so it waits for {t1}'s merge check on lane a", out)
+        d.tick()
+        self.assertEqual((self.desk.meta(t1)["merge_check"]["phase"], self.desk.meta(t2)["merge_check"]["phase"]),
+                         ("running", "queued"))
+        self.assertEqual([self.settle_merge(d, t)["state"] for t in (t1, t2)], ["merged", "merged"])
+        self.assertTrue((self.repo / "a.txt").exists() and (self.repo / "b.txt").exists())
+
+    def test_workers_are_told_the_merge_check_only_when_it_differs_from_the_check(self):
+        from hansa import run
+        same = run.around_note(self.desk, {"check": "make test", "merge_check": "make test"}, {})
+        self.assertNotIn("merge check", same)
+        own = run.around_note(self.desk, {"check": "make test", "merge_check": "make dist"}, {})
+        self.assertIn("After you end, hansa runs the lane's check here, in the same sandbox, and judges the task by "
+                      "it: `make test`", own)
+        self.assertIn("hansa runs the lane's merge check on the task merged with the base branch, in this worktree "
+                      "and the same sandbox; a merge check that fails merges nothing: `make dist`", own)
+        verify = run.around_note(self.desk, {"check": "make test", "merge_check": "make dist"},
+                                 {"kind": "verify", "parent": "t9999"}, "a")
+        self.assertIn("Before it merges a task, not after the task ends", verify)
+        self.assertIn("`make dist`", verify)
+
     def test_a_merge_check_tells_a_session_that_hears_from_hansa_that_it_will_be_told(self):
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "true"
@@ -1970,6 +2154,44 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(run.tried_lanes(self.desk), set())
         m = self.settle(d, self.desk.new_task("Add hello.txt"))  # the next task runs there as before
         self.assertEqual((m["state"], m["files"], m["check"]["exit"]), ("done", ["hello.txt"], 3), m)
+
+    def test_lane_try_merge_check_runs_the_setup_and_the_merge_check_in_place_of_the_check(self):
+        self.hansa("lane", "set", "a", "setup", "echo set up")
+        self.hansa("lane", "set", "a", "check", "echo the light check")
+        self.hansa("lane", "set", "a", "merge_check", "echo the heavy build")
+        self.hansa("lane", "set", "a", "merge_timeout_min", "30")
+        d, stop_serving = Dispatcher(self.desk), threading.Event()
+
+        def serve():
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        held = cli.hold_server_lock(self.desk)
+        d.tick()
+        server = threading.Thread(target=serve)
+        server.start()
+        said = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(said):
+                main(["--desk", str(self.desk.root), "lane", "try", "a", "--merge-check", "--every", "0.05"])
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+        said = said.getvalue()
+        self.assertIn("runs its setup and merge check (echo the heavy build, stopped after 30 minutes)", said)
+        self.assertIn("merge check: echo the heavy build\n  exit 0", said)
+        self.assertNotIn("light check", said)
+        self.assertEqual([c["argv"][-1] for c in self.srt_calls()], ["echo set up", "echo the heavy build"])
+        [tried] = self.events("lane_tried")
+        self.assertEqual((tried["ok"], tried["merge_check"]["exit"], "check" in tried), (True, 0, False))
+        self.assertTrue(self.events("lane_try_queued")[-1]["merge_check"])
+        s = self.desk.settings()  # with neither a merge check nor a check there is nothing to try that way
+        s["lanes"]["a"].update(check="", merge_check="")
+        self.assertEqual(self.desk.save_settings(s), [])
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "try", "a", "--merge-check"])
+        self.assertIn("has no merge check and no check", str(e.exception))
 
     def test_lane_try_on_a_busy_lane_runs_nothing_and_names_the_task(self):
         from hansa import run

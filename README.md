@@ -79,12 +79,14 @@ page gives.
   on, and asks the principal about each release (below).
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
   provider order, allowed commands (for design sessions), network and write lists, environment,
-  check, preview and setup commands, limits) and how many tasks run at once (`hansa concurrency`);
+  check, preview and setup commands, limits, and the merge check's own command and limit,
+  `merge_check` and `merge_timeout_min`, for a heavier command run only before a merge: unset, the
+  merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`);
   each lane's standing instructions (`hansa lane brief`, kept in
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) and asking for a release
   (`hansa release L "note"`), never pushing or deploying by itself.
-  Setup, check and preview run outside the worker, so each change to them is
+  Setup, check, merge check and preview run outside the worker, so each change to them is
   recorded and the coordinator tells the principal about it. It is not a
   worker: it runs on this machine outside any sandbox, and besides `hansa` it
   may run other commands the principal's work needs, such as installing
