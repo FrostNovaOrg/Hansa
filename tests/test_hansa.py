@@ -4955,8 +4955,9 @@ class DeskTest(unittest.TestCase):
                str(lib / "Caches" / ".." / "Keychains"): str(lib), str(self.tmp / "lk"): str(lib),
                str(lib / "Caches" / "out"): str(lib)}  # a link inside Caches that leads out of it
         if os.path.isdir("/System/Volumes/Data/Volumes"):
-            bad["/System/Volumes/Data/Volumes"] = "/Volumes"
-            bad["/System/Volumes/Data" + str(lib / "Keychains")] = str(lib)
+            # named as given, with the name the fence gives it
+            bad["/System/Volumes/Data/Volumes"] = "/System/Volumes/Data/Volumes (the same folder as /Volumes)"
+            bad["/System/Volumes/Data" + str(lib / "Keychains")] = f"/System/Volumes/Data{lib} (the same folder as {lib})"
         root = next((str(v) for v in Path("/Volumes").iterdir() if v.is_symlink() and os.path.samefile(v, "/")), "")
         if root and not set(root) & set("()[]{}*?"):
             bad[root + "/Volumes"] = "/Volumes"
@@ -5048,6 +5049,49 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(len(told) == 1 and f"write cannot include {path}: " in told[0] and why in told[0], (path, told))
         self.assertEqual(write_problems([str(good), "/opt/include", "/var/cache/x"]), [])
         self.assertIn("it would open /usr, where programs are installed", write_problems(["/usr/local/include/x"])[0])
+
+    def test_a_path_whose_links_cannot_be_followed_is_refused_in_every_list_and_crashes_nothing(self):
+        # as Python 3.9's realpath does for /proc/1/root on Linux, for any account but root
+        from hansa.desk import deny_split, read_split
+        good, shut = (self.tmp / "opt").resolve(), (self.tmp / "shut").resolve()
+        good.mkdir()
+        shut.mkdir()
+        real = os.path.realpath
+
+        def realpath(p, *a, **k):
+            if str(p).startswith((str(shut), "/proc")):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real(p, *a, **k)
+        cannot = "hansa cannot follow its links to see where it leads"
+        with unittest.mock.patch("os.path.realpath", realpath):
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), str(shut)]))
+            self.assertFalse(told["ok"])
+            self.assertTrue(any(f"read {shut}: {cannot}" in p for p in told["problems"]), told)
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), "/proc/1/root"]))
+            self.assertTrue(any("read /proc/1/root: it is /proc or inside it" in p for p in told["problems"]), told)
+            self.assertEqual(read_split([str(good), str(shut / "x")])[0], [str(good)])
+            self.assertEqual(write_problems([str(shut / "cache")]), [f"write cannot include {shut / 'cache'}: {cannot} "
+                                                                    "(a folder on the way cannot be looked into), so "
+                                                                    "it cannot check what it would open"])
+            kept, said = deny_split([str(shut / "keys")])
+            self.assertEqual(kept, [])
+            self.assertIn(f"{shut / 'keys'}: {cannot}", said[0])
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(shut / "cache")])
+            self.assertIn(cannot, str(e.exception.code))
+
+    def test_a_system_folder_named_through_a_link_is_named_as_the_path_spells_it_too(self):
+        # as /lib, a link to /usr/lib on many Linux systems, is to /usr/lib/x
+        from hansa import desk
+        top = self.tmp.resolve()
+        (top / "usr" / "lib").mkdir(parents=True)
+        (top / "lib").symlink_to(top / "usr" / "lib")
+        with unittest.mock.patch.object(desk, "SYSTEM_STARTS", (str(top / "lib"),)):
+            self.assertIn(f"write cannot include {top / 'usr' / 'lib' / 'x'}: it would open {top / 'usr' / 'lib'} "
+                          f"(the same folder as {top / 'lib'}), the system's own",
+                          write_problems([str(top / "usr" / "lib" / "x")])[0])
+            # through the link itself: the fence's name is where it leads
+            self.assertIn(f"it would open {top / 'lib'}, the system's own", write_problems([str(top / "lib" / "x")])[0])
 
     def test_a_name_with_an_invisible_or_direction_changing_character_is_in_neither_list(self):
         good = (self.tmp / "opt").resolve()
@@ -5578,7 +5622,11 @@ class DeskTest(unittest.TestCase):
         r = subprocess.run(start, capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(cost.report(self.desk)["coordinator_uncounted"], "")  # the same user: counted
-        with unittest.mock.patch.object(account, "uid", lambda: 0):  # now "root" starts it
+        # now root starts it on the account's Linux desk: the account's hansa (through runuser) does the desk's part
+        self.stand_in_runuser()
+        me = os.getuid()
+        with unittest.mock.patch.object(account, "LINUX", True), unittest.mock.patch.object(account, "uid", lambda: 0), \
+                unittest.mock.patch.object(account, "owner", lambda path: me):
             self.coordinator_as_root({})
         rep = cost.report(self.desk)
         self.assertIn("not counted", rep["coordinator_uncounted"])
@@ -6311,7 +6359,10 @@ class DeskTest(unittest.TestCase):
                home / "Library" / "Caches" / "claude-cli-nodejs":  # on macOS all of ~/Library is closed before it
                    "it would open" if sys.platform == "darwin" else "Claude Code's own files",
                home / ".srt-settings.json": "srt's settings", home / ".hansa" / "followers": "hansa's own files",
-               "/etc/gitconfig": "it would open /etc", "/usr/lib/x": "it would open /usr/lib"}
+               "/etc/gitconfig": "it would open /etc",
+               # where /lib is a link to /usr/lib: "/usr/lib (the same folder as /lib)"; where /usr/lib is the link,
+               # the folder it leads to
+               "/usr/lib/x": "it would open /lib, " if os.path.islink("/usr/lib") else "it would open /usr/lib"}
         loads = "which the python that runs hansa loads modules from"
         version = f"{sys.version_info[0]}.{sys.version_info[1]}"
         user = home / ".local" / "lib" / f"python{version}" / "site-packages"
@@ -8904,7 +8955,8 @@ class DeskTest(unittest.TestCase):
             self.assertIn("Nothing that hansa can look at listens on the loopback now.", out)
             self.assertEqual(self.events("lane_network_changed")[-1]["new"], ["127.0.0.1"])
             self.assertEqual(self.desk.settings()["lanes"]["b"]["network"], ["127.0.0.1"])
-            self.assertIn("they need localhost on the list", views.explain_text(self.desk, "lane", "b"))
+            with unittest.mock.patch.object(views.sys, "platform", "darwin"):  # the explanation reads it there
+                self.assertIn("they need localhost on the list", views.explain_text(self.desk, "lane", "b"))
         with unittest.mock.patch.object(cli, "ON_MAC", False), \
                 unittest.mock.patch.object(cli, "mac_loopback_listeners", listeners):
             out = self.hansa("lane", "set", "a", "network", "localhost")  # Linux: nothing more

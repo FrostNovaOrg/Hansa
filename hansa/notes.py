@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desk import Desk
+from .desk import Desk, resolved
 
 ARCHIVE = "archive"  # where a section goes by default: notes/archive/FILE; hansa notes lists no headings there
 HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
@@ -48,7 +48,11 @@ def inside(desk: Desk, name: str) -> Path:
     if not shown or os.path.isabs(shown) or shown.startswith("~") or ".." in Path(shown).parts:
         raise SystemExit(f"hansa: {name} is refused: give a path inside notes/, such as plan.md or archive/plan.md "
                          f"(no absolute path, no ..); nothing was changed")
-    p = Path(os.path.realpath(root / shown))
+    real = resolved(str(root / shown))
+    if not real:
+        raise SystemExit(f"hansa: notes/{shown} is refused: hansa cannot follow its links to see where it leads; "
+                         "nothing was changed")
+    p = Path(real)
     if p != root and root not in p.parents:
         raise SystemExit(f"hansa: notes/{shown} is a link that leads out of notes/ (to {p}); nothing was changed")
     return p
@@ -90,7 +94,7 @@ def list_text(desk: Desk, name: str = "") -> str:
         dirs[:] = sorted(x for x in dirs if not x.startswith("."))
         for f in sorted(x for x in files if not x.startswith(".")):
             p = Path(d) / f
-            real = Path(os.path.realpath(p))
+            real = Path(resolved(str(p)) or "/")  # where its links cannot be followed: not read
             if root not in real.parents:
                 out.append(f"{_rel(desk, p)}  (a link that leads out of notes/; not read)")
             elif real.is_file():

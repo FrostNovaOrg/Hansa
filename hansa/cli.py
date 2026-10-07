@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import account, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json,
+                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
@@ -44,7 +44,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
     s = default_settings()
     if repo:
-        repo = str(Path(repo).resolve())
+        if not resolved(repo):
+            raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
+        repo = resolved(repo)
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
@@ -666,7 +668,7 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
                              f"({m['head'][:12]}), so lane {name} cannot be shown to reach it. Verify it on a lane on "
                              f"the repository where that branch is{nothing}")
         return
-    same = lambda x, y: os.path.realpath(x) == os.path.realpath(y)
+    same = lambda x, y: (resolved(x) or x) == (resolved(y) or y)
     if not same(lanes[name]["repo"], own["repo"]):
         raise SystemExit(f"hansa: lane {name} cannot reach {m['id']}'s change: it is on {lanes[name]['repo']}, and "
                          f"{m['id']}'s branch is in {own['repo']}, the repository of its lane {m['lane']}. Verify it "
@@ -973,7 +975,7 @@ def cmd_coordinator(a):
     home = env.get("HOME") or os.path.expanduser("~")
     no_read = no_read_rules([*kept, *(os.path.join(home, f) for f in home_secrets())])
     dirs = [*repos, *(d for d in shut if d not in repos)]
-    shut = [*shut, *(r for r in (stored(os.path.realpath(d)) for d in shut) if r not in shut)]  # where a link leads, too
+    shut = [*shut, *(r for r in (stored(resolved(d) or d) for d in shut) if r not in shut)]  # where a link leads, too
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir, *shut]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
     claude = claude_bin()
@@ -1028,7 +1030,7 @@ def can_update(claude: str) -> bool:
     """Whether this account can write where the Claude Code at `claude` is installed, as its auto-updater
     would: the folder of the command, and the folder its link leads to, or for an npm install the
     node_modules folder holding the package. One installed by another account cannot update itself here."""
-    real = os.path.realpath(claude)
+    real = resolved(claude) or claude
     parts = Path(real).parts
     home = (str(Path(*parts[:len(parts) - parts[::-1].index("node_modules")])) if "node_modules" in parts
             else os.path.dirname(real))
@@ -1055,7 +1057,7 @@ def own_folder_rules(env: dict) -> list:
     home = env.get("HOME") or os.path.expanduser("~")
     folder = os.path.abspath(os.path.expanduser(given) if given else os.path.join(home, ".claude"))
     paths = []
-    for top in dict.fromkeys([folder, os.path.realpath(folder)]):  # a link's target too
+    for top in dict.fromkeys([folder, resolved(folder) or folder]):  # a link's target too
         try:
             names = [e.name for e in os.scandir(top) if not e.is_dir()]
         except OSError:
@@ -1063,7 +1065,7 @@ def own_folder_rules(env: dict) -> list:
         paths += [os.path.join(top, n) for n in sorted({*OWN_FILES, *names})] + [os.path.join(top, "sessions", "**")]
     if not given:
         dot = os.path.join(os.path.abspath(home), ".claude.json")
-        paths += [dot, os.path.realpath(dot)]
+        paths += [dot, resolved(dot) or dot]
     return [f"{tool}(//{p.lstrip('/')})" for p in dict.fromkeys(paths) for tool in ("Read", "Edit")]
 
 
@@ -1315,7 +1317,10 @@ def cmd_lane(a):
                 raise SystemExit("hansa: say which git checkout the lane works on (--repo PATH), or which lane to "
                                  "copy (--like L); nothing was changed")
             else:
-                repo = str(Path(a.repo).resolve())
+                repo = resolved(a.repo)
+                if not repo:
+                    raise SystemExit(f"hansa: cannot follow the links of {a.repo} to see where it leads; "
+                                     "nothing was changed")
             theirs = account.foreign_repo(repo)
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
