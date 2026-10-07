@@ -4897,7 +4897,7 @@ class DeskTest(unittest.TestCase):
         show.chmod(0o755)
         notes = self.desk.root / "notes"
         self.assertTrue(notes.is_dir())  # a new desk has it
-        notes.rmdir()  # a desk made before notes/
+        shutil.rmtree(notes)  # a desk made before notes/ (and before notes/PROJECT.md)
         mine = self.desk.root / ".claude" / "settings.json"
         mine.write_text(json.dumps({"permissions": {"allow": ["Bash(hansa:*)"], "deny": []}}))
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
@@ -4906,6 +4906,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(notes.is_dir())  # made when it starts
         self.assertEqual(notes.stat().st_uid, self.desk.root.stat().st_uid)
+        self.assertFalse((notes / "PROJECT.md").exists())  # only init writes it, once
         root = str(self.desk.root).lstrip("/")
         rules = json.loads(mine.read_text())["permissions"]
         self.assertIn(f"Edit(//{root}/notes/**)", rules["allow"])  # one Edit rule: Write and Edit alike
