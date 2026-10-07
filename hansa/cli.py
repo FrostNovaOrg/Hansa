@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, build, cost, installed_text, notes, notify, release, views
+from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
                    kept_from_workers, lane_targets, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json,
                    PROJECT_INTRO)
@@ -885,6 +885,7 @@ def cmd_serve(a):
     (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
+    alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
     d = Dispatcher(desk)
     desk.event("server_started", port=port)
     print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port} (run `hansa web` for the address)", flush=True)

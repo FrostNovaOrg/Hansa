@@ -9816,6 +9816,342 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([u["target"] for u in public_settings(self.desk)["release_unmatched"]], ["prod"])
 
 
+    # -- the principal's alert command (hansa/alert.py) ------------------------------------------------------------
+    ALERT_FAKE = ("import json, os, sys\n"
+                  "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'kind': os.environ.get('HANSA_ALERT_KIND'),"
+                  " 'text': sys.stdin.buffer.read().decode('utf-8'), 'cwd': os.getcwd(),"
+                  " 'task': os.environ.get('HANSA_TASK'), 'mine': os.environ.get('ALERT_TEST_MINE')}) + '\\n')\n")
+
+    def alert_fake(self) -> Path:
+        """A fake alert command that writes what it read and HANSA_ALERT_KIND to a file; set on the page."""
+        script, out = self.tmp / "alert.py", self.tmp / "alerts.jsonl"
+        script.write_text(self.ALERT_FAKE)
+        cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {shlex.quote(str(out))}"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        return out
+
+    def alerted(self, out) -> list:
+        return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()] if out.exists() else []
+
+    def test_the_alert_command_is_the_principals_alone(self):
+        from hansa import alert
+        self.assertEqual(self.desk.settings()["alert"], {"command": ""})
+        self.assertIn("no alert command is set", self.hansa("explain"))
+        self.assertFalse(alert.add(self.desk, "ask", "nothing set"))  # no command: nothing queued
+        self.assertEqual(alert.queued(self.desk), [])
+        # no command of the coordinator's sets, changes or clears it
+        s = self.desk.settings()
+        s["alert"] = {"command": "echo hi"}
+        said = self.desk.save_settings(s, by="coordinator")
+        self.assertTrue(any("alert" in x and "principal's" in x for x in said), said)
+        self.assertEqual(self.desk.settings()["alert"], {"command": ""})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "alert", "echo hi"])
+        self.assertIn("invalid choice: 'alert'", err.getvalue())  # lane set has nothing like it
+        # the page's save is the only way, and it records who saved it and when
+        before = time.time()
+        out = self.alert_fake()
+        saved = self.desk.settings()["alert"]
+        self.assertEqual(saved["by"], "page")
+        self.assertGreaterEqual(saved["at"], before - 1)
+        self.assertEqual(json.loads(self.desk.settings_path.read_text())["alert"], saved)
+        for change in ({"command": "echo other"}, {"command": ""}):
+            s = self.desk.settings()
+            s["alert"] = change
+            self.assertTrue(self.desk.save_settings(s, by="coordinator"))
+            self.assertEqual(self.desk.settings()["alert"], saved)
+        # the coordinator's own changes leave it as the page saved it
+        self.hansa("lane", "set", "a", "check", "true")
+        self.hansa("concurrency", "2")
+        self.assertEqual(self.desk.settings()["alert"], saved)
+        # a page save of something else leaves who and when as they were; what the page sends for them counts for nothing
+        self.assertEqual(self.page_save(lambda s: s.update(cool_minutes=20, alert={**s["alert"], "at": 1, "by": "x"})),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["alert"], saved)
+        told = self.hansa("explain")
+        self.assertIn("the principal's alert command is", told)
+        self.assertIn(str(out), told)
+        self.assertIn("You send no alerts and cannot set it", told)
+        # one line only, and no key
+        self.assertFalse(self.page_save(lambda s: s.update(alert={"command": "echo a\necho b"}))["ok"])
+        self.desk.write_key("demo", "sk-demo-alert-123456")
+        said = self.page_save(lambda s: s.update(alert={"command": "curl -H 'x: sk-demo-alert-123456' example.org"}))
+        self.assertFalse(said["ok"])
+        self.assertIn("holds the key of demo", " ".join(said["problems"]))
+        # the page has its field and its test button; no hansa command sends an alert
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("alertCmd:", "alertTest:"):
+            self.assertEqual(ui.count(x), 2, x)
+        self.assertIn('"/api/alert/test"', ui)
+        self.assertNotIn("hansa alert", self.hansa("help"))
+        self.assertIn("the coordinator does not send them", self.hansa("help"))
+
+    def test_each_kind_of_alert_reaches_the_command_with_its_text(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        os.environ.update(HANSA_TASK="t0099", ALERT_TEST_MINE="yes")  # hansa's own environment, without a task's mark
+        # a request to the principal
+        n = self.desk.add_ask("Please renew the deploy login")
+        self.assertEqual(alert.send_due(self.desk, gather=0)["ok"], True)
+        [a] = self.alerted(out)
+        self.assertEqual(a["kind"], "ask")
+        self.assertIn(f"request #{n} waits for you on the page: Please renew the deploy login", a["text"])
+        self.assertEqual((a["cwd"], a["task"], a["mine"]), (str(self.desk.root), None, "yes"))
+        os.environ.pop("HANSA_TASK")
+        # a release waits for the yes, and ends void
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a", "first")
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
+        self.assertIn("release #1 of lane a, target (unnamed) (main at", self.alerted(out)[-1]["text"])
+        self.assertIn("waits for your yes on the page", self.alerted(out)[-1]["text"])
+        release.void(self.desk, 1, "the test says so")
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
+        self.assertIn("void: the test says so", self.alerted(out)[-1]["text"])
+        # a release that runs and ends done; one that fails
+        d = Dispatcher(self.desk)
+        for rid, command, end in ((2, "true", "done"), (3, "exit 4", "FAILED")):
+            if command != "true":
+                self.hansa("lane", "set", "a", "release", command)
+            self.hansa("release", "a")
+            r = release.get(self.desk, rid)
+            self.assertEqual(release.answer(self.desk, rid, True, "", r["commit"], r["command"]), {"ok": True})
+            self.settle_release(d, rid)
+            alert.send_due(self.desk, gather=0)
+            self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting,release_ended")
+            self.assertIn(f"release #{rid} of lane a, target (unnamed) (main at", self.alerted(out)[-1]["text"])
+            self.assertIn(end, self.alerted(out)[-1]["text"])
+        self.assertIn("(exit 4)", self.alerted(out)[-1]["text"])
+        # one refused for a forbidden word
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["unshippable"])), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "echo unshippable")
+        self.refused("release", "a")
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
+        self.assertIn("refused: what goes out holds words", self.alerted(out)[-1]["text"])
+        # hansa serve finishing no round for a long time: once, until rounds come again
+        write_json(self.desk.state_dir / "heartbeat", time.time() - alert.STUCK_ALERT - 60)
+        told = alert.stuck_check(self.desk, 0.0)
+        self.assertTrue(told)
+        self.assertEqual(alert.stuck_check(self.desk, told), told)
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "server_stuck")
+        self.assertIn("hansa serve has finished no round for", self.alerted(out)[-1]["text"])
+        write_json(self.desk.state_dir / "heartbeat", time.time())
+        self.assertEqual(alert.stuck_check(self.desk, told), 0.0)
+        # the page's test button
+        self.assertTrue(alert.test(self.desk)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["kind"], "test")
+        # ordinary task events are the coordinator's: no alert
+        count = len(self.alerted(out))
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.alerted(out)), count)
+        self.assertEqual(len(self.events("alert_sent")), count)
+
+    def test_alerts_that_come_close_together_go_out_in_one_run_one_run_at_a_time(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.desk.add_ask("first")
+        self.desk.add_ask("second")
+        self.assertIsNone(alert.send_due(self.desk))  # the last came just now: it waits for others to gather
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        # another run holds the lock: this one sends nothing and leaves them queued
+        with open(self.desk.state_dir / "alert.lock", "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
+            fcntl.flock(f, fcntl.LOCK_UN)
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        time.sleep(0.3)
+        self.assertTrue(alert.send_due(self.desk, gather=0.2)["ok"])
+        [a] = self.alerted(out)
+        self.assertEqual(a["kind"], "ask")
+        self.assertIn("2 alerts", a["text"])
+        self.assertIn("- request #1 waits for you on the page: first\n- request #2 waits for you on the page: second",
+                      a["text"])
+        self.assertEqual(alert.queued(self.desk), [])
+        # alerts that keep coming go out once the first has waited long enough
+        q = [{"kind": "ask", "text": "old", "at": time.time() - alert.MOST_WAIT - 1},
+             {"kind": "test", "text": "new", "at": time.time()}]
+        write_json(alert.queue_file(self.desk), q)
+        self.assertTrue(alert.send_due(self.desk)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["kind"], "ask,test")
+
+    def test_a_failed_or_timed_out_alert_is_recorded_and_shown_and_not_retried(self):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "echo no phone here; exit 3"})),
+                         {"ok": True, "problems": []})
+        self.assertEqual(alert.failure_line(self.desk), "")
+        self.desk.add_ask("are you there")
+        r = alert.send_due(self.desk, gather=0)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (False, 3, False, ["no phone here"]))
+        [e] = self.events("alert_failed")
+        self.assertEqual((e["exit"], e["kinds"], e["tail"]), (3, "ask", ["no phone here"]))
+        shown = self.hansa("status")
+        self.assertIn("alert command FAILED", shown)
+        self.assertIn("(exit 3): no phone here", shown)
+        self.assertEqual(alert.queued(self.desk), [])  # no retry: the next alert tries again
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        # a command that takes too long is stopped
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "echo waiting; sleep 30"})),
+                         {"ok": True, "problems": []})
+        self.desk.add_ask("still there?")
+        t0 = time.time()
+        r = alert.send_due(self.desk, gather=0, timeout=0.5)
+        self.assertLess(time.time() - t0, 10)
+        self.assertEqual((r["ok"], r["timed_out"]), (False, True))
+        self.assertTrue(self.events("alert_failed")[-1]["timed_out"])
+        self.assertIn("timed out after", self.hansa("status"))
+        # the next that goes out says so beside the failure; the page's test reports a failure too
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "true"})), {"ok": True, "problems": []})
+        self.assertTrue(alert.test(self.desk)["ok"])
+        self.assertIn("a later one went out", self.hansa("status"))
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "exit 9"})), {"ok": True, "problems": []})
+        self.assertEqual(alert.test(self.desk)["exit"], 9)
+
+    def test_an_alert_has_keys_removed_and_is_short(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.desk.write_key("demo", "sk-demo-alert-987654")
+        self.desk.add_ask("the login is sk-demo-alert-987654, " + "é" * 3000)
+        alert.send_due(self.desk, gather=0)
+        [a] = self.alerted(out)
+        self.assertNotIn("sk-demo-alert", a["text"])
+        self.assertIn("[key of demo]", a["text"])
+        self.assertLessEqual(len(a["text"]), alert.MOST_TEXT)
+        self.assertIn("é", a["text"])  # read as UTF-8
+        # a key saved after an alert was queued is removed too, and so is one in what a failed run wrote
+        write_json(alert.queue_file(self.desk), [{"kind": "test", "text": "new key sk-later-key-24680", "at": 0}])
+        self.desk.write_key("later", "sk-later-key-24680")
+        alert.send_due(self.desk, gather=0)
+        self.assertIn("new key [key of later]", self.alerted(out)[-1]["text"])
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat; exit 1"})), {"ok": True, "problems": []})
+        write_json(alert.queue_file(self.desk), [{"kind": "test", "text": "sk-later-key-24680", "at": 0}])
+        r = alert.send_due(self.desk, gather=0)
+        self.assertNotIn("sk-later-key", json.dumps(r) + self.desk.events_path.read_text() + self.hansa("status"))
+
+    def test_an_alert_queue_entry_that_cannot_be_read_is_dropped_once_and_the_others_go(self):
+        from hansa import alert
+        out = self.alert_fake()
+        q = [{"kind": "ask", "text": "first", "at": 0}, {"kind": "ask", "text": "bad time", "at": "soon"},
+             {"kind": "ask", "text": "no time"}, "not an entry", {"kind": "ask", "text": "second", "at": 1}]
+        alert.queue_file(self.desk).write_text(json.dumps(q))
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("- first\n- second", self.alerted(out)[-1]["text"])
+        [e] = self.events("alert_dropped")
+        self.assertEqual(e["entries"], 3)
+        # text that is not UTF-8 loses no alert, and a bad entry is recorded once, not on every look
+        raw = b'[{"kind": "ask", "text": "caf\xe9 \xff", "at": 0}, {"kind": "ask", "text": "x", "at": null}]'
+        alert.queue_file(self.desk).write_bytes(raw)
+        self.desk.add_ask("third")
+        self.assertEqual(len(self.events("alert_dropped")), 2)
+        self.assertEqual([x["text"] for x in alert.queued(self.desk)][-1], "request #1 waits for you on the page: third")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("caf", self.alerted(out)[-1]["text"])
+        self.assertIn("third", self.alerted(out)[-1]["text"])
+        for _ in range(3):
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.events("alert_dropped")), 2)
+        self.assertEqual(self.events("alert_error"), [])
+        # a whole file that is not JSON is dropped, once
+        alert.queue_file(self.desk).write_bytes(b"\xff{not json")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.events("alert_dropped")), 3)
+
+    def test_an_alert_command_that_exits_leaving_a_child_ends_with_its_own_exit(self):
+        from hansa import alert
+        mark = self.tmp / "child-done"
+        cmd = f"(sleep 3; touch {shlex.quote(str(mark))}) & echo sent; exit 0"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        self.desk.add_ask("are you there")
+        t0 = time.time()
+        r = alert.send_due(self.desk, gather=0, timeout=2)
+        self.assertLess(time.time() - t0, 1.5)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (True, 0, False, ["sent"]))
+        self.assertEqual(self.events("alert_failed"), [])
+        self.assertNotIn("FAILED", self.hansa("status"))
+        # the same, with the child holding stdin and output and the exit code its own
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "(sleep 5 &); echo nope; exit 6"})),
+                         {"ok": True, "problems": []})
+        self.desk.add_ask("again")
+        r = alert.send_due(self.desk, gather=0, timeout=2)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (False, 6, False, ["nope"]))
+        # the child is left alone: only the time limit kills the group
+        deadline = time.time() + 10
+        while not mark.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertTrue(mark.exists())
+
+    def test_at_most_twenty_alert_runs_an_hour_and_what_is_held_back_goes_out_together(self):
+        from hansa import alert
+        out = self.alert_fake()
+        t = time.time()
+        write_json(alert.last_file(self.desk), {"runs": [t - alert.HOUR - 5] + [t - 3000 + i for i in range(alert.MOST_RUNS - 1)]})
+        self.desk.add_ask("one")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])  # the 20th run of the hour
+        self.assertNotIn("held back", self.alerted(out)[-1]["text"])
+        self.assertEqual(len(alert._last(self.desk)["runs"]), alert.MOST_RUNS)  # the one over an hour old is gone
+        self.desk.add_ask("two")
+        self.desk.add_ask("three")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # the limit holds them
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        self.assertEqual(len(self.events("alert_held")), 1)  # recorded once per hold
+        self.assertEqual(len(self.alerted(out)), 1)
+        self.desk.add_ask("four")
+        # the hour frees a run: what was held goes out in one run, saying how many were held back
+        rec = alert._last(self.desk)
+        rec["runs"][0] = time.time() - alert.HOUR - 1
+        write_json(alert.last_file(self.desk), rec)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        a = self.alerted(out)[-1]
+        self.assertIn("(3 held back by the limit of 20 runs an hour)", a["text"])
+        self.assertIn("- request #2 waits for you on the page: two", a["text"])
+        self.assertIn("four", a["text"])
+        self.assertEqual(alert.queued(self.desk), [])
+        self.desk.add_ask("five")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # full again
+        self.assertTrue(alert.test(self.desk)["ok"])  # the principal's own test press is not held
+        self.assertIn("five", self.alerted(out)[-1]["text"])
+
+
+    def test_release_alerts_name_the_target_and_a_tick_that_no_longer_holds_alerts_like_any_wait(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        # a ticked target goes out without asking: no wait, but its end names it
+        self.hansa("release", "a", "test")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        alert.send_due(self.desk, gather=0)
+        a = self.alerted(out)[-1]
+        self.assertEqual(a["kind"], "release_ended")
+        self.assertIn("release #1 of lane a, target test (main at", a["text"])
+        # an approved release whose tick no longer holds goes back to waiting, and alerts like any wait
+        self.hansa("release", "a", "test")
+        self.assertEqual(release.get(self.desk, 2)["state"], "approved")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.hansa("lane", "target", "a", "test", "echo changed")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        alert.send_due(self.desk, gather=0)
+        a = self.alerted(out)[-1]
+        self.assertEqual(a["kind"], "release_waiting")
+        self.assertIn("release #2 of lane a, target test (main at", a["text"])
+        self.assertIn("waits for your yes on the page", a["text"])
+        # a target that was never ticked waits for the yes from the start, named
+        self.hansa("release", "a", "prod")
+        alert.send_due(self.desk, gather=0)
+        a = self.alerted(out)[-1]
+        self.assertEqual(a["kind"], "release_waiting")
+        self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+
 class PortSkipTest(unittest.TestCase):
     """skip_unless_ports tells a sandbox that refuses ports from a machine where they work."""
 
