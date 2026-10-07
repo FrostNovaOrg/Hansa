@@ -1022,7 +1022,10 @@ def env_file(desk: Desk, tid: str, lane: dict) -> dict:
     use hansa's environment."""
     env = sandbox_env(desk, lane)
     f = desk.raw_dir(tid) / "lane-env.sh"
-    f.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + JAVA_PRELUDE, encoding="utf-8")
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # only the desk's account reads it
+    os.fchmod(fd, 0o600)  # one written before was made with the umask's mode
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + JAVA_PRELUDE)
     return {"CLAUDE_ENV_FILE": str(f)}
 
 
@@ -1035,9 +1038,21 @@ def no_read(desk: Desk) -> tuple:
                   "page, Settings)" for x in said]
 
 
+def desk_private(desk: Desk) -> list:
+    """What of the desk no worker, verifier or design session may read: its keys and state, and the
+    coordinator's notes (notes/) and card (CLAUDE.md), the project's and the principal's working knowledge,
+    which a task does not need."""
+    return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md"]
+
+
+def desk_read_rules(desk: Desk) -> list:
+    """desk_private as rules that deny Claude Code's Read tool: each folder with all under it, the card itself."""
+    return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
+
+
 def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
-    check (srt): (the hosts it may reach, {"denyRead": the desk's keys and state, every provider's Claude
+    check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), every provider's Claude
     Code folder (the login and the session records of whoever runs on it) and ~/.claude, whichever provider
     this run uses, the built-in logins and keys, and what the principal keeps from workers, "denyWrite":
     git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
@@ -1047,7 +1062,7 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     homes = [config_home(desk, pname, p)]
     homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
                           if isinstance(q, dict) and isinstance(q.get("config_dir", ""), str)) if h.is_absolute()]
-    deny = full_paths([desk.secrets_dir, desk.state_dir, *homes, home / ".claude",
+    deny = full_paths([*desk_private(desk), *homes, home / ".claude",
                        *(home / f for f in home_secrets()), *no_read(desk)[0]])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
     return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
@@ -1865,7 +1880,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     desk.update(tid, no_read_left_out=not_kept)
     for line in not_kept:
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
-    argv += ["--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir), *no_read_rules(kept),
+    argv += ["--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
@@ -1930,7 +1945,7 @@ def design_command(desk: Desk, tid: str):
     kept, not_kept = no_read(desk)
     desk.update(tid, no_read_left_out=not_kept)
     argv += ["--append-system-prompt", system,
-             "--disallowedTools", rule("Read", desk.secrets_dir), rule("Read", desk.state_dir), *no_read_rules(kept),
+             "--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
     env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,

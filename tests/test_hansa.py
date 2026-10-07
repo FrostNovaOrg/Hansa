@@ -5285,8 +5285,10 @@ class DeskTest(unittest.TestCase):
                 self.assertTrue(self.covered(rules, tool, str(dot)), (tool, dot))
             for f in ("projects/-desk/memory/MEMORY.md", "projects/-desk/s.jsonl", "projects"):
                 self.assertFalse(self.covered(rules, tool, f"{cc}/{f}"), (tool, f))  # the session's memory: its own
-        # hansa relies on no other form: a lone * is not in them
-        self.assertEqual([r for r in rules if "*" in r.replace("/**)", ")")], [])
+        # hansa relies on no other form: a lone * is not in its folder rules (the Bash ones are not about folders)
+        folders = [r for r in rules if r.startswith(("Read(", "Edit("))]
+        self.assertTrue(folders)
+        self.assertEqual([r for r in folders if "*" in r.replace("/**)", ")")], [])
 
     def test_the_coordinator_neither_reads_nor_edits_its_own_claude_code_folder(self):
         echo = self.tmp / "echo-claude"
@@ -5952,6 +5954,141 @@ class DeskTest(unittest.TestCase):
         self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
         self.assertNotIn("Bash", self.allowed_by(argv))  # outside the sandbox: the lane's rules and its own git
         self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
+
+    def test_workers_verifiers_and_design_sessions_cannot_read_the_desks_notes_or_card(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        task, verify = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
+        notes, card = self.desk.notes_dir, self.desk.root / "CLAUDE.md"
+        rules = [run.rule("Read", notes), f"Read(//{str(card).lstrip('/')})"]
+        for argv in (task, verify):
+            for r in rules:
+                self.assertIn(r, self.denied_by(argv))
+            deny = self.sandbox_of(argv)["filesystem"]["denyRead"]  # their commands too
+            self.assertIn(str(notes), deny)
+            self.assertIn(str(card), deny)
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+        self.assertIn(str(notes), srt)  # the setup and the check
+        self.assertIn(str(card), srt)
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        for r in rules:
+            self.assertIn(r, self.denied_by(argv))
+
+    def test_the_coordinator_cannot_push_or_publish_from_its_own_shell(self):
+        self.assertEqual(self.echo_coordinator().returncode, 0)  # the desk's permissions brought up to date
+        deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
+        rules = [r[5:-1] for r in deny if r.startswith("Bash(")]
+
+        def matches(rule, cmd):  # as Claude Code matches a Bash rule: a prefix before :*, else * as any text
+            if rule.endswith(":*") and "*" not in rule[:-2]:
+                return cmd == rule[:-2] or cmd.startswith(rule[:-2] + " ")
+            pattern = ".*".join(re.escape(x) for x in rule.split("*"))
+            if rule.endswith(" *") and rule.count("*") == 1:
+                pattern = pattern[:-3] + "( .*)?"
+            return re.fullmatch(pattern, cmd, re.S) is not None
+
+        def denied(cmd):
+            return any(matches(r, cmd) for r in rules)
+        for cmd in ("git push origin main", "git push", "gh release create v1", "gh pr merge 3 --squash",
+                    "gh repo delete x", "npm publish", "twine upload dist/*", "cargo publish", "docker push img:1",
+                    "git -C /some/repo push", "git -C /some/repo push origin main", "git --no-pager push",
+                    "git -c http.extraHeader=x push --force", "npm --prefix pkg publish", "mvn -B deploy",
+                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img"):
+            self.assertTrue(denied(cmd), cmd)
+        for cmd in ("hansa status", "hansa git a log --oneline", "hansa git a show HEAD", "hansa release a",
+                    "hansa lane set a release \"git push origin main\"", "hansa merge t0001", "git status",
+                    "gh pr view 3", "git -C /some/repo status", "git -C /some/repo log --oneline",
+                    "hansa git a -C x push", "npm --prefix pkg test"):
+            self.assertFalse(denied(cmd), cmd)
+        self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
+
+    def test_a_lanes_env_refuses_the_shells_own_names_and_its_file_is_the_desks_alone(self):
+        from hansa import run
+        for name in ("UID", "EUID", "PPID", "SHELLOPTS", "BASHOPTS", "ZSH_SUBSHELL", "path", "status"):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {name: "0"}
+            told = self.desk.save_settings(s)
+            self.assertTrue(any(f"env {name} cannot be set" in x and "sh, bash or zsh" in x for x in told), (name, told))
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["env"], {})
+        s = self.desk.settings()  # saved another way: the run's file leaves it out
+        s["lanes"]["a"]["env"] = {"UID": "0", "FINE": "1"}
+        write_json(self.desk.settings_path, s)
+        tid = self.desk.new_task("Add hello.txt")
+        f = self.desk.raw_dir(tid) / "lane-env.sh"
+        f.write_text("old\n")
+        f.chmod(0o644)  # one written before, with the umask's mode
+        self.assertEqual(run.env_file(self.desk, tid, s["lanes"]["a"]), {"CLAUDE_ENV_FILE": str(f)})
+        text = f.read_text()
+        self.assertTrue(text.startswith("export FINE=1\n"), text)
+        self.assertNotIn("export UID", text)
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        f.unlink()
+        run.env_file(self.desk, tid, s["lanes"]["a"])
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        r = subprocess.run(["/bin/sh", "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True)
+        self.assertEqual(r.stdout, "ran\n", r.stderr)
+
+    def test_no_name_a_lanes_env_accepts_stops_sh_bash_or_zsh(self):
+        from hansa.desk import ENV_NAME, SHELL_ENV_NAMES, env_problems
+        shells = [s for s in ("/bin/sh", "/bin/bash", "/bin/zsh") if os.access(s, os.X_OK)]
+        names = set(SHELL_ENV_NAMES)  # every variable the shells present know, besides the listed ones
+        for sh, ask in (("/bin/bash", "compgen -v"), ("/bin/zsh", "print -l ${(k)parameters}")):
+            if sh in shells:
+                names |= set(subprocess.run([sh, "-c", ask], capture_output=True, text=True,
+                                            env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}).stdout.split())
+        names = sorted(n for n in names if ENV_NAME.match(n))
+        for n in SHELL_ENV_NAMES:
+            self.assertEqual([k for k, _ in env_problems({n: "0"})], [n], n)
+        accepted = [n for n in names if not env_problems({n: "0"})]
+        self.assertIn("TERM", accepted)
+        f = self.tmp / "lane-env.sh"
+
+        def stops(sh, some):
+            f.write_text("".join(f"export {n}=0\n" for n in some))
+            return subprocess.run([sh, "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True,
+                                  env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}).stdout != "ran\n"
+        for sh in shells:
+            if stops(sh, accepted):  # one at a time, to name them
+                self.fail(f"{sh} stops on {[n for n in accepted if stops(sh, [n])]}")
+
+    def test_what_every_worker_needs_cannot_be_kept_from_them(self):
+        from hansa.desk import account_home
+        home, systmp = Path(account_home()), (self.tmp / "systmp").resolve()
+        systmp.mkdir()
+        wts = self.desk.root / "worktrees"
+        bad = {"/usr/lib": "programs and libraries", "/etc": "programs and libraries",
+               str(home / ".config"): "settings and caches in the home folder",
+               str(home / ".cache"): "settings and caches in the home folder",
+               str(systmp): "the temporary folder", "/var/tmp": "the temporary folder",
+               str(wts): "the desk's worktrees folder", str(wts / "a"): "a lane's worktree",
+               str(wts / "a-design"): "a lane's worktree",
+               "/dev": "devices", "/dev/null": "devices", "/dev/tty": "devices", "/dev/fd": "devices",
+               "/opt/homebrew/Cellar": "Homebrew's programs", "/opt/homebrew/opt": "Homebrew's programs",
+               "/usr/local/Cellar": "Homebrew's programs", "/usr/local/opt": "Homebrew's programs",
+               "/opt/homebrew": "workers could not run their tools"}
+        with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                self.assertFalse(told["ok"], path)
+                self.assertEqual(len(told["problems"]), 1, (path, told))
+                self.assertIn(f"workers cannot be kept from reading {path}: ", told["problems"][0])
+                self.assertIn(why, told["problems"][0], path)
+                self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+            fine = [str(home / ".config" / "myproject" / "keys.json"), "/usr/lib/myproject-keys", str(systmp / "keys"),
+                    str(self.desk.root / "elsewhere"), "/opt/homebrew/Cellar/myformula/1.0/keys"]
+            self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
         from hansa import run
@@ -7377,7 +7514,9 @@ class DeskTest(unittest.TestCase):
             self.assertIn(str(good), deny)
             self.assertFalse(set(bad) & set(deny), deny)
             self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
-                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir)])
+                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir,
+                                                                          self.desk.notes_dir)]
+                             + [f"Read(//{str(self.desk.root).lstrip('/')}/CLAUDE.md)"])
             self.assertEqual(len(m["no_read_left_out"]), len(bad))
             shown = views.show_text(self.desk, tid)
             for path, why in bad.items():
