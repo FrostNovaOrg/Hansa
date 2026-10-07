@@ -40,6 +40,71 @@ def plain(line: str, width: int | None = 200) -> str:
     return ESCAPES.sub("", line)[:width]
 
 
+# What marks a failing test in a check's output, for hansa show to lift out (failure_spans)
+UNITTEST_HEAD = re.compile(r"^(FAIL|ERROR): \S")  # Python's unittest, after a line of =
+PYTEST_SECTION = re.compile(r"^=+ (FAILURES|ERRORS) =+$")  # pytest, to its next ==== heading ====
+PYTEST_HEADING = re.compile(r"^=+ .+ =+$")
+SUREFIRE = re.compile(r"<<< (FAILURE|ERROR)!")  # JUnit run by Maven's Surefire, with its stack trace
+SUREFIRE_SUMMARY = re.compile(r"^\[ERROR\] (Failures|Errors): *$")
+GENERIC_FAIL = re.compile(r"\bFAIL(ED|URE|S)?\b")  # go test, jest, Gradle, pytest's summary, a build's last word
+FAILURE_LINES = 60  # of the failing tests' sections hansa show gives; hansa show ID --check: the whole output
+TAIL_LINES = 15  # and of the output's last lines after them
+
+
+def failure_spans(lines: list) -> list:
+    """The (start, end) line ranges of a check's output that name a failing test and say why: unittest's and
+    pytest's FAIL/ERROR sections with their tracebacks, Surefire's <<< FAILURE! with its stack trace and its
+    Failures:/Errors: summary, and any other line saying FAIL or FAILED with the indented lines under it."""
+    spans, i, n = [], 0, len(lines)
+
+    def until(j, stop, cap=None):
+        k = j + 1
+        while k < n and not stop(k) and (cap is None or k - j < cap):
+            k += 1
+        while k > j + 1 and not lines[k - 1].strip():
+            k -= 1
+        return k
+    while i < n:
+        x = lines[i]
+        if PYTEST_SECTION.match(x):
+            end = until(i, lambda k: bool(PYTEST_HEADING.match(lines[k])))
+        elif UNITTEST_HEAD.match(x) and i and re.fullmatch(r"={20,}", lines[i - 1]):
+            end = until(i, lambda k: bool(re.fullmatch(r"={20,}", lines[k])) or bool(
+                re.fullmatch(r"-{20,}", lines[k]) and k + 1 < n and lines[k + 1].startswith("Ran ")))
+            i -= 1  # the line of = above it
+        elif SUREFIRE.search(x):
+            end = until(i, lambda k: not lines[k].strip() or lines[k].startswith("["))
+        elif SUREFIRE_SUMMARY.match(x):
+            end = until(i, lambda k: not lines[k].startswith(("[ERROR]   ", "[ERROR] \t", "  ", "\t")))
+        elif GENERIC_FAIL.search(x):
+            end = until(i, lambda k: not lines[k][:1].isspace() or not lines[k].strip(), 20)
+        else:
+            i += 1
+            continue
+        spans.append((i, end))
+        i = end
+    return spans
+
+
+def failed_check_lines(log: str, tail: list, tid: str) -> list:
+    """For hansa show, a check or merge check that failed: the failing tests' sections lifted out of its whole
+    output (failure_spans), cut to FAILURE_LINES, then the output's last lines after them; only its last lines
+    when nothing in it names a failing test, or when the output is not kept (tail: the last lines as recorded)."""
+    lines = [plain(x, None) for x in log.strip().splitlines()]
+    spans = failure_spans(lines) if lines else []
+    whole = [f"  the whole output: hansa show {tid} --check"] if lines else []
+    if not spans:
+        return ["  " + plain(x) for x in (lines[-TAIL_LINES:] if lines else tail)] + whole
+    picked = [x for a, b in spans for x in lines[a:b]]
+    out = ["  the failing tests, from its output:"] + ["    " + x[:200] for x in picked[:FAILURE_LINES]]
+    if len(picked) > FAILURE_LINES:
+        out.append(f"    ... {len(picked) - FAILURE_LINES} more lines of them")
+    after = lines[spans[-1][1]:][-TAIL_LINES:]
+    if any(x.strip() for x in after):
+        out += ["  its last lines:"] + ["    " + x[:200] for x in after]
+    return out + whole
+
+
 def as_closed_now(m: dict) -> dict:
     """A verification that had ended when its task closed, recorded before hansa kept such a one as it ended
     (state cancelled, the closed line as its error, and its verdict), as the rule has it now: done, with the
@@ -160,8 +225,8 @@ def waited_text(r: dict) -> str:
     return f"{WAITED}: {str(r.get('note') or 'it could not be made').removesuffix('; nothing was merged')}"
 
 
-def merge_result_lines(m: dict) -> list:
-    """What the last merge check found, for hansa show."""
+def merge_result_lines(m: dict, log: str = "") -> list:
+    """What the last merge check found, for hansa show. log: its whole output, when it is kept."""
     r = m.get("merge_check_result")
     if not r:
         return []
@@ -179,7 +244,7 @@ def merge_result_lines(m: dict) -> list:
     hint = machine_hint(r)
     return ([f"merge check ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
              + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
-            + ["  " + plain(x) for x in r.get("tail", [])] + (["  " + hint] if hint else []))
+            + failed_check_lines(log, r.get("tail", []), m["id"]) + (["  " + hint] if hint else []))
 
 
 def ready_now(desk: Desk, s: dict | None = None) -> list:
@@ -244,8 +309,11 @@ def project_file(desk: Desk) -> dict:
         data = None
     if data is None:
         return {"file": PROJECT_FILE, "present": False, "bytes": 0, "lines": 0, "long": False}
+    # an old desk's card, from before it imported the file, is replaced at the coordinator's next start
+    card = read_text(desk.root / "CLAUDE.md")
     return {"file": PROJECT_FILE, "present": True, "bytes": len(data), "lines": data.count(b"\n")
-            + (not data.endswith(b"\n") and bool(data)), "long": len(data) > PROJECT_LONG}
+            + (not data.endswith(b"\n") and bool(data)), "long": len(data) > PROJECT_LONG,
+            **({} if f"@{PROJECT_FILE}" in card.split() else {"card_lacks_it": True})}
 
 
 def project_text(pf: dict) -> str:
@@ -253,9 +321,35 @@ def project_text(pf: dict) -> str:
     if not pf["present"]:
         return (f"project rules: no {pf['file']} (nothing loads with the card; the coordinator may write one, short: "
                 "the project's own rules)")
-    return (f"project rules: {pf['file']}, {pf['bytes']:,} bytes, {pf['lines']} lines, loaded with the card"
+    return (f"project rules: {pf['file']}, {pf['bytes']:,} byte{'' if pf['bytes'] == 1 else 's'}, {pf['lines']} line{'' if pf['lines'] == 1 else 's'}, "
+            "loaded with the card" + (" from the coordinator's next start" if pf.get("card_lacks_it") else "")
             + (f"; long: the coordinator rereads it at every turn, so keep it under {PROJECT_LONG // 1024} KB"
                if pf["long"] else ""))
+
+
+def web_address(desk: Desk) -> tuple:
+    """The address and port this desk's hansa serve last served the page on (the defaults before it ever ran)."""
+    try:
+        port = int((desk.state_dir / "web-port").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        port = 8765
+    host = read_text(desk.state_dir / "web-host").strip() or "127.0.0.1"
+    return host, port
+
+
+def page_text(page: dict) -> str:
+    """Where the desk's web page is, and whether it is served now, for hansa status and hansa explain."""
+    at = f"http://{page['host']}:{page['port']}/"
+    if page["up"]:
+        return f"web page: {at}, served now by hansa serve (hansa web prints it with its key, for the principal)"
+    return (f"web page: not served now, since hansa serve is not running; it serves it at {at}"
+            + (" (where it last did)" if page.get("served") else " (the default)"))
+
+
+def page_of(desk: Desk, server: dict) -> dict:
+    host, port = web_address(desk)
+    return {"host": host, "port": port, "up": server["state"] != "gone",
+            "served": (desk.state_dir / "web-port").exists()}
 
 
 def status(desk: Desk) -> dict:
@@ -281,6 +375,7 @@ def status(desk: Desk) -> dict:
         "paused": desk.paused(),
         "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
         "server": server,
+        "page": page_of(desk, server),  # where the web page is, and whether it is served now
         "server_seconds_ago": int(time.time() - last) if last else None,
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
@@ -349,6 +444,7 @@ def status_text(st: dict) -> str:
     out += ["cost audit on"] if st.get("audits_cost") else []
     out = [" · ".join(out + [f"hansa {st['build']}", installed_text(st.get("installed") or 0) or "installed ?",
                               time.strftime("now %H:%M")])]
+    out += [page_text(st["page"])] if st.get("page") else []
     out += [st["serve_code"]] if st.get("serve_code") else []
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
@@ -465,6 +561,48 @@ def report_of(desk: Desk, tid: str) -> str:
     """The worker's report (tasks/ID/result.md), keys removed as it was kept; empty if there is none yet."""
     f = desk.tasks_dir / tid / "result.md"
     return f.read_text(encoding="utf-8").strip() if f.exists() else ""
+
+
+def read_text(f: Path) -> str:
+    """A file's text, '' when it is not there."""
+    try:
+        return f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def merge_log(m: dict) -> str:
+    """The file in the task's folder with what its last merge check printed: its setup's, when that failed."""
+    note = str((m.get("merge_check_result") or {}).get("note") or "")
+    return "merge-setup.log" if note.startswith("the lane's setup failed") else "merge-check.log"
+
+
+def check_output_text(desk: Desk, tid: str) -> str:
+    """hansa show ID --check: the whole output of the task's last check and of its last merge check, keys removed."""
+    m = desk.meta(tid)
+    d = desk.tasks_dir / tid
+    out = []
+    chk = m.get("check")
+    if chk:
+        how = ("could not run" if chk.get("could_not_run") else "passed" if chk.get("ok")
+               else "FAILED" + (f" ({chk['note']})" if chk.get("note") else f" (exit {chk.get('exit')})"))
+        log = read_text(d / "check.log").rstrip()
+        out += [f"check (run by hansa, not the worker): {how}: {chk.get('command', '')}",
+                desk.redact(log) if log else "(it printed nothing)" if (d / "check.log").exists()
+                else "(its output is not kept: hansa show has its last lines)"]
+    r = m.get("merge_check_result") or {}
+    if r and not r.get("waited") and not r.get("conflict"):
+        how = ("could not run" if r.get("could_not_run") else "passed" if r.get("ok")
+               else "FAILED" + (f" ({r['note']})" if r.get("note") else f" (exit {r.get('exit')})"))
+        log = read_text(d / merge_log(m)).rstrip()
+        out += ["", f"merge check (on the task merged onto the base at {str(r.get('onto', ''))[:10]}): {how}: "
+                    f"{r.get('command', '')}" + (" (what the lane's setup printed)" if merge_log(m) == "merge-setup.log" else ""),
+                desk.redact(log) if log else "(it printed nothing)" if (d / merge_log(m)).exists()
+                else "(its output is not kept: hansa show has its last lines)"]
+    if not out:
+        return (f"{tid}: no check has run on it" + (": it is checked now; hansa wait, then this again"
+                                                  if m.get("phase") == "checking" or m["state"] == "merging" else ""))
+    return "\n".join(out).lstrip("\n")
 
 
 def report_text(desk: Desk, tid: str) -> str:
@@ -588,7 +726,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         how = "passed" if chk["ok"] else "FAILED" + (f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})")
         out.append(f"check (run by hansa, not the worker): {how} in {chk['seconds']} s: {chk['command']}")
         if not chk["ok"]:
-            out += ["  " + plain(x) for x in chk["tail"]]
+            out += failed_check_lines(desk.redact(read_text(d / "check.log")), chk["tail"], tid)
             if machine_hint(chk):
                 out.append("  " + machine_hint(chk))
     elif m.get("phase") == "checking":
@@ -604,7 +742,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if m["state"] == "merging":
         out.append(merge_check_text(desk, m))
     elif m["state"] in ("done", "merged"):
-        out += merge_result_lines(m)
+        out += merge_result_lines(m, desk.redact(read_text(d / merge_log(m))))
     if m["state"] == "merged" and m.get("unverified"):
         out.append(f"note: {m['unverified']}")
     if m["state"] == "running" and m.get("phase") == "starting":
@@ -715,7 +853,8 @@ def local_servers_text(mac: bool, listed: bool) -> str:
             + ("; this lane lists it, and need not" if listed else ""))
 
 
-def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
+def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False) -> str:
+    """hansa explain. whole (--all): for a lane, the built-in list of what workers may not read, name by name."""
     s = desk.settings()
     if what == "lane":
         ln = s["lanes"].get(name)
@@ -770,7 +909,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             " temporary folder (made for each run and removed when it ends) and the folders listed below;"
             " it cannot read the desk's keys and state or what is listed below; it reaches no network but the hosts below; git history is left to hansa (no commit, merge,"
             " reset, branch and the like), which commits its changes",
-            *no_read_lines(desk, s),
+            *no_read_lines(desk, s, name, whole),
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
             "  folders a worker may also write (a build or test tool's cache): "
@@ -818,6 +957,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
             "desk: a second one refuses to start.",
             f"  now: {server_text(server_state(desk))}",
+            f"  {page_text(page_of(desk, server_state(desk)))}",
             f"It counts as running while a hansa serve holds serve.lock, which names its process, and as not "
             f"running once none holds it, whatever process that number names by then. Once a round (starting and finishing tasks) it writes its heartbeat; a round can "
             f"take a while, when a worker's processes are stopped (up to 20 s each) or what a task left is swept "
@@ -884,6 +1024,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
     return "\n".join([
         "What you can look up: hansa explain lane <name> | provider <name> | task <id> | states | server | notify",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
+        page_text(page_of(desk, server_state(desk))),
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
         *read_lines(desk, s),
@@ -910,18 +1051,23 @@ def release_settings_line(s: dict) -> str:
             "principal's, on the web page; you cannot set them (hansa ask). Do not push or deploy yourself.")
 
 
-def no_read_lines(desk: Desk, s: dict) -> list:
-    """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read."""
+def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
+    """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
+    built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
     kept, left = kept_from_workers(s, desk.root)
     mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
            if sys.platform == "darwin" else "")
+    built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
+                f"{len(HOME_SECRETS)} names" + (f", and {len(MAC_SECRETS)} more on macOS under ~/Library"
+                                                if sys.platform == "darwin" else "")
+                + f" (the whole list: hansa explain lane {name} --all)")
     return ["  what its workers and verifiers, its setup and its check may not read (the sandbox refuses it to any"
             " command; a name that does not exist is refused all the same):",
             f"    the desk's keys and state: {desk.secrets_dir}, {desk.state_dir}",
             f"    every provider's Claude Code folder, whichever provider the run uses: {', '.join(homes)}; and ~/.claude",
             "    logins, keys, tokens, browsing data, messages and histories under the home folder (built in): "
-            f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}",
+            + built_in,
             "    folders and files the principal keeps from workers (set on the web page, Settings; you cannot set"
             " it: hansa ask; Read is denied there to you, workers, verifiers and design sessions as well; no"
             " lane's repository or write list may be one, inside one or above one): " + (", ".join(kept) or "none"),

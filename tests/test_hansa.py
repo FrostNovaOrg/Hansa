@@ -685,6 +685,130 @@ class DeskTest(unittest.TestCase):
                       "coordinator rereads it at every turn, so keep it under 8 KB", text)
         self.assertEqual(text.count("rereads it at every turn"), 1)
 
+    def test_status_says_one_line_and_when_an_old_card_does_not_import_the_project_file_yet(self):
+        self.desk.project_path.write_text("x")
+        text = views.status_text(views.status(self.desk))
+        self.assertIn("project rules: notes/PROJECT.md, 1 byte, 1 line, loaded with the card\n", text)
+        card = self.desk.root / "CLAUDE.md"
+        card.write_text(card.read_text().replace("@notes/PROJECT.md", ""))  # a desk's card from before the import
+        self.assertIn("1 line, loaded with the card from the coordinator's next start\n",
+                      views.status_text(views.status(self.desk)))
+
+    UNITTEST_OUT = ("test_a (t.T.test_a) ... ok\n" * 40 + "test_b (t.T.test_b) ... FAIL\n\n" + "=" * 70
+                    + "\nFAIL: test_b (t.T.test_b)\n" + "-" * 70 + "\nTraceback (most recent call last):\n"
+                    "  File \"t.py\", line 9, in test_b\n    self.assertEqual(1, 2)\nAssertionError: 1 != 2\n\n"
+                    + "-" * 70 + "\nRan 41 tests in 0.010s\n\nFAILED (failures=1)\n")
+
+    def test_failure_spans_lift_the_failing_tests_of_common_runners(self):
+        def lifted(text):
+            lines = text.splitlines()
+            return [x for a, b in views.failure_spans(lines) for x in lines[a:b]]
+        got = lifted(self.UNITTEST_OUT)
+        self.assertEqual(got[:3], ["test_b (t.T.test_b) ... FAIL", "=" * 70, "FAIL: test_b (t.T.test_b)"])
+        self.assertIn("AssertionError: 1 != 2", got)
+        self.assertNotIn("Ran 41 tests in 0.010s", got)
+        self.assertEqual(got[-1], "FAILED (failures=1)")
+        self.assertNotIn("test_a (t.T.test_a) ... ok", got)
+        pytest_out = ("t.py ..F.                                    [100%]\n\n" + "=" * 10 + " FAILURES " + "=" * 10
+                      + "\n____ test_c ____\n\n    def test_c():\n>       assert 1 == 2\nE       assert 1 == 2\n\n"
+                      "t.py:4: AssertionError\n" + "=" * 10 + " short test summary info " + "=" * 10
+                      + "\nFAILED t.py::test_c - assert 1 == 2\n" + "=" * 10 + " 1 failed, 3 passed in 0.1s " + "=" * 10)
+        got = lifted(pytest_out)
+        self.assertIn("E       assert 1 == 2", got)
+        self.assertIn("____ test_c ____", got)
+        self.assertIn("FAILED t.py::test_c - assert 1 == 2", got)
+        self.assertNotIn("t.py ..F.                                    [100%]", got)
+        surefire = ("[INFO] Running com.x.FooTest\n[ERROR] Tests run: 2, Failures: 1, Errors: 0, Skipped: 0, Time "
+                    "elapsed: 0.1 s <<< FAILURE! - in com.x.FooTest\n[ERROR] com.x.FooTest.bar  Time elapsed: 0.01 s"
+                    "  <<< FAILURE!\norg.opentest4j.AssertionFailedError: expected: <1> but was: <2>\n\tat "
+                    "com.x.FooTest.bar(FooTest.java:12)\n\n[INFO]\n[INFO] Results:\n[INFO]\n[ERROR] Failures: \n"
+                    "[ERROR]   FooTest.bar:12 expected: <1> but was: <2>\n[INFO]\n[ERROR] Tests run: 2, Failures: 1\n")
+        got = lifted(surefire)
+        self.assertIn("org.opentest4j.AssertionFailedError: expected: <1> but was: <2>", got)
+        self.assertIn("\tat com.x.FooTest.bar(FooTest.java:12)", got)
+        self.assertIn("[ERROR]   FooTest.bar:12 expected: <1> but was: <2>", got)
+        self.assertNotIn("[INFO] Running com.x.FooTest", got)
+        got = lifted("=== RUN   TestX\n--- FAIL: TestX (0.00s)\n    x_test.go:9: got 2\nok  other\nFAIL\tpkg\t0.01s\n")
+        self.assertEqual(got, ["--- FAIL: TestX (0.00s)", "    x_test.go:9: got 2", "FAIL\tpkg\t0.01s"])
+        self.assertEqual(lifted("all good\nexit 1\n"), [])
+
+    def test_show_lifts_the_failing_tests_and_show_check_prints_the_whole_output_without_keys(self):
+        tid = self.desk.new_task("Add hello.txt")
+        key = "sk-test-0123456789"
+        log = "using " + key + "\n" + self.UNITTEST_OUT
+        (self.desk.tasks_dir / tid / "check.log").write_text(log)
+        tail = log.strip().splitlines()[-15:]
+        self.desk.update(tid, state="done", commits=1, check={"command": "python3 -m unittest", "ok": False, "exit": 1,
+                                                              "note": "", "seconds": 2, "tail": tail})
+        self.desk.write_key("mimo", key)  # saved after the check ran: removed when it is shown all the same
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("check (run by hansa, not the worker): FAILED (exit 1) in 2 s: python3 -m unittest\n"
+                      "  the failing tests, from its output:\n    test_b (t.T.test_b) ... FAIL\n    " + "=" * 70
+                      + "\n    FAIL: test_b (t.T.test_b)", shown)
+        self.assertIn("    AssertionError: 1 != 2\n", shown)
+        self.assertIn(f"  the whole output: hansa show {tid} --check", shown)
+        self.assertNotIn("test_a (t.T.test_a) ... ok", shown)
+        whole = self.hansa_out("show", tid, "--check")
+        self.assertTrue(whole.startswith("check (run by hansa, not the worker): FAILED (exit 1): python3 -m unittest\n"
+                                         "using [key of mimo]\n"), whole[:300])
+        self.assertEqual(whole.count("test_a (t.T.test_a) ... ok"), 40)
+        self.assertNotIn(key, whole)
+        # a long run of failures is cut, and says how much more there is
+        (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"--- FAIL: Test{i} (0.00s)\n" for i in range(90)))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("    --- FAIL: Test59 (0.00s)\n    ... 30 more lines of them\n", shown)
+        self.assertNotIn("Test60 ", shown)
+        # nothing in it names a failing test: its last lines, as before
+        (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"line {i}\n" for i in range(30)) + "not good\n")
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("python3 -m unittest\n  line 16\n", shown)
+        self.assertIn("  not good\n", shown)
+        self.assertNotIn("line 15\n", shown)
+        # its merge check, and a task no check ran on
+        (self.desk.tasks_dir / tid / "merge-check.log").write_text("merged badly\n")
+        self.desk.update(tid, merge_check_result={"ok": False, "exit": 3, "note": "", "command": "make test",
+                                                  "onto": "0123456789abcdef", "seconds": 1, "tail": ["merged badly"]})
+        whole = self.hansa_out("show", tid, "--check")
+        self.assertIn("\n\nmerge check (on the task merged onto the base at 0123456789): FAILED (exit 3): make test\n"
+                      "merged badly", whole)
+        other = self.desk.new_task("Something else")
+        self.assertEqual(self.hansa_out("show", other, "--check"), f"{other}: no check has run on it\n")
+
+    def test_status_and_explain_say_where_the_web_page_is(self):
+        st = views.status(self.desk)
+        self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "served": False})
+        says = ("web page: not served now, since hansa serve is not running; it serves it at http://127.0.0.1:8765/ "
+                "(the default)")
+        self.assertIn(says, views.status_text(st))
+        self.assertIn(says, self.hansa_out("explain"))
+        self.assertIn(says, self.hansa_out("explain", "server"))
+        (self.desk.state_dir / "web-port").write_text("9001")
+        (self.desk.state_dir / "web-host").write_text("0.0.0.0")
+        with unittest.mock.patch("hansa.views.server_state", return_value={"state": "up", "pid": 1, "quiet": 0,
+                                                                            "answers": True}):
+            self.assertIn("web page: http://0.0.0.0:9001/, served now by hansa serve", self.hansa_out("explain"))
+        self.assertIn("it serves it at http://0.0.0.0:9001/ (where it last did)", self.hansa_out("explain"))
+
+    def test_init_on_a_repository_with_no_commit_says_to_make_one(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=empty)
+        for args in ([], ["--base", "main"]):
+            with self.assertRaises(SystemExit) as e:
+                main(["init", str(self.tmp / "new"), "--repo", str(empty), *args])
+            self.assertIn("has no commit yet; make a first commit there (git commit), then run this again; "
+                          "no desk was made", str(e.exception.code))
+            self.assertFalse((self.tmp / "new").exists())  # nothing half made
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "z", "--repo", str(empty)])
+        self.assertIn("has no commit yet", str(e.exception.code))
+        self.assertNotIn("z", self.desk.settings()["lanes"])
+        plain_dir = self.tmp / "plain-folder"
+        plain_dir.mkdir()
+        with self.assertRaises(SystemExit) as e:
+            main(["init", str(self.tmp / "new"), "--repo", str(plain_dir)])
+        self.assertIn("is not a git checkout", str(e.exception.code))
+
     def test_hansa_notes_lists_files_with_sizes_lines_and_headings(self):
         (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
         (self.desk.notes_dir / "archive").mkdir()
@@ -1697,6 +1821,26 @@ class DeskTest(unittest.TestCase):
         merged = [e for e in self.events("task_merged") if e["task"] == t2]
         self.assertTrue(merged[0]["waited"])
         self.assertIn(f"{t2} merged into main in its turn", notify._item(self.desk, merged[0])[1])
+
+    def test_a_merge_that_waited_its_turn_goes_in_without_a_check_with_its_lanes_merge_message(self):
+        d, t1, t2 = self.two_lanes(check="sleep 1; test -f README.md")
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = ""  # t2 needs no check
+        s["concurrency"] = 2
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("lane", "set", "b", "merge_message", "Merge {task} ({lane}): {title}")
+        self.move_main()  # so t1 needs a merge check
+        self.hansa("merge", t1)
+        d.tick()
+        self.hansa("merge", t2)
+        self.assertTrue(self.desk.meta(t2)["merge_check"]["plain"])
+        m1 = self.settle_merge(d, t1)
+        m2 = self.settle_merge(d, t2)
+        self.assertEqual((m1["state"], m2["state"]), ("merged", "merged"), (m1, m2))
+        self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])  # none ran for t2
+        self.assertEqual(self.git_out("log", "-1", "--format=%s", m2["merge_commit"]), f"Merge {t2} (b): Add b.txt")
+        self.assertEqual(self.git_out("log", "-1", "--format=%s", m1["merge_commit"]), f"Merge {t1}: Add a.txt")
+        self.assertEqual(self.git_out("rev-parse", "main"), m2["merge_commit"])
 
     def test_a_merge_that_waited_its_turn_and_was_refused_says_no_check_ran(self):
         d, t1, t2 = self.two_lanes(check="sleep 1; test -f README.md")
@@ -7208,7 +7352,9 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(f"Read(//{str(home / '.claude').lstrip('/')}/**)", denied)
         told = self.hansa("explain", "lane", "a")
         self.assertIn("may not read", told)
-        self.assertIn("~/.tsh", told)
+        self.assertNotIn("~/.tsh", told)  # the built-in list as a count, and where the whole of it is
+        self.assertRegex(told, r"\(built in\): \d+ names.* \(the whole list: hansa explain lane a --all\)")
+        self.assertIn("~/.tsh", self.hansa("explain", "lane", "a", "--all"))
 
     def test_anthropics_tool_settings_and_proxy_clients_settings_are_kept_from_workers(self):
         from hansa import run
@@ -7237,7 +7383,7 @@ class DeskTest(unittest.TestCase):
         denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
         for f in everywhere + (mac if sys.platform == "darwin" else ()):
             self.assertIn(f"Read(//{str(home / f).lstrip('/')}/**)", denied, f)
-        told = self.hansa("explain", "lane", "a")
+        told = self.hansa("explain", "lane", "a", "--all")
         for f in everywhere:
             self.assertIn(f"~/{f}", told)
 
@@ -7503,7 +7649,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         shown = views.show_text(self.desk, m["id"])
-        self.assertIn("  ✓ passed\n  FAIL one", shown)
+        self.assertIn("  the failing tests, from its output:\n    FAIL one\n", shown)  # lifted, read without them
         self.assertNotIn("\x1b", shown)
         self.assertIn("\x1b[32m", (self.desk.tasks_dir / m["id"] / "check.log").read_text())  # the log keeps them
         said = views.try_text("a", {"ok": False, "onto": "abc", "steps": {"check": {
@@ -9404,7 +9550,8 @@ class DeskTest(unittest.TestCase):
         [u] = public_settings(self.desk)["release_unmatched"]
         self.assertEqual((u["lane"], u["why"]), ("a", "its base branch changed since the list was saved"))
         self.assertIn("基础分支", u["why_zh"])
-        self.assertIn("releases wait for the yes until the principal saves the list again",
+        self.assertIn("releases wait for the yes until the principal takes it back in on the page (its button for "
+                      "that, or unticking and ticking it again, then Save; a plain Save keeps the old entry)",
                       self.hansa("explain", "lane", "a"))
         self.assertEqual(self.desk.settings()["releases_without_asking"], [entry])  # hansa leaves the list as it is
         take_back_in()
