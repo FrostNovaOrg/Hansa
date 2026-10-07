@@ -33,6 +33,7 @@ import string
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 import unicodedata
@@ -157,6 +158,22 @@ MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
 # tell a loader, git, a shell or Claude Code what to run, are not a lane's to set
 RUN_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "CLAUDE_")
 RUN_ENV_NAMES = ("NODE_OPTIONS", "BASH_ENV", "ENV", "SHELL", "ZDOTDIR", "HOME")
+# Names sh, bash or zsh keep for themselves, read-only or special: `export UID=0` in the file a worker's Bash
+# commands start with (run.env_file) stops the shell, so every command of the lane would fail; zsh's lowercase
+# ones are tied to others (path is PATH) or are the shell's own tables
+SHELL_ENV_NAMES = (
+    "UID", "EUID", "GID", "EGID", "PPID", "GROUPS", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_VERSINFO",
+    "BASH_VERSION", "BASH_ARGC", "BASH_ARGV", "BASH_ARGV0", "BASH_LINENO", "BASH_SOURCE", "BASH_SUBSHELL",
+    "BASH_COMMAND", "BASH_REMATCH", "BASH_ALIASES", "BASH_CMDS", "FUNCNAME", "PIPESTATUS", "HISTCMD", "LINENO",
+    "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "IFS", "OPTIND", "OPTARG", "PS4", "PWD",
+    "OLDPWD", "SHLVL", "ARGC", "ERRNO", "TTYIDLE", "ZSH_SUBSHELL", "ZSH_EVAL_CONTEXT", "ZSH_ARGZERO", "ZSH_NAME",
+    "ZSH_VERSION", "ZSH_PATCHLEVEL", "_", "status", "pipestatus", "argv", "path", "cdpath", "fpath", "manpath",
+    "mailpath", "module_path", "psvar", "funcstack", "functrace", "funcfiletrace", "funcsourcetrace", "options",
+    "parameters", "commands", "aliases", "functions", "builtins", "modules", "history", "historywords",
+    "dirstack", "jobstates", "jobtexts", "jobdirs", "signals", "userdirs", "nameddirs", "reswords", "widgets",
+    "termcap", "terminfo", "sysparams", "patchars")
+SHELL_ENV_WHY = ("cannot be set for a lane: sh, bash or zsh keeps it for itself (read-only or special), and setting "
+                 "it would stop every command of the lane's workers")
 RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run; set it inside "
                "the check or setup command instead, where it runs in the sandbox")
 # The variables that exist to point a tool in the sandbox at the lane's own folder: what these name may be on
@@ -433,6 +450,8 @@ def env_problems(env: dict, root=None) -> list:
             p.append((k, "is set from the provider, not the lane"))
         elif k.startswith(RUN_ENV_PREFIXES) or k in RUN_ENV_NAMES:
             p.append((k, RUN_ENV_WHY))
+        elif k in SHELL_ENV_NAMES:
+            p.append((k, SHELL_ENV_WHY))
         else:
             home = home or account_home()
             odd = [d for d in v.split(os.pathsep) if not d.startswith("/")] if k == "PATH" else []
@@ -1432,6 +1451,13 @@ def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
 
 DENY_LIST_WHY = (f"what workers may not read must be a list of up to {MAX_DENY} full paths, one per line")
 DENY_AT = "workers cannot be kept from reading "
+# Folders no entry of workers_may_not_read may be or be above (deny_split): the system's programs and libraries,
+# which every command runs on. One that does not exist on this system costs nothing; what is below them may be listed
+SYSTEM_FOLDERS = SYSTEM_STARTS + ("/bin", "/sbin", "/lib32", "/libx32", "/usr/bin", "/usr/sbin", "/usr/lib32",
+                                  "/usr/local/bin", "/usr/share", "/dev", "/proc", "/nix/store", "/opt/homebrew/bin",
+                                  "/opt/homebrew/lib", "/System/Library", "/Library/Developer/CommandLineTools")
+# and the folders in the home folder where tools keep their settings and caches (~/Library too, on macOS)
+HOME_TOOL_FOLDERS = (".config", ".local", ".cache")
 
 
 @_one_look
@@ -1455,6 +1481,19 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
     fenced += [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers could "
                            "not run their tools") for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    fenced += [(d, _above, f"it is {d}, where the system keeps its programs and libraries, or a folder above it: "
+                           "workers could not run their tools") for d in SYSTEM_FOLDERS]
+    fenced += [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
+                "caches in the home folder, or a folder above it: name the files in it instead")
+               for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    fenced += [(d, _above, f"it is {d}, the temporary folder, or a folder above it: workers' commands and tools "
+                           "write and read there") for d in dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir()))]
+    if root:
+        wts = Path(root) / "worktrees"
+        own = {wts / n for x in (lanes if isinstance(lanes, dict) else {}) for n in (x, f"{x}-design")}
+        own |= set(wts.iterdir()) if wts.is_dir() else set()
+        fenced += [(str(d), _above, f"it is {d}, the desk's worktrees folder or a lane's worktree in it, or a folder "
+                                    "above it: workers work there") for d in [wts, *sorted(own)]]
     good, p, seen = [], [], set()
     for x in paths:
         if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:

@@ -73,7 +73,16 @@ def permissions(desk: Desk) -> dict:
     # an Edit rule covers every file-editing tool (Write too); //path is absolute. Claude Code allows a write only
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win
     return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/notes/**)"],
-            "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]}
+            "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]
+            + [f"Bash({c}:*)" for c in NO_PUBLISH]}
+
+
+# What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
+# and publishing. A release goes out through hansa release, which runs the lane's command itself after the
+# principal's yes; the coordinator reads a repository through hansa git.
+NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
+              "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
+              "docker push", "podman push", "mvn deploy")
 
 
 def _text(args) -> str:
