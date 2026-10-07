@@ -176,6 +176,9 @@ def home_secrets() -> tuple:
     return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
 
 
+REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
+
+
 def default_settings() -> dict:
     return {
         "version": 1,
@@ -306,7 +309,8 @@ def validate(s: dict, root=None) -> list:
             continue
         if {"key", "api_key", "token"} & set(pv):
             p.append(f"{at}: keys are not kept in settings; use the key box on the page")
-        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "key", "api_key", "token"}
+        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "rest_minutes", "key", "api_key",
+                           "token"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if pv.get("kind") not in PROVIDER_KINDS:
@@ -318,6 +322,9 @@ def validate(s: dict, root=None) -> list:
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
             p.append(f"{at}: the endpoint address must start with https://")
+        if pv.get("rest_minutes") is not None and not _is_int(pv["rest_minutes"], 1, REST_MINUTES_MOST):
+            p.append(f"{at}: rest_minutes (its rest after a usage limit) must be a whole number from 1 to "
+                     f"{REST_MINUTES_MOST}, or empty for the desk's cool_minutes")
         cdir = pv.get("config_dir", "")
         if cdir and not str(cdir).startswith("/"):  # nothing expands ~ for a worker
             p.append(f"{at}: config_dir must be a full path starting with /")

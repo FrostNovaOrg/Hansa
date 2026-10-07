@@ -315,6 +315,26 @@ Mockito documents; in the pom:
 Gradle is not covered yet: the prelude sets nothing for it but
 `JAVA_TOOL_OPTIONS`.
 
+## When a provider hits a usage limit
+When a provider answers with a usage limit (HTTP 402 or 429, or the wording of one), it rests: no task
+starts on it until the rest ends, and a task stopped by the limit moves to the next ready provider of its
+lane, or waits for one.
+
+- **Until the reset time, when the error gives one**, and a minute, for at most 31 days. hansa reads a
+  clock time (`You've hit your session limit · resets 3pm (Europe/Berlin)`, as Claude Code prints a
+  subscription's limit), a date and time (`resets Oct 9, 3pm (Europe/Berlin)`, `resets 2026-08-08 00:00
+  UTC`), a Unix time (`usage limit reached|1760000000`, `resets_at`), a `retry-after` value given in the
+  message, and "in N minutes" or "in N hours" (`Please try again in 20 minutes`). A time without a zone is
+  the machine's local time. A form hansa is unsure of gets the fixed length below.
+- **Else for the provider's own rest**, `rest_minutes` on the page (1 to 44640, a month), or the desk's
+  `cool_minutes` (30 by default) when it is empty. Fit it to the provider: a subscription's window is a
+  few hours, an API key's limit may be per minute, a plan's allowance may be monthly.
+- **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
+  using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
+  limit again right after each rest cannot hold a task forever. Any other failure counts as before.
+  `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
+  when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
+
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the

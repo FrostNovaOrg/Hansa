@@ -128,9 +128,10 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
         open("partial.txt", "w").write("half done\n")
         status = int(what) if what.isdigit() else None
         text = {"econnreset": "API Error: Connection dropped (ECONNRESET)", "529": "API Error: Repeated 529 Overloaded errors",
-                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error"}[what]
+                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
+                "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
-                          "api_error_status": 429 if what == "quota" else status,
+                          "api_error_status": 429 if what in ("quota", "limit") else status,
                           "result": text, "session_id": "s-net", "num_turns": 3}))
         sys.exit(1)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
@@ -3253,7 +3254,7 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["attempts"][0]["error"], m["attempts"][0].get("kind")),
-                         ("queued", "out of quota (HTTP 429)", None), m)
+                         ("queued", "out of quota (HTTP 429)", "limit"), m)
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "claude"))
         self.desk.set_provider_state("claude", cool_until=0, reason="")
         self.assertEqual(self.settle(d, tid)["state"], "done")
@@ -3262,6 +3263,173 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
         self.assertEqual(count.read_text(), "1")
+
+    def test_a_limit_s_reset_time_is_read_in_each_form(self):
+        from datetime import datetime, timedelta, timezone
+        from zoneinfo import ZoneInfo
+        from hansa import run
+        zone = unittest.mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"})  # the machine's zone, for times that name none
+        zone.start()
+        self.addCleanup(time.tzset)  # cleanups run last first: TZ is put back, then read again
+        self.addCleanup(zone.stop)
+        time.tzset()
+        berlin, tokyo, ny = ZoneInfo("Europe/Berlin"), ZoneInfo("Asia/Tokyo"), ZoneInfo("America/New_York")
+        at = datetime(2026, 10, 8, 12, 0, tzinfo=berlin).timestamp()  # 19:00 in Tokyo
+        cases = [
+            # a clock time, as Claude Code prints a subscription's limit (within a day: hour, minutes when not :00)
+            ("You've hit your session limit · resets 3pm (Europe/Berlin)", datetime(2026, 10, 8, 15, 0, tzinfo=berlin)),
+            ("You've hit your session limit · resets 3:30pm (Europe/Berlin) · progress saved",
+             datetime(2026, 10, 8, 15, 30, tzinfo=berlin)),
+            ("You've hit your session limit · resets 9am (Europe/Berlin)", datetime(2026, 10, 9, 9, 0, tzinfo=berlin)),
+            ("Your limit resets at 13:45 UTC", datetime(2026, 10, 8, 13, 45, tzinfo=timezone.utc)),
+            ("You've hit your session limit · resets 3pm", datetime(2026, 10, 9, 15, 0, tzinfo=tokyo)),  # passed today
+            ("You've hit your session limit · resets 11pm", datetime(2026, 10, 8, 23, 0, tzinfo=tokyo)),
+            # a date and time: Claude Code's reset more than a day out; a gateway's spend limit; ISO 8601
+            ("You've hit your weekly limit · resets Oct 12, 3pm (Europe/Berlin)", datetime(2026, 10, 12, 15, 0, tzinfo=berlin)),
+            ("You've hit your Opus limit · resets Jan 2, 2027, 3:30pm (America/New_York)",
+             datetime(2027, 1, 2, 15, 30, tzinfo=ny)),
+            ('API Error: 429 {"type":"error","error":{"type":"billing_error","message":"spend limit reached (daily; '
+             'resets 2026-10-09 00:00 UTC) — request an increase"}}', datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)),
+            ("quota exceeded; resets at 2026-10-08T20:00:00+08:00",
+             datetime(2026, 10, 8, 20, 0, tzinfo=timezone(timedelta(hours=8)))),
+            ("quota exceeded until 2026-10-09 08:00", datetime(2026, 10, 9, 8, 0, tzinfo=tokyo)),  # local time
+            # a Unix time
+            ("Claude AI usage limit reached|1791460800", datetime.fromtimestamp(1791460800, timezone.utc)),
+            ('API Error: 429 {"rate_limits":{"resets_at":1791460800,"rate_limit_type":"five_hour"}}',
+             datetime.fromtimestamp(1791460800, timezone.utc)),
+            # in N minutes or hours, and a retry-after value passed on
+            ("API Error: 429 Rate limit reached for requests. Please try again in 20 minutes.", at + 1200),
+            ("API Error: 429 insufficient_quota: usage resets in 3 hours", at + 3 * 3600),
+            ("API Error: 429 too many requests, try again in 45s", at + 45),
+            ("API Error: 429 rate_limit_error retry-after: 120", at + 120),
+        ]
+        for text, want in cases:
+            with self.subTest(text):
+                want = want if isinstance(want, float) else want.timestamp()
+                self.assertEqual(run.reset_time(text, at), want)
+        for text in ("API Error: 429 rate_limit_error",  # no time: the fixed length
+                     "API Error: 429 This request would exceed the rate limit of 50,000 input tokens per minute",
+                     "You've hit your session limit · resets 3pm (Mars/Olympus)",  # a zone hansa does not know
+                     "usage limit reached; resets 3",  # no clock time
+                     "You've hit your weekly limit · resets Oct 7, 3pm (Europe/Berlin) · 2025",  # the day before
+                     "usage limit reached|1600000000",  # long past
+                     "resets 25:00 UTC"):
+            with self.subTest(text):
+                self.assertIsNone(run.reset_time(text, at))
+        self.assertEqual(run.unusable_reason({"is_error": True, "result": cases[0][0]}, "")[0], "quota")
+        # until the reset and a minute, at most 31 days; what it read is said
+        s = self.desk.settings()
+        t0 = time.time()
+        until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)",
+                                  f"API Error: 429 usage resets in 2 hours")
+        self.assertAlmostEqual(until, t0 + 7200 + 60, delta=5)
+        self.assertEqual(self.desk.provider_state()["claude"]["rest_how"], "reset")
+        until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota",
+                                  "Claude AI usage limit reached|" + str(int(t0) + 90 * 86400))
+        self.assertAlmostEqual(until, t0 + 31 * 86400, delta=5)
+
+    def test_a_provider_s_own_rest_overrides_cool_minutes(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["cool_minutes"] = 30
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid",
+                                  "rest_minutes": 300}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        s = self.desk.settings()
+        self.assertEqual((run.rest_minutes(s, "mimo"), run.rest_minutes(s, "claude")), (300, 30))
+        t0 = time.time()
+        for name, minutes in (("mimo", 300), ("claude", 30)):
+            until = run.rest_provider(self.desk, s, name, "quota", "out of quota (HTTP 429)", "API Error: 429 rate_limit_error")
+            self.assertAlmostEqual(until, t0 + 60 * minutes, delta=5)
+        self.assertIn(f"no reset time in its error, so its rest of 300 minutes",
+                      provider_problem(self.desk, s, "mimo"))
+        out = views.status_text(views.status(self.desk))
+        self.assertRegex(out, r"\n  mimo +compatible +mimo-x +rest 300 min +resting until")
+        self.assertRegex(out, r"\n  claude +subscription +opus +rest 30 min \(desk\) +resting until")
+        self.assertIn("else 300 minutes (its own rest_minutes)", views.explain_text(self.desk, "provider", "mimo"))
+        self.assertIn("else 30 minutes (the desk's cool_minutes)", views.explain_text(self.desk, "provider", "claude"))
+        status = views.status(self.desk)["providers"]
+        self.assertEqual([(p["name"], p["rest_minutes"], p["rest_own"]) for p in status],
+                         [("claude", 30, False), ("mimo", 300, True)])  # what the page shows
+
+    def test_a_usage_limit_costs_no_try_and_the_task_starts_again_after_the_rest(self):
+        from hansa import run
+        count = self.net_lane("limit", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = "You've hit your session limit · resets 3pm (Europe/Berlin)"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        self.assertEqual(run.tries_used(m["attempts"]), 0)
+        self.assertIn("queued again without using a try", m["error"])
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "reset")
+        reset = run.reset_time(s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"])
+        self.assertAlmostEqual(st["cool_until"], max(reset, time.time()) + 60, delta=30)
+        when = time.strftime("%m-%d %H:%M", time.localtime(st["cool_until"]))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"waits for the rest of claude after its usage limit, until {when} (the reset time its error "
+                      "gave, and a minute)", shown)
+        self.assertIn("That return used no try.", shown)
+        self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; no try used)", shown)
+        out = views.status_text(views.status(self.desk))  # until when, and why
+        self.assertIn(f"resting until {when} (out of quota (HTTP 429)): the reset time its error gave, and a minute", out)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not while its only provider rests
+        self.assertEqual(count.read_text(), "1")
+        self.desk.set_provider_state("claude", cool_until=time.time() - 1)  # the rest ran out
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["error"]), ("done", ""), m)
+        self.assertEqual(count.read_text(), "2")
+        self.assertNotIn("waits for the rest", views.show_text(self.desk, tid))
+
+    def test_a_provider_that_hits_its_limit_after_each_rest_uses_up_the_task_s_tries(self):
+        from hansa import run
+        count = self.net_lane("limit", 99)
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end, seen = time.time() + 60, 0
+        while time.time() < end and self.desk.meta(tid)["state"] in ("queued", "running"):
+            d.tick()
+            if len(self.desk.meta(tid).get("attempts", [])) > seen:
+                seen = len(self.desk.meta(tid)["attempts"])
+                self.desk.set_provider_state("claude", cool_until=time.time() - 1)  # each rest runs out
+            time.sleep(0.05)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertEqual(run.LIMIT_RETURNS, 5)
+        self.assertEqual([a["counted"] for a in m["attempts"]], [False] * 5 + [True] * 3)
+        self.assertEqual(count.read_text(), "8")
+        self.assertTrue(m["error"].endswith("gave up after 3 tries"), m["error"])
+        self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; counted as a try)",
+                      views.show_text(self.desk, tid))
+
+    def test_the_page_checks_a_provider_s_rest_minutes(self):
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn('bind(p, "rest_minutes", "number")', ui)
+        self.assertIn("T.restNote", ui)
+        want = ("provider claude: rest_minutes (its rest after a usage limit) must be a whole number from 1 to 44640, "
+                "or empty for the desk's cool_minutes")
+        for bad in (0, 44641, "30", 1.5, True):
+            with self.subTest(bad):
+                r = self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=bad))
+                self.assertEqual((r["ok"], r["problems"]), (False, [want]))
+        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
+        for good in (1, 300, 44640):
+            self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=good)),
+                             {"ok": True, "problems": []})
+            self.assertEqual(self.desk.settings()["providers"]["claude"]["rest_minutes"], good)
+        self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].pop("rest_minutes")),  # emptied on the page
+                         {"ok": True, "problems": []})
+        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
 
     def test_rejected_key_rests_provider_until_a_new_key(self):
         s = self.desk.settings()
