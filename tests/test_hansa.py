@@ -5285,8 +5285,10 @@ class DeskTest(unittest.TestCase):
                 self.assertTrue(self.covered(rules, tool, str(dot)), (tool, dot))
             for f in ("projects/-desk/memory/MEMORY.md", "projects/-desk/s.jsonl", "projects"):
                 self.assertFalse(self.covered(rules, tool, f"{cc}/{f}"), (tool, f))  # the session's memory: its own
-        # hansa relies on no other form: a lone * is not in them
-        self.assertEqual([r for r in rules if "*" in r.replace("/**)", ")")], [])
+        # hansa relies on no other form: a lone * is not in its folder rules (the Bash ones are not about folders)
+        folders = [r for r in rules if r.startswith(("Read(", "Edit("))]
+        self.assertTrue(folders)
+        self.assertEqual([r for r in folders if "*" in r.replace("/**)", ")")], [])
 
     def test_the_coordinator_neither_reads_nor_edits_its_own_claude_code_folder(self):
         echo = self.tmp / "echo-claude"
