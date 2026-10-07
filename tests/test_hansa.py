@@ -9180,7 +9180,8 @@ class DeskTest(unittest.TestCase):
         self.with_release(f"touch {out}")
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         [entry] = self.desk.settings()["releases_without_asking"]
-        self.assertEqual(entry, {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "release": f"touch {out}"})
+        self.assertEqual(entry, {"lane": "a", "target": "", "repo": str(self.repo.resolve()), "base": "main",
+                                 "command": f"touch {out}"})
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
 
         def asked():
@@ -9477,6 +9478,241 @@ class DeskTest(unittest.TestCase):
         self.assertIn("lanes a are on that list, but their repository, base branch or release command is no longer", told)
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         self.assertIn("for lanes a, which the principal lets go out without asking", self.hansa("explain"))
+
+    # -- release targets (hansa lane target; hansa release L TARGET) ---------------------------------------------
+    def with_targets(self, **targets):
+        """Name the lane's release targets: name=command, or name=(command, {timeout_min, after})."""
+        for name, t in targets.items():
+            cmd, opts = (t, {}) if isinstance(t, str) else t
+            args = [*(["--minutes", str(opts["timeout_min"])] if "timeout_min" in opts else []),
+                    *(["--after", opts["after"]] if "after" in opts else [])]
+            self.hansa("lane", "target", "a", name, cmd, *args)
+
+    def tick_targets(self, *ticked):
+        """The page ticks these targets of lane a (and no other) for going out without asking."""
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
+            {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
+
+    def test_an_old_settings_file_with_one_release_command_and_an_old_entry_works_unchanged(self):
+        from hansa import release
+        out = self.tmp / "ran.txt"
+        s = self.desk.settings()
+        s["lanes"]["a"]["release"] = f"echo x >> {out}"
+        s["releases_without_asking"] = [{"lane": "a", "repo": str(self.repo.resolve()), "base": "main",
+                                         "release": f"echo x >> {out}"}]  # as a page before targets saved it
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(public_settings(self.desk)["problems"], [])
+        self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
+        told = self.hansa("release", "a", "first", "cut")
+        self.assertIn("on the principal's list of lanes released without asking", told)
+        self.assertNotIn("target", told)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["target"], r["note"]), ("approved", "", "first cut"))
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(out.read_text(), "x\n")
+        self.assertIn("#1 lane a at", self.hansa("release"))
+        self.assertIn("release: echo x", self.hansa("explain", "lane", "a"))
+        self.assertIn("(unnamed: the release command)", self.hansa("lane", "target", "a"))
+        # a request recorded before targets had names is the unnamed target's last release
+        release.change(self.desk, 1, lambda x: {"target": None})
+        self.commit_in_repo("b.txt", "b\n")
+        self.hansa("release", "a")
+        self.assertEqual((release.get(self.desk, 2)["since_release"], release.get(self.desk, 2)["count"]), (1, 1))
+        # the entry is left as it was saved
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0].get("release"), f"echo x >> {out}")
+
+    def test_two_targets_one_listed_and_one_not(self):
+        from hansa import release
+        push, test = self.tmp / "pushed.txt", self.tmp / "installed.txt"
+        self.with_targets(push=f"touch {push}", test=f"touch {test}")
+        self.assertEqual(sorted(self.desk.settings()["lanes"]["a"]["targets"]), ["push", "test"])
+        self.assertEqual([(e["field"], e["target"]) for e in self.events("lane_command_changed")],
+                         [("release", "push"), ("release", "test")])
+        listed = self.hansa("lane", "target", "a")
+        self.assertIn(f"push: touch {push}", listed)
+        # a lane has its unnamed target or named ones, not both
+        self.assertIn("named release targets", self.refused("lane", "set", "a", "release", "git push"))
+        self.tick_targets("test")
+        [entry] = self.desk.settings()["releases_without_asking"]
+        self.assertEqual(entry, {"lane": "a", "target": "test", "repo": str(self.repo.resolve()), "base": "main",
+                                 "command": f"touch {test}"})
+        said = self.refused("release", "a", "now")
+        self.assertIn("lane a has 2 release targets (push, test); say which: hansa release a TARGET", said)
+        told = self.hansa("release", "a", "test", "for", "the", "demo")
+        self.assertIn("by target test", told)
+        self.assertIn("lane a target test is on the principal's list of releases without asking", told)
+        self.assertIn("waits for the principal's yes", self.hansa("release", "a", "push", "public"))
+        t1, p2 = release.get(self.desk, 1), release.get(self.desk, 2)
+        self.assertEqual((t1["target"], t1["state"], t1["note"]), ("test", "approved", "for the demo"))
+        self.assertEqual((p2["target"], p2["state"], p2["note"], p2["command"]), ("push", "waiting", "public",
+                                                                                  f"touch {push}"))
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        for _ in range(3):  # a tick for one target never covers another
+            d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        self.assertTrue(test.exists())
+        self.assertFalse(push.exists())
+        s = self.desk.settings()
+        self.assertEqual((release.lane_listed(s, "a", "test"), release.lane_listed(s, "a", "push"),
+                          release.lane_listed(s, "a")), (True, False, False))
+        # everywhere a release is named, so is its target
+        self.assertIn("#2 lane a target push at", self.hansa("release"))
+        self.assertIn("#1 lane a target test at", self.hansa("release"))
+        self.assertIn("#2 lane a target push at", views.status_text(views.status(self.desk)))
+        rows = {r["id"]: r for r in views.status(self.desk)["releases"]}
+        self.assertEqual((rows[1]["target"], rows[2]["target"]), ("test", "push"))
+        self.assertEqual({e["target"] for e in self.events("release_asked")}, {"test", "push"})
+        self.assertEqual([e["target"] for e in self.events("release_ended")], ["test"])
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_ended"), {"key": "k", "session": None})]
+        self.assertIn("release #1 of lane a target test", heard[0])
+        explained = self.hansa("explain", "lane", "a")
+        self.assertIn("release target push: touch", explained)
+        self.assertIn("hansa release a push asks for it", explained)
+        self.assertIn("the principal lets it go out without asking", explained)
+        self.assertIn("last release of test: #1 lane a target test", explained)
+        self.assertIn("lanes a target test, which the principal lets go out without asking", self.hansa("explain"))
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("releaseTarget:", "laneTargets:"):
+            self.assertEqual(ui.count(x), 2, x)
+        # the principal's yes on the page, to the push
+        self.assertEqual(release.answer(self.desk, 2, True, "", p2["commit"], p2["command"]), {"ok": True})
+        self.assertEqual(self.settle_release(d, 2)["state"], "done")
+        self.assertTrue(push.exists())
+        # a target changed after it was ticked waits for the yes; taking one out voids what was asked for it
+        self.hansa("lane", "target", "a", "test", f"touch {test}; true")
+        self.commit_in_repo("b.txt", "b\n")
+        self.hansa("release", "a", "test")
+        self.assertEqual(release.get(self.desk, 3)["state"], "waiting")
+        self.assertIn("release command changed", public_settings(self.desk)["release_unmatched"][0]["why"])
+        self.assertEqual(public_settings(self.desk)["release_unmatched"][0]["target"], "test")
+        self.hansa("lane", "target", "a", "test", "none")
+        self.assertEqual(sorted(self.desk.settings()["lanes"]["a"]["targets"]), ["push"])
+        self.assertIn("has no release target test any more", {r["id"]: r for r in views.status(self.desk)["releases"]}[3]["moved"])
+        self.assertIn("has no release target test now", public_settings(self.desk)["release_unmatched"][0]["why"])
+        # with one target left, hansa release L [note] asks for it
+        self.hansa("release", "a", "the", "rest")
+        r = release.releases(self.desk)[-1]
+        self.assertEqual((r["target"], r["note"]), ("push", "the rest"))
+
+    def test_a_target_that_must_follow_another_waits_for_its_commit(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["prod"], {"command": "true", "after": "test"})
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        # refused before the earlier target sent the commit out, in one line that says which release goes first
+        said = self.refused("release", "a", "prod")
+        self.assertEqual(len(said.splitlines()), 1, said)
+        self.assertIn("lane a target prod goes out only after target test sent out the same commit", said)
+        self.assertIn("release test first (hansa release a test)", said)
+        self.assertIn("Nothing was asked", said)
+        self.assertEqual(release.releases(self.desk), [])
+        # allowed after it
+        self.hansa("release", "a", "test")
+        self.assertIn("goes out only after target test", self.refused("release", "a", "prod"))  # not done yet
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.hansa("release", "a", "prod")
+        r = release.get(self.desk, 2)
+        self.assertEqual((r["target"], r["state"], r["commit"]), ("prod", "waiting", release.get(self.desk, 1)["commit"]))
+        # refused again once the base moved
+        self.commit_in_repo("b.txt", "b\n")
+        said = self.refused("release", "a", "prod")
+        self.assertIn(f"test's last release that went out (#1) was {r['commit'][:10]}", said)
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")  # nothing replaced it
+        # and looked at again when it is about to start: prod must now follow a target that sent nothing out
+        sh("git", "reset", "-q", "--hard", r["commit"], cwd=self.repo)
+        self.assertEqual(release.answer(self.desk, 2, True, "", r["commit"], r["command"]), {"ok": True})
+        self.with_targets(stage="true")
+        self.hansa("lane", "target", "a", "prod", "--after", "stage")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["prod"], {"command": "true", "after": "stage"})
+        d.tick()
+        r = release.get(self.desk, 2)
+        self.assertEqual(r["state"], "void", r)
+        self.assertIn("goes out only after target stage", r["void"])
+        self.assertIn("前面的目标", r["void_zh"])
+        # the order is checked as the lane is set
+        self.assertIn("after must name another release target", self.refused("lane", "target", "a", "prod", "--after", "nope"))
+        self.assertIn("goes round in a circle", self.refused("lane", "target", "a", "stage", "--after", "prod"))
+        self.assertIn("goes out only after stage", self.refused("lane", "target", "a", "stage", "none"))
+        self.hansa("lane", "target", "a", "prod", "--after", "none")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["prod"], {"command": "true"})
+        self.hansa("release", "a", "prod")  # no order now
+        self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
+
+    def test_each_target_counts_what_goes_out_from_its_own_last_release(self):
+        from hansa import release
+        self.with_targets(test="true", push="true")
+        self.tick_targets("test", "push")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.commit_in_repo("b.txt", "b\n")
+        told = self.hansa("release", "a", "test")
+        self.assertIn("1 commit(s) since release #1", told)
+        t2 = release.get(self.desk, 2)
+        self.assertEqual((t2["since_release"], t2["since"], [c["subject"] for c in t2["commits"]]),
+                         (1, release.get(self.desk, 1)["commit"], ["Add b.txt"]))
+        self.assertEqual(self.settle_release(d, 2)["state"], "done")
+        # the push never went out: all of it goes out by the push
+        told = self.hansa("release", "a", "push")
+        self.assertIn("2 commit(s) on no remote-tracking branch (no release of it went out before)", told)
+        p3 = release.get(self.desk, 3)
+        self.assertEqual((p3["since_release"], p3["since"], p3["count"]), (None, "", 2))
+        self.assertEqual(p3["files"], ["README.md", "b.txt"])
+        self.assertEqual(self.settle_release(d, 3)["state"], "done")
+        self.commit_in_repo("c.txt", "c\n")
+        self.hansa("release", "a", "push")
+        self.assertEqual((release.get(self.desk, 4)["since_release"], release.get(self.desk, 4)["count"]), (3, 1))
+        # the forbidden words are checked for every target
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["internal-only"])),
+                         {"ok": True, "problems": []})
+        self.commit_in_repo("d.txt", "internal-only\n", "Add d")
+        said = self.refused("release", "a", "test")
+        self.assertIn("words the principal keeps from going out", said)
+        self.assertEqual(release.releases(self.desk)[-1]["target"], "test")
+
+    def test_a_release_stops_at_its_targets_own_time_limit(self):
+        from hansa import release
+        self.with_targets(install=("echo started; sleep 60", {"timeout_min": 1}), push="true")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["install"]["timeout_min"], 1)
+        self.assertIn("timeout_min must be from 1 to 1440", self.refused("lane", "target", "a", "push", "--minutes", "0"))
+        self.assertIn("timeout_min must be from 1 to 1440",
+                      self.refused("lane", "target", "a", "push", "--minutes", "1441"))
+        s = self.desk.settings()
+        self.assertEqual(release.minutes(s, {"lane": "a", "target": "push"}), (240, "the lane's"))
+        self.assertEqual(release.minutes(s, {"lane": "a", "target": "install"}), (1, "target install's"))
+        self.tick_targets("install")
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        release.change(self.desk, 1, lambda x: {"started": x["started"] - 61})  # a minute and more went by
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["problem"]), ("failed", "stopped at target install's time limit (1 min)"))
+        # unset, the lane's timeout_min again
+        self.hansa("lane", "target", "a", "install", "--minutes", "none")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["install"], {"command": "echo started; sleep 60"})
+        self.assertIn("[240 min, the lane's]", self.hansa("lane", "target", "a"))
+
+    def test_the_page_refuses_a_malformed_target_entry(self):
+        self.with_targets(test="true")
+        for bad in ({"lane": "a", "target": "Not A Target"}, {"lane": "a", "target": 5},
+                    {"lane": "a", "target": "test", "when": "always"}, {"lane": "Not A Lane", "target": "test"},
+                    {"target": "test"}):
+            said = self.page_save(lambda s: s.update(releases_without_asking=[bad]))
+            self.assertFalse(said["ok"], bad)
+            self.assertTrue(any("releases without asking" in x for x in said["problems"]), said)
+            self.assertEqual(self.desk.settings()["releases_without_asking"], [])
+        # and a lane whose targets are malformed is refused like any other field of a lane
+        s = self.desk.settings()
+        s["lanes"]["a"]["targets"] = {"test": {"command": "true", "timeout_min": 0, "after": "test", "x": 1}}
+        said = self.desk.save_settings(s)
+        for x in ("timeout_min must be from 1 to 1440", "after must name another release target", "unknown field(s): x"):
+            self.assertTrue(any(x in p for p in said), (x, said))
+        self.tick_targets("test")
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0]["target"], "test")
 
 
 if __name__ == "__main__":

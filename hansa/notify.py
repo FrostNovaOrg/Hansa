@@ -282,8 +282,8 @@ def _release_item(desk: Desk, e: dict):
     r = release.get(desk, e.get("id"))
     if not r:
         return None
-    rid, lane = r["id"], r.get("lane")
-    head = f"release #{rid} of lane {lane} ({r.get('base')} at {str(r.get('commit', ''))[:10]})"
+    rid = r["id"]
+    head = f"release #{rid} of {release.what(r)} ({r.get('base')} at {str(r.get('commit', ''))[:10]})"
     kind = e.get("event")
     if kind == "release_answered":
         key = ("release-answer", rid)
@@ -297,10 +297,10 @@ def _release_item(desk: Desk, e: dict):
         line = (f"{head} done: `{r.get('command')}` exited 0" if e.get("ok") else
                 f"{head} FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                 + (f": {e.get('problem')}" if e.get("problem") else "") + (f" · last lines: {tail}" if tail else "")
-                + " · next: hansa release; fix what failed, then ask again: hansa release " + str(lane))
+                + " · next: hansa release; fix what failed, then ask again: " + release.ask_again(r))
     elif kind == "release_void":
         key = ("release", rid)
-        line = f"{head} is void: {e.get('why')}; nothing was run · next: ask again, hansa release {lane}"
+        line = f"{head} is void: {e.get('why')}; nothing was run · next: ask again, {release.ask_again(r)}"
     else:
         key = ("release", rid)
         line = (f"{head} refused: what goes out holds words the principal keeps from going out · next: "
