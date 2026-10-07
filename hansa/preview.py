@@ -1,18 +1,22 @@
 """Start a lane's preview for one task or verification worker, wait until it is ready, run the worker, and
 stop the preview when the worker ends.
 
-    python3 preview.py <log> <state file> <seconds> <srt> <srt settings> <temporary folder> <task> <command>
-                       <ready note> <not ready note> -- <worker command...>
+    python3 preview.py <log> <state file> <seconds> <srt> <srt settings> <temporary folder> <task> <desk>
+                       <command> <ready note> <not ready note> -- <worker command...>
 
 It runs in the worker's own process, after the lane's setup (hansa.run.with_preview): hansa serve never waits
 on it. The preview runs in srt with the lane's sandbox and local binding, in a process group of its own, with
 hansa's environment (never a provider's key), HANSA_TASK and its own temporary folder. Its output goes through
-a pipe this reads, into <log>. It is ready at the first http://localhost:PORT or http://127.0.0.1:PORT address it
-prints, or once a port it names answers; it has <seconds> to be. One not ready by then is stopped. The worker is
-then started with <ready note> (@ADDRESS@ replaced by the address) or <not ready note> (@WHY@ and @LINES@ replaced)
+a pipe this reads to its end, so the preview never waits on it; <log> keeps its first and last
+hansa.run.PREVIEW_KEEP / 2 bytes, with a line between them saying how much was left out. It is ready at the first
+http://localhost:PORT or http://127.0.0.1:PORT address it prints, or once a port it names answers; it has
+<seconds> to be. One not ready by then is stopped. The worker is then started with <ready note> (@ADDRESS@
+replaced by the address) or <not ready note> (@WHY@ and @LINES@ replaced, the desk's keys removed from them)
 added to its --append-system-prompt. The preview's process group is stopped when the worker ends, and when this
-is told to stop (hansa stops the worker's process group); <state file> names the group, so hansa stops it too if
-this could not (hansa.run.end_preview). This prints nothing of its own on stdout, which is the worker's result.
+is told to stop (hansa stops the worker's process group); so is every process seen below the preview (looked
+for every hansa.run.PREVIEW_LOOK_S seconds), whatever its group or environment. <state file> names the group and
+those processes, so hansa stops them too if this could not (hansa.run.end_preview). This prints nothing of its
+own on stdout, which is the worker's result.
 """
 import json
 import os
@@ -23,6 +27,10 @@ import subprocess
 import sys
 import threading
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hansa import run  # noqa: E402
+from hansa.desk import Desk  # noqa: E402
 
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL")  # as hansa.run.BASE_ENV, without TMPDIR
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # the worker's own key, never shown in its instructions
@@ -66,23 +74,83 @@ def stop_group(proc) -> None:
         pass
 
 
+class Kept:
+    """What <log> keeps of the preview's output: all of it up to `half` bytes; past that, its start cut at a
+    line, a line saying how much was left out, and its last `half` bytes (from a line's start), written again at
+    most every half second, and at the end."""
+
+    def __init__(self, path: str, half: int) -> None:
+        self.out, self.half = open(path, "wb"), half
+        self.total = self.written = self.line_end = 0  # line_end: in the file, just after its last newline
+        self.cut = None  # where the start ends, once the output outgrew it
+        self.tail, self.flushed, self.lock = bytearray(), 0.0, threading.Lock()
+
+    def add(self, chunk: bytes) -> None:
+        with self.lock:
+            self.total += len(chunk)
+            if self.cut is None:
+                room = self.half - self.written
+                part = chunk[:room]
+                if b"\n" in part:
+                    self.line_end = self.written + part.rfind(b"\n") + 1
+                self.out.write(part)
+                self.written += len(part)
+                if len(chunk) <= room:
+                    self.out.flush()
+                    return
+                self.cut, chunk = self.line_end or self.written, chunk[room:]
+            self.tail += chunk
+            if len(self.tail) > self.half:
+                del self.tail[:len(self.tail) - self.half]
+            if time.time() - self.flushed >= 0.5:
+                self._write()
+
+    def _write(self) -> None:
+        if self.cut is None:
+            return
+        shown = self.tail
+        if self.total - self.written > len(self.tail):  # the tail's start was dropped: it is shown from a line
+            shown = self.tail[self.tail.find(b"\n") + 1:] or self.tail
+        left = self.total - self.cut - len(shown)
+        self.out.seek(self.cut)
+        if left:
+            self.out.write(f"\n[hansa: {left} bytes of the preview's output left out here]\n".encode())
+        self.out.write(shown)
+        self.out.truncate()
+        self.out.flush()
+        self.flushed = time.time()
+
+    def close(self) -> None:
+        with self.lock:
+            if not self.out.closed:
+                self._write()
+                self.out.close()
+
+
 def main() -> int:
     cut = sys.argv.index("--")
-    log, state, seconds, srt, settings, tmp, tid, command, ready_note, not_ready_note = sys.argv[1:cut]
+    log, state, seconds, srt, settings, tmp, tid, root, command, ready_note, not_ready_note = sys.argv[1:cut]
     worker = sys.argv[cut + 1:]
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env.update(HANSA_TASK=tid, TERM="dumb", TMPDIR=tmp, CLAUDE_CODE_TMPDIR=tmp)
-    out = open(log, "wb")
+    kept = Kept(log, run.PREVIEW_KEEP // 2)
     try:
         proc = subprocess.Popen([srt, "--settings", settings, "--", "/bin/sh", "-c", command], env=env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 start_new_session=True)
     except OSError as e:
         proc, said = None, f"srt could not be started: {e}"
-    rec = {"pgid": proc.pid if proc else None, "started": time.time(), "ready": False}
-    with open(state, "w") as f:  # before anything else: hansa can stop the group even if this is stopped first
-        json.dump(rec, f)
-    stopping = []
+    rec = {"pgid": proc.pid if proc else None, "started": time.time(), "ready": False, "cwd": os.getcwd(),
+           "tmp": tmp, "seen": {}}
+    seen_procs, rec_lock = {}, threading.Lock()
+
+    def save():  # whole or not at all: hansa may read it meanwhile
+        with rec_lock:
+            with open(state + ".new", "w") as f:
+                json.dump({**rec, "seen": {str(p): s for p, s in seen_procs.items()}}, f)
+            os.replace(state + ".new", state)
+    save()  # before anything else: hansa can stop the group even if this is stopped first
+    stopping, done = [], threading.Event()
 
     def on_signal(sig, _frame):
         stopping.append(sig)
@@ -93,7 +161,8 @@ def main() -> int:
                 pass
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, on_signal)
-    seen, lock = [""], threading.Lock()
+    seen, lock, looking = [""], threading.Lock(), [True]
+    first, ports, part = [""], {}, [""]  # in its whole lines as they come, also in a flood: its address, ports it names
 
     def drain():
         while True:
@@ -105,23 +174,56 @@ def main() -> int:
                 break
             if not chunk:
                 break
-            out.write(chunk)
-            out.flush()
-            with lock:
-                seen[0] = (seen[0] + ANSI.sub("", chunk.decode(errors="replace").replace("\r", "\n")))[-200000:]
+            kept.add(chunk)
+            if looking[0]:  # its address, and its last lines for the worker's note
+                piece = chunk.decode(errors="replace").replace("\r", "\n")
+                text = part[0] + piece
+                whole = ANSI.sub("", text[:text.rfind("\n") + 1])
+                part[0] = text[text.rfind("\n") + 1:][-4000:]
+                found = ADDRESS.search(whole)
+                with lock:
+                    if found and not first[0]:
+                        first[0] = found.group(0)
+                    for m in NAMED_PORT.finditer(whole):
+                        if len(ports) < 64:
+                            ports.setdefault(int(m.group(1) or m.group(2)), 0)
+                    seen[0] = (seen[0] + ANSI.sub("", piece))[-200000:]
+
+    def recorder():  # what the preview starts, also what leaves its group or clears its environment
+        while not done.wait(run.PREVIEW_LOOK_S):
+            look()
+
+    def look():
+        try:
+            if run.record_descendants(proc.pid, seen_procs):
+                save()
+        except Exception:  # noqa: BLE001 - a look that fails is tried again at the next
+            pass
     if proc:
-        threading.Thread(target=drain, daemon=True).start()
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()
+        look()
+        threading.Thread(target=recorder, daemon=True).start()
+
+    def stop_all():
+        if done.is_set():  # once: the leader is reaped, and its number may pass to another process
+            return
+        done.set()
+        look()  # the last ones it started
+        stop_group(proc)
+        run.stop_recorded(seen_procs, GRACE)
+        drainer.join(timeout=2)  # its last lines; a process that kept the pipe open does not hold this up
+        kept.close()
     address, why, tried = "", "", {}
     end = time.time() + float(seconds)
     while proc and not stopping:
         with lock:
-            text = seen[0]
-        found = ADDRESS.search(text)
+            text, named = seen[0][-4000:], list(ports)  # its last line, perhaps not ended yet, too
+            found = first[0] or (ADDRESS.search(text) or [""])[0]
         if found:
-            address = found.group(0).rstrip(".,;:)]}")
+            address = found.rstrip(".,;:)]}")
             break
-        for m in NAMED_PORT.finditer(text):
-            port = int(m.group(1) or m.group(2))
+        for port in named + [int(m.group(1) or m.group(2)) for m in NAMED_PORT.finditer(text)]:
             if 0 < port < 65536 and time.time() >= tried.get(port, 0):
                 tried[port] = time.time() + 0.5
                 if answers(port):
@@ -137,29 +239,30 @@ def main() -> int:
             why = f"it was not ready within {seconds} seconds"
             break
         time.sleep(0.2)
+    looking[0] = False
     if stopping:
         if proc:
-            stop_group(proc)
+            stop_all()
         return 128 + stopping[0]
     if not proc:
         why = said
     elif not address:
-        stop_group(proc)
+        stop_all()
     with lock:
         text = seen[0]
     lines = [x for x in text.strip().splitlines() if x.strip()][-LINES:]
     keys = [os.environ[k] for k in KEY_VARS if os.environ.get(k)]
+    desk = Desk(root)
 
     def clean(x):
         for k in keys:
             x = x.replace(k, "[key]")
-        return x
+        return desk.redact(x)  # the desk's keys too, as in the kept log
     note = (ready_note.replace("@ADDRESS@", address) if address else
             not_ready_note.replace("@WHY@", why).replace(
                 "@LINES@", "".join(f"    {clean(x)[:300]}\n" for x in lines) or "    (nothing)\n"))
     rec.update(ready=bool(address), address=address, why=why, waited=round(time.time() - rec["started"]))
-    with open(state, "w") as f:
-        json.dump(rec, f)
+    save()
     if "--append-system-prompt" in worker:
         i = worker.index("--append-system-prompt") + 1
         worker[i] += note
@@ -171,7 +274,7 @@ def main() -> int:
         except InterruptedError:
             continue
     if proc:
-        stop_group(proc)
+        stop_all()
     return rc if rc >= 0 else 128 - rc
 
 

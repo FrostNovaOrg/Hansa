@@ -7838,6 +7838,93 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(key, json.dumps(m))
         self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.log").exists())
 
+    def test_preview_not_ready_note_has_the_desks_keys_removed(self):
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        seen, _ = self.preview_lane(f"echo token {key}; exec sleep 600", wait=1)
+        tid = self.add_browser_task()
+        self.settle(Dispatcher(self.desk), tid)
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("    token [key of registry]\n", prompt)
+        self.assertNotIn(key, prompt)
+
+    def test_preview_flooding_its_output_keeps_a_bounded_log_and_does_not_hold_up_the_server(self):
+        from hansa import run
+        flood = ("import sys, time\nline = b'A' * 999 + b'\\n'\nend, n = time.time() + 3, 0\n"
+                 "while time.time() < end and n < 2 ** 30:\n    sys.stdout.buffer.write(line * 1024); n += 2 ** 20\n"
+                 "sys.stdout.buffer.flush()\nprint('the end of it', flush=True)\ntime.sleep(600)\n")
+        self.preview_lane(f"echo http://localhost:8128/; exec {shlex.quote(sys.executable)} -c {shlex.quote(flood)}",
+                          FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="5")
+        raw_log, sizes = self.desk.state_dir / "runs" / "t0001" / "preview.log", []
+        took, real_finish = [], run.finish
+
+        def timed(*a):
+            t = time.time()
+            try:
+                return real_finish(*a)
+            finally:
+                took.append(time.time() - t)
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.run.finish", timed):
+            end = time.time() + 60
+            while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
+                d.tick()
+                if raw_log.exists():
+                    sizes.append(raw_log.stat().st_size)
+                time.sleep(0.2)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertLess(max(sizes), 2 ** 23)  # a few MB at most on disk, while it ran too
+        log = self.desk.tasks_dir / tid / "preview.log"
+        self.assertLess(log.stat().st_size, 2 ** 23)
+        text = log.read_text()
+        self.assertTrue(text.startswith("http://localhost:8128/\n"))
+        self.assertRegex(text, r"\n\[hansa: \d+ bytes of the preview's output left out here\]\nA{999}\n")
+        self.assertTrue(text.endswith("the end of it\n"))
+        self.assertLess(max(took), 10)  # hansa serve read no more than that
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
+        big = self.tmp / "big.log"  # what publish reads of a log hansa did not write itself is bounded too
+        with open(big, "wb") as f:
+            f.write(b"first line\n")
+            f.truncate(2 ** 30)
+            f.seek(0, 2)
+            f.write(b"\nlast line\n")
+        text = run.read_bounded(big, 2 ** 20, 2 ** 20)
+        self.assertLess(len(text), 2 ** 21 + 200)
+        self.assertTrue(text.startswith("first line\n") and text.endswith("\nlast line\n"))
+
+    def test_preview_stops_what_it_started_that_left_its_group_and_cleared_its_environment(self):
+        from hansa import run
+        py, d1, d2 = shlex.quote(sys.executable), self.tmp / "d1.pid", self.tmp / "d2.pid"
+        away = (f"import os\nopen({str(d1)!r}, 'w').write(str(os.getpid()))\nos.setsid()\nos.chdir('/')\n"
+                "os.execve('/bin/sleep', ['sleep', '600'], {})\n")  # its own session, no environment, elsewhere
+        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
+                 f"open({str(d2)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
+        self.preview_lane(f"echo http://localhost:8129/; {py} -c {shlex.quote(away)} & {py} -c {shlex.quote(twice)} & "
+                          "exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="3")
+
+        def pid_of(f):
+            return int(f.read_text()) if f.exists() and f.read_text() else 0
+
+        def kill_daemons():
+            for f in (d1, d2):
+                if pid_of(f):
+                    try:
+                        os.kill(pid_of(f), signal.SIGKILL)
+                    except OSError:
+                        pass
+        self.addCleanup(kill_daemons)
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertTrue(pid_of(d1) and pid_of(d2))
+        for f in (d1, d2):  # the first seen below the preview, the second working in its worktree
+            end = time.time() + 10
+            while run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z" and time.time() < end:
+                time.sleep(0.1)
+            self.assertFalse(run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z", f.name)
+
     def test_preview_is_not_started_on_linux_and_the_worker_is_told(self):
         seen, _ = self.preview_lane("echo http://localhost:8126/; exec sleep 600")
         with unittest.mock.patch("hansa.run.PREVIEW_STARTS", False):

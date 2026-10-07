@@ -740,7 +740,8 @@ def preview_text(mac: bool, ln: dict) -> list:
                 " plus local binding for this one process, waits up to"
                 f" {ln.get('preview_wait_s', 120)} s (preview_wait_s) for the first http://localhost:PORT address it"
                 " prints or a port it names that answers, tells the worker the address, and stops it with its whole"
-                " process group when the worker ends; its output is kept in the task's folder, keys removed)",
+                " process group, and each process seen below it (looked for every half second), when the worker"
+                " ends; its output is kept in the task's folder, keys removed, its first and last 2 MB at most)",
                 "    on macOS, while it runs this preview can reach every service on this machine's loopback, as a"
                 " lane with localhost on its network list can: the price of looking at the app in a browser on a Mac"]
     return [head + " on macOS only)",

@@ -195,8 +195,24 @@ page gives.
   its last lines, and goes on without it. hansa stops the preview with its
   whole process group when the worker ends, however it ends (done, failed,
   cancelled, stopped at the ceiling, or ended while `hansa serve` was
-  restarted). Its output is kept in the task's folder as `preview.log`, keys
-  removed; `hansa show` says where and what became of it. **On macOS such a
+  restarted). It stops the processes the preview started that left that group
+  too: while the preview runs, hansa looks every half second for what runs
+  below it and records each one (its number and start time), and at the end
+  stops each recorded one still running, whatever its group or environment,
+  and any process started since whose working folder is in the worktree or the
+  preview's temporary folder. What can still escape on macOS: a process that
+  forks twice, leaves the group, clears its environment and changes folder all
+  between two looks (half a second). It keeps running after the task, with the
+  preview's sandbox, local binding included: it can reach the machine's
+  loopback, write in the worktree and the lane's write list, and reach the
+  hosts on the lane's network list, until it ends or the machine restarts. A
+  worker's own processes are not recorded this way: hansa still finds what a
+  worker leaves by `HANSA_TASK` in its environment or its run's folder in its
+  arguments, as before. Its output is kept in the task's folder as
+  `preview.log`, keys removed, at most its first and last 2 MB with a line
+  saying how much was left out between them (hansa reads the whole output as
+  it comes, so a preview that prints without end never waits on it and never
+  fills the disk); `hansa show` says where and what became of it. **On macOS such a
   preview can reach every service on this machine's loopback while it runs**,
   as a lane with `localhost` on its network list can: that is the price of
   looking at the app in a browser on a Mac. **On Linux hansa does not start

@@ -294,6 +294,8 @@ This lane has a preview (`{preview}`), but hansa could not start it: {why}. Do n
 yourself; say in your report that the preview did not start, and do what you can without it.
 """
 PREVIEW_WAIT_S = 120  # how long a preview has to be ready when its lane sets no preview_wait_s
+PREVIEW_KEEP = 4 * 2 ** 20  # bytes of a preview's output kept, its first and last half (hansa/preview.py)
+PREVIEW_LOOK_S = 0.5  # how often hansa/preview.py looks for what the preview started
 # Whether hansa starts a lane's preview for a task with a browser: on macOS only. There srt's local binding lets
 # the preview bind the machine's loopback, where the browser reaches it (and the preview reaches every service on
 # it). On Linux srt runs the command with a network namespace of its own (bubblewrap's --unshare-net), and local
@@ -1260,15 +1262,34 @@ def markers_text(markers: dict) -> str:
                      + (" ..." if len(ns) > 12 else "") for f, ns in markers.items())
 
 
-def publish(desk: Desk, tid: str, *names: str) -> None:
-    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed."""
+def read_bounded(path: Path, head: int, tail: int) -> str:
+    """A file's text, or of a longer one its first `head` and last `tail` bytes, cut at whole lines, with a line
+    in between saying how much was left out: never more of it read than that."""
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        if size <= head + tail:
+            return f.read().decode("utf-8", errors="replace")
+        first = f.read(head)
+        f.seek(size - tail)
+        last = f.read(tail)
+    first = first[:first.rfind(b"\n") + 1] or first  # a key cut in two is not left half shown
+    last = last[last.find(b"\n") + 1:] or last
+    return (first.decode("utf-8", errors="replace")
+            + f"\n[hansa: {size - len(first) - len(last)} bytes left out here]\n"
+            + last.decode("utf-8", errors="replace"))
+
+
+def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
+    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed. most: when given,
+    no more than about this many bytes of each is read and kept, its start and its end (read_bounded)."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
         for name in names:
             src = raw / name if (raw / name).exists() else d / name  # in d: started before hansa kept them apart
             if src.exists():
-                (d / name).write_text(desk.redact(src.read_text(encoding="utf-8", errors="replace")),
-                                      encoding="utf-8")
+                text = read_bounded(src, most // 2, most // 2) if most else \
+                    src.read_text(encoding="utf-8", errors="replace")
+                (d / name).write_text(desk.redact(text), encoding="utf-8")
                 if src.parent == raw:
                     src.unlink()
         try:
@@ -1601,6 +1622,112 @@ def task_processes(tid: str, folders: list = ()) -> list:
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
 
 
+# A process's parent in its kinfo_proc (e_ppid), on macOS; and its working folder through libproc
+# (PROC_PIDVNODEPATHINFO: a struct proc_vnodepathinfo of 2352 bytes, the folder's path at 152).
+_KP_PPID, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 9, 2352
+
+
+def process_table() -> dict:
+    """This account's running processes: {pid: (parent pid, start as proc_start gives it, start in seconds since
+    the epoch)}. {} when the list cannot be read."""
+    out = {}
+    if Path("/proc").is_dir():
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            btime = next(int(x.split()[1]) for x in Path("/proc/stat").read_text().splitlines() if x.startswith("btime "))
+            hz = os.sysconf("SC_CLK_TCK")
+            entries = list(Path("/proc").iterdir())
+        except (OSError, StopIteration, ValueError):
+            return {}
+        for p in entries:
+            try:
+                if p.name.isdigit() and p.stat().st_uid == os.getuid():
+                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    if f[0] != "Z":
+                        out[int(p.name)] = (int(f[1]), f"{boot}:{f[19]}", btime + int(f[19]) / hz)
+            except (OSError, IndexError, ValueError):
+                pass
+        return out
+    for k in _mac_procs(_KERN_PROC_ALL, 0):
+        pid = struct.unpack_from("@i", k, 40)[0]
+        if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
+            sec, usec = struct.unpack_from("@li", k, 0)
+            out[pid] = (struct.unpack_from("@i", k, _KP_PPID)[0], f"{sec}.{usec:06d}", sec + usec / 1e6)
+    return out
+
+
+def record_descendants(top: int, seen: dict) -> bool:
+    """Add to `seen` ({pid: start}) the processes now running below `top` (a process hansa started), or below one
+    seen before: whatever their process group, session or environment, so long as their parent is still known
+    at a look. Whether anything was added."""
+    table, added = process_table(), False
+    if top in table and seen.get(top) != table[top][1]:
+        seen[top], added = table[top][1], True
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, start, _) in table.items():
+            if seen.get(pid) != start and ppid in seen and table.get(ppid, (0, ""))[1] == seen[ppid]:
+                seen[pid], grew, added = start, True, True
+    return added
+
+
+def working_in(folders: list, since: float = 0) -> dict:
+    """This account's processes whose working folder is one of `folders` or inside one, started at `since` or
+    later: {pid: start}. Never this process or its parent."""
+    paths = {os.path.normpath(x) for f in folders if f for x in (f, os.path.realpath(f))}
+    if not paths:
+        return {}
+    lib = buf = None
+    if not Path("/proc").is_dir():
+        try:
+            import ctypes
+            lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            buf = ctypes.create_string_buffer(_VNODEPATHINFO_SIZE)
+        except (ImportError, OSError):
+            return {}
+    out = {}
+    for pid, (_, start, when) in process_table().items():
+        if pid in (os.getpid(), os.getppid()) or when < since - 2:  # 2 s for the rounding of both clocks
+            continue
+        try:
+            if lib is None:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+            elif lib.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) == _VNODEPATHINFO_SIZE:
+                cwd = buf.raw[152:152 + 1024].split(b"\0")[0].decode(errors="replace")
+            else:
+                continue
+        except OSError:
+            continue
+        cwd = os.path.normpath(cwd) if cwd else ""
+        if cwd and any(cwd == x or cwd.startswith(x + "/") for x in paths):
+            out[pid] = start
+    return out
+
+
+def stop_recorded(found: dict, grace: float = 5) -> list:
+    """Stop these processes ({pid: start}) that still run and are still the same process (their start matches),
+    politely and then for good, one by one, whatever their group. The ones that were running."""
+    keep = {os.getpid(), os.getppid()}
+
+    def running(p, start):
+        return p not in keep and alive(p, start) and _state(p) != "Z"
+    hit = [(int(p), s) for p, s in found.items() if s and running(int(p), s)]
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 2)):
+        for p, s in hit:
+            if running(p, s):
+                try:
+                    os.kill(p, sig)
+                except OSError:
+                    pass
+        end = time.time() + wait
+        while any(running(p, s) for p, s in hit) and time.time() < end:
+            time.sleep(0.1)
+        if not any(running(p, s) for p, s in hit):
+            break
+    return [p for p, _ in hit]
+
+
 SWEEP_GRACE = 5  # seconds between the polite signal and the one that cannot be refused
 
 
@@ -1799,15 +1926,17 @@ def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: di
     seconds = lane.get("preview_wait_s", PREVIEW_WAIT_S)
     desk.update(tid, preview={"command": shown, "started": True, "seconds": seconds})
     return [sys.executable, str(Path(__file__).with_name("preview.py")), str(raw / "preview.log"),
-            str(raw / "preview.json"), str(seconds), srt, settings, tmp, tid, in_sandbox(desk, lane, lane["preview"]),
+            str(raw / "preview.json"), str(seconds), srt, settings, tmp, tid, str(desk.root), in_sandbox(desk, lane, lane["preview"]),
             PREVIEW_READY_NOTE.format(preview=shown),
             PREVIEW_NOT_READY_NOTE.format(preview=shown, seconds=seconds), "--", *argv]
 
 
 def end_preview(desk: Desk, tid: str) -> None:
     """Stop the preview hansa started for this task, with its whole process group, if it still runs: the worker's
-    end stops it (hansa/preview.py), and this makes sure, also for a worker an earlier server started. Then its
-    output goes into the task's folder, keys removed, and what became of it onto the task (preview)."""
+    end stops it (hansa/preview.py), and this makes sure, also for a worker an earlier server started; so with each
+    process preview.py saw below it that still runs (the same start), and any started since that works in the
+    worktree or the preview's temporary folder. Then its output goes into the task's folder, keys removed, no more
+    than PREVIEW_KEEP of it read, and what became of it onto the task (preview)."""
     raw = desk.raw_dir(tid)
     rec = read_json(raw / "preview.json", {}) or {}
     pgid = rec.get("pgid")
@@ -1822,11 +1951,18 @@ def end_preview(desk: Desk, tid: str) -> None:
                 time.sleep(0.1)
             if not group_running(pgid):
                 break
+    left = []
+    if pgid:  # what left the group: each process preview.py saw below it, and what works in its folders since
+        left = stop_recorded({**(rec.get("seen") or {}),
+                              **working_in([rec.get("cwd"), rec.get("tmp")], rec.get("started") or time.time())},
+                             SWEEP_GRACE)
     (raw / "preview.json").unlink(missing_ok=True)
     m = desk.meta(tid)
     if not (m.get("preview") or {}).get("started"):
         return
-    publish(desk, tid, "preview.log")
+    if left:
+        desk.event("left_running_stopped", task=tid, processes=[f"{p} (left by the preview)" for p in left])
+    publish(desk, tid, "preview.log", most=PREVIEW_KEEP + 4096)  # bounded by preview.py already: this makes sure
     desk.change(tid, lambda x: {"preview": {**(x.get("preview") or {}), "stopped": True,
                                             **{k: rec[k] for k in ("ready", "address", "waited") if k in rec},
                                             **({"why": desk.redact(rec["why"])} if rec.get("why") else {})}})
