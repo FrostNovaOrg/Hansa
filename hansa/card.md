@@ -515,6 +515,9 @@ here; work that needs code changed or a browser goes to a worker.
 - A provider that reports it is out of quota rests for a while and the task
   moves to the lane's next provider; `hansa status` shows this. A provider that
   refuses one task (its content filter) does not rest; that task alone moves on.
+- A run stopped by its provider's usage limit costs the task no try (5 times; then each counts): the
+  provider rests until the reset time the error gives, else its own `rest_minutes` or the desk's
+  `cool_minutes`, and `hansa show <id>` says until when the task waits.
 - While a task runs, `hansa status` and `hansa show <id>` say how far the worker has
   got: model replies so far, minutes since it last did anything, its last note.
   Some providers take minutes per reply; a task is stuck only when nothing has

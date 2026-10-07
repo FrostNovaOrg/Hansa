@@ -34,6 +34,7 @@ from .desk import lane_env as checked_env
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
 QUOTA = re.compile(r"API Error: (402|429)|rate_limit_error|usage limit reached|credit balance is too low|"
+                   r"you(?:'|’)ve hit your [\w' ]{0,40}limit|"  # Claude Code's own line for a subscription's limit
                    r"insufficient[_ ](quota|balance)|quota exceeded|too many requests|余额不足|额度不足|额度已用", re.I)
 QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
@@ -118,6 +119,33 @@ while [ $# -ge 4 ]; do rm -rf "$4"; shift 4; done
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
+TRIES = 3  # a task's tries before it fails
+# A run that ends on its provider's usage limit puts the task back in the queue without using a try, this
+# many times; after that each such end counts as a try, so a provider that hits its limit again right after
+# each rest does not hold one task forever.
+LIMIT_RETURNS = 5
+REST_CAP = 31 * 86400  # the longest rest a reset time read from an error gives (a monthly allowance)
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+# The zone after a time: "(Europe/Berlin)", as Claude Code prints the subscription's reset; UTC, GMT, Z; an offset.
+_ZONE = r"(?:\s*\(([A-Za-z][\w+-]*(?:/[\w+-]+)*)\)|\s*\b(UTC|GMT)\b|(Z)\b|\s*([+-]\d{2}:?\d{2})\b)?"
+# The forms of a limit's reset time in an error, each read by reset_time:
+#   a Unix time: Claude Code's "Claude AI usage limit reached|1760000000", the API's
+#     anthropic-ratelimit-unified-reset, Claude Code's resets_at
+RESET_UNIX = re.compile(r"(?:limit reached\||ratelimit-unified-reset\"?\s*[:=]\s*\"?|resets_?at\"?\s*[:=]\s*\"?)"
+                        r"(\d{10})(?!\d)", re.I)
+#   seconds from now: a retry-after header, when a message passes it on
+RESET_AFTER = re.compile(r"retry[-_ ]after\"?\s*[:=]\s*\"?(\d{1,7})(?![\d.])", re.I)
+#   "in N minutes" or "in N hours" (seconds too) after words that say the limit ends or to try again then
+RESET_IN = re.compile(r"(?:reset|try|retry|again|available|wait)\w*\b[^.\n]{0,30}?\bin\s+(\d{1,5}(?:\.\d+)?)\s*"
+                      r"(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b", re.I)
+#   a date and time: "2026-08-08 00:00 UTC" (a gateway's spend limit), ISO 8601
+RESET_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?" + _ZONE)
+#   Claude Code's subscription reset more than a day out: "resets Oct 9, 3pm (Europe/Berlin)",
+#   "resets Jan 2, 2027, 3:30pm (Europe/Berlin)"
+RESET_DAY = re.compile(r"\b(" + "|".join(MONTHS) + r")[a-z]*\.?\s+(\d{1,2})(?:,\s*(\d{4}))?,?\s+(?:at\s+)?"
+                       r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)" + _ZONE, re.I)
+#   a clock time: Claude Code's "You've hit your session limit · resets 3pm (Europe/Berlin)", "resets at 15:00"
+RESET_CLOCK = re.compile(r"\bresets?\s+(?:at\s+)?(\d{1,2})(?!\d)(?::(\d{2}))?\s*([ap]\.?m\.?)?" + _ZONE, re.I)
 # The provider would not answer this request (its content filter or a refusal). That
 # says nothing about other tasks, so the provider does not rest; the task moves on.
 REFUSED_STOPS = {"content_filter", "refusal"}
@@ -459,6 +487,139 @@ def no_read_rules(paths) -> list:
     return [r for x in full_paths(paths) for r in (f"Read(//{x.lstrip('/')})", rule("Read", x))]
 
 
+def _zone(m, first: int):
+    """The zone a reset time names (groups first..first+3 of _ZONE): a tzinfo; None for the machine's local
+    time, when it names none; False when it names one hansa does not know."""
+    from datetime import timedelta, timezone
+    name, utc, z, offset = m.group(first, first + 1, first + 2, first + 3)
+    if utc or z:
+        return timezone.utc
+    if offset:
+        sign, digits = (-1 if offset[0] == "-" else 1), offset[1:].replace(":", "")
+        return timezone(sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:])))
+    if name:
+        if name.upper() in ("UTC", "GMT"):
+            return timezone.utc
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 - not a zone (or no zone data): unsure of the time
+            return False
+    return None
+
+
+def _hour(h: str, ampm) -> int:
+    h = int(h)
+    if not ampm:
+        return h
+    return -1 if not 1 <= h <= 12 else h % 12 + (12 if ampm[0].lower() == "p" else 0)
+
+
+def reset_time(text: str, at: float | None = None):
+    """When a provider's usage limit resets, as its error says (see RESET_UNIX and the forms after it): a Unix
+    time, or None when the error gives none, or hansa is unsure of the one it gives. A time without a zone is the
+    machine's local time; a clock time alone is its next coming."""
+    try:
+        return _reset_time(text, at)
+    except Exception:  # noqa: BLE001 - a line hansa cannot read (an impossible offset, say): no reset time
+        return None
+
+
+def _reset_time(text, at):
+    from datetime import datetime, timedelta
+    at = time.time() if at is None else at
+    text = str(text or "").replace(" ", " ").replace("\xa0", " ").replace("\xb7", " ")
+
+    def when(y, mo, d, h, mi, s, tz):
+        if tz is False or not (0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
+            return None
+        try:
+            return datetime(y, mo, d, h, mi, s, tzinfo=tz).timestamp()
+        except (ValueError, OverflowError):
+            return None
+
+    found = None
+    if m := RESET_UNIX.search(text):
+        found = float(m.group(1))
+    elif m := RESET_AFTER.search(text):
+        found = at + int(m.group(1))
+    elif m := RESET_IN.search(text):
+        unit = m.group(2).lower()
+        found = at + float(m.group(1)) * (3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1)
+    elif m := RESET_ISO.search(text):
+        found = when(*map(int, m.group(1, 2, 3, 4, 5)), int(m.group(6) or 0), _zone(m, 7))
+    elif m := RESET_DAY.search(text):
+        tz = _zone(m, 7)
+        args = (MONTHS.index(m.group(1).lower()[:3]) + 1, int(m.group(2)), _hour(m.group(4), m.group(6)),
+                int(m.group(5) or 0), 0, tz)
+        if m.group(3):
+            found = when(int(m.group(3)), *args)
+        else:  # the year that puts it nearest to now: Jan 2 read on Dec 31 is next year's, Dec 31 read on Jan 1 last
+            year = datetime.fromtimestamp(at, tz or None).year
+            near = [t for t in (when(y, *args) for y in (year - 1, year, year + 1)) if t is not None]
+            found = min(near, key=lambda t: abs(t - at)) if near else None
+    elif (m := RESET_CLOCK.search(text)) and (m.group(2) or m.group(3)):  # "resets 3" alone is no time
+        tz = _zone(m, 4)
+        if tz is not False:
+            day = datetime.fromtimestamp(at, tz or None)
+            found = when(day.year, day.month, day.day, _hour(m.group(1), m.group(3)), int(m.group(2) or 0), 0, tz)
+            if found is not None and found < at - 3600:  # that time today has passed: tomorrow's
+                found = (datetime.fromtimestamp(found, tz or None) + timedelta(days=1)).timestamp()
+    if found is None or found < at - 3600:  # long past: not this limit's reset
+        return None
+    return found
+
+
+def own_rest_minutes(s: dict, name: str) -> int | None:
+    """The provider's own rest after a usage limit, in minutes, as the principal set it; None: the desk's."""
+    v = (s["providers"].get(name) or {}).get("rest_minutes")
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def rest_minutes(s: dict, name: str) -> int:
+    """How long the provider rests after a usage limit whose error gives no reset time."""
+    own = own_rest_minutes(s, name)
+    return own if own is not None else s.get("cool_minutes", 30)
+
+
+def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float:
+    """Rest a provider that cannot be used ("quota" or a key or login problem, unusable_reason) and return
+    until when. After a usage limit: until the reset time its error gives (reset_time) and a minute, at most
+    REST_CAP; else for its rest_minutes."""
+    t = time.time()
+    if kind != "quota":
+        until = t + 60 * KEY_REST_MINUTES
+        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
+        return until
+    try:
+        reset = reset_time(text, t)
+    except Exception as e:  # noqa: BLE001 - only a detail: the rest falls back to the fixed length
+        desk.event("detail_unread", provider=name, what="reset time", error=str(e)[:300])
+        reset = None
+    if reset is not None:
+        until = min(max(reset, t) + 60, t + REST_CAP)
+        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
+    else:
+        minutes = rest_minutes(s, name)
+        until = t + 60 * minutes
+        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
+    return until
+
+
+def rest_text(st: dict) -> str:
+    """Why a resting provider rests that long (its state, provider_state), or ''."""
+    if st.get("rest_how") == "reset":
+        return "the reset time its error gave, and a minute"
+    if st.get("rest_how") == "fixed" and st.get("rest_minutes"):
+        return f"no reset time in its error, so its rest of {st['rest_minutes']} minutes"
+    return ""
+
+
+def tries_used(attempts: list) -> int:
+    """The tries a task has used: each earlier run but those that ended on a usage limit and cost no try."""
+    return sum(1 for a in attempts if a.get("kind") != "limit" or a.get("counted"))
+
+
 def refused_by(m: dict) -> set:
     """Providers that refused this task; it is not offered to them again."""
     return {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
@@ -490,7 +651,9 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
                 as_root = f"env {login}" if p.get("config_dir") else login
                 how += f" as {who} (from root: `runuser -u {who} -- {as_root}`)"
             return f"{st['reason']}; log in with {how}, then `hansa check {name}` brings it back"
-        return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
+        how = rest_text(st)
+        return (f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
+                + (f": {how}" if how else ""))
     return ""
 
 
@@ -2118,6 +2281,16 @@ def network_reason(run: dict, err: str) -> str:
     return f"the connection to the provider failed ({found})"
 
 
+def read_detail(desk: Desk, tid: str, what: str, default, fn, *args):
+    """fn(*args), a reading that only adds detail to a run's end; on an error, default, with the error in the
+    event log, so the run still ends."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001 - any error: the run ends on the plainest reading
+        desk.event("detail_unread", task=tid, what=what, error=f"{type(e).__name__}: {e}"[:300])
+        return default
+
+
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
@@ -2133,16 +2306,19 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
     p = desk.settings()["providers"].get(meta.get("provider"))
-    usage = usage_of(run)
+    usage = read_detail(desk, tid, "usage", {}, usage_of, run)
     if not usage and p:
-        usage = usage_from_record(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        usage = read_detail(desk, tid, "usage", {}, lambda: usage_from_record(
+            config_home(desk, meta["provider"], p), meta.get("session_id", "")))
     designing = meta.get("kind") == "design"
-    late = report_after_notices(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
+    late = read_detail(desk, tid, "report after notices", None, report_after_notices,
+                       config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
         if p and not designing and not stopped else None
     if late:
         report = late[0] + (LATE_NOTE + late[1] if late[1] else "")
     if stopped and not result.strip() and p:
-        notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
+                            meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
     if designing:
         texts, replies, _, _ = _record(config_home(desk, meta["provider"], p), meta.get("session_id", "")) if p \
@@ -2152,8 +2328,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         end_design(desk, meta)
     report = desk.redact(report)
     denied = run.get("permission_denials") or []
-    reasons = refusal_reasons(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
-        if p and denied else {}
+    reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
+                          meta.get("session_id", "")) if p and denied else {}
     (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
@@ -2161,9 +2337,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
               "usage": usage, "denials": [desk.redact(denial_of(x)) for x in denied],
               "denial_reasons": [desk.redact(reasons.get(x.get("tool_use_id"), "") if isinstance(x, dict) else "")
                                  for x in denied],
-              "background_left": [desk.redact(x) for x in background_left(config_home(desk, meta["provider"], p),
-                                                                          meta.get("session_id", ""))]
-              if p and not designing else []}
+              "background_left": [desk.redact(x) for x in read_detail(
+                  desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
+                  meta.get("session_id", ""))] if p and not designing else []}
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""
@@ -2222,16 +2398,26 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
         order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
         left = [p for p in order if p not in refused_by({"attempts": attempts})]
-        state = "queued" if left and len(attempts) < 3 else "failed"
+        state = "queued" if left and tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
-    elif kind:
-        minutes = desk.settings().get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
-        desk.set_provider_state(meta["provider"], cool_until=time.time() + 60 * minutes, reason=why)
-        attempts.append({"provider": meta["provider"], "at": now(), "error": why})
-        state = "queued" if len(attempts) < 3 else "failed"
+    elif kind == "quota":  # the provider's limit, not the task's doing: no try used, LIMIT_RETURNS times
+        until = rest_provider(desk, desk.settings(), meta["provider"], kind, why, f"{run.get('result') or ''}\n{err}")
+        counted = sum(a.get("kind") == "limit" for a in attempts) >= LIMIT_RETURNS
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "limit", "counted": counted,
+                         "rest_until": round(until)})
+        state = "queued" if tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
-            "queued again for the lane's next provider" if state == "queued" else "gave up after 3 tries")
+            f"gave up after {TRIES} tries" if state == "failed" else
+            f"queued again; this one used a try, since the task had already gone back {LIMIT_RETURNS} times for a "
+            "provider's limit" if counted else
+            "queued again without using a try; it starts again when a provider of its lane is ready")
+    elif kind:
+        rest_provider(desk, desk.settings(), meta["provider"], kind, why)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why})
+        state = "queued" if tries_used(attempts) < TRIES else "failed"
+        error = f"{meta['provider']}: {why}; " + (
+            "queued again for the lane's next provider" if state == "queued" else f"gave up after {TRIES} tries")
     elif net:  # tried once more on the same provider, which does not rest for it
         again = any(a.get("kind") == "network" for a in attempts)
         attempts.append({"provider": meta["provider"], "at": now(), "error": net, "kind": "network"})
@@ -3515,8 +3701,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
         if ok:
             desk.set_provider_state(name, cool_until=0, reason="")
         elif kind:
-            minutes = s.get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
-            desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
+            rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
     desk.ready_news()
     return result
