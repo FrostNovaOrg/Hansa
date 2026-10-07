@@ -7925,6 +7925,82 @@ class DeskTest(unittest.TestCase):
                 time.sleep(0.1)
             self.assertFalse(run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z", f.name)
 
+    def kept_preview_log(self, tid: str, *chunks: bytes) -> str:
+        """What the task's folder keeps of this preview output, as preview.py and hansa serve keep it."""
+        from hansa import preview, run
+        raw = self.desk.raw_dir(tid)
+        raw.mkdir(parents=True, exist_ok=True)
+        kept = preview.Kept(str(raw / "preview.log"), run.PREVIEW_KEEP // 2)
+        for c in chunks:
+            for i in range(0, len(c), 65536):  # as drain reads the pipe
+                kept.add(c[i:i + 65536])
+        kept.close()
+        run.publish(self.desk, tid, "preview.log", most=run.PREVIEW_KEEP + 4096)
+        return str(self.desk.tasks_dir / tid / "preview.log")
+
+    def test_preview_a_key_cut_inside_a_long_line_of_the_kept_log_leaves_no_part_of_it(self):
+        from hansa import run
+        key = b"sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_bytes(key)
+        half, tid = run.PREVIEW_KEEP // 2, self.desk.new_task("Keys at the cuts")
+
+        def only_filler(text):
+            body = re.sub(r"\n\[hansa: [^\]]*\]\n", "", text)
+            self.assertLessEqual(set(body), set("xyz\n"), "a part of the key is left")
+            self.assertIn(f"with {run.PREVIEW_MARGIN} bytes on each side of a cut inside a line", text)
+        # one line with no newline: a key across the end of the kept start, another across the start of the kept end
+        out = b"x" * (half - 10) + key + b"y" * (3 * half) + key + b"z" * (half - 10)
+        log = self.kept_preview_log(tid, out)
+        only_filler(Path(log).read_text())
+        big = self.tmp / "big.log"  # read_bounded cuts the same way
+        big.write_bytes(out)
+        only_filler(self.desk.redact(run.read_bounded(big, half, half)))
+        b2 = self.desk.new_task("A key just after the start's last line")  # its start ends at a line, its end not
+        only_filler(Path(self.kept_preview_log(b2, b"x" * 100 + b"\n" + b"y" * (half - 20) + key + b"z" * half)).read_text())
+
+    def test_preview_binary_output_is_kept_within_its_bound_on_disk(self):
+        from hansa import run
+        tid = self.desk.new_task("Binary output")
+        log = self.kept_preview_log(tid, os.urandom(3 * run.PREVIEW_KEEP))
+        self.assertLessEqual(Path(log).stat().st_size, run.PREVIEW_KEEP + 4096)
+        self.assertIn("left out here", Path(log).read_text(encoding="utf-8"))  # and it is UTF-8 still
+
+    def test_preview_end_stops_an_orphan_in_the_worktree_but_not_a_process_with_a_parent_there(self):
+        from hansa import run
+        tid, folder = self.desk.new_task("Look at the page"), self.tmp / "wt"
+        (folder / "sub").mkdir(parents=True)
+        orphan_pid = self.tmp / "orphan.pid"
+        raw = self.desk.raw_dir(tid)
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / "preview.json").write_text(json.dumps({"pgid": 2 ** 22 + 7, "started": time.time() - 1, "seen": {},
+                                                      "cwd": str(folder), "tmp": str(self.tmp / "ptmp")}))
+        self.desk.change(tid, lambda x: {"preview": {"started": True}})
+        shell = subprocess.Popen(["sleep", "600"], cwd=folder / "sub")  # the principal's own, its parent alive
+        self.addCleanup(lambda: (shell.kill(), shell.wait()))
+        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
+                 f"open({str(orphan_pid)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
+        subprocess.run([sys.executable, "-c", twice], cwd=folder, check=True)
+        end = time.time() + 10
+        while not (orphan_pid.exists() and orphan_pid.read_text()) and time.time() < end:
+            time.sleep(0.05)
+        orphan = int(orphan_pid.read_text())
+
+        def kill_orphan():
+            try:
+                os.kill(orphan, signal.SIGKILL)
+            except OSError:
+                pass
+        self.addCleanup(kill_orphan)
+        while run.process_table().get(orphan, (0,))[0] != 1 and time.time() < end:
+            time.sleep(0.05)
+        run.end_preview(self.desk, tid)
+        self.assertIsNone(shell.poll())  # left alone
+        self.assertFalse(run.alive(orphan) and run._state(orphan) != "Z")
+        events = self.desk.events_path.read_text()
+        self.assertIn(f"{orphan} (an orphan working in the preview's folders)", events)
+        self.assertNotIn(str(shell.pid), events)
+
     def test_preview_is_not_started_on_linux_and_the_worker_is_told(self):
         seen, _ = self.preview_lane("echo http://localhost:8126/; exec sleep 600")
         with unittest.mock.patch("hansa.run.PREVIEW_STARTS", False):

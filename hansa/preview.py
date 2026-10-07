@@ -77,12 +77,13 @@ def stop_group(proc) -> None:
 class Kept:
     """What <log> keeps of the preview's output: all of it up to `half` bytes; past that, its start cut at a
     line, a line saying how much was left out, and its last `half` bytes (from a line's start), written again at
-    most every half second, and at the end."""
+    most every half second, and at the end. A cut with no line to fall at drops hansa.run.PREVIEW_MARGIN bytes more
+    on its side, so no key is kept in part, and the line says so."""
 
     def __init__(self, path: str, half: int) -> None:
         self.out, self.half = open(path, "wb"), half
         self.total = self.written = self.line_end = 0  # line_end: in the file, just after its last newline
-        self.cut = None  # where the start ends, once the output outgrew it
+        self.cut, self.cut_in_line = None, False  # where the start ends, once the output outgrew it
         self.tail, self.flushed, self.lock = bytearray(), 0.0, threading.Lock()
 
     def add(self, chunk: bytes) -> None:
@@ -98,7 +99,10 @@ class Kept:
                 if len(chunk) <= room:
                     self.out.flush()
                     return
-                self.cut, chunk = self.line_end or self.written, chunk[room:]
+                # the start ends at its last whole line; with none, inside the line, and a margin before the cut
+                # goes too: desk.redact replaces whole keys only, and no key is left there in part
+                self.cut = self.line_end or max(0, self.written - run.PREVIEW_MARGIN)
+                self.cut_in_line, chunk = not self.line_end, chunk[room:]
             self.tail += chunk
             if len(self.tail) > self.half:
                 del self.tail[:len(self.tail) - self.half]
@@ -108,13 +112,15 @@ class Kept:
     def _write(self) -> None:
         if self.cut is None:
             return
-        shown = self.tail
-        if self.total - self.written > len(self.tail):  # the tail's start was dropped: it is shown from a line
-            shown = self.tail[self.tail.find(b"\n") + 1:] or self.tail
+        shown, margin = self.tail, self.cut_in_line
+        if self.total - len(self.tail) > self.cut:  # output left out before the end: it is shown from a line's start,
+            line = self.tail.find(b"\n")  # or with none, without a margin after the cut
+            shown, margin = (self.tail[line + 1:], margin) if line >= 0 else (self.tail[run.PREVIEW_MARGIN:], True)
         left = self.total - self.cut - len(shown)
         self.out.seek(self.cut)
         if left:
-            self.out.write(f"\n[hansa: {left} bytes of the preview's output left out here]\n".encode())
+            self.out.write(f"\n[hansa: {left} bytes of the preview's output left out here{run.margin_said(margin)}]\n"
+                           .encode())
         self.out.write(shown)
         self.out.truncate()
         self.out.flush()

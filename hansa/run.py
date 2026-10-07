@@ -295,6 +295,7 @@ yourself; say in your report that the preview did not start, and do what you can
 """
 PREVIEW_WAIT_S = 120  # how long a preview has to be ready when its lane sets no preview_wait_s
 PREVIEW_KEEP = 4 * 2 ** 20  # bytes of a preview's output kept, its first and last half (hansa/preview.py)
+PREVIEW_MARGIN = 4096  # bytes dropped on each side of a cut inside a line of kept output: longer than any key
 PREVIEW_LOOK_S = 0.5  # how often hansa/preview.py looks for what the preview started
 # Whether hansa starts a lane's preview for a task with a browser: on macOS only. There srt's local binding lets
 # the preview bind the machine's loopback, where the browser reaches it (and the preview reaches every service on
@@ -1262,21 +1263,31 @@ def markers_text(markers: dict) -> str:
                      + (" ..." if len(ns) > 12 else "") for f, ns in markers.items())
 
 
+def margin_said(margin: bool) -> str:
+    """What the line saying how much output was left out adds when a cut fell inside a line (PREVIEW_MARGIN)."""
+    return (f", with {PREVIEW_MARGIN} bytes on each side of a cut inside a line, so that no key is left in part"
+            if margin else "")
+
+
 def read_bounded(path: Path, head: int, tail: int) -> str:
     """A file's text, or of a longer one its first `head` and last `tail` bytes, cut at whole lines, with a line
-    in between saying how much was left out: never more of it read than that."""
+    in between saying how much was left out: never more of it read than that. A cut that falls inside a line drops
+    PREVIEW_MARGIN bytes more on its side, so no key is left there in part (desk.redact replaces whole keys only).
+    Bytes that are not UTF-8 stay one character each (surrogateescape): written back with errors="replace", each is
+    one byte again."""
     with open(path, "rb") as f:
         size = os.fstat(f.fileno()).st_size
         if size <= head + tail:
-            return f.read().decode("utf-8", errors="replace")
+            return f.read().decode("utf-8", errors="surrogateescape")
         first = f.read(head)
         f.seek(size - tail)
         last = f.read(tail)
-    first = first[:first.rfind(b"\n") + 1] or first  # a key cut in two is not left half shown
-    last = last[last.find(b"\n") + 1:] or last
-    return (first.decode("utf-8", errors="replace")
-            + f"\n[hansa: {size - len(first) - len(last)} bytes left out here]\n"
-            + last.decode("utf-8", errors="replace"))
+    a, b = first.rfind(b"\n"), last.find(b"\n")
+    first = first[:a + 1] if a >= 0 else first[:max(0, len(first) - PREVIEW_MARGIN)]
+    last = last[b + 1:] if b >= 0 else last[PREVIEW_MARGIN:]
+    return (first.decode("utf-8", errors="surrogateescape")
+            + f"\n[hansa: {size - len(first) - len(last)} bytes left out here{margin_said(a < 0 or b < 0)}]\n"
+            + last.decode("utf-8", errors="surrogateescape"))
 
 
 def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
@@ -1289,7 +1300,8 @@ def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
             if src.exists():
                 text = read_bounded(src, most // 2, most // 2) if most else \
                     src.read_text(encoding="utf-8", errors="replace")
-                (d / name).write_text(desk.redact(text), encoding="utf-8")
+                # errors="replace": a byte read_bounded kept that is not UTF-8 is written as one "?", not three bytes
+                (d / name).write_text(desk.redact(text), encoding="utf-8", errors="replace")
                 if src.parent == raw:
                     src.unlink()
         try:
@@ -1673,8 +1685,10 @@ def record_descendants(top: int, seen: dict) -> bool:
 
 
 def working_in(folders: list, since: float = 0) -> dict:
-    """This account's processes whose working folder is one of `folders` or inside one, started at `since` or
-    later: {pid: start}. Never this process or its parent."""
+    """This account's orphans (their parent is the system's first process, as for a daemon that forked twice) whose
+    working folder is one of `folders` or inside one, started at `since` or later: {pid: start}. Never this process
+    or its parent, and never one whose parent still runs: a terminal's shell, an editor or a watcher the principal
+    started there."""
     paths = {os.path.normpath(x) for f in folders if f for x in (f, os.path.realpath(f))}
     if not paths:
         return {}
@@ -1687,8 +1701,8 @@ def working_in(folders: list, since: float = 0) -> dict:
         except (ImportError, OSError):
             return {}
     out = {}
-    for pid, (_, start, when) in process_table().items():
-        if pid in (os.getpid(), os.getppid()) or when < since - 2:  # 2 s for the rounding of both clocks
+    for pid, (ppid, start, when) in process_table().items():
+        if pid in (os.getpid(), os.getppid()) or ppid != 1 or when < since - 2:  # 2 s for both clocks' rounding
             continue
         try:
             if lib is None:
@@ -1934,8 +1948,8 @@ def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: di
 def end_preview(desk: Desk, tid: str) -> None:
     """Stop the preview hansa started for this task, with its whole process group, if it still runs: the worker's
     end stops it (hansa/preview.py), and this makes sure, also for a worker an earlier server started; so with each
-    process preview.py saw below it that still runs (the same start), and any started since that works in the
-    worktree or the preview's temporary folder. Then its output goes into the task's folder, keys removed, no more
+    process preview.py saw below it that still runs (the same start), and any orphan started since that works in
+    the worktree or the preview's temporary folder (working_in). Then its output goes into the task's folder, keys removed, no more
     than PREVIEW_KEEP of it read, and what became of it onto the task (preview)."""
     raw = desk.raw_dir(tid)
     rec = read_json(raw / "preview.json", {}) or {}
@@ -1951,17 +1965,18 @@ def end_preview(desk: Desk, tid: str) -> None:
                 time.sleep(0.1)
             if not group_running(pgid):
                 break
-    left = []
-    if pgid:  # what left the group: each process preview.py saw below it, and what works in its folders since
-        left = stop_recorded({**(rec.get("seen") or {}),
-                              **working_in([rec.get("cwd"), rec.get("tmp")], rec.get("started") or time.time())},
-                             SWEEP_GRACE)
+    left, seen = [], rec.get("seen") or {}
+    if pgid:  # what left the group: each process preview.py saw below it, and the orphans working in its folders since
+        left = stop_recorded({**working_in([rec.get("cwd"), rec.get("tmp")], rec.get("started") or time.time()),
+                              **seen}, SWEEP_GRACE)
     (raw / "preview.json").unlink(missing_ok=True)
     m = desk.meta(tid)
     if not (m.get("preview") or {}).get("started"):
         return
     if left:
-        desk.event("left_running_stopped", task=tid, processes=[f"{p} (left by the preview)" for p in left])
+        desk.event("left_running_stopped", task=tid, processes=[
+            f"{p} (left by the preview)" if str(p) in seen else f"{p} (an orphan working in the preview's folders)"
+            for p in left])
     publish(desk, tid, "preview.log", most=PREVIEW_KEEP + 4096)  # bounded by preview.py already: this makes sure
     desk.change(tid, lambda x: {"preview": {**(x.get("preview") or {}), "stopped": True,
                                             **{k: rec[k] for k in ("ready", "address", "waited") if k in rec},
