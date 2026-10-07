@@ -812,12 +812,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             "in hansa status but no post), hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
-            "line per event and the next command; events seconds apart come in one message. While the session is idle "
-            "(claude agents --json), each post would start a turn that rereads its whole conversation, so hansa holds "
-            "the lines until 2 minutes pass with nothing new, or 5 minutes since the first, and posts them as one "
-            "message (HANSA_NOTIFY_IDLE_GATHER and HANSA_NOTIFY_IDLE_MOST, in seconds; 0 holds nothing); a session "
-            "that is busy, or stops being idle, or whose state cannot be read, gets them at once, and lines about "
-            "hansa serve itself are never held. hansa notify and hansa status show lines held, and until when.",
+            "line per event and the next command; events seconds apart come in one message.",
             "Who hears what: a task or request goes to the session that made it (hansa add, retry, verify, merge, "
             "design and ask record it) while that session has a follower; otherwise to every follower of the desk, "
             "as do desk-wide events. A cancel is not posted to the session whose hansa cancel made it (hansa cancel "

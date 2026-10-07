@@ -6,8 +6,7 @@ per session and desk. It reads the desk's event log from where it left off, pick
 waits for (a task ended, a verification or design session ended, a queued merge check ended, the principal
 answered a request, a provider an open request names became ready, the principal answered a release, a release
 ended or became void, the server stopped), and posts it to that session's inbox. It ends when the session's
-process does. While the session is idle it gathers for up to five minutes (Gather), since each post to an idle
-session starts a turn; a busy session gets the lines at once, between its steps.
+process does.
 
     `hansa coordinator`   starts one for the session it launches (--messaging-socket-path, a path it chose)
     `hansa notify on`     starts one for the session it is run from (CLAUDE_PID, CLAUDE_CODE_MESSAGING_SOCKET)
@@ -543,85 +542,6 @@ class Namer:
         return self.name
 
 
-SHORT_MOST = 20.0  # seconds: the longest a busy session's lines are gathered
-IDLE_GATHER, IDLE_MOST = 120.0, 300.0  # seconds: an idle session's quiet period, and the longest it is held from
-IDLE_EVERY, IDLE_LIMIT = 10.0, 10.0  # seconds: between readings of the session's state, and one reading's limit
-
-
-class Gather:
-    """What the follower has to post, and when it posts it. Each post to an idle session starts a turn that rereads
-    its whole conversation, so while the session is idle (session_state) lines are held until idle seconds pass
-    with nothing new, or most since the first; then they go as one message. To a session that is not idle (busy,
-    running a command, waiting on a dialog) they go after short seconds of quiet (SHORT_MOST at most): they come
-    between its steps and start no turn of their own. Held lines go at once when the session stops being idle,
-    or when its state cannot be read; lines about hansa serve itself are never held. The state is read in a thread
-    of its own, with a time limit, no more often than every IDLE_EVERY seconds while lines wait. idle or most 0:
-    nothing is held. read: the reading (True, False, or None when it cannot say), for tests."""
-
-    def __init__(self, pid: int, short: float, idle: float = IDLE_GATHER, most: float = IDLE_MOST, read=None):
-        self.short, self.idle, self.most = short, idle, most
-        self.read = read or (lambda: session_state(pid, IDLE_LIMIT)[0])
-        self.asked, self.thread, self.box = float("-inf"), None, {}
-        self.posted()
-
-    def posted(self) -> None:
-        """What was gathered went out (or is let go): nothing waits."""
-        self.lines, self.first, self.last, self.urgent, self.held, self.state = [], None, 0.0, False, False, "?"
-
-    def add(self, items: list, t: float) -> None:
-        if not items:
-            return
-        self.lines += [x["line"] for x in items]
-        self.last, self.first = t, t if self.first is None else self.first
-        self.urgent = self.urgent or any(x["key"] == ["server"] for x in items)
-
-    def _run(self, box: dict) -> None:
-        try:
-            box["state"] = self.read()
-        except Exception:  # noqa: BLE001 - it cannot say
-            box["state"] = None
-
-    def _look(self, t: float) -> None:
-        """Take in a reading that ended; start one when due. Never waits for one."""
-        if self.thread and (not self.thread.is_alive() or t - self.asked > IDLE_LIMIT + 5):
-            got = self.box.get("state") if not self.thread.is_alive() else None  # one that hangs cannot say
-            self.state, self.thread = got if got in (True, False) else None, None
-        if not self.thread and t - self.asked >= IDLE_EVERY:
-            self.asked, self.box = t, {}
-            self.thread = threading.Thread(target=self._run, args=(self.box,), daemon=True)
-            self.thread.start()
-
-    def due(self, t: float) -> bool:
-        """Whether what waits is to be posted now."""
-        if not self.lines:
-            return False
-        quiet = t - self.last >= self.short or t - self.first >= SHORT_MOST
-        if self.urgent or self.idle <= 0 or self.most <= 0:
-            return quiet
-        self._look(t)
-        if self.state == "?":  # the first reading is not back yet; it has a time limit
-            return False
-        if self.state is True:
-            self.held = True
-            return t - self.last >= self.idle or t - self.first >= self.most
-        return self.held or quiet  # not idle, or it cannot say: as always, and at once for what was held
-
-    def record(self):
-        """For the register (hansa status, hansa notify): how many lines are held for an idle session, since when,
-        and until when at most; None when none are."""
-        if not (self.held and self.lines):
-            return None
-        return {"lines": len(self.lines), "since": self.first, "until": self.first + self.most}
-
-
-def held_text(h) -> str:
-    """Lines a follower holds for an idle session, for hansa status and hansa notify; '' when none are."""
-    if not isinstance(h, dict) or not h.get("lines"):
-        return ""
-    return (f"{h['lines']} line(s) held while the session is idle, posted by "
-            f"{time.strftime('%H:%M:%S', time.localtime(h.get('until') or 0))} at the latest")
-
-
 def _say(text: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S ") + text, flush=True)
 
@@ -695,9 +615,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
     ask = source(desk)
     via_account = bool(account.desk_account(desk.root))
     poll = float(os.environ.get("HANSA_NOTIFY_POLL") or (2.0 if via_account else 1.0))
-    gather = Gather(sess["pid"], float(os.environ.get("HANSA_NOTIFY_GATHER") or 3.0),
-                    float(os.environ.get("HANSA_NOTIFY_IDLE_GATHER") or IDLE_GATHER),
-                    float(os.environ.get("HANSA_NOTIFY_IDLE_MOST") or IDLE_MOST))
+    gather = float(os.environ.get("HANSA_NOTIFY_GATHER") or 3.0)
     me = {"key": key, "session": sess, "socket": sock, "name": was.get("name") or name, "follower": me_proc,
           "uid": os.getuid(), "user": account.name_of(os.getuid()), "since": was.get("since") or now(),
           "last_post": was.get("last_post")}
@@ -722,7 +640,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 ask({"op": "caught_up", "me": me, "of": (r.get("missed") or {}).get("key")})
             except Exception as e:  # noqa: BLE001 - the next follower may then say it again
                 _say(f"could not record that what was missed is told: {e}")
-        errors = 0
+        pending, first, last, errors = [], 0.0, 0.0, 0
         namer = Namer(sess["pid"], me["name"])
         mark, changed = code_mark(), 0.0
         while True:
@@ -758,15 +676,16 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             if srt and (told_srt or r.get("srt_ran")):  # said once until srt runs again; or it runs by now
                 items = [x for x in items if x["key"] != ["srt"]]
             told_srt = False if r.get("srt_ran") else told_srt or srt
-            gather.add(items, time.time())
-            if gather.due(time.time()):
-                if not _deliver(sock, message(str(desk.root), gather.lines), sess, me):
+            if items:
+                pending += [x["line"] for x in items]
+                last = time.time()
+                first = first or last
+            if pending and (time.time() - last >= gather or time.time() - first >= 20):
+                if not _deliver(sock, message(str(desk.root), pending), sess, me):
                     return 0
-                gather.posted()
-                done = pos  # a restart, or the next follower, reads again from before what is held
-            me["held"] = gather.record()  # recorded with the next feed
+                pending, first, done = [], 0.0, pos
             if daily:
-                daily.tick((me["last_post"] or {}).get("at") or 0.0, bool(gather.lines))
+                daily.tick((me["last_post"] or {}).get("at") or 0.0, bool(pending))
             time.sleep(poll)
     finally:
         try:
@@ -947,28 +866,20 @@ def box_text(capture: str):
     return box[2:] if box.startswith("❯\xa0") else None
 
 
-def session_state(pid: int, timeout: float = 15) -> tuple:
+def idle_reading(pid: int) -> tuple:
     """(True, its sessionId) when `claude agents --json` shows the session idle with nothing waiting for an
-    answer; (False, why not) when it shows it otherwise (busy, running a command, waiting on a dialog); (None,
-    why) when it cannot say."""
+    answer; (False, why not) otherwise, and when it cannot say."""
     try:
-        row = session_row(pid, timeout)
+        row = session_row(pid)
     except RuntimeError as e:
-        return None, str(e)
+        return False, str(e)
     if row is None:
-        return None, f"claude agents --json lists no session with pid {pid}"
+        return False, f"claude agents --json lists no session with pid {pid}"
     if row.get("status") != "idle":
         return False, f"the session is {row.get('status')!r}, not idle"
     if row.get("waitingFor"):
         return False, f"the session waits: {str(row['waitingFor'])[:80]}"
     return True, str(row.get("sessionId") or "")
-
-
-def idle_reading(pid: int) -> tuple:
-    """(True, its sessionId) when the session is idle with nothing waiting for an answer; (False, why not)
-    otherwise, and when it cannot say."""
-    ok, said = session_state(pid)
-    return ok is True, said
 
 
 class DailyClear:
@@ -1319,8 +1230,6 @@ def list_text(desk: Desk) -> str:
         out.append(f"  {who((r.get('session') or {}).get('pid'), r.get('name') or '')} · since "
                    f"{when(r.get('since'))} · last post: " + (f"{when(lp.get('at'))} {lp.get('text', '')}" if lp
                                                                else "none yet"))
-        if held_text(r.get("held")):
-            out.append(f"    {held_text(r.get('held'))}")
         if clear_text(r.get("clear")):
             out.append(f"    {clear_text(r.get('clear'))}")
     return "\n".join(out)
@@ -1333,5 +1242,4 @@ def who(pid, name: str = "") -> str:
 
 def names(desk: Desk) -> list:
     """The sessions hansa notifies, for hansa status, in the form hansa names a session everywhere."""
-    return [who((r.get("session") or {}).get("pid"), r.get("name") or "")
-            + (f" ({held_text(r.get('held'))})" if held_text(r.get("held")) else "") for r in live_records(desk)]
+    return [who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in live_records(desk)]
