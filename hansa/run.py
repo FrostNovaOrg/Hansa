@@ -1290,6 +1290,20 @@ def read_bounded(path: Path, head: int, tail: int) -> str:
             + last.decode("utf-8", errors="surrogateescape"))
 
 
+def cut_redacted(data: bytes, most: int) -> bytes:
+    """Text with keys already removed, cut again to at most `most` bytes when a key's longer [key of NAME] label
+    made it longer: its start and end, at whole lines where there are some, with a line in between saying how much
+    was left out. No margin is needed here: no key is left to split, and a character a cut splits is dropped."""
+    if len(data) <= most:
+        return data
+    half = max(0, most // 2 - 128)  # 128: room for the line in between
+    first, last = data[:half], data[len(data) - half:]
+    a, b = first.rfind(b"\n"), last.find(b"\n")
+    first, last = (first[:a + 1] if a >= 0 else first), (last[b + 1:] if b >= 0 else last)
+    note = f"\n[hansa: {len(data) - len(first) - len(last)} bytes left out here, after keys were removed]\n"
+    return (first.decode("utf-8", errors="ignore") + note + last.decode("utf-8", errors="ignore")).encode("utf-8")
+
+
 def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
     """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed. most: when given,
     no more than about this many bytes of each is read and kept, its start and its end (read_bounded)."""
@@ -1301,7 +1315,8 @@ def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
                 text = read_bounded(src, most // 2, most // 2) if most else \
                     src.read_text(encoding="utf-8", errors="replace")
                 # errors="replace": a byte read_bounded kept that is not UTF-8 is written as one "?", not three bytes
-                (d / name).write_text(desk.redact(text), encoding="utf-8", errors="replace")
+                data = desk.redact(text).encode("utf-8", errors="replace")
+                (d / name).write_bytes(cut_redacted(data, most) if most else data)
                 if src.parent == raw:
                     src.unlink()
         try:

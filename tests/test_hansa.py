@@ -7966,6 +7966,19 @@ class DeskTest(unittest.TestCase):
         self.assertLessEqual(Path(log).stat().st_size, run.PREVIEW_KEEP + 4096)
         self.assertIn("left out here", Path(log).read_text(encoding="utf-8"))  # and it is UTF-8 still
 
+    def test_preview_kept_log_with_many_short_keys_stays_within_its_bound_on_disk(self):
+        from hansa import run
+        K = run.PREVIEW_KEEP
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry-of-the-team.key").write_bytes(b"k1234567")
+        tid = self.desk.new_task("Keys flood")
+        log = Path(self.kept_preview_log(tid, (b"\xff" + b"k1234567" + b"\xfe") * (3 * K // 10)))
+        self.assertLessEqual(log.stat().st_size, K + 4096)
+        text = log.read_bytes().decode("utf-8")
+        self.assertNotIn("k1234567", text)
+        self.assertIn("[key of registry-of-the-team]", text)
+        self.assertTrue(re.search(r"\n\[hansa: \d+ bytes left out here, after keys were removed\]\n", text))
+
     def test_preview_end_stops_an_orphan_in_the_worktree_but_not_a_process_with_a_parent_there(self):
         from hansa import run
         tid, folder = self.desk.new_task("Look at the page"), self.tmp / "wt"

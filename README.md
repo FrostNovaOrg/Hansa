@@ -204,7 +204,9 @@ page gives.
   worktree or the preview's temporary folder. A process with a living parent
   that the preview did not start is not touched, so a shell, an editor or a
   file watcher you start in the worktree while a browser task runs there is
-  left alone. What can still escape on macOS: a process that forks twice,
+  left alone. But a process you start there with `nohup` (or an editor that
+  detaches itself from the shell that started it) becomes an orphan once that
+  shell ends, and is stopped at the end of the task. What can still escape on macOS: a process that forks twice,
   leaves the group, clears its environment and changes folder all between two
   looks (half a second). It keeps running after the task, with the
   preview's sandbox, local binding included: it can reach the machine's
@@ -216,7 +218,8 @@ page gives.
   `preview.log`, keys removed, at most its first and last 2 MB on disk with a
   line saying how much was left out between them (a byte that is not UTF-8 is
   kept as one `?`; where a cut falls inside a line, 4 KB more on each side of
-  it are left out, so no key is kept in part, and the line says so; hansa reads the whole output as
+  it are left out, so no key is kept in part, and the line says so; if
+  removing keys made it longer, it is cut again after; hansa reads the whole output as
   it comes, so a preview that prints without end never waits on it and never
   fills the disk); `hansa show` says where and what became of it. **On macOS such a
   preview can reach every service on this machine's loopback while it runs**,
