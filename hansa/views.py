@@ -58,7 +58,7 @@ GO_PASS = re.compile(r"^\s*--- (PASS|SKIP): ")
 GO_RUN = re.compile(r"^=== (RUN|CONT|NAME|PAUSE)\s+(\S+)")
 GO_PACKAGE = re.compile(r"^(ok|FAIL|\?)\s+\S+\s+(\(cached\)|\d+(\.\d+)?s\b|\[[^\]]*\])")  # a package's result line
 GO_PANIC = re.compile(r"^panic: ")  # with the first part of its goroutine trace
-GO_BUILD = re.compile(r"^# \S+$")  # go's build errors of a package: file.go:line:col: message under it
+GO_BUILD = re.compile(r"^# \S+( \[\S+\])?$")  # go's build errors: # pkg, # pkg [pkg.test] or vet's # [pkg], file.go:l:c: under it
 GO_ERROR = re.compile(r"^\S+\.go:\d+:\d+: ")
 JEST_BLOCK = re.compile(r"^\s+● (?!Console$)\S")  # jest's failing test, with its Expected/Received and code
 JEST_FILE = re.compile(r"^ ?FAIL  \S")

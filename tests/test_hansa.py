@@ -846,6 +846,21 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("b log line", shown)
         self.assertNotIn("c log line", shown)
 
+    def test_go_test_lifts_a_test_files_build_error_under_its_pkg_test_header(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(10))
+        shown = self.failing_show(
+            "# example.com/m/c [example.com/m/c.test]\nc/c_test.go:5:2: undefined: NewThing\n"
+            "c/c_test.go:9:14: cannot use 3 (untyped int constant) as string value in argument to Parse\n"
+            "FAIL\texample.com/m/c [build failed]\n" + passing + "PASS\nok  \texample.com/m/d\t0.002s\n"
+            "?   \texample.com/m/e\t[no test files]\nFAIL\n")
+        self.assertIn("  the errors, from its output:\n    # example.com/m/c [example.com/m/c.test]\n"
+                      "    c/c_test.go:5:2: undefined: NewThing\n    c/c_test.go:9:14: cannot use 3 (untyped int "
+                      "constant) as string value in argument to Parse\n  its last lines:\n", shown)
+        shown = self.failing_show(  # go vet's header, as before
+            "# example.com/m/c\n# [example.com/m/c]\nc/c.go:7:2: fmt.Printf format %d has arg s of wrong type string\n"
+            + passing + "FAIL\n")
+        self.assertIn("    # [example.com/m/c]\n    c/c.go:7:2: fmt.Printf format %d", shown)
+
     def test_show_lifts_a_maven_compile_error_as_the_errors(self):
         err = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n  符号:   类 Foo{i}\n  位置: 类 a.App\n"
                       for i in range(5, 12))
