@@ -36,16 +36,29 @@ from hansa.web import start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 
-def skip_unless_ports(test):
-    """Skip a test that binds a local port where the sandbox refuses to (macOS's, with no localhost on the
-    lane's network list), as tests that make a Unix socket skip where one is refused."""
+def ports_refused() -> str:
+    """Why a local port cannot be bound here, or "" where it can. Only a refusal (EPERM or EACCES, as macOS's
+    sandbox gives with no localhost on the lane's network list) counts; any other error is raised, so a port
+    test never skips for something else."""
     s = socket.socket()
     try:
         s.bind(("127.0.0.1", 0))
     except PermissionError as e:
-        test.skipTest(f"cannot bind a local port here ({e}; a sandbox refuses to)")
+        return f"cannot bind a local port here ({e}; a sandbox refuses to)"
     finally:
         s.close()
+    return ""
+
+
+def skip_unless_ports(test):
+    """Skip a test that binds a local port where the sandbox refuses to, as tests that make a Unix socket
+    skip where one is refused. With HANSA_TESTS_NEED_PORTS=1 (as on CI, where ports work) a refusal fails
+    the test instead, so the port tests cannot quietly stop running."""
+    why = ports_refused()
+    if why and os.environ.get("HANSA_TESTS_NEED_PORTS") == "1":
+        test.fail(f"{why}, and HANSA_TESTS_NEED_PORTS=1 says ports must work")
+    if why:
+        test.skipTest(why)
 
 
 # What Claude Code writes when a worker starts work in the background: the tool result's text and the row's
@@ -9781,6 +9794,47 @@ class DeskTest(unittest.TestCase):
         self.assertIsNone(alert.send_due(self.desk, gather=0))  # full again
         self.assertTrue(alert.test(self.desk)["ok"])  # the principal's own test press is not held
         self.assertIn("five", self.alerted(out)[-1]["text"])
+
+
+class PortSkipTest(unittest.TestCase):
+    """skip_unless_ports tells a sandbox that refuses ports from a machine where they work."""
+
+    def binding(self, error):
+        s = unittest.mock.MagicMock()
+        s.bind.side_effect = error
+        return unittest.mock.patch.object(socket, "socket", return_value=s)
+
+    def outcome(self, error, need=""):
+        class Probe(unittest.TestCase):
+            def runTest(self):
+                skip_unless_ports(self)
+        result = unittest.TestResult()
+        with self.binding(error), unittest.mock.patch.dict(os.environ, {"HANSA_TESTS_NEED_PORTS": need}):
+            Probe().run(result)
+        return result
+
+    def test_ports_that_work_neither_skip_nor_fail(self):
+        with self.binding(None):
+            self.assertEqual(ports_refused(), "")
+        for need in ("", "1"):
+            r = self.outcome(None, need)
+            self.assertEqual((r.skipped, r.failures, r.errors, r.testsRun), ([], [], [], 1))
+
+    def test_a_refusing_sandbox_skips_with_its_reason(self):
+        r = self.outcome(PermissionError(1, "Operation not permitted"))
+        self.assertEqual((len(r.skipped), r.failures, r.errors), (1, [], []))
+        self.assertIn("cannot bind a local port here", r.skipped[0][1])
+        self.assertIn("a sandbox refuses to", r.skipped[0][1])
+
+    def test_where_ports_are_needed_a_refusal_fails(self):
+        r = self.outcome(PermissionError(1, "Operation not permitted"), "1")
+        self.assertEqual((r.skipped, len(r.failures), r.errors), ([], 1, []))
+        self.assertIn("HANSA_TESTS_NEED_PORTS=1", r.failures[0][1])
+
+    def test_another_error_is_not_taken_for_a_sandbox(self):
+        r = self.outcome(OSError(49, "Can't assign requested address"))
+        self.assertEqual((r.skipped, r.failures, len(r.errors)), ([], [], 1))
+
 
 if __name__ == "__main__":
     unittest.main()

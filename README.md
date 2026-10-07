@@ -287,6 +287,8 @@ looks like an empty box: it may send the guess as if you wrote it.
 
 ## Tests
 `python3 -m unittest tests.test_hansa` (uses a stand-in for `claude`; no model is called).
+They run on GitHub's machines (Ubuntu and macOS, Python 3.9 and the newest) for every push to `alpha` or
+`main` and every pull request: `.github/workflows/tests.yml`.
 
 ## License
 

@@ -1,0 +1,38 @@
+# hansa's test suite on GitHub's machines. Unlike a sandboxed run, ports on the loopback work here, so the
+# tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not.
+# No secrets: the suite uses stand-ins for claude and srt, and needs no login.
+name: tests
+
+on:
+  push:
+    branches: [alpha, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.x"]  # the lowest hansa supports, and the newest
+    env:
+      HANSA_TESTS_NEED_PORTS: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run the tests
+        run: python3 -m unittest -v tests.test_hansa
