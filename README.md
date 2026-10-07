@@ -154,6 +154,25 @@ page gives.
   `srt`): the lane's network and write lists hold for them too, so a setup that
   downloads needs its registry on the network list. Design sessions, which the
   principal works in directly, and the coordinator run outside it.
+- One Bash call of a task or verification worker may run as long as the lane's
+  check may, plus 5 minutes, but never past the worker's own limit: hansa gives
+  Claude Code `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` (without them it
+  stops a call after 2 minutes unless the call asks for more, and allows at most
+  10). The check's limit is the lane's `merge_timeout_min`, else its
+  `timeout_min`; the worker's is `timeout_min`. Workers are told both numbers,
+  and to run a long build or suite in the foreground, in one Bash call, never in
+  the background while they end their turn. A worker that does end its turn while
+  background work it started still runs is resumed once, in the same session,
+  with a short message: that work was stopped with it, so it runs it again in the
+  foreground, waits for it, then reports. A second time it is not resumed; `hansa
+  show` then says what was still running. The time limit counts from the task's
+  start, across both runs.
+- A run that ended on a dropped connection is tried once more by itself. hansa
+  reads only Claude Code's own error lines for this: one that begins `API Error`
+  (a 5xx, a connection error or reset, a request that timed out, an overloaded
+  provider), one that begins with a connection reset, refused or closed, a socket
+  hang up or a fetch that failed, and the API's `overloaded_error`. A test that
+  timed out, or a log line saying "overloaded", is the task's own failure.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a

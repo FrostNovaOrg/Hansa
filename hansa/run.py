@@ -42,10 +42,18 @@ AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
 # The connection to the provider failed, or the provider did (overloaded, a server error): nothing the task
 # did, and nothing that says the provider's key or quota is wrong. The task is tried once more by itself.
-NETWORK = re.compile(r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|"
-                     r"Connection (dropped|error|reset|closed|refused|timed out)|socket hang up|fetch failed|"
-                     r"(request|connection|API Error:?)[^\n]{0,40}?tim(ed[ -]?out|eout)|"
-                     r"overloaded_error|\boverloaded\b|API Error: 5\d\d\b", re.I)
+# Only on Claude Code's own error lines: one that begins "API Error" (a 5xx, a connection or timeout, the provider
+# overloaded), one that begins with a connection reset, refused or closed, a socket hang up or a fetch that failed
+# (after an "Error:" maybe), or the API's own overloaded error. A test that timed out, or a log line saying
+# "overloaded", is the task's output, not a dropped connection. The phrase found is the one named group that matched.
+NETWORK = re.compile(r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?P<server>API Error:?[ \t]*5\d\d)\b|"
+                     r"^[ \t]*(?:[\w.]*Error:[ \t]+)?API Error:?[^\n]{0,80}?(?P<api>Repeated 529 Overloaded errors|"
+                     r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|"
+                     r"Connection (?:dropped|error|reset|closed|refused|timed out)|socket hang up|fetch failed|"
+                     r"(?:request|connection) tim(?:ed[ -]?out|eout)|overloaded_error|\boverloaded\b)|"
+                     r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?:(?:read|write|connect)[ \t]+)?(?P<line>ECONNRESET|ECONNREFUSED|"
+                     r"Connection (?:reset|refused|closed)|socket hang up|fetch failed)|"
+                     r"\"type\"[ \t]*:[ \t]*\"(?P<json>overloaded_error)\"", re.I | re.M)
 OVERLOADED_STATUS = 529
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -172,7 +180,7 @@ on branch task/{tid}, which was made for this task.
   line. To see a file as it was before your changes: `git show HEAD:path`.
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
-- End with a short report: what you changed, how you checked it, and anything left undone.
+{long}- End with a short report: what you changed, how you checked it, and anything left undone.
   Stop or wait for any background work you started before you write it: your last message
   is taken as your report.
 - Nobody will wake you later or answer questions: wait for your own work before you report.
@@ -199,9 +207,15 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
   base commit the task names: `git show <base>:path`).
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
-- Stop or wait for any background work you started before you write your report: your last
+{long}- Stop or wait for any background work you started before you write your report: your last
   message is taken as your report.
 - Nobody will wake you later or answer questions: wait for your own work before you report.
+"""
+
+LONG_RUNS = """- Run a long build or test suite in the foreground, in one Bash call with a timeout long enough
+  for it: here one call may run up to {bash_min} minutes, and the lane's check may run {check_min}
+  minutes, so a command near that is long. Never start one in the background and end your turn
+  while it runs: when your turn ends, your run ends, and what it was waiting for is lost.
 """
 
 VERIFY_TASK = """Find out, by running things, whether task {id} does what it asked. Its change is
@@ -729,14 +743,15 @@ ENDED = re.compile(r"\b(completed|complete|done|finished|failed|killed|stopped|c
                    re.I)
 
 
-def background_left(home: Path, sid: str) -> list:
+def background_left(home: Path, sid: str, after: int = 0) -> list:
     """What a worker started in the background (a Bash command or an agent) and had no notice of
     ending by the end of its session record, by description: it was still running when the worker
-    ended, so the worker may have written its report without it. Empty when the record cannot be read."""
+    ended, so the worker may have written its report without it. Empty when the record cannot be read.
+    Only what was started in the record's rows from `after` on (a resumed run's own: see resume)."""
     rows = _rows(home, sid) or []
     started, ended = {}, set()  # background id: description
     calls = {}  # tool use id: (tool name, input)
-    for d in rows:
+    for i, d in enumerate(rows):
         content = (d.get("message") or {}).get("content")
         for c in content if isinstance(content, list) else []:
             if not isinstance(c, dict):
@@ -761,7 +776,7 @@ def background_left(home: Path, sid: str) -> list:
                     elif given.get("run_in_background") or re.search(r"async|background", said, re.I):
                         found = AGENT_ID.search(said)
                         bid = found and found.group(1)
-                if bid:
+                if bid and i >= after:
                     what = given.get("description") or given.get("command") or given.get("prompt") or name
                     started[str(bid)] = " ".join(str(what).split())[:100]
         for s in _strings(d):
@@ -2006,7 +2021,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     brief = desk.lanes_dir / lane_name / "brief.md"
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
-    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp))
+    long = LONG_RUNS.format(bash_min=bash_minutes(lane), check_min=merge_minutes(lane))
+    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
+                                                                 long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
@@ -2047,11 +2064,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), "HANSA_TASK": tid,
-           "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
-           "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
-           "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
+    (raw / RESUME_ARGV).write_text(json.dumps(argv), encoding="utf-8")  # no key in it: keys are in env only
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
@@ -2072,6 +2087,87 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                     pid_start=proc_start(proc.pid))
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
+
+
+def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str) -> dict:
+    """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
+    return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), "HANSA_TASK": tid,
+            "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
+            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
+            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
+
+
+# A worker that ended its turn while background work it started still ran (background_left) has its session
+# resumed once, with RESUME_NOTE, so the run is not lost: hansa stopped that work with the worker, so it runs
+# it again in the foreground and then reports. Only once (meta "resumed"): a second time it ends as it is,
+# and the task says what was left running. The worker's own command line, without the lane's setup around it,
+# is kept in the run's raw folder (RESUME_ARGV) for this; its time limit still counts from the task's start.
+RESUME_ARGV = "worker-argv.json"
+RESUME_NOTE = """Your turn ended while work you started in the background was still running: {left}.
+hansa stopped it when your turn ended. Run what you still need of it again in the foreground, in one
+Bash call with a long enough timeout (up to {bash_min} minutes here), and wait for it to finish. Then
+write your report, as your instructions say. This is the only time hansa resumes you.
+"""
+
+
+def resume(desk: Desk, tid: str):
+    """Resume a task or verification worker whose run ended well while background work it started was still
+    running, once (see RESUME_ARGV): its new process, or None when it is not resumed."""
+    meta = desk.meta(tid)
+    if meta.get("kind") == "design" or meta.get("resumed") or meta.get("cancel") or meta.get("timed_out"):
+        return None
+    s = desk.settings()
+    lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
+    lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
+    raw = desk.state_dir / "runs" / tid
+    run = read_json(raw / "run.json", {}) or {}
+    sid, tmp = meta.get("session_id") or "", meta.get("worker_tmp") or ""
+    if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()) \
+            or run.get("is_error") or run.get("subtype") != "success":
+        return None
+    home = config_home(desk, pname, p)
+    left = read_detail(desk, tid, "background work left", [], background_left, home, sid)
+    if not left or not meta.get("worktree"):
+        return None
+    wt = Path(meta["worktree"])
+    try:
+        check_git_file(desk, wt)
+        argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
+        argv[argv.index("--session-id")] = "--resume"
+    except (GitFileChanged, OSError, ValueError):  # finish says what happened
+        return None
+    sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
+    note = RESUME_NOTE.format(left="; ".join(left), bash_min=bash_minutes(lane))
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
+    with desk.lock():
+        if desk.meta(tid).get("cancel"):
+            return None
+        desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
+                                  "rows": len(_rows(home, sid) or []), "usage": usage_of(run),
+                                  "turns": run.get("num_turns")})
+        with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
+            stdin.write(note.encode("utf-8"))
+            stdin.seek(0)
+            proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
+                                    start_new_session=True)
+        desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
+    desk.event("task_resumed", task=tid, lane=lane_name, provider=pname, left=[desk.redact(x) for x in left])
+    return proc
+
+
+def add_usage(a: dict, b: dict) -> dict:
+    """Two runs' usage (usage_of) as one: the tokens added up by model, and the cost where both say it."""
+    out = {m: dict(u) for m, u in a.items()}
+    for m, u in b.items():
+        t = out.get(m)
+        if t is None:
+            out[m] = dict(u)
+            continue
+        for k in ("in", "out", "cache_read", "cache_write"):
+            t[k] = (t.get(k) or 0) + (u.get(k) or 0)
+        cost = (t.get("claude_code_usd"), u.get("claude_code_usd"))
+        t["claude_code_usd"] = None if None in cost else cost[0] + cost[1]
+    return out
 
 
 def design_command(desk: Desk, tid: str):
@@ -2273,7 +2369,7 @@ def network_reason(run: dict, err: str) -> str:
     m = NETWORK.search(str(run.get("result") or "") or err)
     if not m:
         return ""
-    found = m.group(0)
+    found = next(x for x in m.groups() if x)
     if re.search(r"overloaded|529", found, re.I):
         return f"the provider was overloaded ({found})"
     if re.fullmatch(r"API Error: 5\d\d", found, re.I):
@@ -2297,6 +2393,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
     done.unlink(missing_ok=True)
+    (done.parent / RESUME_ARGV).unlink(missing_ok=True)
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
@@ -2310,6 +2407,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     if not usage and p:
         usage = read_detail(desk, tid, "usage", {}, lambda: usage_from_record(
             config_home(desk, meta["provider"], p), meta.get("session_id", "")))
+    resumed = meta.get("resumed") or {}
+    if resumed.get("usage"):  # the first run's, before hansa resumed it
+        usage = add_usage(resumed["usage"], usage)
     designing = meta.get("kind") == "design"
     late = read_detail(desk, tid, "report after notices", None, report_after_notices,
                        config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
@@ -2339,7 +2439,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                                  for x in denied],
               "background_left": [desk.redact(x) for x in read_detail(
                   desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
-                  meta.get("session_id", ""))] if p and not designing else []}
+                  meta.get("session_id", ""), resumed.get("rows", 0))] if p and not designing else []}
+    if resumed.get("turns") and isinstance(fields["turns"], int):
+        fields["turns"] += resumed["turns"]
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""
@@ -2535,6 +2637,23 @@ def merge_command(lane: dict) -> str:
 def merge_minutes(lane: dict) -> int:
     """A lane's merge check's time limit in minutes: its merge_timeout_min, else its timeout_min."""
     return lane.get("merge_timeout_min") or lane.get("timeout_min", 240)
+
+
+BASH_MARGIN_MIN = 5  # beyond the check's own limit, for one Bash call that runs the lane's check
+
+
+def bash_minutes(lane: dict) -> int:
+    """How long one Bash call of a task or verification worker may run: as long as the lane's check may
+    (merge_minutes) plus BASH_MARGIN_MIN, but never past the worker's own limit, the lane's timeout_min."""
+    return min(merge_minutes(lane) + BASH_MARGIN_MIN, lane.get("timeout_min", 240))
+
+
+def bash_limits(lane: dict) -> dict:
+    """Claude Code's own limits on one Bash call, both bash_minutes (it stops a call after 2 minutes unless the
+    call asks for more, and allows at most 10): a long suite then runs in one call in the foreground, even one
+    that does not ask for a timeout, instead of moving to the background while the worker ends its turn."""
+    ms = str(60000 * bash_minutes(lane))
+    return {"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}
 
 
 def own_merge_check(lane: dict) -> bool:
@@ -3131,6 +3250,14 @@ class Dispatcher:
         if self.desk.meta(tid).get("phase") == "checking":
             finish_check(self.desk, tid)
         else:
+            try:
+                proc = resume(self.desk, tid)
+            except Exception as e:  # noqa: BLE001 - the run ends as it did, and the event log says why
+                self.desk.event("resume_failed", task=tid, error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+                proc = None
+            if proc:
+                self.procs[tid] = proc
+                return
             finish(self.desk, tid, returncode)
 
     def look(self, tid: str, launch: str, launched, since, what: str):

@@ -102,7 +102,32 @@ if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
                 {"type": "text", "text": t}], "usage": {"input_tokens": 100, "output_tokens": 20}}}) + "\n")
     time.sleep(float(os.environ.get("FAKE_DESIGN_SECONDS", "0")))
     sys.exit(0)
-compat = bool(os.environ.get("ANTHROPIC_BASE_URL"))
+if "--resume" in sys.argv:  # hansa resuming a run that left background work: it runs it in the foreground
+    sid = sys.argv[sys.argv.index("--resume") + 1]
+    if os.environ.get("FAKE_RESUMED"):
+        open(os.environ["FAKE_RESUMED"], "a").write(json.dumps({"prompt": prompt, "argv": sys.argv, "env": {
+            k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "HANSA_TASK")}}) + "\n")
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}}]
+    kind = os.environ.get("FAKE_TRANSCRIPT", "")
+    if kind.endswith("-again"):  # and again ends with background work running
+        cmd = kind.startswith("bg-cmd")
+        use = {"type": "tool_use", "id": "u9", "name": "Bash" if cmd else "Agent", "input": {
+            "description": "Run the full test suite" if cmd else "Review the badge change", "run_in_background": True,
+            **({"command": "python3 -m unittest"} if cmd else {"prompt": "Review it", "subagent_type": "general-purpose"})}}
+        said, result = BG_BASH("bz9q2") if cmd else BG_AGENT("a9z9q2", "Review the badge change")
+        rows += [{"type": "assistant", "message": {"id": "r1", "content": [use]}},
+                 {"type": "user", "message": {"role": "user", "content": [
+                     {"type": "tool_result", "tool_use_id": "u9", "content": [{"type": "text", "text": said}]}]},
+                  "toolUseResult": result}]
+    report = "Report after the resume: the suite passes."
+    rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}]}})
+    with open(rec, "a") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
+                      "result": report, "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}))
+    sys.exit(0)
+compat =bool(os.environ.get("ANTHROPIC_BASE_URL"))
 if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
                       "result": "API Error: 401 authentication_error", "session_id": "s-key", "num_turns": 1}))
@@ -129,6 +154,8 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
         status = int(what) if what.isdigit() else None
         text = {"econnreset": "API Error: Connection dropped (ECONNRESET)", "529": "API Error: Repeated 529 Overloaded errors",
                 "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
+                "test-timed-out": "Ran 40 tests\nERROR: test_upload (tests.test_api): the upload request timed out after 60s\nFAILED (errors=1)",
+                "log-overloaded": "The suite failed:\n2026-10-08 12:00:01 WARN queue overloaded, shedding requests\nerror: 2 tests failed",
                 "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
                           "api_error_status": 429 if what in ("quota", "limit") else status,
@@ -257,6 +284,9 @@ if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git fold
     open(".git", "w").write("gitdir: " + os.path.abspath("copied-git") + "\n")
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
+if os.environ.get("FAKE_SEE_BASH"):  # Claude Code's own limits on one Bash call, as it was given them
+    open(os.environ["FAKE_SEE_BASH"], "a").write(json.dumps(
+        {k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")}) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
     "result": "Added hello.txt. Checked it exists." + (" Notes: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "") + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
                                                       if os.environ.get("FAKE_VERDICT") else ""),
@@ -551,7 +581,7 @@ class DeskTest(unittest.TestCase):
                           "command line", flat)
             self.assertIn("`git show HEAD:path`", flat)
             self.assertIn("stop background work within the command that started it, or wait for it there", flat)
-            text.format(tid="t1", lane="a", tmp="/tmp/x")  # still a template with nothing else to fill
+            text.format(tid="t1", lane="a", tmp="/tmp/x", long="")  # still a template with nothing else to fill
 
     def test_a_change_holding_a_stored_key_is_never_merged_and_the_key_is_never_shown(self):
         key = "sk-test-0123456789"
@@ -3233,6 +3263,60 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
         self.assertEqual(run.network_reason({"is_error": False, "result": "Fixed the ECONNRESET on a dropped connection"}, ""), "")
         self.assertEqual(run.network_reason({"is_error": True, "result": "I could not do it"}, ""), "")
+
+    def test_a_failed_run_that_only_quotes_a_timeout_or_overloaded_is_not_run_again(self):
+        from hansa import run
+        for what in ("test-timed-out", "log-overloaded"):
+            with self.subTest(what):
+                count = self.net_lane(what, 1)
+                tid = self.desk.new_task("Add hello.txt")
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "failed", m)
+                self.assertEqual(count.read_text(), "1")  # not run again
+                self.assertEqual([a for a in m.get("attempts", []) if a.get("kind") == "network"], [])
+        with self.subTest("a real dropped connection"):
+            count = self.net_lane("econnreset", 1)
+            m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+            self.assertEqual((m["state"], count.read_text()), ("done", "2"), m)
+        for text in ("FAIL: test_slow (tests.test_x) ... timed out", "ERROR: test_api: request timed out after 30s",
+                     "WARN worker pool overloaded", "the server is overloaded", "Connection timed out in test_fetch",
+                     "I could not finish: the suite timed out"):
+            self.assertEqual(run.network_reason({"is_error": True, "result": text}, ""), "", text)
+        for text in ("Error: read ECONNRESET", "TypeError: fetch failed", "Error: socket hang up",
+                     "Connection refused", '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'):
+            self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
+
+    def test_workers_and_verifiers_get_bash_limits_from_the_lanes_check_limit(self):
+        from hansa import run
+        seen, argvs = self.tmp / "bash.jsonl", self.tmp / "argv.jsonl"
+        d = Dispatcher(self.desk)
+        for merge_min, minutes in ((20, 25), (None, 240), (600, 240)):  # the check's limit + 5, capped by the worker's
+            with self.subTest(merge_timeout_min=merge_min):
+                seen.unlink(missing_ok=True)
+                argvs.unlink(missing_ok=True)
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"] = {"FAKE_SEE_BASH": str(seen), "FAKE_SHOW_ARGV": str(argvs)}
+                s["lanes"]["a"]["timeout_min"] = 240
+                s["lanes"]["a"].pop("merge_timeout_min", None)
+                if merge_min:
+                    s["lanes"]["a"]["merge_timeout_min"] = merge_min
+                self.assertEqual(self.desk.save_settings(s), [])
+                tid = self.desk.new_task("Add hello.txt")
+                self.settle(d, tid)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    main(["--desk", str(self.desk.root), "verify", tid])
+                self.settle(d, self.desk.meta(tid)["verify"])
+                ms = str(60000 * minutes)
+                self.assertEqual([json.loads(x) for x in seen.read_text().splitlines()],
+                                 [{"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}] * 2)
+                for argv in map(json.loads, argvs.read_text().splitlines()):
+                    said = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+                    self.assertIn(f"one call may run up to {minutes} minutes, and the lane's check may run "
+                                  f"{merge_min or 240} minutes", said)
+                    self.assertIn("Run a long build or test suite in the foreground, in one Bash call", said)
+                    self.assertIn("Never start one in the background and end your turn while it runs", said)
+        self.assertEqual(run.bash_minutes({"timeout_min": 30}), 30)
+        self.assertEqual(run.bash_minutes({"timeout_min": 60, "merge_timeout_min": 10}), 15)
 
     def test_a_verification_that_lost_the_connection_twice_says_how_to_run_it_again(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -8077,12 +8161,12 @@ class DeskTest(unittest.TestCase):
         self.assertIn("The previous attempt's report:", follow)
         self.assertIn("week badge is still in English", follow)
 
-    def transcript_run(self, kind: str, key: str = "") -> str:
+    def transcript_run(self, kind: str, key: str = "", env=None) -> str:
         """The report of a worker run on mimo whose stand-in writes a session record of this kind."""
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
         s["lanes"]["a"]["providers"] = ["mimo"]
-        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": kind, **({"FAKE_WRITE": key} if key else {})}
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": kind, **({"FAKE_WRITE": key} if key else {}), **(env or {})}
         self.assertEqual(self.desk.save_settings(s), [])
         self.desk.write_key("mimo", key or "sk-test-01")
         tid = self.desk.new_task("Fix the badge")
@@ -8140,8 +8224,8 @@ class DeskTest(unittest.TestCase):
         line = ("the worker ended while its background work was still running ({}); its report may be "
                 "incomplete: read the changes before merging")
         for kind, what in (("bg-cmd", "Run the full test suite"), ("bg-agent", "Review the badge change")):
-            with self.subTest(kind):
-                self.assertEqual(self.transcript_run(kind), "Report: fixed the badge; the tests pass.\n")
+            with self.subTest(kind):  # resumed once, and it left background work running again
+                self.assertEqual(self.transcript_run(kind + "-again"), "Report after the resume: the suite passes.\n")
                 tid = self.desk.tasks()[-1]["id"]
                 m = self.desk.meta(tid)
                 self.assertEqual(m["state"], "done")  # not failed for it: the work may be complete
@@ -8151,6 +8235,46 @@ class DeskTest(unittest.TestCase):
                 tid = self.desk.tasks()[-1]["id"]
                 self.assertNotIn("background work was still running", views.show_text(self.desk, tid))
                 self.assertNotIn("background work", notify.task_line(self.desk, self.desk.meta(tid)))
+
+    def test_a_worker_that_ended_with_background_work_running_is_resumed_once_and_then_reports(self):
+        from hansa import run
+        seen = self.tmp / "resumed.jsonl"
+        report = self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen)})
+        self.assertEqual(report, "Report after the resume: the suite passes.\n")
+        tid = self.desk.tasks()[-1]["id"]
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        calls = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        argv, prompt = calls[0]["argv"], " ".join(calls[0]["prompt"].split())
+        self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
+        self.assertNotIn("--session-id", argv)
+        self.assertIn("Run the full test suite", prompt)
+        self.assertIn("in the foreground, in one Bash call", prompt)
+        self.assertIn("This is the only time hansa resumes you", prompt)
+        self.assertEqual(calls[0]["env"]["HANSA_TASK"], tid)
+        self.assertEqual(calls[0]["env"]["BASH_MAX_TIMEOUT_MS"], str(60000 * 240))
+        self.assertEqual(m["resumed"]["left"], ["Run the full test suite"])
+        self.assertEqual(m["background_left"], [])  # the first run's work was run again, in the foreground
+        self.assertEqual(m["turns"], 5 + 2)  # both runs'
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 10)
+        self.assertNotIn("background work was still running", views.show_text(self.desk, tid))
+        self.assertFalse((self.desk.state_dir / "runs" / tid / run.RESUME_ARGV).exists())
+        self.assertIn(("task_resumed", tid), [(e["event"], e.get("task")) for e in
+                                              map(json.loads, self.desk.events_path.read_text().splitlines())])
+        # It ends with background work running a second time: not resumed again, and the task says so
+        seen.unlink()
+        self.transcript_run("bg-cmd-again", env={"FAKE_RESUMED": str(seen)})
+        tid = self.desk.tasks()[-1]["id"]
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(len(seen.read_text().splitlines()), 1)
+        self.assertEqual(m["background_left"], ["Run the full test suite"])
+        # Work seen to end, or no background work at all: no resume
+        seen.unlink()
+        self.transcript_run("bg-cmd-noticed", env={"FAKE_RESUMED": str(seen)})
+        self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
+        self.assertFalse(seen.exists())
 
     def test_background_agents_with_notices_are_not_listed_as_still_running(self):
         # Four background agents each have a "completed" notice; a test run has none.
