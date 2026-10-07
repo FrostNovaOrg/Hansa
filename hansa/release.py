@@ -1,20 +1,25 @@
 """Releases: how a lane's base branch goes out (a push, a wait for CI, a deploy), run by hansa only after the
 principal says yes on the page.
 
-The coordinator sets a lane's release command (`hansa lane set L release "..."`) and asks for a release of the
-base branch as it is now with `hansa release L [note]`. hansa records the request in .hansa/releases.json, which
-no agent may edit: the lane, the commit, the command line, the note, the commits that go out (reachable from the
-commit, on no remote-tracking branch of the repository and not in the lane's last release that went out) and the
-files they change. Before the request waits for the principal, the command line, the lines those commits add,
+A lane has release targets: the ways its base branch goes out. Its release command (`hansa lane set L release
+"..."`) is its one unnamed target; or it has named ones (`hansa lane target L NAME "..."`), each with its own
+command, time limit, and optionally another target of the lane that must have sent out the same commit first
+(after). The coordinator asks for a release of the base branch as it is now with `hansa release L [TARGET] [note]`
+(TARGET is needed when the lane has more than one). hansa records the request in .hansa/releases.json, which no
+agent may edit: the lane, the target, the commit, the command line, the note, the commits that go out (reachable
+from the commit, on no remote-tracking branch of the repository and not in that target's last release that went
+out) and the files they change. Before the request waits for the principal, the command line, the lines those commits add,
 the names of the files they add or change, and their messages are checked against the principal's
 release_forbidden words; a hit refuses it. The principal answers on the page (Release, or Refuse with a
-reason); a lane on the principal's releases_without_asking list needs no answer while it is what the list
+reason); a target on the principal's releases_without_asking list needs no answer while it is what the list
 recorded when the page saved it, and while the desk is not paused. hansa serve runs an approved
 release in the lane's repository, as the desk's account, outside the sandbox, with hansa's own environment (not
-the lane's env) and the lane's timeout_min, and only while the base branch and the command line are still what
-the principal saw: otherwise the request is void, says why, and the coordinator asks again. Its output is kept,
+the lane's env) and the target's time limit (else the lane's timeout_min), and only while the base branch and the
+command line are still what the principal saw, and the target it must follow sent out that commit: otherwise the
+request is void, says why, and the coordinator asks again. Its output is kept,
 keys removed, in .hansa/releases/<id>.log. One release runs at a time per repository, and none while a merge
-check runs there (nor a merge while a release runs).
+check runs there (nor a merge while a release runs): a release holds the lane's repository for as long as it
+runs, so a long install keeps that repository's merges waiting.
 
 A release's state: waiting (for the principal) -> approved -> starting -> running -> done | failed; or refused
 (the principal said no), void (what the principal saw changed, or the lane is gone), forbidden (a word that
@@ -30,7 +35,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desk import Desk, listed_mismatch, now, read_json, write_json
+from .desk import Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json
 from .run import (LOOK_LIMIT, CannotLook, alive, git, has_ended, leader, merge_target, pids_with_arg, proc_start,
                   stop)
 
@@ -84,11 +89,60 @@ def repo_key(repo) -> str:
     return str(Path(repo).expanduser().resolve())
 
 
-def lane_listed(s: dict, lane: str) -> bool:
-    """Whether the principal lets this lane's releases go out without asking: the lane is on the list, and has the
-    repository, base branch and release command it had when the page saved the list."""
-    return any(isinstance(x, dict) and x.get("lane") == lane and not listed_mismatch(s, x)
+def lane_listed(s: dict, lane: str, target: str = "") -> bool:
+    """Whether the principal lets this release target of the lane go out without asking: it is on the list, and the
+    lane has the repository and base branch, and the target the command, they had when the page saved the list. A
+    tick for one target never covers another."""
+    return any(isinstance(x, dict) and listed_key(x) == (lane, target) and not listed_mismatch(s, x)
                for x in s.get("releases_without_asking") or [])
+
+
+def what(r: dict) -> str:
+    """A release's lane and target, in words: 'lane a' or 'lane a target prod'."""
+    t = target_name(r.get("target"))
+    return f"lane {r.get('lane')}" + (f" {t}" if t else "")
+
+
+def what_zh(r: dict) -> str:
+    return f"工作线 {r.get('lane')}" + (f" 的目标 {r['target']}" if r.get("target") else "")
+
+
+def ask_again(r: dict) -> str:
+    """The command that asks for the same release again."""
+    return f"hansa release {r.get('lane')}" + (f" {r['target']}" if r.get("target") else "")
+
+
+def minutes(s: dict, r: dict) -> tuple:
+    """A release's time limit in minutes, and whose it is ('the lane's' or 'target T's'): the target's own, else
+    the lane's timeout_min."""
+    ln = s["lanes"].get(r.get("lane")) or {}
+    own = (lane_targets(ln).get(r.get("target") or "") or {}).get("timeout_min")
+    if own:
+        return own, f"target {r.get('target')}'s"
+    return ln.get("timeout_min", 240), "the lane's"
+
+
+def before_it(desk: Desk, s: dict, lane: str, target: str, repo, base: str, commit: str, zh: bool = False) -> str:
+    """'' when the target may send this commit out now; else which release must go first, in one line: a target
+    that must follow another goes out only with a commit the other one already sent out (done, same commit). zh: in
+    Chinese, for the page."""
+    after = (lane_targets((s["lanes"].get(lane) or {})).get(target) or {}).get("after")
+    if not after:
+        return ""
+    if any(r.get("lane") == lane and (r.get("target") or "") == after and r.get("state") == "done"
+           and r.get("repo") == repo_key(repo) and r.get("base") == base and r.get("commit") == commit
+           for r in releases(desk)):
+        return ""
+    prev = last_out(desk, lane, repo, base, after)
+    if zh:
+        return (f"工作线 {lane} 的目标 {target} 要等目标 {after} 先发出同一个提交才能发出，而"
+                + (f" {after} 上一次发出的发布（#{prev['id']}）是 {prev['commit'][:10]}，不是 {commit[:10]}"
+                   if prev else f"目标 {after} 还没有从 {base} 发出过发布")
+                + f"：先发布 {after}（hansa release {lane} {after}）")
+    return (f"lane {lane} target {target} goes out only after target {after} sent out the same commit, and "
+            + (f"{after}'s last release that went out (#{prev['id']}) was {prev['commit'][:10]}, not {commit[:10]}"
+               if prev else f"no release of {after} went out from {base}")
+            + f": release {after} first (hansa release {lane} {after})")
 
 
 def running_on(desk: Desk, repo) -> dict | None:
@@ -98,7 +152,7 @@ def running_on(desk: Desk, repo) -> dict | None:
 
 
 def running_text(r: dict) -> str:
-    return f"release #{r['id']} of lane {r.get('lane')}, which runs on that repository"
+    return f"release #{r['id']} of {what(r)}, which runs on that repository"
 
 
 def merging_on(desk: Desk, s: dict, repo, tasks=None):
@@ -112,7 +166,7 @@ def merging_on(desk: Desk, s: dict, repo, tasks=None):
 # -- what goes out ---------------------------------------------------------------------------------------------
 def _range(since: str, commit: str) -> list:
     """The commits that go out: reachable from the release commit, on no remote-tracking branch of the repository
-    (the whole history when it has none) and not in the lane's last release."""
+    (the whole history when it has none) and not in the target's last release."""
     return [commit, *([f"^{since}"] if since else []), "--not", "--remotes", "--"]
 
 
@@ -236,10 +290,11 @@ def named_files(command: str, files: list) -> list:
                                     for x in dict.fromkeys([f, os.path.basename(f)]) if x)]
 
 
-def last_out(desk: Desk, lane: str, repo: str, base: str) -> dict | None:
-    """The lane's last release that went out, of this repository and base branch."""
-    done = [r for r in releases(desk) if r.get("lane") == lane and r.get("state") == "done"
-            and r.get("repo") == repo_key(repo) and r.get("base") == base]
+def last_out(desk: Desk, lane: str, repo: str, base: str, target: str = "") -> dict | None:
+    """The last release of the lane's target that went out, of this repository and base branch (a request recorded
+    before targets had names is the lane's unnamed target's)."""
+    done = [r for r in releases(desk) if r.get("lane") == lane and (r.get("target") or "") == target
+            and r.get("state") == "done" and r.get("repo") == repo_key(repo) and r.get("base") == base]
     return done[-1] if done else None
 
 
@@ -249,39 +304,56 @@ def _has_commit(repo, sha: str) -> bool:
 
 
 # -- asking ------------------------------------------------------------------------------------------------------
-def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None) -> dict:
-    """Record a request for a release of the lane's base branch as it is now. Returns it; raises SystemExit, with
-    nothing recorded, when it cannot be asked, and with the request recorded as forbidden on a forbidden word."""
+def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, target: str | None = None) -> dict:
+    """Record a request for a release of the lane's base branch as it is now, by one of its release targets (None:
+    its only one). Returns it; raises SystemExit, with nothing recorded, when it cannot be asked, and with the
+    request recorded as forbidden on a forbidden word."""
     with desk.lock():
         s = desk.settings()
         ln = s["lanes"].get(lane)
         if not ln:
             raise SystemExit(f"hansa: there is no lane {lane}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}. "
                              "Nothing was asked")
-        command = ln.get("release") or ""
-        if not command.strip():
+        targets = lane_targets(ln)
+        if not targets:
             raise SystemExit(f"hansa: lane {lane} has no release command; set it first: hansa lane set {lane} release "
-                             "\"<the command that sends the base branch out>\" (and tell the principal). Nothing was asked")
+                             "\"<the command that sends the base branch out>\", or name targets with hansa lane target "
+                             f"{lane} NAME \"<command>\" (and tell the principal). Nothing was asked")
+        if target is None:
+            if len(targets) > 1:
+                raise SystemExit(f"hansa: lane {lane} has {len(targets)} release targets ({', '.join(sorted(targets))}); "
+                                 f"say which: hansa release {lane} TARGET [note]. Nothing was asked")
+            target = next(iter(targets))
+        if target not in targets:
+            raise SystemExit(f"hansa: lane {lane} has no release target {target}; its targets: "
+                             f"{', '.join(sorted(x or '(unnamed)' for x in targets))}. Nothing was asked")
+        command = targets[target].get("command") or ""
+        who = what({"lane": lane, "target": target})
         repo, base = ln["repo"], ln.get("base") or "main"
         try:
             commit = git("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}", cwd=repo)
         except (RuntimeError, OSError) as e:
             raise SystemExit(f"hansa: lane {lane}'s base branch {base} cannot be read in {repo} ({e}). Nothing was asked")
+        first = before_it(desk, s, lane, target, repo, base, commit)
+        if first:
+            raise SystemExit(f"hansa: {first}. Nothing was asked")
         rs = releases(desk)
-        busy = [r for r in rs if r.get("lane") == lane and r.get("state") in ("approved", "starting", "running")]
+        busy = [r for r in rs if r.get("lane") == lane and (r.get("target") or "") == target
+                and r.get("state") in ("approved", "starting", "running")]
         if busy:
             r = busy[0]
-            raise SystemExit(f"hansa: release #{r['id']} of lane {lane} is already {r['state']}; one at a time. "
+            raise SystemExit(f"hansa: release #{r['id']} of {who} is already {r['state']}; one at a time. "
                              f"hansa release shows how it goes; hansa tells you when it ends. Nothing was asked")
-        prev = last_out(desk, lane, repo, base)
+        prev = last_out(desk, lane, repo, base, target)
         since = prev["commit"] if prev and _has_commit(repo, prev["commit"]) else ""
         try:
             commits, files = outgoing(repo, since, commit)
             hits, checked = forbidden_in(repo, since, commit, s.get("release_forbidden") or [], command)
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
-        listed = lane_listed(s, lane)
-        r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "repo": repo_key(repo),
+        listed = lane_listed(s, lane, target)
+        r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
+             "repo": repo_key(repo),
              "base": base, "commit": commit, "command": command, "note": desk.redact(note.strip()), "asked": now(),
              "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
              "count": len(commits), "checked": checked, "commits": commits[:MOST_COMMITS], "files": files[:MOST_FILES],
@@ -290,34 +362,40 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None) -> di
              **({"hits": hits} if hits else {}), **({"without_asking": True, "answered": now()} if listed and not hits
                                                    else {}), **({"session": session} if session else {})}
         replaced = []
-        if not hits:  # a newer request replaces one still waiting for the principal
+        if not hits:  # a newer request for the same target replaces one still waiting for the principal
             for x in rs:
-                if x.get("lane") == lane and x.get("state") == "waiting":
+                if x.get("lane") == lane and (x.get("target") or "") == target and x.get("state") == "waiting":
                     x.update(state="void", void=f"replaced by release #{r['id']}", void_zh=f"被发布 #{r['id']} 取代",
                              ended=now())
                     replaced.append(x["id"])
         rs.append(r)
         _write(desk, rs)
-    desk.event("release_asked", id=r["id"], lane=lane, commit=commit, state=r["state"], by=by,
+    desk.event("release_asked", id=r["id"], lane=lane, target=target, commit=commit, state=r["state"], by=by,
                **({"replaced": replaced} if replaced else {}))
     for n in replaced:
-        desk.event("release_void", id=n, lane=lane, why=f"replaced by release #{r['id']}", quiet=True)
+        desk.event("release_void", id=n, lane=lane, target=target, why=f"replaced by release #{r['id']}", quiet=True)
     if hits:
-        desk.event("release_forbidden", id=r["id"], lane=lane, commit=commit, found=len(hits), quiet=True)
+        desk.event("release_forbidden", id=r["id"], lane=lane, target=target, commit=commit, found=len(hits),
+                   quiet=True)
     return r
 
 
 # -- the principal's answer ----------------------------------------------------------------------------------------
 def stale(desk: Desk, s: dict, r: dict, zh: bool = False) -> str:
-    """Why a release is no longer what the principal saw (the lane gone, its release command or base branch
-    changed, the base branch moved); '' when it still is. zh: in Chinese, for the page."""
+    """Why a release is no longer what the principal saw (the lane or its target gone, the target's command or
+    the lane's base branch changed, the base branch moved); '' when it still is. zh: in Chinese, for the page."""
     ln = s["lanes"].get(r.get("lane"))
     if not ln:
         return f"工作线 {r.get('lane')} 已不在桌面上" if zh else f"lane {r.get('lane')} is no longer on the desk"
-    if (ln.get("release") or "") != r.get("command"):
-        now_as, then = ln.get("release") or ("（无）" if zh else "(none)"), r.get("command")
-        return (f"工作线 {r['lane']} 的发布命令在请求之后改了：现在是 {now_as!r}，不是 {then!r}" if zh else
-                f"lane {r['lane']}'s release command changed since it was asked: it is now {now_as!r}, not {then!r}")
+    target = r.get("target") or ""
+    t = lane_targets(ln).get(target)
+    if t is None and target:
+        return (f"工作线 {r['lane']} 已没有发布目标 {target}" if zh else
+                f"lane {r['lane']} has no release target {target} any more")
+    if ((t or {}).get("command") or "") != r.get("command"):
+        now_as, then = (t or {}).get("command") or ("（无）" if zh else "(none)"), r.get("command")
+        return (f"{what_zh(r)} 的发布命令在请求之后改了：现在是 {now_as!r}，不是 {then!r}" if zh else
+                f"{what(r)}'s release command changed since it was asked: it is now {now_as!r}, not {then!r}")
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了" if zh else
                 f"lane {r['lane']}'s repository or base branch changed since it was asked")
@@ -336,7 +414,7 @@ def void(desk: Desk, rid, why: str, states=("waiting", "approved"), why_zh: str 
     r = change(desk, rid, lambda x: {"state": "void", "void": why, **({"void_zh": why_zh} if why_zh else {}),
                                      "ended": now()} if x.get("state") in states else None)
     if r:
-        desk.event("release_void", id=rid, lane=r.get("lane"), why=why)
+        desk.event("release_void", id=rid, lane=r.get("lane"), target=r.get("target") or "", why=why)
     return r
 
 
@@ -356,7 +434,8 @@ def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", comma
         if not yes:
             change(desk, rid, lambda x: {"state": "refused", "reason": reason, "answered": now(), "answered_by": by,
                                          "ended": now()})
-            desk.event("release_answered", id=rid, lane=r.get("lane"), yes=False, reason=reason, by=by)
+            desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=False,
+                       reason=reason, by=by)
             return {"ok": True}
         why = stale(desk, desk.settings(), r)
         if why:
@@ -365,7 +444,7 @@ def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", comma
                                                            "coordinator is told, and asks again"]}
         change(desk, rid, lambda x: {"state": "approved", "answered": now(), "answered_by": by,
                                      **({"reason": reason} if reason else {})})
-        desk.event("release_answered", id=rid, lane=r.get("lane"), yes=True, by=by)
+        desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=True, by=by)
     return {"ok": True}
 
 
@@ -378,15 +457,19 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         if not r or r.get("state") != "approved":
             return None
         s = desk.settings()
-        if r.get("without_asking") and not lane_listed(s, r["lane"]):  # off the list, or no longer what it recorded
+        target = r.get("target") or ""
+        if r.get("without_asking") and not lane_listed(s, r["lane"], target):  # off the list, or changed
             change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
-            desk.event("release_waits", id=rid, lane=r["lane"], why="the lane is no longer on the principal's list "
-                                                                       "of lanes released without asking, or no longer "
-                                                                       "what the list recorded")
+            desk.event("release_waits", id=rid, lane=r["lane"], target=target,
+                       why="the target is no longer on the principal's list of releases without asking, or no longer "
+                           "what the list recorded")
             return None
         if r.get("without_asking") and desk.paused():  # while paused, only a release the principal said yes to
             return None
         why, why_zh = stale(desk, s, r), stale(desk, s, r, zh=True)
+        if not why:  # the order, again: the target it must follow sent out this commit
+            why = before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"])
+            why_zh = why and before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"], zh=True)
         if not why:
             try:
                 current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=r["repo"])
@@ -416,13 +499,15 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
             return None
         if hits:  # a word the principal added since it was asked
             change(desk, rid, lambda x: {"state": "forbidden", "hits": hits, "checked": checked, "ended": now()})
-            desk.event("release_forbidden", id=rid, lane=r["lane"], commit=r["commit"], found=len(hits))
+            desk.event("release_forbidden", id=rid, lane=r["lane"], target=target, commit=r["commit"],
+                       found=len(hits))
             return None
         d = log_dir(desk)
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{rid}.exit").unlink(missing_ok=True)
         token = f"hansa-release-{rid}-{uuid.uuid4().hex[:8]}"
-        env = {**os.environ, "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"]}
+        env = {**os.environ, "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"],
+               "HANSA_RELEASE_TARGET": target}
         for k in ("HANSA_TASK", "HANSA_MERGING"):
             env.pop(k, None)
         change(desk, rid, lambda x: {"state": "starting", "launch": token, "started": now(), "checked": checked})
@@ -431,7 +516,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
                                     cwd=r["repo"], env=env, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
         change(desk, rid, lambda x: {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
-    desk.event("release_started", id=rid, lane=r["lane"], commit=r["commit"])
+    desk.event("release_started", id=rid, lane=r["lane"], target=target, commit=r["commit"])
     return proc
 
 
@@ -451,8 +536,8 @@ def finish(desk: Desk, rid) -> dict | None:
         text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
         if log.exists():
             log.write_text(text, encoding="utf-8")
-    limit = r.get("limit_min")
-    problem = (f"stopped at the lane's time limit ({limit} min)" if r.get("timed_out") else
+    limit, whose = r.get("limit_min"), r.get("limit_of") or "the lane's"
+    problem = (f"stopped at {whose} time limit ({limit} min)" if r.get("timed_out") else
                r.get("lost") or ("" if code is not None else "it was interrupted before it could end (no exit code)"))
     ok = code == 0 and not problem
     r = change(desk, rid, lambda x: None if x.get("state") not in ("starting", "running") else {
@@ -460,7 +545,8 @@ def finish(desk: Desk, rid) -> dict | None:
         "tail": text.strip().splitlines()[-TAIL:], "seconds": round(now() - (x.get("started") or now())), "pid": None,
         "pid_start": ""})
     if r:
-        desk.event("release_ended", id=rid, lane=r.get("lane"), commit=r.get("commit"), ok=ok, exit=code, problem=problem)
+        desk.event("release_ended", id=rid, lane=r.get("lane"), target=r.get("target") or "", commit=r.get("commit"),
+                   ok=ok, exit=code, problem=problem)
     return r
 
 
@@ -486,7 +572,7 @@ def _recover(desk: Desk, r: dict) -> None:
 
 
 def tick(desk: Desk, s: dict, procs: dict) -> None:
-    """hansa serve's round for releases: finish those that ended, stop those over their lane's time limit, take
+    """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider)."""
     for rid, proc in list(procs.items()):
@@ -504,9 +590,9 @@ def tick(desk: Desk, s: dict, procs: dict) -> None:
     for r in releases(desk):
         if r.get("state") != "running" or r.get("timed_out"):
             continue
-        minutes = (s["lanes"].get(r.get("lane")) or {}).get("timeout_min", 240)
-        if time.time() - (r.get("started") or time.time()) > 60 * minutes:
-            change(desk, r["id"], lambda x: {"timed_out": True, "limit_min": minutes})
+        limit, whose = minutes(s, r)
+        if time.time() - (r.get("started") or time.time()) > 60 * limit:
+            change(desk, r["id"], lambda x: {"timed_out": True, "limit_min": limit, "limit_of": whose})
             stop(r.get("pid"), r.get("pid_start", ""), procs.get(r["id"]))
     tasks = desk.tasks()
     held = {r.get("repo") for r in releases(desk) if r.get("state") in ("starting", "running")}
@@ -519,8 +605,8 @@ def tick(desk: Desk, s: dict, procs: dict) -> None:
             why = desk.redact(f"it could not start: {e}")[:600]
             if change(desk, r["id"], lambda x: {"state": "failed", "problem": why, "ended": now()}
                       if x.get("state") in ("approved", "starting") else None):
-                desk.event("release_ended", id=r["id"], lane=r.get("lane"), commit=r.get("commit"), ok=False, exit=None,
-                           problem=why)
+                desk.event("release_ended", id=r["id"], lane=r.get("lane"), target=r.get("target") or "",
+                           commit=r.get("commit"), ok=False, exit=None, problem=why)
             continue
         if proc:
             procs[r["id"]] = proc
@@ -542,8 +628,8 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
     other = next((x for x in releases(desk) if x.get("state") in ("starting", "running") and x.get("repo") == r.get("repo")
                   and x["id"] != r["id"]), None)
     if other:
-        return (f"等同一仓库上工作线 {other.get('lane')} 的发布 #{other['id']} 结束" if zh else
-                f"waits for release #{other['id']} of lane {other.get('lane')} on the same repository")
+        return (f"等同一仓库上{what_zh(other)}的发布 #{other['id']} 结束" if zh else
+                f"waits for release #{other['id']} of {what(other)} on the same repository")
     m = merging_on(desk, s, r.get("repo"), tasks)
     if m:
         return (f"等同一仓库上工作线 {m.get('lane')} 的 {m['id']} 合并验收结束" if zh else
@@ -562,10 +648,10 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         return "等你在网页上点头" if zh else "waiting for the principal's yes on the page"
     if st == "approved":
         if zh:
-            how = ("不用问你就发布（这条工作线在你的清单上）" if r.get("without_asking")
+            how = ("不用问你就发布（这个发布目标在你的清单上）" if r.get("without_asking")
                    else f"你在 {when(r.get('answered'))} 点了头")
             return f"{how}；{waits_text(desk, s or desk.settings(), r, zh=True)}"
-        how = "released without asking (the lane is on the principal's list)" if r.get("without_asking") \
+        how = "released without asking (it is on the principal's list)" if r.get("without_asking") \
             else f"the principal said yes {when(r.get('answered'))}"
         return f"{how}; {waits_text(desk, s or desk.settings(), r)}"
     if st in ("starting", "running"):
@@ -600,15 +686,15 @@ def checked_text(r: dict) -> str:
 
 
 def line(desk: Desk, r: dict, s: dict | None = None) -> str:
-    return (f"#{r['id']} lane {r.get('lane')} at {r.get('commit', '')[:10]} ({r.get('base')}): "
+    return (f"#{r['id']} {what(r)} at {r.get('commit', '')[:10]} ({r.get('base')}): "
             f"{state_text(desk, r, s)}")
 
 
 def list_text(desk: Desk) -> str:
     rs = releases(desk)
     if not rs:
-        return ("no releases yet. A lane's release command is set with hansa lane set L release \"<command>\"; "
-                "hansa release L [note] asks for one")
+        return ("no releases yet. A lane's release command is set with hansa lane set L release \"<command>\", or its "
+                "named targets with hansa lane target L NAME \"<command>\"; hansa release L [TARGET] [note] asks for one")
     s = desk.settings()
     live = [r for r in rs if r.get("state") in OPEN]
     recent = [r for r in rs if r.get("state") not in OPEN][-10:]
@@ -630,26 +716,35 @@ def list_text(desk: Desk) -> str:
 
 
 def lane_lines(desk: Desk, name: str, ln: dict) -> list:
-    """For hansa explain lane: the release command and the lane's last release."""
+    """For hansa explain lane: the release targets and the last release of each."""
     s = desk.settings()
-    rs = [r for r in releases(desk) if r.get("lane") == name]
-    last = rs[-1] if rs else None
-    return [
-        "  release: " + (f"{ln['release']} (hansa release {name} asks for it; it runs in {ln['repo']} at the base "
-                         "branch's commit, as the desk's account, outside the sandbox, with hansa's environment (not "
-                         "the lane's env) and the lane's minutes as its limit, only after the principal says yes on "
-                         "the page" + (": this lane is on the principal's list of lanes released without asking"
-                                       if lane_listed(s, name) else unlisted(s, name)) + ")"
-                         if ln.get("release") else f"none (set one with hansa lane set {name} release \"<command>\")"),
-        "  last release: " + (line(desk, last, s) if last else "none")]
+    targets = lane_targets(ln)
+    how = (f"it runs in {ln['repo']} at the base branch's commit, as the desk's account, outside the sandbox, with "
+           "hansa's environment (not the lane's env), holding the repository (merges there wait for it), only after "
+           "the principal says yes on the page")
+    if not targets:
+        return [f"  release: none (set one with hansa lane set {name} release \"<command>\", or name targets with "
+                f"hansa lane target {name} NAME \"<command>\")", "  last release: none"]
+    out = []
+    for target, t in sorted(targets.items()):
+        rs = [r for r in releases(desk) if r.get("lane") == name and (r.get("target") or "") == target]
+        limit = t.get("timeout_min") or ln.get("timeout_min", 240)
+        head = f"  release target {target}" if target else "  release"
+        out += [f"{head}: {t.get('command')} (hansa release {name}{' ' + target if target else ''} asks for it; "
+                f"{how}; {limit} min as its limit"
+                + (f"; only for a commit target {t['after']} already sent out" if t.get("after") else "")
+                + (": the principal lets it go out without asking" if lane_listed(s, name, target)
+                   else unlisted(s, name, target)) + ")",
+                f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
+    return out
 
 
-def unlisted(s: dict, name: str) -> str:
-    """For hansa explain lane: a lane on the principal's list that no longer goes out without asking, and why."""
+def unlisted(s: dict, name: str, target: str = "") -> str:
+    """For hansa explain lane: a target on the principal's list that no longer goes out without asking, and why."""
     why = next((listed_mismatch(s, x) for x in s.get("releases_without_asking") or []
-                if (x if isinstance(x, str) else x.get("lane") if isinstance(x, dict) else None) == name), "")
-    return (f": this lane is on the principal's list of lanes released without asking, but {why}, so its releases "
-            "wait for the yes until the principal saves the list again") if why else ""
+                if listed_key(x) == (name, target)), "")
+    return (f": it is on the principal's list of releases without asking, but {why}, so its releases wait for the "
+            "yes until the principal saves the list again") if why else ""
 
 
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:
@@ -660,7 +755,8 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
                                                            and (r.get("ended") or r.get("asked") or 0) >= week][-5:]
     out = []
     for r in shown:
-        row = {k: r.get(k) for k in ("id", "lane", "base", "commit", "command", "note", "state", "asked", "answered",
+        row = {k: r.get(k) for k in ("id", "lane", "target", "base", "commit", "command", "note", "state", "asked",
+                                     "answered",
                                      "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
                                      "named", "hits", "ended", "without_asking", "since_release")}
         row["checked"] = r.get("checked", r.get("count"))

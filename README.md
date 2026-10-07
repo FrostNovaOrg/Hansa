@@ -74,8 +74,8 @@ page gives.
 ## Who changes what
 - The principal, on the page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices,
-  whether the coordinator audits cost, the lanes whose releases go out without
-  asking and the words no release may send out. The page also shows what goes
+  whether the coordinator audits cost, the release targets that go out without
+  asking (each ticked on its own) and the words no release may send out. The page also shows what goes
   on, and asks the principal about each release (below).
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
   provider order, allowed commands (for design sessions), network and write lists, environment,
@@ -84,8 +84,9 @@ page gives.
   merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`);
   each lane's standing instructions (`hansa lane brief`, kept in
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
-  (`hansa lane set L release "git push origin main"`) and asking for a release
-  (`hansa release L "note"`), never pushing or deploying by itself.
+  (`hansa lane set L release "git push origin main"`) or its named release
+  targets (`hansa lane target L NAME "<command>"`) and asking for a release
+  (`hansa release L [TARGET] "note"`), never pushing or deploying by itself.
   Each lane may also set the form of the messages hansa writes into its
   repository: `commit_message` for the commit of a task's work (and the merge
   of the base into a task's branch on `retry --update`), `merge_message` for a
@@ -181,29 +182,46 @@ page gives.
   inside the desk. `hansa/card.md` says the same.
 - Releases are the last step. hansa merges into a lane's base branch and stops
   there; a lane's release command (a push, a wait for CI such as `gh run watch
-  --exit-status`, a deploy script) is how the base branch goes out. `hansa
-  release L` records the request: the commit, the command, the note, the
+  --exit-status`, a deploy script) is how the base branch goes out. A lane
+  that sends it out in more than one way (a push to the public repository, an
+  install on a test server, an install on the production server) names its
+  release targets instead, with `hansa lane target L NAME "<command>"
+  [--minutes N] [--after OTHER]`: each has its own command, its own time limit
+  (else the lane's `timeout_min`) and optionally another target of the lane
+  that must have sent out the same commit first; a lane has either the
+  `release` command (its one unnamed target) or named targets. `hansa
+  release L [TARGET] [note]` (TARGET needed when there is more than one)
+  records the request: the target, the commit, the command, the note, the
   commits that go out (on no remote-tracking branch of the repository and not
-  in the lane's last release; the whole history when it has no
+  in that target's last release; the whole history when it has no
   remote-tracking branch) and the files they change, a file the command names
   (such as `./deploy.sh`) marked. A word from the principal's list of words no
   release may send out, in the command line or in a line, a file name or a
   message of any outgoing commit (all are checked; matched within one line,
   in text read as UTF-8), refuses it. A command that holds a known key is
-  refused when it is set. Otherwise the page shows it with Release and Refuse;
-  a lane the principal lists as released without asking needs no answer while
-  its repository, base branch and command are what they were when the list
-  was saved, and while the desk is not paused. hansa serve runs the
+  refused when it is set. A target that must follow another is asked only for
+  a commit the other one already sent out, and looked at again before it
+  starts. Otherwise the page shows it, with its target, with Release and
+  Refuse; a target the principal ticks as released without asking (each one
+  on its own) needs no answer while the lane's repository and base branch, the
+  target's command and the target it must follow (its `--after`, or none) are
+  what they were when the list was saved, and while the desk is not paused: a
+  change to any of them, `--after` dropped or changed included, unticks it
+  until the principal saves the list again; `--minutes` alone does not, and a
+  target taken out and set again with the same command and `--after` keeps its
+  tick. hansa serve runs the
   command only then, and only while the base branch and the command are still
   what the principal saw (else the request is void and the coordinator asks
   again): in the lane's repository at that commit, as the desk's account,
   outside the sandbox (it needs the account's logins and network), with
-  hansa's own environment (not the lane's env), the lane's `timeout_min` as its
+  hansa's own environment (not the lane's env), the target's time limit as its
   limit, its output kept without keys in `.hansa/releases/`. One release at a
   time per repository, and none while a merge or merge check runs there, nor a
-  merge while a release runs. The coordinator hears when the principal answers
+  merge while a release runs: a release holds the repository, so a long
+  install keeps that repository's merges waiting (a later change may let such
+  a target run from a fixed checkout instead). The coordinator hears when the principal answers
   and when the release ends. `hansa release` lists them; `hansa explain lane L`
-  shows the command and the last release.
+  shows each target's command and its last release.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
   and not the settings, plugins, hooks or MCP servers of the account they run as.
 - Nobody reads hansa's code to use it. If the card or a command's output is not
