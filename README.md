@@ -257,7 +257,7 @@ page gives.
   that sends it out in more than one way (a push to the public repository, an
   install on a test server, an install on the production server) names its
   release targets instead, with `hansa lane target L NAME "<command>"
-  [--minutes N] [--after OTHER]`: each has its own command, its own time limit
+  [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
   (else the lane's `timeout_min`) and optionally another target of the lane
   that must have sent out the same commit first; a lane has either the
   `release` command (its one unnamed target) or named targets. `hansa
@@ -275,8 +275,8 @@ page gives.
   starts. Otherwise the page shows it, with its target, with Release and
   Refuse; a target the principal ticks as released without asking (each one
   on its own) needs no answer while the lane's repository and base branch, the
-  target's command and the target it must follow (its `--after`, or none) are
-  what they were when the list was saved, and while the desk is not paused: a
+  target's command, the target it must follow (its `--after`, or none) and
+  whether it is `--fixed` are what they were when the list was saved, and while the desk is not paused: a
   change to any of them, `--after` dropped or changed included, unticks it
   until the principal saves the list again; `--minutes` alone does not, and a
   target taken out and set again with the same command and `--after` keeps its
@@ -287,10 +287,21 @@ page gives.
   outside the sandbox (it needs the account's logins and network), with
   hansa's own environment (not the lane's env), the target's time limit as its
   limit, its output kept without keys in `.hansa/releases/`. One release at a
-  time per repository, and none while a merge or merge check runs there, nor a
-  merge while a release runs: a release holds the repository, so a long
-  install keeps that repository's merges waiting (a later change may let such
-  a target run from a fixed checkout instead). The coordinator hears when the principal answers
+  time per repository. A release that runs in the repository holds it: none
+  starts while a merge or merge check runs there, nor a merge while it runs. A
+  target set `--fixed` runs instead in a detached checkout of the release's
+  commit made for it under the desk (removed when it ends, however it ends,
+  and swept after a restart), with `HANSA_RELEASE_COMMIT`,
+  `HANSA_RELEASE_TARGET` and `HANSA_RELEASE_REPO` in its environment, and
+  holds nothing, so a long install leaves the repository's merges going on;
+  its command must name the commit (`$HANSA_RELEASE_COMMIT`, or `HEAD`), and
+  one that names the base branch (`git push origin main`) is refused, since
+  the branch may have moved past what the principal saw. The commits going out
+  are read and checked for forbidden words without holding the desk, each
+  commit's own change once (a merge's: only what it adds beyond its parents,
+  git's `--cc`), and recorded only if they are still what goes out; hansa
+  serve checks again at the start only when the commit, the starting point,
+  the words or the command changed. The coordinator hears when the principal answers
   and when the release ends. `hansa release` lists them; `hansa explain lane L`
   shows each target's command and its last release.
 - Alerts reach the principal away from the page. The principal may set one

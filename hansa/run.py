@@ -3539,7 +3539,7 @@ class Dispatcher:
             if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
                 desk.update(m["id"], merge_check={**mc, "timed_out": True})
                 stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
-        from .release import releases
+        from .release import holds_repo, releases
         tasks = desk.tasks()
         busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
         free = s["concurrency"] - sum(map(lane_occupied, tasks))
@@ -3547,8 +3547,9 @@ class Dispatcher:
         # that ran beside another would be checked on a base that the other's merge then moves
         held = {merge_target(s, m.get("lane")) for m in tasks
                 if m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running")}
-        # and none, nor a merge, where a release runs: it sends out the commit the principal saw
-        releasing = {r.get("repo") for r in releases(desk) if r.get("state") in ("starting", "running")}
+        # and none, nor a merge, where a release runs: it sends out the commit the principal saw (one that runs
+        # from a fixed checkout of that commit holds nothing)
+        releasing = {r.get("repo") for r in releases(desk) if holds_repo(r)}
         for m in sorted(tasks, key=merge_order):
             if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
                 continue

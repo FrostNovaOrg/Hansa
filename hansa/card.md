@@ -52,7 +52,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, network, write, env, limits, standing instructions), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
 | `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below) |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
-| `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`) and another target of the lane that must have sent out the same commit first; options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
+| `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
@@ -213,7 +213,19 @@ to a public repository, a deploy to production) waits for the principal:
   one line saying which release goes first, otherwise; hansa looks again when
   it is about to start. A lane has either its `release` command (its one
   unnamed target) or named targets: take `release` out (`hansa lane set L
-  release none`) when you name the first. `hansa lane target L` lists them.
+  release none`) when you name the first. `hansa lane target L` lists them,
+  each with the way it runs.
+- A target whose release takes long (an install that waits until nobody uses
+  the server) runs from a fixed checkout: `hansa lane target L test --fixed`
+  (`--fixed none`: back to the repository). Its command then runs in a
+  detached checkout of the release's commit that hansa makes for it under the
+  desk and removes when it ends (however it ends; swept after a restart), and
+  it holds nothing: merges and merge checks in the repository go on meanwhile.
+  Its environment has `HANSA_RELEASE_COMMIT`, `HANSA_RELEASE_TARGET` and
+  `HANSA_RELEASE_REPO` (the lane's repository). Name the commit, never the base
+  branch: `git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"` or `HEAD`,
+  not `git push origin main`, which would send wherever `main` has moved by
+  then; a fixed target whose command names the base branch is refused.
 - When the base branch holds what should go out, ask: `hansa release L
   [TARGET] "<note>"` (TARGET is needed when the lane has more than one).
   hansa records the commit, the target and its command, your note, the
@@ -234,7 +246,7 @@ to a public repository, a deploy to production) waits for the principal:
   its own; a tick for one never covers another). That list holds each target
   as it was when the principal saved it: the lane's repository and base
   branch, the target's command and the target it must follow (`--after`, or
-  none). A change to any of these unticks it: it waits for the yes until the
+  none), and whether it is `--fixed`. A change to any of these unticks it: it waits for the yes until the
   principal saves the list again. Dropping or changing `--after` unticks it
   too; a change of `--minutes` alone does not, and a target taken out and set
   again with the same command and `--after` keeps its tick, since it is what
@@ -247,11 +259,18 @@ to a public repository, a deploy to production) waits for the principal:
   hansa's own environment (not the lane's env), the target's minutes (else the
   lane's `timeout_min`) as its limit. If the base branch moved or the command changed since the principal
   saw it, the release is void and says why: ask again.
-- One release at a time per repository, and none while a merge or merge check
-  runs there; a merge asked while a release runs waits for it. A release holds
-  the repository for as long as it runs, so a long install (one that waits
-  until nobody uses the service) keeps that repository's merges waiting; a
-  later change may let such a target run from a fixed checkout instead.
+- One release at a time per repository. A release that runs in the
+  repository holds it for as long as it runs: none starts while a merge or
+  merge check runs there, and a merge asked meanwhile waits for it, so a long
+  install there keeps that repository's merges waiting. A `--fixed` target's
+  release holds nothing.
+- `hansa release` reads and checks the commits without holding the desk, so
+  the server's round and the page go on meanwhile. Each outgoing commit's own
+  change is checked once: for a merge, only what it adds beyond its parents
+  (such as a conflict's resolution), so a merge that brings in commits already
+  on a remote-tracking branch is not refused for words in them. hansa serve
+  checks again before it starts only when the commit, the starting point, the
+  words or the command changed since.
 - hansa tells you when the principal answers and when the release ends: done,
   or failed with its exit code and last lines. `hansa release` lists them;
   `hansa explain lane L` shows each target's command and its last release.
