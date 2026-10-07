@@ -202,6 +202,55 @@ page gives.
   would stop every command of the lane's workers), no `PATH` entry that is empty
   or not a full path, and no place inside the desk. The file hansa writes it to
   for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
+- A task or verification with a browser (`hansa add --browser`, `hansa verify
+  --browser`) on a lane with a `preview` (the command that starts the app, such
+  as `npm run dev`) gets the app started for it. On macOS hansa starts the
+  preview itself before the worker: in the lane's worktree, after the lane's
+  setup, in `srt` with the lane's sandbox (network and write lists, env, the
+  prelude), with local binding allowed for that one process; the worker's own
+  sandbox stays as the lane sets it. hansa waits up to the lane's
+  `preview_wait_s` (default 120 seconds) for the first `http://localhost:PORT`
+  or `http://127.0.0.1:PORT` address the preview prints, or a port it names
+  that answers, and puts the address in the worker's instructions; a preview
+  not ready by then is stopped, and the worker is told it did not start, with
+  its last lines, and goes on without it. hansa stops the preview with its
+  whole process group when the worker ends, however it ends (done, failed,
+  cancelled, stopped at the ceiling, or ended while `hansa serve` was
+  restarted). It stops the processes the preview started that left that group
+  too: while the preview runs, hansa looks every half second for what runs
+  below it and records each one (its number and start time), and at the end
+  stops each recorded one still running, whatever its group or environment,
+  and any orphan (a process whose parent is the system's first process, as a
+  daemon that forked twice is) started since whose working folder is in the
+  worktree or the preview's temporary folder. A process with a living parent
+  that the preview did not start is not touched, so a shell, an editor or a
+  file watcher you start in the worktree while a browser task runs there is
+  left alone. But a process you start there with `nohup` (or an editor that
+  detaches itself from the shell that started it) becomes an orphan once that
+  shell ends, and is stopped at the end of the task. What can still escape on macOS: a process that forks twice,
+  leaves the group, clears its environment and changes folder all between two
+  looks (half a second). It keeps running after the task, with the
+  preview's sandbox, local binding included: it can reach the machine's
+  loopback, write in the worktree and the lane's write list, and reach the
+  hosts on the lane's network list, until it ends or the machine restarts. A
+  worker's own processes are not recorded this way: hansa still finds what a
+  worker leaves by `HANSA_TASK` in its environment or its run's folder in its
+  arguments, as before. Its output is kept in the task's folder as
+  `preview.log`, keys removed, at most its first and last 2 MB on disk with a
+  line saying how much was left out between them (a byte that is not UTF-8 is
+  kept as one `?`; where a cut falls inside a line, 4 KB more on each side of
+  it are left out, so no key is kept in part, and the line says so; if
+  removing keys made it longer, it is cut again after; hansa reads the whole output as
+  it comes, so a preview that prints without end never waits on it and never
+  fills the disk); `hansa show` says where and what became of it. **On macOS such a
+  preview can reach every service on this machine's loopback while it runs**,
+  as a lane with `localhost` on its network list can: that is the price of
+  looking at the app in a browser on a Mac. **On Linux hansa does not start
+  it**: `srt` runs a command there in a network namespace of its own
+  (bubblewrap's `--unshare-net`; local binding is a macOS setting), so a
+  server bound inside listens on the sandbox's own loopback, and the browser,
+  which runs outside the sandbox, cannot reach it. The worker is told so. A
+  design session starts its own preview, as before.
 - Releases are the last step. hansa merges into a lane's base branch and stops
   there; a lane's release command (a push, a wait for CI such as `gh run watch
   --exit-status`, a deploy script) is how the base branch goes out. A lane
@@ -398,8 +447,10 @@ looks like an empty box: it may send the guess as if you wrote it.
 ## Current limits
 - Alpha: settings, commands and files may still change between versions.
 - A worker's commands, and the lane's setup and check commands, run in the
-  operating system's sandbox; the lane's preview command, design sessions and
-  the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
+  operating system's sandbox, and so does the preview hansa starts for a task
+  with a browser (on macOS only, with local binding: it can reach every service
+  on the machine's loopback while it runs); the preview a design session starts,
+  design sessions and the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the
