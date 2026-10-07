@@ -2088,7 +2088,10 @@ def main(argv=None):
         "HANSA_RELEASE_COMMIT (the commit the principal saw), HANSA_RELEASE_TARGET and HANSA_RELEASE_REPO (the lane's "
         "repository). Such a command must name the commit, as $HANSA_RELEASE_COMMIT or HEAD (git push origin "
         "\"$HANSA_RELEASE_COMMIT:refs/heads/main\", say), never the base branch (git push origin main would send "
-        "wherever main has moved by then): a fixed target whose command names the base branch is refused. "
+        "wherever main has moved by then). hansa refuses a fixed target whose command line itself names the base "
+        "branch as what to send (main, refs/heads/main, main~0, main^{commit}, main@{0}, or the source of main:prod; "
+        "HEAD:main names it only as where to send, and is allowed); a variable the command expands or a script it "
+        "runs is not looked into, so a fixed target's command should send $HANSA_RELEASE_COMMIT. "
         "--fixed none runs it in the repository again"))
     q.add_argument("name")
     q.add_argument("target", nargs="?", metavar="NAME")

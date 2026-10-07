@@ -10510,6 +10510,18 @@ class DeskTest(unittest.TestCase):
         self.assertIn("names the base branch (dev)", self.refused("lane", "set", "a", "base", "dev"))
         self.assertEqual(self.desk.settings()["lanes"]["a"].get("base", "main"), "main")
 
+    def test_a_fixed_target_naming_the_base_branch_with_a_revision_suffix_is_refused(self):
+        for word in ("main~0", "main^{commit}", "main^{}", "main@{0}", "refs/heads/main~1",
+                     "main~0:refs/heads/prod", "main^{commit}:refs/heads/prod", "main@{0}:refs/heads/prod"):
+            said = self.refused("lane", "target", "a", "push", f"git push origin {word}", "--fixed")
+            self.assertIn(f"names the base branch ({word})", said)
+            self.assertNotIn("targets", self.desk.settings()["lanes"]["a"])
+        # the base only as where to send is still allowed, as is a branch whose name merely begins with it
+        for cmd in ("git push origin HEAD:main", 'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"',
+                    "git push origin mainline~0"):
+            self.hansa("lane", "target", "a", "push", cmd, "--fixed")
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["push"]["command"], cmd)
+
     def test_the_tick_for_going_out_without_asking_stops_counting_when_fixed_changes(self):
         from hansa import release
         from hansa.desk import public_settings

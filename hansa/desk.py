@@ -885,8 +885,9 @@ def target_problems(ln: dict) -> list:
 
 def names_branch(command: str, branch: str) -> str:
     """The word of a command line that names the branch as what to read or send (main, refs/heads/main, the source
-    side of main:dest), '' for none; naming it only as where to send (HEAD:main, $X:refs/heads/main)
-    is not reading it."""
+    side of main:dest, and any of these followed by git's revision syntax: main~0, main^{commit}, main@{0}), '' for
+    none; naming it only as where to send (HEAD:main, $X:refs/heads/main) is not reading it. Only the command line
+    itself is read: a variable it expands or a script it runs is not looked into."""
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
@@ -894,7 +895,7 @@ def names_branch(command: str, branch: str) -> str:
     except ValueError:
         words = command.split()
     for w in words:
-        src = w.lstrip("+").split(":", 1)[0]
+        src = re.split(r"[~^]|@\{", w.lstrip("+").split(":", 1)[0], maxsplit=1)[0]
         if src in (branch, f"refs/heads/{branch}", f"heads/{branch}"):
             return w
     return ""

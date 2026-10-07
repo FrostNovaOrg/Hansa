@@ -225,7 +225,11 @@ to a public repository, a deploy to production) waits for the principal:
   `HANSA_RELEASE_REPO` (the lane's repository). Name the commit, never the base
   branch: `git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"` or `HEAD`,
   not `git push origin main`, which would send wherever `main` has moved by
-  then; a fixed target whose command names the base branch is refused.
+  then. hansa refuses a fixed target whose command line itself names the
+  base branch as what to send (`main`, `main~0`, `main^{commit}`, `main@{0}`,
+  the source of `main:prod`; `HEAD:main` is allowed), but it does not look
+  into a variable the command expands or a script it runs: send
+  `$HANSA_RELEASE_COMMIT`.
 - When the base branch holds what should go out, ask: `hansa release L
   [TARGET] "<note>"` (TARGET is needed when the lane has more than one).
   hansa records the commit, the target and its command, your note, the

@@ -294,9 +294,12 @@ page gives.
   and swept after a restart), with `HANSA_RELEASE_COMMIT`,
   `HANSA_RELEASE_TARGET` and `HANSA_RELEASE_REPO` in its environment, and
   holds nothing, so a long install leaves the repository's merges going on;
-  its command must name the commit (`$HANSA_RELEASE_COMMIT`, or `HEAD`), and
-  one that names the base branch (`git push origin main`) is refused, since
-  the branch may have moved past what the principal saw. The commits going out
+  its command should send the commit (`$HANSA_RELEASE_COMMIT`, or `HEAD`), not
+  the base branch, which may have moved past what the principal saw. hansa
+  refuses a fixed target whose command line itself names the base branch as
+  what to send (`main`, `refs/heads/main`, `main~0`, `main^{commit}`,
+  `main@{0}`, or the source of `main:prod`; `HEAD:main` is allowed), but a
+  variable the command expands or a script it runs is not looked into. The commits going out
   are read and checked for forbidden words without holding the desk, each
   commit's own change once (a merge's: only what it adds beyond its parents,
   git's `--cc`), and recorded only if they are still what goes out; hansa
