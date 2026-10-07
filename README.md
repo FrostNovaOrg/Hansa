@@ -87,7 +87,15 @@ page gives.
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) or its named release
   targets (`hansa lane target L NAME "<command>"`) and asking for a release
-  (`hansa release L [TARGET] "note"`), never pushing or deploying by itself.
+  (`hansa release L [TARGET] "note"`), never pushing or deploying by itself:
+  its settings deny `git push`, `gh release`, `gh pr merge`, `gh repo` and the
+  usual publish commands (`npm`, `pnpm`, `yarn`, `uv` and `poetry publish`,
+  `twine upload`, `cargo publish`, `gem push`, `docker` and `podman push`,
+  `mvn deploy`) from its own shell, whatever its mode, written plainly or with
+  options before the subcommand (`git -C DIR push`); run through another
+  program or shell (`bash -c "git push"`, `xargs`, a script) they are not
+  caught, and in manual mode such a command asks the principal. `hansa release`
+  runs the release command itself after the principal's yes.
   Each lane may also set the form of the messages hansa writes into its
   repository: `commit_message` for the commit of a task's work (and the merge
   of the base into a task's branch on `retry --update`), `merge_message` for a
@@ -119,7 +127,8 @@ page gives.
   report, inside Claude Code's sandbox, which the operating system enforces: any
   command, but files changed only in the worktree (and its temporary folder and
   the lane's write list, `hansa lane set L write ...`), no
-  reading of the desk's keys and state, of any provider's Claude Code folder or
+  reading of the desk's keys and state, the coordinator's notes (`notes/`) and
+  card (the desk's `CLAUDE.md`; design sessions may not read these either), of any provider's Claude Code folder or
   `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
   shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
   macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
@@ -129,7 +138,15 @@ page gives.
   keychains, cookies, mail and messages under `~/Library`), or of
   the folders and files the principal lists on the page (Settings, "workers may
   not read": this machine's own folders of keys; Read is denied there to every
-  Claude Code run hansa starts, the coordinator too), no network but the
+  Claude Code run hansa starts, the coordinator too. An entry that would stop
+  every worker is refused on saving, each with its reason: the home folder,
+  the desk, a lane's repository, a folder on the `PATH`, the system's programs
+  and libraries (`/usr/lib`, `/etc` and the like), Homebrew's `Cellar`, `opt`
+  and `Caskroom`, `~/.config`, `~/.local`, `~/.cache` (and `~/Library` on
+  macOS), the temporary folder, the desk's worktrees folder or a lane's
+  worktree, or a folder above any of them, and `/dev` or anything in it; a
+  file or folder inside one of the others, such as one file in `~/.config` or
+  one formula's folder in `Cellar`, may be listed), no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
   own branch, and merges only what the coordinator merges. The lane's setup,
@@ -179,8 +196,12 @@ page gives.
   check command, not in the lane's env. A lane's env takes no name that tells
   a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
   `GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
-  `HOME`), no `PATH` entry that is empty or not a full path, and no place
-  inside the desk. `hansa/card.md` says the same.
+  `HOME`), no name sh, bash or zsh keeps for itself (read-only or special, such
+  as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's `path` and
+  `keymaps`, each one tried in sh, bash and zsh: setting one
+  would stop every command of the lane's workers), no `PATH` entry that is empty
+  or not a full path, and no place inside the desk. The file hansa writes it to
+  for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
 - A task or verification with a browser (`hansa add --browser`, `hansa verify
   --browser`) on a lane with a `preview` (the command that starts the app, such
   as `npm run dev`) gets the app started for it. On macOS hansa starts the
@@ -297,7 +318,8 @@ page gives.
   has a button that sends a test alert; no coordinator command sends one.
   `hansa explain` says whether a command is set and what it is.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
-  and not the settings, plugins, hooks or MCP servers of the account they run as.
+  and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
+  verifier or a design session read the desk's card or `notes/`.
 - Nobody reads hansa's code to use it. If the card or a command's output is not
   enough, fix the card or the output.
 
@@ -363,6 +385,27 @@ Mockito documents; in the pom:
 
 Gradle is not covered yet: the prelude sets nothing for it but
 `JAVA_TOOL_OPTIONS`.
+
+## When a provider hits a usage limit
+When a provider answers with a usage limit (HTTP 402 or 429, or the wording of one), it rests: no task
+starts on it until the rest ends, and a task stopped by the limit moves to the next ready provider of its
+lane, or waits for one.
+
+- **Until the reset time, when the error gives one**, and a minute, for at most 31 days. hansa reads a
+  clock time (`You've hit your session limit · resets 3pm (Europe/Berlin)`, as Claude Code prints a
+  subscription's limit), a date and time (`resets Oct 9, 3pm (Europe/Berlin)`, `resets 2026-08-08 00:00
+  UTC`), a Unix time (`usage limit reached|1760000000`, `resets_at`), a `retry-after` value given in the
+  message, and "in N minutes" or "in N hours" (`Please try again in 20 minutes`). A time without a zone is
+  the machine's local time; a month and day without a year is in the year that puts it nearest to now.
+  A form hansa is unsure of, a time already past, or a line it cannot read gets the fixed length below.
+- **Else for the provider's own rest**, `rest_minutes` on the page (1 to 44640, a month), or the desk's
+  `cool_minutes` (30 by default) when it is empty. Fit it to the provider: a subscription's window is a
+  few hours, an API key's limit may be per minute, a plan's allowance may be monthly.
+- **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
+  using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
+  limit again right after each rest cannot hold a task forever. Any other failure counts as before.
+  `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
+  when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
 
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live

@@ -33,6 +33,7 @@ import string
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 import unicodedata
@@ -157,6 +158,30 @@ MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
 # tell a loader, git, a shell or Claude Code what to run, are not a lane's to set
 RUN_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "CLAUDE_")
 RUN_ENV_NAMES = ("NODE_OPTIONS", "BASH_ENV", "ENV", "SHELL", "ZDOTDIR", "HOME")
+# Names sh, bash or zsh keep for themselves, read-only or special: `export UID=0` in the file a worker's Bash
+# commands start with (run.env_file) stops the shell, so every command of the lane would fail; zsh's lowercase
+# ones are tied to others (path is PATH) or are the shell's own tables.
+# Made from the names zsh 5.9 types special or readonly in ${(t)parameters}, bash's `readonly -p` and the names
+# bash 5's manual says the shell sets or reads itself, each written as `export NAME=0` in a file sourced by
+# /bin/sh, /bin/bash and /bin/zsh: here are every name that stops one of them, every read-only one, and those the
+# shell sets for itself and reads each line with (IFS, PWD, BASHOPTS...); the rest (PATH, LANG, TERM, HISTSIZE,
+# PS1...) are ordinary values a lane may set
+SHELL_ENV_NAMES = (
+    "_", "aliases", "ARGC", "argv", "BASH_ALIASES", "BASH_ARGC", "BASH_ARGV", "BASH_ARGV0", "BASH_CMDS",
+    "BASH_COMMAND", "BASH_LINENO", "BASH_REMATCH", "BASH_SOURCE", "BASH_SUBSHELL", "BASH_VERSINFO",
+    "BASH_VERSION", "BASHOPTS", "BASHPID", "builtins", "cdpath", "commands", "dirstack", "dis_aliases",
+    "dis_builtins", "dis_functions", "dis_functions_source", "dis_galiases", "dis_patchars", "dis_reswords",
+    "dis_saliases", "EGID", "EPOCHREALTIME", "EPOCHSECONDS", "ERRNO", "EUID", "fignore", "fpath", "funcfiletrace",
+    "FUNCNAME", "funcsourcetrace", "funcstack", "functions", "functions_source", "functrace", "galiases", "GID",
+    "GROUPS", "HISTCMD", "history", "historywords", "IFS", "jobdirs", "jobstates", "jobtexts", "keymaps",
+    "LINENO", "mailpath", "manpath", "module_path", "modules", "nameddirs", "OLDPWD", "OPTARG", "OPTIND",
+    "options", "parameters", "patchars", "path", "PIPESTATUS", "pipestatus", "PPID", "PS4", "psvar", "PWD",
+    "RANDOM", "reswords", "saliases", "SECONDS", "SHELLOPTS", "SHLVL", "signals", "SRANDOM", "status",
+    "sysparams", "termcap", "terminfo", "TTYIDLE", "UID", "userdirs", "usergroups", "widgets", "ZSH_ARGZERO",
+    "ZSH_EVAL_CONTEXT", "zsh_eval_context", "ZSH_NAME", "ZSH_PATCHLEVEL", "zsh_scheduled_events", "ZSH_SUBSHELL",
+    "ZSH_VERSION")
+SHELL_ENV_WHY = ("cannot be set for a lane: sh, bash or zsh keeps it for itself (read-only or special), and setting "
+                 "it would stop every command of the lane's workers")
 RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run; set it inside "
                "the check or setup command instead, where it runs in the sandbox")
 # The variables that exist to point a tool in the sandbox at the lane's own folder: what these name may be on
@@ -174,6 +199,9 @@ DEFAULT_ALLOW: list = []
 def home_secrets() -> tuple:
     """The built-in names, under the home folder, of what no worker may read on this system."""
     return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
+
+
+REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
 
 
 def default_settings() -> dict:
@@ -306,7 +334,8 @@ def validate(s: dict, root=None) -> list:
             continue
         if {"key", "api_key", "token"} & set(pv):
             p.append(f"{at}: keys are not kept in settings; use the key box on the page")
-        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "key", "api_key", "token"}
+        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "rest_minutes", "key", "api_key",
+                           "token"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if pv.get("kind") not in PROVIDER_KINDS:
@@ -318,6 +347,9 @@ def validate(s: dict, root=None) -> list:
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
             p.append(f"{at}: the endpoint address must start with https://")
+        if pv.get("rest_minutes") is not None and not _is_int(pv["rest_minutes"], 1, REST_MINUTES_MOST):
+            p.append(f"{at}: rest_minutes (its rest after a usage limit) must be a whole number from 1 to "
+                     f"{REST_MINUTES_MOST}, or empty for the desk's cool_minutes")
         cdir = pv.get("config_dir", "")
         if cdir and not str(cdir).startswith("/"):  # nothing expands ~ for a worker
             p.append(f"{at}: config_dir must be a full path starting with /")
@@ -435,6 +467,8 @@ def env_problems(env: dict, root=None) -> list:
             p.append((k, "is set from the provider, not the lane"))
         elif k.startswith(RUN_ENV_PREFIXES) or k in RUN_ENV_NAMES:
             p.append((k, RUN_ENV_WHY))
+        elif k in SHELL_ENV_NAMES:
+            p.append((k, SHELL_ENV_WHY))
         else:
             home = home or account_home()
             odd = [d for d in v.split(os.pathsep) if not d.startswith("/")] if k == "PATH" else []
@@ -1434,6 +1468,16 @@ def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
 
 DENY_LIST_WHY = (f"what workers may not read must be a list of up to {MAX_DENY} full paths, one per line")
 DENY_AT = "workers cannot be kept from reading "
+# Folders no entry of workers_may_not_read may be or be above (deny_split): the system's programs and libraries,
+# which every command runs on. One that does not exist on this system costs nothing; what is below them may be listed
+SYSTEM_FOLDERS = SYSTEM_STARTS + ("/bin", "/sbin", "/lib32", "/libx32", "/usr/bin", "/usr/sbin", "/usr/lib32",
+                                  "/usr/local/bin", "/usr/share", "/proc", "/nix/store", "/opt/homebrew/bin",
+                                  "/opt/homebrew/lib", "/System/Library", "/Library/Developer/CommandLineTools")
+# the folders Homebrew's program links (bin, opt) lead into: a single formula's folder in them may be listed
+BREW_FOLDERS = tuple(f"{top}/{d}" for top in ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew")
+                     for d in ("Cellar", "opt", "Caskroom"))
+# and the folders in the home folder where tools keep their settings and caches (~/Library too, on macOS)
+HOME_TOOL_FOLDERS = (".config", ".local", ".cache")
 
 
 @_one_look
@@ -1457,6 +1501,23 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
     fenced += [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers could "
                            "not run their tools") for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    fenced += [(d, _above, f"it is {d}, where the system keeps its programs and libraries, or a folder above it: "
+                           "workers could not run their tools") for d in SYSTEM_FOLDERS]
+    fenced += [(d, _above, f"it is {d}, where Homebrew's programs are, or a folder above it: workers could not run "
+                           "their tools") for d in BREW_FOLDERS]
+    fenced.append(("/dev", _overlaps, "it is /dev or inside it, the system's devices: workers' commands need /dev/null, "
+                                      "/dev/tty and /dev/urandom"))
+    fenced += [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
+                "caches in the home folder, or a folder above it: name the files in it instead")
+               for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    fenced += [(d, _above, f"it is {d}, the temporary folder, or a folder above it: workers' commands and tools "
+                           "write and read there") for d in dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir()))]
+    if root:
+        wts = Path(root) / "worktrees"
+        own = {wts / n for x in (lanes if isinstance(lanes, dict) else {}) for n in (x, f"{x}-design")}
+        own |= set(wts.iterdir()) if wts.is_dir() else set()
+        fenced += [(str(d), _above, f"it is {d}, the desk's worktrees folder or a lane's worktree in it, or a folder "
+                                    "above it: workers work there") for d in [wts, *sorted(own)]]
     good, p, seen = [], [], set()
     for x in paths:
         if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
