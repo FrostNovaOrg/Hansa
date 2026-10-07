@@ -83,9 +83,10 @@ exec(BG_SHAPES)
 FAKE = r'''#!/usr/bin/env python3
 import json, os, shlex, subprocess, sys, time
 if os.environ.get("CLAUDE_ENV_FILE"):  # the lane's env: the real one runs the file in front of each Bash command
-    for word in shlex.split(open(os.environ["CLAUDE_ENV_FILE"]).read()):
-        if "=" in word:
-            os.environ[word.split("=", 1)[0]] = word.split("=", 1)[1]
+    seen = subprocess.run(["/bin/sh", "-c", '. "$1" && exec "$2" -c "import json, os; print(json.dumps(dict(os.environ)))"',
+                           "sh", os.environ["CLAUDE_ENV_FILE"], sys.executable], capture_output=True, text=True, check=True)
+    os.environ.clear()
+    os.environ.update(json.loads(seen.stdout))
 ''' + BG_SHAPES + r'''
 prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
 if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
@@ -385,6 +386,23 @@ class DeskTest(unittest.TestCase):
         """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts."""
         calls = [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
+
+    @staticmethod
+    def ran(call) -> str:
+        """The command a stand-in srt call was given, as the lane has it: without the prelude hansa runs in front
+        of it (run.with_prelude), the lane's env still set by env as hansa sets it."""
+        from hansa import run
+        cmd = call["argv"][-1]
+
+        def bare(x):
+            head = run.JAVA_PRELUDE + "exec /bin/sh -c "
+            assert x.startswith(head), x[:200]
+            [inner] = shlex.split(x[len(head):])
+            return inner
+        if cmd.startswith("exec /usr/bin/env "):
+            words = shlex.split(cmd)
+            return " ".join(shlex.quote(w) for w in words[:-1]) + " " + shlex.quote(bare(words[-1]))
+        return bare(cmd)
 
     def without_srt(self):
         """PATH without the stand-in srt, or any other."""
@@ -1488,7 +1506,7 @@ class DeskTest(unittest.TestCase):
         m = self.settle_merge(d, t2)
         self.assertEqual((m["state"], m["merge_check_result"]["exit"]), ("done", 3), m)
         setup, check = self.srt_calls()[calls:]
-        self.assertEqual((setup["argv"][-1], check["argv"][-1]),  # the lane's env is set inside the sandbox
+        self.assertEqual((self.ran(setup), self.ran(check)),  # the lane's env is set inside the sandbox
                          ("exec /usr/bin/env FAKE_HELLO=b.txt /bin/sh -c 'echo set up for the merge'",
                           "exec /usr/bin/env FAKE_HELLO=b.txt /bin/sh -c 'echo merged badly; exit 3'"))
         self.assertEqual((setup["stdout"], check["stdout"]), ("pipe", "pipe"))
@@ -1775,7 +1793,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{tid} is not merged yet: hansa runs the lane's check again", out)
         self.assertEqual(self.desk.meta(tid)["state"], "merging")
         m = self.settle_merge(d, tid)
-        self.assertEqual([c["argv"][-1] for c in self.srt_calls()[calls:]], [check])  # it ran again
+        self.assertEqual([self.ran(c) for c in self.srt_calls()[calls:]], [check])  # it ran again
         [queued] = self.events("check_rerun_queued")
         self.assertEqual((queued["task"], queued["by"]), (tid, "coordinator"))
         [checked] = self.events("merge_checked")
@@ -1843,7 +1861,7 @@ class DeskTest(unittest.TestCase):
         d, tid = self.merge_check_lane(check=check)
         m = self.desk.meta(tid)
         self.assertEqual(m["check"]["command"], check)  # after the task: the check, not the merge check
-        self.assertNotIn(heavy, [c["argv"][-1] for c in self.srt_calls()])
+        self.assertNotIn(heavy, [self.ran(c) for c in self.srt_calls()])
         explained = views.explain_text(self.desk, "lane", "a")
         self.assertIn(f"  merge check before merging: {heavy} (hansa merge runs it in place of the check", explained)
         self.assertIn("stopped at 30 minutes", explained)
@@ -1861,7 +1879,7 @@ class DeskTest(unittest.TestCase):
         m = self.settle_merge(d, tid)
         self.assertEqual((m["state"], m["merge_check_result"]["ok"], m["merge_check_result"]["command"]),
                          ("merged", True, heavy), m)
-        self.assertEqual([c["argv"][-1] for c in self.srt_calls()[calls:]], [heavy])  # in the sandbox, as the check
+        self.assertEqual([self.ran(c) for c in self.srt_calls()[calls:]], [heavy])  # in the sandbox, as the check
         self.assertEqual(Path(self.srt_calls()[-1]["cwd"]).resolve(), (self.desk.worktrees_dir / "a").resolve())
         self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", "main").split()[1:], [tip, m["head"]])
         self.assertIn(f"merge check: passed in ", views.show_text(self.desk, tid))
@@ -1938,7 +1956,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("lane a has a merge check of its own", self.hansa("merge", tid))
         m = self.settle_merge(d, tid)
         self.assertEqual((m["state"], m["merge_check_result"]["command"]), ("merged", heavy), m)
-        self.assertEqual([c["argv"][-1] for c in self.srt_calls()], [heavy])
+        self.assertEqual([self.ran(c) for c in self.srt_calls()], [heavy])
         # --recheck runs it too
         tid = self.desk.new_task("Add hello.txt again")
         self.settle(d, tid)
@@ -1946,7 +1964,7 @@ class DeskTest(unittest.TestCase):
                       self.hansa("merge", tid, "--recheck"))
         self.assertEqual(self.events("check_rerun_queued")[-1]["command"], heavy)
         self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["command"], heavy)
-        self.assertEqual([c["argv"][-1] for c in self.srt_calls()], [heavy, heavy])
+        self.assertEqual([self.ran(c) for c in self.srt_calls()], [heavy, heavy])
         # a task that changed nothing needs no merge check
         self.desk.update(tid, state="done", commits=0)
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
@@ -2284,7 +2302,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("exit 0", said)  # the setup's
         tried_srt, setup, check = self.srt_calls(tries=True)
         self.assertEqual(tried_srt["argv"][-2:], ["--", "true"])  # srt is tried first, in the lane's sandbox
-        self.assertEqual((setup["argv"][-1], check["argv"][-1]),
+        self.assertEqual((self.ran(setup), self.ran(check)),
                          ("echo set up for the try; echo left > left.txt", "echo checked badly; exit 3"))
         wt = self.desk.worktrees_dir / "a"
         self.assertEqual(Path(check["cwd"]).resolve(), wt.resolve())
@@ -2324,7 +2342,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("runs its setup and merge check (echo the heavy build, stopped after 30 minutes)", said)
         self.assertIn("merge check: echo the heavy build\n  exit 0", said)
         self.assertNotIn("light check", said)
-        self.assertEqual([c["argv"][-1] for c in self.srt_calls()], ["echo set up", "echo the heavy build"])
+        self.assertEqual([self.ran(c) for c in self.srt_calls()], ["echo set up", "echo the heavy build"])
         [tried] = self.events("lane_tried")
         self.assertEqual((tried["ok"], tried["merge_check"]["exit"], "check" in tried), (True, 0, False))
         self.assertTrue(self.events("lane_try_queued")[-1]["merge_check"])
@@ -3029,6 +3047,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["attempts"], [])
 
     def test_the_lane_setup_runs_in_srt_with_the_workers_sandbox(self):
+        from hansa import run
         seen, m2 = self.tmp / "argv.jsonl", self.tmp / "m2"
         m2.mkdir()
         s = self.desk.settings()
@@ -3042,7 +3061,7 @@ class DeskTest(unittest.TestCase):
         argv, got = call["argv"], call["settings"]
         self.assertEqual(argv[0], "--settings")
         self.assertEqual(argv[2:6], ["--", "/bin/sh", "-c", f"exec /usr/bin/env FAKE_SHOW_ARGV={seen} /bin/sh -c "
-                                     + shlex.quote('echo "tmp=$TMPDIR"')])
+                                     + shlex.quote(run.with_prelude('echo "tmp=$TMPDIR"'))])
         self.assertEqual(call["stdout"], "pipe")  # not the log file in the raw folder srt hides
         self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
@@ -5870,11 +5889,16 @@ class DeskTest(unittest.TestCase):
             self.desk.update(other, check=record)
             self.assertIn("`make test` You may run", run.around_note(self.desk, lane, verify, "a"))
 
-        long = "echo " + "x" * 700 + key  # a very long command is cut, after its keys are hidden
+        long = "echo " + "x" * 700 + key  # a long command is given whole, its keys hidden
         note = run.around_note(self.desk, {"check": long}, {})
-        self.assertIn(f"{'x' * (run.COMMAND_SHOWN - 5)}` (cut: the command is ", note)
-        self.assertLess(len(note), run.COMMAND_SHOWN + 200)
-        self.assertEqual(run.around_note(self.desk, {"check": "echo " + "x" * 594 + key}, {}).count(key[:6]), 0)
+        self.assertIn(f"`echo {'x' * 700}[key of registry]`\n", note)
+        self.assertEqual(note.count(key[:6]), 0)
+        folder = self.tmp / "run-folder"  # a very long one, whole in a file in the run's folder: no key there either
+        folder.mkdir()
+        note = run.around_note(self.desk, {"check": "echo " + "x" * run.COMMAND_SHOWN + key}, {}, "a", str(folder))
+        self.assertEqual((folder / "lane-check-command.txt").read_text(),
+                         f"echo {'x' * run.COMMAND_SHOWN}[key of registry]\n")
+        self.assertEqual(note.count(key[:6]), 0)
 
         s = self.desk.settings()  # a lane without a check says so, in one line
         s["lanes"]["a"].update(setup="", check="")
@@ -6616,6 +6640,7 @@ class DeskTest(unittest.TestCase):
         return unittest.mock.patch("subprocess.Popen", popen), envs, files
 
     def test_a_worker_starts_without_the_lanes_env_and_its_commands_get_it_from_a_file(self):
+        from hansa import run
         value = "two words, 'single' \"double\" $HOME `id` \\ and\ta tab"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"LANE_VAR": value, "npm_config_cache": "/srv/x/cache", "FAKE_WRITE": "from the file",
@@ -6632,18 +6657,71 @@ class DeskTest(unittest.TestCase):
         [(path, text)] = files
         self.assertTrue(Path(path).resolve().is_relative_to(self.desk.state_dir.resolve()), path)  # no worker writes there
         self.assertEqual(text, f"export LANE_VAR={shlex.quote(value)}\nexport npm_config_cache=/srv/x/cache\n"
-                               "export FAKE_WRITE='from the file'\n")  # quoted; the temporary folder stays the run's
+                               "export FAKE_WRITE='from the file'\n" + run.JAVA_PRELUDE)  # quoted; the temporary folder stays the run's
         r = subprocess.run(["/bin/sh", "-c", text + 'printf %s "$LANE_VAR"'], capture_output=True, text=True,
                            env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(r.stdout, value)  # as a shell reads it back
         self.assertIn("notes.txt", m["files"])  # the stand-in read the file, as Claude Code does for its commands
-        # a lane with no env: no file
+        # a lane with no env: the file holds the prelude alone
         s["lanes"]["a"]["env"] = {}
         self.assertEqual(self.desk.save_settings(s), [])
         patch, envs, files = self.popens()
         with patch:
             self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
-        self.assertEqual(files, [])
+        self.assertEqual([t for _, t in files], [run.JAVA_PRELUDE])
+
+    def test_the_setup_and_check_hansa_runs_get_the_java_prelude_in_the_sandbox(self):
+        password = "s3cr%40t-pass"
+        srt = self.tmp / "bin" / "srt"  # as the real one, it sets its own proxy inside the sandbox
+        srt.write_text(srt.read_text().replace(
+            "args = sys.argv[1:]", f"os.environ['HTTPS_PROXY'] = 'http://srt.u%3D:{password}@localhost:4711'\n"
+                                   "args = sys.argv[1:]"))
+        out = self.tmp / "seen"
+        out.mkdir()
+        step = lambda name: (f'printf "%s\\n" "$JAVA_TOOL_OPTIONS" "$MAVEN_ARGS" "$TMPDIR" > {out}/{name} && '
+                             f'cp "${{MAVEN_ARGS##* }}" {out}/{name}.xml')
+        s = self.desk.settings()
+        s["lanes"]["a"].update(setup=step("setup"), check=step("check"),
+                               env={"MAVEN_ARGS": "-B", "JAVA_TOOL_OPTIONS": "-Dlane=1"})
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+        for name in ("setup", "check"):
+            java, maven, tmpdir = (out / name).read_text().splitlines()
+            self.assertEqual(java, f"-Dlane=1 -Djava.io.tmpdir={tmpdir}")  # the lane's kept, the run's folder added
+            self.assertEqual(maven, f"-B -gs {tmpdir}/hansa-maven-settings.xml")
+            xml = (out / f"{name}.xml").read_text()
+            self.assertIn("<host>localhost</host>", xml)
+            self.assertIn("<port>4711</port>", xml)
+            self.assertIn("<username>srt.u=</username>", xml)
+            self.assertIn("<password>s3cr@t-pass</password>", xml)
+        said = [f for f in self.desk.root.rglob("*") if f.is_file() and
+                any(x in f.read_bytes() for x in (b"s3cr@t", b"s3cr%40t"))]
+        self.assertEqual(said, [])  # nothing hansa keeps, no log, holds the password
+
+    def test_a_long_check_reaches_the_worker_whole_and_a_very_long_one_in_a_file(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        check = "mvn -B -ntp verify " + " ".join(f"-Dmaven.flag{i}=on" for i in range(50)) + " -Dlast=yes || true"
+        self.assertGreater(len(check), 900)  # the page takes up to 1000 characters; workers were given 600
+        s = self.desk.settings()
+        s["lanes"]["a"].update(check=check, env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(m["state"], "done", m)
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn(f"and judges the task by it: `{check}`\n", argv[argv.index("--append-system-prompt") + 1])
+        # longer than a prompt holds well (saved some other way than the page): whole in a file in the run's
+        # folder, which the instructions name
+        tmp = self.tmp / "run"
+        tmp.mkdir()
+        huge = "echo " + "x" * (run.COMMAND_SHOWN + 10) + " && make test"
+        note = run.around_note(self.desk, {"setup": "make deps", "check": huge}, {}, "a", str(tmp))
+        f = tmp / "lane-check-command.txt"
+        self.assertEqual(f.read_text(), huge + "\n")
+        self.assertIn(f"(the command is {len(huge)} characters long; it is whole in {f}, which you may read)", note)
+        self.assertIn("`make deps`", note)
+        self.assertFalse((tmp / "lane-setup-command.txt").exists())
 
     def test_setup_check_lane_try_and_the_merge_check_get_the_lanes_env_inside_the_sandbox_only(self):
         from hansa import run
@@ -7441,7 +7519,8 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
         [call] = self.srt_calls()
-        self.assertEqual(call["argv"][2:], ["--", "sh", "-c", 'test -f hello.txt && echo "tmp=$TMPDIR"'])
+        self.assertEqual(call["argv"][2:-1], ["--", "sh", "-c"])
+        self.assertEqual(self.ran(call), 'test -f hello.txt && echo "tmp=$TMPDIR"')  # after the prelude
         self.assertEqual(call["stdout"], "pipe")  # not the log file in the raw folder srt hides
         self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
         got = call["settings"]
@@ -10260,6 +10339,96 @@ class DeskTest(unittest.TestCase):
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
         self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+
+class JavaPreludeTest(unittest.TestCase):
+    """run.JAVA_PRELUDE, the sh hansa runs in the sandbox before a lane's commands and a worker's: Maven's proxy
+    from HTTPS_PROXY and Java's temporary folder."""
+    PASSWORD = "pa%2Fss&w0rd<x>"  # percent-encoded and with what XML must escape
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def prelude(self, shell="/bin/sh", **env):
+        """Run the prelude with only this environment (and PATH, TMPDIR the test's folder unless given), then
+        print what it exported: (that environment, the settings file's text or None, everything it printed)."""
+        from hansa import run
+        env = {"PATH": "/usr/bin:/bin", "TMPDIR": str(self.tmp), **env}
+        env = {k: v for k, v in env.items() if v is not None}
+        show = 'exec "$0" -c "import json, os; print(json.dumps(dict(os.environ)))"'
+        r = subprocess.run([shell, "-c", run.JAVA_PRELUDE + show, sys.executable], env=env, capture_output=True,
+                           text=True, check=True)
+        bare = subprocess.run([shell, "-c", run.JAVA_PRELUDE], env=env, capture_output=True, text=True, check=True)
+        f = self.tmp / "hansa-maven-settings.xml"
+        return json.loads(r.stdout), f.read_text() if f.exists() else None, bare.stdout + bare.stderr + r.stderr
+
+    def proxies(self, text):
+        """The settings file's proxies, parsed as Maven would: [{tag: text}]."""
+        import xml.etree.ElementTree as ET
+        ns = {"m": "http://maven.apache.org/SETTINGS/1.0.0"}
+        root = ET.fromstring(text)
+        return [{c.tag.split("}")[1]: c.text for c in p} for p in root.findall("m:proxies/m:proxy", ns)]
+
+    def test_a_proxy_with_a_percent_encoded_user_and_password_goes_into_a_maven_global_settings_file(self):
+        url = f"http://srt.dXNlcg%3D%3D:{self.PASSWORD}@localhost:62987"
+        env, text, printed = self.prelude(HTTPS_PROXY=url, HTTP_PROXY=url)
+        f = str(self.tmp / "hansa-maven-settings.xml")
+        self.assertEqual(env["MAVEN_ARGS"], f"-gs {f}")
+        self.assertEqual(env["JAVA_TOOL_OPTIONS"], f"-Djava.io.tmpdir={self.tmp}")
+        self.assertEqual(self.proxies(text), [
+            {"id": f"hansa-{q}", "active": "true", "protocol": q, "host": "localhost", "port": "62987",
+             "username": "srt.dXNlcg==", "password": "pa/ss&w0rd<x>", "nonProxyHosts": "localhost|127.0.0.1"}
+            for q in ("https", "http")])
+        self.assertEqual(stat.S_IMODE(os.stat(f).st_mode), 0o600)  # the password: the account's alone
+        self.assertEqual(printed, "")
+        self.assertFalse([k for k in env if k.startswith("hansa_")])  # its own names are gone after it
+
+    def test_a_proxy_without_a_user_an_odd_port_or_none_and_http_proxy_alone(self):
+        _, text, _ = self.prelude(HTTPS_PROXY="http://127.0.0.1:1/")
+        [https, http] = self.proxies(text)
+        self.assertEqual((https["host"], https["port"], http["protocol"]), ("127.0.0.1", "1", "http"))
+        self.assertNotIn("username", https)
+        self.assertNotIn("password", https)
+        _, text, _ = self.prelude(HTTP_PROXY="http://u@proxy.test")  # a user without a password; no port
+        [https, _] = self.proxies(text)
+        self.assertEqual((https["host"], https["port"], https["username"], https["password"]),
+                         ("proxy.test", "80", "u", None))
+        _, text, _ = self.prelude(HTTPS_PROXY="https://proxy.test")
+        self.assertEqual(self.proxies(text)[0]["port"], "443")
+        (self.tmp / "hansa-maven-settings.xml").unlink()
+        env, text, printed = self.prelude(HTTPS_PROXY="http://u:p@proxy.test:80x80")  # no port to give Maven
+        self.assertEqual((text, "MAVEN_ARGS" in env, printed), (None, False, ""))
+
+    def test_what_was_in_maven_args_and_java_tool_options_is_kept_and_nothing_is_added_twice(self):
+        url = f"http://u:{self.PASSWORD}@localhost:8080"
+        f = self.tmp / "hansa-maven-settings.xml"
+        for shell in ("/bin/sh", *filter(None, (shutil.which("bash"), shutil.which("zsh")))):
+            env, _, printed = self.prelude(shell, HTTPS_PROXY=url, MAVEN_ARGS="-B -ntp",
+                                           JAVA_TOOL_OPTIONS="-Djava.net.preferIPv4Stack=true")
+            self.assertEqual(env["MAVEN_ARGS"], f"-B -ntp -gs {f}", shell)
+            self.assertEqual(env["JAVA_TOOL_OPTIONS"], f"-Djava.net.preferIPv4Stack=true -Djava.io.tmpdir={self.tmp}")
+            self.assertEqual(printed, "")
+            again, _, _ = self.prelude(shell, HTTPS_PROXY=url, MAVEN_ARGS=env["MAVEN_ARGS"],
+                                       JAVA_TOOL_OPTIONS=env["JAVA_TOOL_OPTIONS"])  # each Bash command runs it
+            self.assertEqual((again["MAVEN_ARGS"], again["JAVA_TOOL_OPTIONS"]),
+                             (env["MAVEN_ARGS"], env["JAVA_TOOL_OPTIONS"]))
+
+    def test_without_a_proxy_only_the_temporary_folder_and_without_one_nothing_and_it_never_fails(self):
+        env, text, printed = self.prelude()
+        self.assertEqual((env["JAVA_TOOL_OPTIONS"], "MAVEN_ARGS" in env, text, printed),
+                         (f"-Djava.io.tmpdir={self.tmp}", False, None, ""))
+        for tmpdir in (None, str(self.tmp / "gone"), str(self.tmp / "with space")):
+            env, text, printed = self.prelude(TMPDIR=tmpdir, HTTPS_PROXY="http://u:p@localhost:1")
+            self.assertEqual(("JAVA_TOOL_OPTIONS" in env, "MAVEN_ARGS" in env, printed), (False, False, ""), tmpdir)
+        ro = self.tmp / "ro"
+        ro.mkdir(mode=0o500)
+        self.addCleanup(ro.chmod, 0o700)
+        env, _, printed = self.prelude(TMPDIR=str(ro), HTTPS_PROXY="http://u:p@localhost:1")  # cannot write there
+        self.assertEqual(("MAVEN_ARGS" in env, printed), (False, ""))
+        r = subprocess.run(["/bin/sh", "-eu", "-c", __import__("hansa.run").run.JAVA_PRELUDE + "echo ran on"],
+                           env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "ran on\n", ""))  # with -e and -u too
+
 
 class PortSkipTest(unittest.TestCase):
     """skip_unless_ports tells a sandbox that refuses ports from a machine where they work."""

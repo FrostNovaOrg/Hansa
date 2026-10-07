@@ -252,6 +252,69 @@ page gives.
 - Nobody reads hansa's code to use it. If the card or a command's output is not
   enough, fix the card or the output.
 
+## Java and Maven in a lane
+**What hansa does by itself.** Before a lane's setup, check and merge check, and in
+front of each Bash command of a worker or verifier, hansa runs a short sh prelude
+inside the sandbox, after the lane's env is set:
+- The sandbox's proxy wants a user and password, which it puts only in
+  `HTTPS_PROXY` and `HTTP_PROXY`; Maven reads neither. When one of them holds a
+  proxy, the prelude writes a Maven global settings file in the run's temporary
+  folder naming that proxy for https and http (`localhost` and `127.0.0.1` left
+  out with `nonProxyHosts`), and adds `-gs <that file>` to `MAVEN_ARGS`, which
+  Maven 3.9 reads. A global settings file, so a project's own
+  `~/.m2/settings.xml` (its mirrors, say) still applies where the sandbox lets
+  Maven read it.
+- Java ignores `TMPDIR`, and on macOS the sandbox does not let it write its own
+  temporary folder. The prelude adds `-Djava.io.tmpdir=$TMPDIR` to
+  `JAVA_TOOL_OPTIONS`, which every JVM reads, the one Surefire starts for the
+  tests too.
+
+What was already in `MAVEN_ARGS` and `JAVA_TOOL_OPTIONS` (the sandbox's, or the
+lane's env) is kept. The prelude prints nothing, never the proxy's password, and
+skips what it cannot do instead of failing the run.
+
+**What a project should do.** Mockito's inline mock maker attaches itself to the
+running JVM, and cannot in the sandbox: the JVM's attach files and socket live in
+the system's temporary folder whatever `java.io.tmpdir` says, and the sandbox
+does not open that folder to workers. Load Mockito as a Java agent instead, as
+Mockito documents; in the pom:
+```xml
+<properties>
+  <argLine></argLine> <!-- empty, so @{argLine} is there without a coverage agent -->
+</properties>
+...
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-dependency-plugin</artifactId>
+  <executions>
+    <execution>
+      <goals><goal>properties</goal></goals> <!-- sets ${org.mockito:mockito-core:jar} -->
+    </execution>
+  </executions>
+</plugin>
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-surefire-plugin</artifactId>
+  <configuration>
+    <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar}</argLine>
+  </configuration>
+</plugin>
+```
+
+**The lane.**
+- A Maven repository of the lane's own, on its write list, named in its
+  commands: `hansa lane set L write ~/hansa-cache/L/m2`, and
+  `-Dmaven.repo.local=...` with that full path in the setup and check (not
+  `~/.m2/repository`, which the write list refuses).
+- `repo.maven.apache.org` on the network list, and any other repository the
+  build downloads from.
+- Tests that bind a local port cannot on macOS unless `localhost` is on the
+  network list, which opens the machine's whole loopback. Have such tests skip
+  when the bind is refused (JUnit's `Assumptions`, say), as hansa's own do.
+
+Gradle is not covered yet: the prelude sets nothing for it but
+`JAVA_TOOL_OPTIONS`.
+
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the
