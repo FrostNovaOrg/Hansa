@@ -225,9 +225,13 @@ to a public repository, a deploy to production) waits for the principal:
 - It then waits for the principal's yes on the page, unless the principal lists
   the target as released without asking (the principal ticks each target on
   its own; a tick for one never covers another). That list holds each target
-  as it was when the principal saved it: one whose lane's repository or base
-  branch, or whose command, changed since (or that was removed and added
-  again) waits for the yes until the principal saves the list again. While the desk is paused, only a
+  as it was when the principal saved it: the lane's repository and base
+  branch, the target's command and the target it must follow (`--after`, or
+  none). A change to any of these unticks it: it waits for the yes until the
+  principal saves the list again. Dropping or changing `--after` unticks it
+  too; a change of `--minutes` alone does not, and a target taken out and set
+  again with the same command and `--after` keeps its tick, since it is what
+  the principal saw. While the desk is paused, only a
   release the principal said yes to runs: a listed lane's waits until it is
   resumed. Tell the principal in the conversation that it waits. A new
   request for the same target replaces one still waiting.

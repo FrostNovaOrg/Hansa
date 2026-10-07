@@ -111,7 +111,7 @@ const T = ZH ? {
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
-  releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头）",
+  releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令或它要跟在哪个目标之后，只要有一样变了，勾就不再算数）",
   releaseForbidden:"不许发出去的字眼（每行一个词或短语，不分大小写；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   laneRelease:"发布命令：你在这页点头后由 hansa 运行，把基础分支发出去（空＝没有）", f_release:"发布命令",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布运行时占着仓库，那里的合并要等它",
@@ -173,7 +173,7 @@ const T = ZH ? {
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
-  releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes)",
+  releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command or the target it must follow, changes)",
   releaseForbidden:"Words or phrases no release may send out (one per line, any case; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   laneRelease:"Release command: hansa runs it after your yes on this page, to send the base branch out (blank = none)", f_release:"release",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a running release holds the repository, so merges there wait for it",
@@ -442,7 +442,8 @@ function renderSettings(problems) {
       ...(DENY_SKIPPED.length ? [T.workersMayNotReadSkipped, h("ul", {}, DENY_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))),
     section(T.releases, h("div", {class:"grid"},
       /* the list holds each release target as it was when saved (the lane's repository and base branch, the
-         target's command); one ticked here, or taken back in, is recorded as it is when Save is pressed */
+         target's command and the target it must follow); one ticked here, or taken back in, is recorded as it is
+         when Save is pressed */
       T.releasesWithoutAsking, releaseTicks(),
       ...(RELEASE_UNMATCHED.length ? [T.releaseUnmatched, h("div", {},
         h("ul", {}, RELEASE_UNMATCHED.map(u => h("li", {class:"bad"}, `${u.lane}${u.target ? ` · ${T.releaseTarget} ${u.target}` : ""}: ${(ZH && u.why_zh) || u.why}`))),

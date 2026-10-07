@@ -122,9 +122,10 @@ def minutes(s: dict, r: dict) -> tuple:
     return ln.get("timeout_min", 240), "the lane's"
 
 
-def before_it(desk: Desk, s: dict, lane: str, target: str, repo, base: str, commit: str) -> str:
+def before_it(desk: Desk, s: dict, lane: str, target: str, repo, base: str, commit: str, zh: bool = False) -> str:
     """'' when the target may send this commit out now; else which release must go first, in one line: a target
-    that must follow another goes out only with a commit the other one already sent out (done, same commit)."""
+    that must follow another goes out only with a commit the other one already sent out (done, same commit). zh: in
+    Chinese, for the page."""
     after = (lane_targets((s["lanes"].get(lane) or {})).get(target) or {}).get("after")
     if not after:
         return ""
@@ -133,6 +134,11 @@ def before_it(desk: Desk, s: dict, lane: str, target: str, repo, base: str, comm
            for r in releases(desk)):
         return ""
     prev = last_out(desk, lane, repo, base, after)
+    if zh:
+        return (f"工作线 {lane} 的目标 {target} 要等目标 {after} 先发出同一个提交才能发出，而"
+                + (f" {after} 上一次发出的发布（#{prev['id']}）是 {prev['commit'][:10]}，不是 {commit[:10]}"
+                   if prev else f"目标 {after} 还没有从 {base} 发出过发布")
+                + f"：先发布 {after}（hansa release {lane} {after}）")
     return (f"lane {lane} target {target} goes out only after target {after} sent out the same commit, and "
             + (f"{after}'s last release that went out (#{prev['id']}) was {prev['commit'][:10]}, not {commit[:10]}"
                if prev else f"no release of {after} went out from {base}")
@@ -463,7 +469,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         why, why_zh = stale(desk, s, r), stale(desk, s, r, zh=True)
         if not why:  # the order, again: the target it must follow sent out this commit
             why = before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"])
-            why_zh = why and f"{what_zh(r)} 要等它前面的目标先发出同一个提交：{why}"
+            why_zh = why and before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"], zh=True)
         if not why:
             try:
                 current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=r["repo"])

@@ -1919,7 +1919,8 @@ def main(argv=None):
                      "of any of those commits, refuses it. A target that must follow another (--after) is asked only "
                      "for a commit the other one already sent out. It waits for the principal's yes on the web page "
                      "(unless the principal lists that target as released without asking and the desk is not "
-                     "paused); then hansa serve runs the command in the lane's repository, as the desk's account, "
+                     "paused; a tick stops counting when the lane's repository or base branch, or the target's "
+                     "command or --after, changes, not when only --minutes does); then hansa serve runs the command in the lane's repository, as the desk's account, "
                      "outside the sandbox, with hansa's environment and the target's minutes (else the lane's) as its "
                      "limit, and only while the base branch and the command are what the principal saw. One release "
                      "runs at a time per repository, and it holds the repository: merges there wait while it runs, "
@@ -2017,7 +2018,9 @@ def main(argv=None):
         "L NAME none takes it out. The lane's release command (hansa lane set L release) is its one unnamed target: "
         "a lane has either that or named targets, so take it out (hansa lane set L release none) when you name its "
         "first target. hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
-        "each target on its own for going out without asking. A release holds the lane's repository while it runs: "
+        "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
+        "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
+        "command and --after keeps it; --minutes alone does not untick). A release holds the lane's repository while it runs: "
         "merges there wait for it, a long install too; a later change may let such a target run from a fixed "
         "checkout instead"))
     q.add_argument("name")

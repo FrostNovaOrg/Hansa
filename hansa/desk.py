@@ -65,9 +65,11 @@ PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
-# it: {lane, target, repo, base, command}; a target goes out without asking only while it still has them. An entry
-# saved before targets had names holds {lane, repo, base, release}: the lane's unnamed target and its command
-LISTED_AS = ("repo", "base", "command")
+# it: {lane, target, repo, base, command, after} (after: the target it must follow, "" for none); a target goes out
+# without asking only while it still has all of them. An entry saved before targets had names holds {lane, repo,
+# base, release}: the lane's unnamed target and its command; an entry without after counts only for a target that
+# must follow none
+LISTED_AS = ("repo", "base", "command", "after")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release")
 MAX_TARGETS = 20  # named release targets on one lane
 TARGET_FIELDS = ("command", "timeout_min", "after")
@@ -196,9 +198,10 @@ def default_settings() -> dict:
         # denied there to every Claude Code run hansa starts, the coordinator too. The principal's, on the page.
         "workers_may_not_read": [],
         # Release targets whose releases (hansa release) go out without the principal's yes on the page: each one as
-        # the page saved it, {lane, target, repo, base, command} (target "": the lane's unnamed one, its release
-        # command); a target that no longer has that repository, base branch and command waits for the yes. The
-        # principal's, on the page; empty: every release waits for the yes.
+        # the page saved it, {lane, target, repo, base, command, after} (target "": the lane's unnamed one, its
+        # release command; after: the target it must follow, "" for none); a target that no longer has that
+        # repository, base branch, command and after waits for the yes. The principal's, on the page; empty: every
+        # release waits for the yes.
         "releases_without_asking": [],
         # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add or in
         # their messages refuses the release. The principal's, on the page.
@@ -806,11 +809,13 @@ def _listed_ok(x) -> bool:
 
 def listed_as(ln: dict | None, target: str = "") -> dict:
     """What the principal's list of releases without asking records of a lane's release target when the page saves
-    it: the lane's repository and base branch, and the target's command (empty when there is no such lane)."""
+    it: the lane's repository and base branch, and the target's command and the target it must follow ('' for none;
+    all empty when there is no such lane)."""
     if not isinstance(ln, dict) or not isinstance(ln.get("repo"), str):
-        return {"repo": "", "base": "", "command": ""}
+        return {"repo": "", "base": "", "command": "", "after": ""}
+    t = lane_targets(ln).get(target, {})
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
-            "command": str(lane_targets(ln).get(target, {}).get("command") or "")}
+            "command": str(t.get("command") or ""), "after": str(t.get("after") or "")}
 
 
 def listed_key(entry) -> tuple:
@@ -855,9 +860,12 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
         return (f"lane {lane} has no release target {target} now" if target else
                 f"lane {lane} has no unnamed release command now (its targets have names)")
     now_as = listed_as(ln, target)
+    # an entry saved without after (before hansa recorded it) stands for a target that must follow none
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
-                                    ("command", ("release command", "发布命令"))) if then.get(k, "") != now_as[k]]
+                                    ("command", ("release command", "发布命令")),
+                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")))
+               if then.get(k, "") != now_as[k]]
     if not changed:
         return ""
     return (f"保存清单之后它的{'和'.join(w[1] for w in changed)}变了" if zh else

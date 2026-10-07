@@ -203,9 +203,13 @@ page gives.
   a commit the other one already sent out, and looked at again before it
   starts. Otherwise the page shows it, with its target, with Release and
   Refuse; a target the principal ticks as released without asking (each one
-  on its own) needs no answer while the lane's repository and base branch and
-  the target's command are what they were when the list was saved, and while
-  the desk is not paused. hansa serve runs the
+  on its own) needs no answer while the lane's repository and base branch, the
+  target's command and the target it must follow (its `--after`, or none) are
+  what they were when the list was saved, and while the desk is not paused: a
+  change to any of them, `--after` dropped or changed included, unticks it
+  until the principal saves the list again; `--minutes` alone does not, and a
+  target taken out and set again with the same command and `--after` keeps its
+  tick. hansa serve runs the
   command only then, and only while the base branch and the command are still
   what the principal saw (else the request is void and the coordinator asks
   again): in the lane's repository at that commit, as the desk's account,

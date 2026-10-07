@@ -9181,7 +9181,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         [entry] = self.desk.settings()["releases_without_asking"]
         self.assertEqual(entry, {"lane": "a", "target": "", "repo": str(self.repo.resolve()), "base": "main",
-                                 "command": f"touch {out}"})
+                                 "command": f"touch {out}", "after": ""})
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
 
         def asked():
@@ -9535,7 +9535,7 @@ class DeskTest(unittest.TestCase):
         self.tick_targets("test")
         [entry] = self.desk.settings()["releases_without_asking"]
         self.assertEqual(entry, {"lane": "a", "target": "test", "repo": str(self.repo.resolve()), "base": "main",
-                                 "command": f"touch {test}"})
+                                 "command": f"touch {test}", "after": ""})
         said = self.refused("release", "a", "now")
         self.assertIn("lane a has 2 release targets (push, test); say which: hansa release a TARGET", said)
         told = self.hansa("release", "a", "test", "for", "the", "demo")
@@ -9630,7 +9630,8 @@ class DeskTest(unittest.TestCase):
         r = release.get(self.desk, 2)
         self.assertEqual(r["state"], "void", r)
         self.assertIn("goes out only after target stage", r["void"])
-        self.assertIn("前面的目标", r["void_zh"])
+        self.assertIn("工作线 a 的目标 prod 要等目标 stage 先发出同一个提交才能发出", r["void_zh"])
+        self.assertNotIn("goes out only", r["void_zh"])  # its own Chinese, not the English line
         # the order is checked as the lane is set
         self.assertIn("after must name another release target", self.refused("lane", "target", "a", "prod", "--after", "nope"))
         self.assertIn("goes round in a circle", self.refused("lane", "target", "a", "stage", "--after", "prod"))
@@ -9713,6 +9714,93 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(any(x in p for p in said), (x, said))
         self.tick_targets("test")
         self.assertEqual(self.desk.settings()["releases_without_asking"][0]["target"], "test")
+
+
+    # -- a tick counts only while the target's order (after) is what the principal ticked ----------------------------
+    def test_dropping_after_unticks_a_target_and_its_release_waits_for_the_yes(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.tick_targets("prod")
+        [entry] = self.desk.settings()["releases_without_asking"]
+        self.assertEqual(entry, {"lane": "a", "target": "prod", "repo": str(self.repo.resolve()), "base": "main",
+                                 "command": "true", "after": "test"})
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+        self.hansa("lane", "target", "a", "prod", "--after", "none")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        [u] = public_settings(self.desk)["release_unmatched"]
+        self.assertEqual((u["lane"], u["target"]), ("a", "prod"))
+        self.assertIn("its order (the target it must follow) changed", u["why"])
+        self.assertIn("顺序", u["why_zh"])
+        # test never sent anything out, and prod no longer goes out without the principal's yes
+        told = self.hansa("release", "a", "prod")
+        self.assertIn("waits for the principal's yes", told)
+        self.assertNotIn("without asking", told.split("waits")[0])
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["state"], r.get("without_asking")), ("prod", "waiting", None))
+        d = Dispatcher(self.desk)
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        # the principal saves the list again: what it now records is what counts
+        self.tick_targets("prod")
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0]["after"], "")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+
+    def test_changing_after_unticks_a_target(self):
+        from hansa import release
+        self.with_targets(test="true", stage="true", prod=("true", {"after": "test"}))
+        self.tick_targets("prod", "test")
+        self.hansa("lane", "target", "a", "prod", "--after", "stage")
+        s = self.desk.settings()
+        self.assertEqual((release.lane_listed(s, "a", "prod"), release.lane_listed(s, "a", "test")), (False, True))
+        # nor does an approved release of it start once its order changed
+        self.hansa("lane", "target", "a", "prod", "--after", "test")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.hansa("release", "a", "prod")
+        self.assertEqual(release.get(self.desk, 2)["state"], "approved")
+        self.hansa("lane", "target", "a", "prod", "--after", "none")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        # --minutes alone leaves the tick as it was
+        self.hansa("lane", "target", "a", "test", "--minutes", "5")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "test"))
+
+    def test_a_target_removed_and_added_again_keeps_its_tick_only_when_nothing_differs(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.tick_targets("prod", "test")
+        # prod taken out and set again with the same command but no order: what the principal saw differs
+        self.hansa("lane", "target", "a", "prod", "none")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        self.hansa("lane", "target", "a", "prod", "true")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        # with the same command and after again, it is what the principal ticked
+        self.hansa("lane", "target", "a", "prod", "--after", "test")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+        # another command voids it, as does an order the new target has and the ticked one had not
+        self.hansa("lane", "target", "a", "prod", "none")
+        self.hansa("lane", "target", "a", "prod", "true; true", "--after", "test")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        self.hansa("lane", "target", "a", "prod", "none")
+        self.hansa("lane", "target", "a", "test", "none")
+        self.hansa("lane", "target", "a", "push", "true")
+        self.hansa("lane", "target", "a", "test", "true", "--after", "push")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "test"))
+
+    def test_an_entry_saved_without_after_counts_only_for_a_target_that_follows_none(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        s = self.desk.settings()
+        at = {"repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        s["releases_without_asking"] = [{"lane": "a", "target": "test", **at}, {"lane": "a", "target": "prod", **at}]
+        self.desk.settings_path.write_text(json.dumps(s))  # as the page saved it before it recorded after
+        self.assertEqual(public_settings(self.desk)["problems"], [])
+        s = self.desk.settings()
+        self.assertEqual((release.lane_listed(s, "a", "test"), release.lane_listed(s, "a", "prod")), (True, False))
+        self.assertEqual([u["target"] for u in public_settings(self.desk)["release_unmatched"]], ["prod"])
 
 
 if __name__ == "__main__":
