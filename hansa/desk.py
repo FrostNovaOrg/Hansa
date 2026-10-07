@@ -160,18 +160,26 @@ RUN_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "CLAUDE_")
 RUN_ENV_NAMES = ("NODE_OPTIONS", "BASH_ENV", "ENV", "SHELL", "ZDOTDIR", "HOME")
 # Names sh, bash or zsh keep for themselves, read-only or special: `export UID=0` in the file a worker's Bash
 # commands start with (run.env_file) stops the shell, so every command of the lane would fail; zsh's lowercase
-# ones are tied to others (path is PATH) or are the shell's own tables
+# ones are tied to others (path is PATH) or are the shell's own tables.
+# Made from the names zsh 5.9 types special or readonly in ${(t)parameters}, bash's `readonly -p` and the names
+# bash 5's manual says the shell sets or reads itself, each written as `export NAME=0` in a file sourced by
+# /bin/sh, /bin/bash and /bin/zsh: here are every name that stops one of them, every read-only one, and those the
+# shell sets for itself and reads each line with (IFS, PWD, BASHOPTS...); the rest (PATH, LANG, TERM, HISTSIZE,
+# PS1...) are ordinary values a lane may set
 SHELL_ENV_NAMES = (
-    "UID", "EUID", "GID", "EGID", "PPID", "GROUPS", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_VERSINFO",
-    "BASH_VERSION", "BASH_ARGC", "BASH_ARGV", "BASH_ARGV0", "BASH_LINENO", "BASH_SOURCE", "BASH_SUBSHELL",
-    "BASH_COMMAND", "BASH_REMATCH", "BASH_ALIASES", "BASH_CMDS", "FUNCNAME", "PIPESTATUS", "HISTCMD", "LINENO",
-    "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "IFS", "OPTIND", "OPTARG", "PS4", "PWD",
-    "OLDPWD", "SHLVL", "ARGC", "ERRNO", "TTYIDLE", "ZSH_SUBSHELL", "ZSH_EVAL_CONTEXT", "ZSH_ARGZERO", "ZSH_NAME",
-    "ZSH_VERSION", "ZSH_PATCHLEVEL", "_", "status", "pipestatus", "argv", "path", "cdpath", "fpath", "manpath",
-    "mailpath", "module_path", "psvar", "funcstack", "functrace", "funcfiletrace", "funcsourcetrace", "options",
-    "parameters", "commands", "aliases", "functions", "builtins", "modules", "history", "historywords",
-    "dirstack", "jobstates", "jobtexts", "jobdirs", "signals", "userdirs", "nameddirs", "reswords", "widgets",
-    "termcap", "terminfo", "sysparams", "patchars")
+    "_", "aliases", "ARGC", "argv", "BASH_ALIASES", "BASH_ARGC", "BASH_ARGV", "BASH_ARGV0", "BASH_CMDS",
+    "BASH_COMMAND", "BASH_LINENO", "BASH_REMATCH", "BASH_SOURCE", "BASH_SUBSHELL", "BASH_VERSINFO",
+    "BASH_VERSION", "BASHOPTS", "BASHPID", "builtins", "cdpath", "commands", "dirstack", "dis_aliases",
+    "dis_builtins", "dis_functions", "dis_functions_source", "dis_galiases", "dis_patchars", "dis_reswords",
+    "dis_saliases", "EGID", "EPOCHREALTIME", "EPOCHSECONDS", "ERRNO", "EUID", "fignore", "fpath", "funcfiletrace",
+    "FUNCNAME", "funcsourcetrace", "funcstack", "functions", "functions_source", "functrace", "galiases", "GID",
+    "GROUPS", "HISTCMD", "history", "historywords", "IFS", "jobdirs", "jobstates", "jobtexts", "keymaps",
+    "LINENO", "mailpath", "manpath", "module_path", "modules", "nameddirs", "OLDPWD", "OPTARG", "OPTIND",
+    "options", "parameters", "patchars", "path", "PIPESTATUS", "pipestatus", "PPID", "PS4", "psvar", "PWD",
+    "RANDOM", "reswords", "saliases", "SECONDS", "SHELLOPTS", "SHLVL", "signals", "SRANDOM", "status",
+    "sysparams", "termcap", "terminfo", "TTYIDLE", "UID", "userdirs", "usergroups", "widgets", "ZSH_ARGZERO",
+    "ZSH_EVAL_CONTEXT", "zsh_eval_context", "ZSH_NAME", "ZSH_PATCHLEVEL", "zsh_scheduled_events", "ZSH_SUBSHELL",
+    "ZSH_VERSION")
 SHELL_ENV_WHY = ("cannot be set for a lane: sh, bash or zsh keeps it for itself (read-only or special), and setting "
                  "it would stop every command of the lane's workers")
 RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run; set it inside "
@@ -1454,8 +1462,11 @@ DENY_AT = "workers cannot be kept from reading "
 # Folders no entry of workers_may_not_read may be or be above (deny_split): the system's programs and libraries,
 # which every command runs on. One that does not exist on this system costs nothing; what is below them may be listed
 SYSTEM_FOLDERS = SYSTEM_STARTS + ("/bin", "/sbin", "/lib32", "/libx32", "/usr/bin", "/usr/sbin", "/usr/lib32",
-                                  "/usr/local/bin", "/usr/share", "/dev", "/proc", "/nix/store", "/opt/homebrew/bin",
+                                  "/usr/local/bin", "/usr/share", "/proc", "/nix/store", "/opt/homebrew/bin",
                                   "/opt/homebrew/lib", "/System/Library", "/Library/Developer/CommandLineTools")
+# the folders Homebrew's program links (bin, opt) lead into: a single formula's folder in them may be listed
+BREW_FOLDERS = tuple(f"{top}/{d}" for top in ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew")
+                     for d in ("Cellar", "opt", "Caskroom"))
 # and the folders in the home folder where tools keep their settings and caches (~/Library too, on macOS)
 HOME_TOOL_FOLDERS = (".config", ".local", ".cache")
 
@@ -1483,6 +1494,10 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
                            "not run their tools") for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     fenced += [(d, _above, f"it is {d}, where the system keeps its programs and libraries, or a folder above it: "
                            "workers could not run their tools") for d in SYSTEM_FOLDERS]
+    fenced += [(d, _above, f"it is {d}, where Homebrew's programs are, or a folder above it: workers could not run "
+                           "their tools") for d in BREW_FOLDERS]
+    fenced.append(("/dev", _overlaps, "it is /dev or inside it, the system's devices: workers' commands need /dev/null, "
+                                      "/dev/tty and /dev/urandom"))
     fenced += [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
                 "caches in the home folder, or a folder above it: name the files in it instead")
                for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]

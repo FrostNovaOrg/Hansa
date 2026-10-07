@@ -74,7 +74,7 @@ def permissions(desk: Desk) -> dict:
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win
     return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/notes/**)"],
             "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]
-            + [f"Bash({c}:*)" for c in NO_PUBLISH]}
+            + [f"Bash({c}:*)" for c in NO_PUBLISH] + [f"Bash({r})" for r in no_publish_with_options()]}
 
 
 # What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
@@ -83,6 +83,14 @@ def permissions(desk: Desk) -> dict:
 NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
               "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
               "docker push", "podman push", "mvn deploy")
+
+
+def no_publish_with_options() -> list:
+    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
+    reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
+    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. They stop
+    nothing run through another program or shell (bash -c, xargs, a script)."""
+    return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
 
 
 def _text(args) -> str:

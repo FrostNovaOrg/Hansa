@@ -5989,16 +5989,28 @@ class DeskTest(unittest.TestCase):
     def test_the_coordinator_cannot_push_or_publish_from_its_own_shell(self):
         self.assertEqual(self.echo_coordinator().returncode, 0)  # the desk's permissions brought up to date
         deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
-        prefixes = [r[5:-3] for r in deny if r.startswith("Bash(") and r.endswith(":*)")]
+        rules = [r[5:-1] for r in deny if r.startswith("Bash(")]
+
+        def matches(rule, cmd):  # as Claude Code matches a Bash rule: a prefix before :*, else * as any text
+            if rule.endswith(":*") and "*" not in rule[:-2]:
+                return cmd == rule[:-2] or cmd.startswith(rule[:-2] + " ")
+            pattern = ".*".join(re.escape(x) for x in rule.split("*"))
+            if rule.endswith(" *") and rule.count("*") == 1:
+                pattern = pattern[:-3] + "( .*)?"
+            return re.fullmatch(pattern, cmd, re.S) is not None
 
         def denied(cmd):
-            return any(cmd == x or cmd.startswith(x + " ") for x in prefixes)
+            return any(matches(r, cmd) for r in rules)
         for cmd in ("git push origin main", "git push", "gh release create v1", "gh pr merge 3 --squash",
-                    "gh repo delete x", "npm publish", "twine upload dist/*", "cargo publish", "docker push img:1"):
+                    "gh repo delete x", "npm publish", "twine upload dist/*", "cargo publish", "docker push img:1",
+                    "git -C /some/repo push", "git -C /some/repo push origin main", "git --no-pager push",
+                    "git -c http.extraHeader=x push --force", "npm --prefix pkg publish", "mvn -B deploy",
+                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img"):
             self.assertTrue(denied(cmd), cmd)
         for cmd in ("hansa status", "hansa git a log --oneline", "hansa git a show HEAD", "hansa release a",
                     "hansa lane set a release \"git push origin main\"", "hansa merge t0001", "git status",
-                    "gh pr view 3"):
+                    "gh pr view 3", "git -C /some/repo status", "git -C /some/repo log --oneline",
+                    "hansa git a -C x push", "npm --prefix pkg test"):
             self.assertFalse(denied(cmd), cmd)
         self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
 
@@ -6028,6 +6040,29 @@ class DeskTest(unittest.TestCase):
         r = subprocess.run(["/bin/sh", "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True)
         self.assertEqual(r.stdout, "ran\n", r.stderr)
 
+    def test_no_name_a_lanes_env_accepts_stops_sh_bash_or_zsh(self):
+        from hansa.desk import ENV_NAME, SHELL_ENV_NAMES, env_problems
+        shells = [s for s in ("/bin/sh", "/bin/bash", "/bin/zsh") if os.access(s, os.X_OK)]
+        names = set(SHELL_ENV_NAMES)  # every variable the shells present know, besides the listed ones
+        for sh, ask in (("/bin/bash", "compgen -v"), ("/bin/zsh", "print -l ${(k)parameters}")):
+            if sh in shells:
+                names |= set(subprocess.run([sh, "-c", ask], capture_output=True, text=True,
+                                            env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}).stdout.split())
+        names = sorted(n for n in names if ENV_NAME.match(n))
+        for n in SHELL_ENV_NAMES:
+            self.assertEqual([k for k, _ in env_problems({n: "0"})], [n], n)
+        accepted = [n for n in names if not env_problems({n: "0"})]
+        self.assertIn("TERM", accepted)
+        f = self.tmp / "lane-env.sh"
+
+        def stops(sh, some):
+            f.write_text("".join(f"export {n}=0\n" for n in some))
+            return subprocess.run([sh, "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True,
+                                  env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}).stdout != "ran\n"
+        for sh in shells:
+            if stops(sh, accepted):  # one at a time, to name them
+                self.fail(f"{sh} stops on {[n for n in accepted if stops(sh, [n])]}")
+
     def test_what_every_worker_needs_cannot_be_kept_from_them(self):
         from hansa.desk import account_home
         home, systmp = Path(account_home()), (self.tmp / "systmp").resolve()
@@ -6038,7 +6073,11 @@ class DeskTest(unittest.TestCase):
                str(home / ".cache"): "settings and caches in the home folder",
                str(systmp): "the temporary folder", "/var/tmp": "the temporary folder",
                str(wts): "the desk's worktrees folder", str(wts / "a"): "a lane's worktree",
-               str(wts / "a-design"): "a lane's worktree"}
+               str(wts / "a-design"): "a lane's worktree",
+               "/dev": "devices", "/dev/null": "devices", "/dev/tty": "devices", "/dev/fd": "devices",
+               "/opt/homebrew/Cellar": "Homebrew's programs", "/opt/homebrew/opt": "Homebrew's programs",
+               "/usr/local/Cellar": "Homebrew's programs", "/usr/local/opt": "Homebrew's programs",
+               "/opt/homebrew": "workers could not run their tools"}
         with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)):
             for path, why in bad.items():
                 told = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
@@ -6048,7 +6087,7 @@ class DeskTest(unittest.TestCase):
                 self.assertIn(why, told["problems"][0], path)
                 self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
             fine = [str(home / ".config" / "myproject" / "keys.json"), "/usr/lib/myproject-keys", str(systmp / "keys"),
-                    str(self.desk.root / "elsewhere")]
+                    str(self.desk.root / "elsewhere"), "/opt/homebrew/Cellar/myformula/1.0/keys"]
             self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):

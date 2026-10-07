@@ -91,8 +91,11 @@ page gives.
   its settings deny `git push`, `gh release`, `gh pr merge`, `gh repo` and the
   usual publish commands (`npm`, `pnpm`, `yarn`, `uv` and `poetry publish`,
   `twine upload`, `cargo publish`, `gem push`, `docker` and `podman push`,
-  `mvn deploy`) from its own shell, whatever its mode; `hansa release` runs the
-  release command itself after the principal's yes.
+  `mvn deploy`) from its own shell, whatever its mode, written plainly or with
+  options before the subcommand (`git -C DIR push`); run through another
+  program or shell (`bash -c "git push"`, `xargs`, a script) they are not
+  caught, and in manual mode such a command asks the principal. `hansa release`
+  runs the release command itself after the principal's yes.
   Each lane may also set the form of the messages hansa writes into its
   repository: `commit_message` for the commit of a task's work (and the merge
   of the base into a task's branch on `retry --update`), `merge_message` for a
@@ -138,10 +141,12 @@ page gives.
   Claude Code run hansa starts, the coordinator too. An entry that would stop
   every worker is refused on saving, each with its reason: the home folder,
   the desk, a lane's repository, a folder on the `PATH`, the system's programs
-  and libraries (`/usr/lib`, `/etc` and the like), `~/.config`, `~/.local`,
-  `~/.cache` (and `~/Library` on macOS), the temporary folder, the desk's
-  worktrees folder or a lane's worktree, or a folder above any of them; a file
-  or folder inside one, such as one file in `~/.config`, may be listed), no network but the
+  and libraries (`/usr/lib`, `/etc` and the like), Homebrew's `Cellar`, `opt`
+  and `Caskroom`, `~/.config`, `~/.local`, `~/.cache` (and `~/Library` on
+  macOS), the temporary folder, the desk's worktrees folder or a lane's
+  worktree, or a folder above any of them, and `/dev` or anything in it; a
+  file or folder inside one of the others, such as one file in `~/.config` or
+  one formula's folder in `Cellar`, may be listed), no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
   own branch, and merges only what the coordinator merges. The lane's setup,
@@ -192,7 +197,8 @@ page gives.
   a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
   `GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
   `HOME`), no name sh, bash or zsh keeps for itself (read-only or special, such
-  as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's `path`: setting one
+  as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's `path` and
+  `keymaps`, each one tried in sh, bash and zsh: setting one
   would stop every command of the lane's workers), no `PATH` entry that is empty
   or not a full path, and no place inside the desk. The file hansa writes it to
   for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.

@@ -24,7 +24,10 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    your settings deny `git push`, `gh release`, `gh pr merge`, `gh repo`, and
    publishing to a package or image registry (`npm`, `pnpm` and `yarn publish`,
    `twine upload`, `uv` and `poetry publish`, `cargo publish`, `gem push`,
-   `docker` and `podman push`, `mvn deploy`) from your own shell.
+   `docker` and `podman push`, `mvn deploy`) from your own shell, written plainly
+   or with options before the subcommand (`git -C DIR push`, `mvn -B deploy`).
+   Run through another program or shell (`bash -c "git push"`, `xargs`, a
+   script) they are not caught; in manual mode such a command asks the principal.
 
 ## Commands
 | command | what it does |
@@ -463,7 +466,7 @@ here; work that needs code changed or a browser goes to a worker.
   `HOME`): set such a thing inside the check or setup command, where it runs
   in the sandbox. Nor the names sh, bash or zsh keep for themselves (read-only
   or special, such as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's
-  `path`): setting one would stop every command of the lane's workers. A saved env that holds one: a run leaves that variable out,
+  `path`, `keymaps` and `dis_aliases`; each one tried in sh, bash and zsh): setting one would stop every command of the lane's workers. A saved env that holds one: a run leaves that variable out,
   with a line in `hansa show`.
   The env names that point common tools at a folder (`hansa lane set L env
   NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
@@ -499,9 +502,11 @@ here; work that needs code changed or a browser goes to a worker.
   or write list may be one, inside one or above one; and none may be or be above
   what every worker needs: the home folder, the desk, a lane's repository or
   worktree, the desk's worktrees folder, a folder on the `PATH`, the system's
-  programs and libraries (`/usr/lib`, `/etc`), `~/.config`, `~/.local`,
+  programs and libraries (`/usr/lib`, `/etc`), Homebrew's `Cellar`, `opt` and
+  `Caskroom` (where its program links lead), `~/.config`, `~/.local`,
   `~/.cache` (and `~/Library` on macOS) or the temporary folder; a file or folder
-  inside one may be listed); which lanes' releases go
+  inside one may be listed, one formula's folder in `Cellar` too; nor `/dev` or
+  anything in it, such as `/dev/null`); which lanes' releases go
   out without the principal's yes, and the words no release may send out.
   Ask with `hansa ask`; do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.
