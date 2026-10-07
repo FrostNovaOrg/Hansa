@@ -599,8 +599,8 @@ def unresolved_why(path: str) -> str:
 
 @_once
 def _forms(path: str) -> set:
-    """A full path as given and with links resolved (as given only, when they cannot be followed: a list check
-    refuses such a path itself, unresolved_why); on macOS, one under the data volume also as the path from /."""
+    """A full path as given and with links resolved (as given only, when they cannot be followed: a list that
+    opens refuses such a path itself, unresolved_why; the deny list keeps it); on macOS, one under the data volume also as the path from /."""
     out = {_plain(w) for w in (path, resolved(path)) if w}
     if sys.platform == "darwin":
         out |= {w for w in map(_off_data, out) if w}
@@ -1322,7 +1322,8 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
     """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
     wrong with the others, one line each). None may close what a worker needs in order to run: the home folder
     or a folder above it, the desk or above it, a lane's repository or above it, a folder on the PATH or above
-    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted."""
+    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted, and so is one
+    whose links cannot be followed (unresolved_why): it is denied as given, in every form hansa can work out."""
     if not isinstance(paths, list) or len(paths) > MAX_DENY:
         return [], [DENY_LIST_WHY]
     home = account_home()
@@ -1347,7 +1348,8 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         if _has_format(x):
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
-        why = next((why for f, hit, why in fenced if hit(x, f)), "") or unresolved_why(x)
+        # one whose links cannot be followed is kept, denied as given: refused, it would be read
+        why = next((why for f, hit, why in fenced if hit(x, f)), "")
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:

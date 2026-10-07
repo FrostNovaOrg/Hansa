@@ -5050,7 +5050,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(write_problems([str(good), "/opt/include", "/var/cache/x"]), [])
         self.assertIn("it would open /usr, where programs are installed", write_problems(["/usr/local/include/x"])[0])
 
-    def test_a_path_whose_links_cannot_be_followed_is_refused_in_every_list_and_crashes_nothing(self):
+    def test_a_path_whose_links_cannot_be_followed_is_refused_in_the_lists_that_open_and_crashes_nothing(self):
         # as Python 3.9's realpath does for /proc/1/root on Linux, for any account but root
         from hansa.desk import deny_split, read_split
         good, shut = (self.tmp / "opt").resolve(), (self.tmp / "shut").resolve()
@@ -5073,12 +5073,69 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(write_problems([str(shut / "cache")]), [f"write cannot include {shut / 'cache'}: {cannot} "
                                                                     "(a folder on the way cannot be looked into), so "
                                                                     "it cannot check what it would open"])
-            kept, said = deny_split([str(shut / "keys")])
-            self.assertEqual(kept, [])
-            self.assertIn(f"{shut / 'keys'}: {cannot}", said[0])
+            self.assertEqual(deny_split([str(shut / "keys")]), ([str(shut / "keys")], []))  # kept: denied as given
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(shut / "cache")])
             self.assertIn(cannot, str(e.exception.code))
+
+    def unfollowable(self, under):
+        """os.path.realpath as Python 3.9's on Linux, for an account other than root, under /proc/1/root: it
+        raises for any path under `under`."""
+        real = os.path.realpath
+
+        def realpath(p, *a, **k):
+            if str(p) == str(under) or str(p).startswith(str(under) + "/"):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real(p, *a, **k)
+        return unittest.mock.patch("os.path.realpath", realpath)
+
+    def test_a_deny_entry_whose_links_cannot_be_followed_is_kept_and_closes_the_folders_above_it(self):
+        from hansa.desk import deny_split, read_split
+        share = (self.tmp / "share").resolve()
+        (share / "lnk").mkdir(parents=True)
+        secret = str(share / "lnk" / "secret")
+        with self.unfollowable(share / "lnk"):
+            told = self.page_save(lambda s: s.update(workers_may_not_read=[secret]))
+            self.assertTrue(told["ok"], told)
+            self.assertEqual(self.desk.settings()["workers_may_not_read"], [secret])
+            kept, said = deny_split([secret])
+            self.assertEqual((kept, said), ([secret], []))
+            self.assertIn("which is on the list of what workers may not read", read_split([str(share)], denied=kept)[1][0])
+            self.assertIn("which the principal keeps workers from reading", write_problems([str(share)], denied=kept)[0])
+            told = self.page_save(lambda s: s.update(coordinator_read=[str(share)]))
+            self.assertFalse(told["ok"], told)
+            self.assertTrue(any("on the list of what workers may not read" in p for p in told["problems"]), told)
+
+    def test_a_saved_deny_entry_that_cannot_be_followed_later_is_still_denied_to_runs_and_the_coordinator(self):
+        from hansa import run
+        share = (self.tmp / "share").resolve()
+        (share / "lnk").mkdir(parents=True)
+        secret = str(share / "lnk" / "secret")
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[secret]))["ok"])
+        with self.unfollowable(share / "lnk"):
+            self.assertEqual(run.no_read(self.desk), ([secret], []))  # not "left out of this run"
+            self.assertEqual(run.full_paths([secret]), [secret])
+            self.assertIn(f"Read(//{secret.lstrip('/')})", run.no_read_rules([secret]))
+            # the account's part, then root's checks of the plan again
+            plan = cli.coordinator_desk(self.desk, os.getuid())
+            self.assertEqual(plan["no_read"], [secret])
+            self.assertEqual(cli.no_read_paths(self.desk, plan, "someone"), ([secret], []))
+            s = self.desk.settings()
+            s["coordinator_read"] = [str(share)]
+            write_json(self.desk.settings_path, s)
+            plan = cli.coordinator_desk(self.desk, os.getuid())
+            self.assertEqual(plan["read"], [])
+            self.assertEqual(cli.read_folders(self.desk, plan, {}, "someone", [secret])[0], [])
+
+    def test_hansa_notes_lists_a_file_whose_links_cannot_be_followed_as_such(self):
+        (self.desk.notes_dir / "plan.md").write_text("# Plan\n")
+        (self.desk.notes_dir / "odd.md").write_text("# Odd\n")
+        with self.unfollowable(self.desk.notes_dir.resolve() / "odd.md"):
+            code, out, _ = self.hansa_notes()
+        self.assertEqual(code, 0)
+        self.assertIn("odd.md  (hansa cannot follow its links to see where it leads; not read)", out)
+        self.assertNotIn("leads out of notes/", out)
+        self.assertIn("plan.md", out)
 
     def test_a_system_folder_named_through_a_link_is_named_as_the_path_spells_it_too(self):
         # as /lib, a link to /usr/lib on many Linux systems, is to /usr/lib/x

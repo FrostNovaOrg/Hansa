@@ -94,10 +94,12 @@ def list_text(desk: Desk, name: str = "") -> str:
         dirs[:] = sorted(x for x in dirs if not x.startswith("."))
         for f in sorted(x for x in files if not x.startswith(".")):
             p = Path(d) / f
-            real = Path(resolved(str(p)) or "/")  # where its links cannot be followed: not read
-            if root not in real.parents:
+            real = resolved(str(p))
+            if not real:  # what it is cannot be checked: not read
+                out.append(f"{_rel(desk, p)}  (hansa cannot follow its links to see where it leads; not read)")
+            elif root not in Path(real).parents:
                 out.append(f"{_rel(desk, p)}  (a link that leads out of notes/; not read)")
-            elif real.is_file():
+            elif Path(real).is_file():
                 archived = not name and p.relative_to(root).parts[0] == ARCHIVE
                 out.append(_file_text(desk, p, not archived))
     return "\n".join(out) if out else f"{_rel(desk, top) if name else 'notes/'} holds no files"
