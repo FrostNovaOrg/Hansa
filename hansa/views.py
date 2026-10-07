@@ -73,10 +73,23 @@ def failure_spans(lines: list) -> list:
     running, as (kind, line numbers) in order, kind 'test' or 'error': unittest's FAIL:/ERROR: blocks, pytest's
     FAILURES and ERRORS sections (a part each test) and its short summary, Surefire's <<< FAILURE!/<<< ERROR!
     blocks with their stack traces, its Failures:/Errors: summary and its Tests run count, Maven's COMPILATION
-    ERROR and its first path:[line,col] errors, go's --- FAIL blocks with their messages above or under them, a
-    go panic with the first part of its trace, go's build errors, jest's FAIL file lines and ● blocks, Gradle's
-    FAILED tests. A line a runner marks as passing (go's --- PASS, say) is never one of them."""
+    ERROR and its first path:[line,col] errors, go's --- FAIL blocks with the messages under them and, by the
+    names those fail, under each === RUN/CONT/NAME line of a failing test or subtest wherever it is, a go panic
+    with the first part of its trace, go's build errors, jest's FAIL file lines and ● blocks, Gradle's FAILED
+    tests. A line a runner marks as passing (go's --- PASS, say) is never one of them."""
     spans, i, n, floor, errors, seen = [], 0, len(lines), 0, 0, set()
+    failing = {m.group(1) for x in lines if (m := GO_FAIL.match(x))}  # go's failing tests and subtests, by name
+    go_run, go_parts, part = set(), [], []  # go test -v prints a test's messages as it runs, under each === RUN,
+    for k, x in enumerate(lines + [""]):  # === CONT and === NAME line of its name, wherever: those of the failing
+        m = GO_RUN.match(x)
+        if m or not (x.strip() and x[:1].isspace()) or GO_FAIL.match(x) or GO_PASS.match(x):
+            if len(part) > 1:  # its header, with the messages under it
+                go_parts.append(("test", part))
+            part = [k] if m and m.group(1) != "PAUSE" and m.group(2) in failing else []
+            if m:
+                go_run.add(m.group(2))
+        elif part:
+            part.append(k)
 
     def until(j, stop, cap=None):
         k = j + 1
@@ -122,29 +135,23 @@ def failure_spans(lines: list) -> list:
             seen.add(key)
             errors += 1
             keep, kind = list(range(i, end)), "error"
-        elif GO_FAIL.match(x):
-            end = until(i, lambda k: not indented(k), 20)
-            failing = {m.group(1) for k in range(i, end) if (m := GO_FAIL.match(lines[k]))}
-            name = GO_FAIL.match(x).group(1)
-            top = next((k for k in range(i - 1, floor - 1, -1) if (m := GO_RUN.match(lines[k]))
-                        and m.group(1) == "RUN" and m.group(2) == name), None)
-            above, part = [], []  # go test -v prints a test's messages as it runs, under its own === RUN line,
-            if top is not None:  # a subtest's too, before its parent's --- FAIL: those of the failing ones
-                for k in range(top, i + 1):
-                    m = GO_RUN.match(lines[k])
-                    if m or k == i or GO_FAIL.match(lines[k]) or GO_PASS.match(lines[k]) or not indented(k):
-                        if len(part) > 1 and len(above) < 40:  # its === RUN line, with the messages under it
-                            above += part
-                        part = [k] if m and m.group(1) != "PAUSE" and m.group(2) in failing else []
-                    elif part:
-                        part.append(k)
-            else:  # or without one above them
+        elif GO_FAIL.match(x):  # with the failing results under it, never a passing one or what is under that
+            keep, k, passed = [i], i + 1, None
+            while k < n and indented(k):
+                at = len(lines[k]) - len(lines[k].lstrip())
+                if GO_PASS.match(lines[k]):
+                    passed = at
+                elif passed is None or at <= passed:
+                    keep.append(k)
+                    passed = None
+                k += 1
+            if GO_FAIL.match(x).group(1) not in go_run:  # without go test -v: its messages under it, or just above
                 while start > floor and indented(start - 1) and not GO_PASS.match(lines[start - 1]) and i - start < 20:
                     start -= 1
-                if start > floor and GO_RUN.match(lines[start - 1]) and start < i:
-                    start -= 1
-                above = list(range(start, i))
-            keep = above + [k for k in range(i, end) if not GO_PASS.match(lines[k])]
+                keep = list(range(start, i)) + keep
+            spans.append(("test", keep))
+            floor = i = k
+            continue
         elif GO_PANIC.match(x):
             k = i + 1
             while k < n and k - i < 8 and not re.match(r"goroutine \d+ \[", lines[k]):
@@ -170,15 +177,21 @@ def failure_spans(lines: list) -> list:
             continue
         spans.append((kind, keep))
         floor = i = max(keep[-1] + 1, i + 1)
-    return spans
+    out, used = [], set()  # in the output's order, each line once
+    for kind, keep in sorted(spans + go_parts, key=lambda s: s[1][0]):
+        keep = [k for k in keep if k not in used]
+        used.update(keep)
+        if keep:
+            out.append((kind, keep))
+    return out
 
 
 def failed_check_lines(log: str, tail: list, tid: str) -> list:
     """For hansa show, a check or merge check that failed: the failing tests (or the errors that kept them from
-    running) lifted out of its whole output (failure_spans) above its last TAIL_LINES lines, each cut to
-    BLOCK_LINES and all to FAILURE_LINES, then those last lines, always: never less than its last lines alone,
-    which is all it gives when nothing in it is recognised, or when the output is not kept (tail: the last lines
-    as recorded)."""
+    running) lifted out of its whole output (failure_spans), those of their lines above its last TAIL_LINES lines
+    (a failure's message above them even when its marker is among them), each cut to BLOCK_LINES and all to
+    FAILURE_LINES, then those last lines, always: never less than its last lines alone, which is all it gives
+    when nothing in it is recognised, or when the output is not kept (tail: the last lines as recorded)."""
     lines = [plain(x, None) for x in log.rstrip().splitlines()]
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -187,7 +200,10 @@ def failed_check_lines(log: str, tail: list, tid: str) -> list:
     whole = [f"  the whole output: hansa show {tid} --check"]
     last = max(0, len(lines) - TAIL_LINES)  # the lines from here are shown as its last lines
     picked, kinds = [], set()
-    for kind, keep in failure_spans(lines[:last]):
+    for kind, keep in failure_spans(lines):  # the lines above the last ones, a failure's message above them too
+        keep = [k for k in keep if k < last]
+        if not any(lines[k].strip() and not RULE.fullmatch(lines[k].strip()) for k in keep):
+            continue
         kinds.add(kind)
         picked += ["    " + lines[k][:200] for k in keep[:BLOCK_LINES]]
         if len(keep) > BLOCK_LINES:

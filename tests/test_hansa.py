@@ -799,6 +799,37 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("pos is fine", shown)  # never a passing subtest's lines
         self.assertNotIn("TestSum/pos", shown)
 
+    def test_go_test_v_keeps_the_messages_of_two_parallel_top_level_tests(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(20))
+        shown = self.failing_show(
+            "=== RUN   TestA\n=== PAUSE TestA\n=== RUN   TestB\n=== PAUSE TestB\n=== CONT  TestA\n"
+            "    a_test.go:10: A broke\n=== CONT  TestB\n    b_test.go:10: B broke\n--- FAIL: TestB (0.00s)\n"
+            "--- FAIL: TestA (0.00s)\n" + passing + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === CONT  TestA\n        a_test.go:10: A broke\n"
+                      "    === CONT  TestB\n        b_test.go:10: B broke\n    --- FAIL: TestB (0.00s)\n"
+                      "    --- FAIL: TestA (0.00s)\n  its last lines:\n", shown)
+
+    def test_go_test_v_keeps_the_message_of_a_failing_case_in_a_table_of_thirty(self):
+        runs = "".join(f"=== RUN   TestT/case{i:02d}\n" + ("    t_test.go:20: case28 WRONG\n" if i == 28 else "")
+                       for i in range(30))
+        results = "".join(f"    --- {'FAIL' if i == 28 else 'PASS'}: TestT/case{i:02d} (0.00s)\n" for i in range(30))
+        shown = self.failing_show("=== RUN   TestT\n" + runs + "--- FAIL: TestT (0.00s)\n" + results
+                                  + "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(10))
+                                  + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestT/case28\n        t_test.go:20: case28 "
+                      "WRONG\n    --- FAIL: TestT (0.00s)\n        --- FAIL: TestT/case28 (0.00s)\n  its last lines:\n",
+                      shown)
+        self.assertNotIn("case27", shown)
+
+    def test_go_test_v_keeps_a_subtests_message_when_its_fail_line_is_among_the_last_lines(self):
+        runs = "".join(f"=== RUN   TestC/c{i}\n" + ("    c_test.go:8: c0 WRONG\n" if i == 0 else "") for i in range(8))
+        results = "".join(f"    --- {'FAIL' if i == 0 else 'PASS'}: TestC/c{i} (0.00s)\n" for i in range(8))
+        shown = self.failing_show("=== RUN   TestC\n" + runs + "--- FAIL: TestC (0.00s)\n" + results
+                                  + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestC/c0\n        c_test.go:8: c0 WRONG\n"
+                      "  its last lines:\n", shown)
+        self.assertEqual(shown.count("--- FAIL: TestC (0.00s)"), 1)  # once, among the last lines
+
     def test_show_lifts_a_maven_compile_error_as_the_errors(self):
         err = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n  符号:   类 Foo{i}\n  位置: 类 a.App\n"
                       for i in range(5, 12))
