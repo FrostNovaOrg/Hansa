@@ -9,8 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import build, cost, installed, installed_text, notify, release
-from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_lanes, read_json,
+from . import alert, build, cost, installed, installed_text, notify, release
+from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, progress_of, provider_problem, serve_code, server_state,
@@ -287,6 +287,7 @@ def status(desk: Desk) -> dict:
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
+        "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -353,6 +354,7 @@ def status_text(st: dict) -> str:
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out += [project_text(st["project"])] if st.get("project") else []
+    out += [st["alert_failed"]] if st.get("alert_failed") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
@@ -404,7 +406,7 @@ def status_text(st: dict) -> str:
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {p['problem'] or 'ready'}")
     if [r for r in st.get("releases") or [] if r["state"] in release.OPEN]:
         out.append("releases (hansa release):")
-        out += [f"  #{r['id']} lane {r['lane']} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
+        out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
                 if r["state"] in release.OPEN]
     if st["asks"]:
         out.append("open asks to the principal:")
@@ -888,17 +890,20 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
         "pause/resume.",
-        release_settings_line(s)])
+        release_settings_line(s),
+        alert.explain_line(s)])
 
 
 def release_settings_line(s: dict) -> str:
     """For hansa explain: the principal's release settings."""
-    listed = [n for n in listed_lanes(s) if release.lane_listed(s, n)]
-    changed = [n for n in listed_lanes(s) if n not in listed]
+    def named(k):
+        return k[0] + (f" target {k[1]}" if k[1] else "")
+    listed = [named(k) for k in listed_targets(s) if release.lane_listed(s, *k)]
+    changed = [named(k) for k in listed_targets(s) if named(k) not in listed]
     words = s.get("release_forbidden") or []
-    return ("Releases (hansa release L) go out only after the principal's yes on the page"
+    return ("Releases (hansa release L [TARGET]) go out only after the principal's yes on the page"
             + (f", but for lanes {', '.join(listed)}, which the principal lets go out without asking while the desk is "
-               "not paused" if listed else "")
+               "not paused (each target ticked on its own)" if listed else "")
             + (f" (lanes {', '.join(changed)} are on that list, but their repository, base branch or release command "
                "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
             + f"; {len(words)} word(s) the principal keeps from going out are checked first. Both lists are the "

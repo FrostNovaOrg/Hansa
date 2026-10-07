@@ -63,10 +63,18 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden")
-# What the principal's list of lanes released without asking records of each lane, as the page saves it: a lane
-# goes out without asking only while it still has them
-LISTED_AS = ("repo", "base", "release")
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
+# The events that may call for an alert to the principal (alert.from_event)
+ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "ask")
+# What the principal's list of releases without asking records of each lane's release target, as the page saves
+# it: {lane, target, repo, base, command, after} (after: the target it must follow, "" for none); a target goes out
+# without asking only while it still has all of them. An entry saved before targets had names holds {lane, repo,
+# base, release}: the lane's unnamed target and its command; an entry without after counts only for a target that
+# must follow none
+LISTED_AS = ("repo", "base", "command", "after")
+LISTED_KEYS = ("lane", "target", *LISTED_AS, "release")
+MAX_TARGETS = 20  # named release targets on one lane
+TARGET_FIELDS = ("command", "timeout_min", "after")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
@@ -191,13 +199,18 @@ def default_settings() -> dict:
         # them (desk.HOME_SECRETS and the like): full paths, a machine's own folders of keys, say. Read is
         # denied there to every Claude Code run hansa starts, the coordinator too. The principal's, on the page.
         "workers_may_not_read": [],
-        # Lanes whose releases (hansa release) go out without the principal's yes on the page: each one as the page
-        # saved it, {lane, repo, base, release}; a lane that no longer has that repository, base branch and release
-        # command waits for the yes. The principal's, on the page; empty: every release waits for the yes.
+        # Release targets whose releases (hansa release) go out without the principal's yes on the page: each one as
+        # the page saved it, {lane, target, repo, base, command, after} (target "": the lane's unnamed one, its
+        # release command; after: the target it must follow, "" for none); a target that no longer has that
+        # repository, base branch, command and after waits for the yes. The principal's, on the page; empty: every
+        # release waits for the yes.
         "releases_without_asking": [],
         # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add or in
         # their messages refuses the release. The principal's, on the page.
         "release_forbidden": [],
+        # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
+        # it. The principal's, on the page; empty: no alerts.
+        "alert": {"command": ""},
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -244,7 +257,8 @@ def validate(s: dict, root=None) -> list:
     if not isinstance(s, dict):
         return ["settings must be an object"]
     known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden"}
+             "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden",
+             "alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     # which of them may be read is looked at when the page saves a changed list, and when the coordinator
     # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
@@ -261,12 +275,17 @@ def validate(s: dict, root=None) -> list:
     kept = deny_split(kept, root)[0]  # whatever the lanes: a lane's repository gives way to the list, below
     listed = s.get("releases_without_asking", [])
     if not isinstance(listed, list) or len(listed) > 100 or not all(_listed_ok(x) for x in listed):
-        p.append("the lanes released without asking must be a list of lane names, one per line")
+        p.append("the releases without asking must be a list of lanes and their release targets, each a lane name "
+                 "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)")
     words = s.get("release_forbidden", [])
     if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
         p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
                  "line, each up to 200 characters")
+    al = s.get("alert", {"command": ""})
+    if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
+            or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
+        p.append("the alert command must be one shell command line (up to 1000 characters)")
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -315,8 +334,8 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
-                           "preview", "setup", "release", "max_turns", "timeout_min", "merge_timeout_min", "note",
-                           *MESSAGE_FIELDS}
+                           "preview", "setup", "release", "targets", "max_turns", "timeout_min", "merge_timeout_min",
+                           "note", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -351,6 +370,7 @@ def validate(s: dict, root=None) -> list:
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
         p += [f"{at}: {f} {message_problem(ln[f])}" for f in MESSAGE_FIELDS if message_problem(ln.get(f, ""))]
+        p += [f"{at}: {x}" for x in target_problems(ln)]
         if not _is_int(ln.get("max_turns", 300), 1, 1000):
             p.append(f"{at}: max_turns must be from 1 to 1000")
         if not _is_int(ln.get("timeout_min", 240), 1, 1440):
@@ -761,36 +781,124 @@ def claude_home(state_dir, name: str, p: dict) -> Path:
     return Path(state_dir) / f"claude-{name}"
 
 
+def lane_targets(ln) -> dict:
+    """A lane's release targets, by name: its named ones (targets), or else its release command as its one unnamed
+    target, named ""; each {command, timeout_min?, after?}. Empty when it has neither."""
+    if not isinstance(ln, dict):
+        return {}
+    named = ln.get("targets")
+    if isinstance(named, dict) and named:
+        return {k: v for k, v in named.items() if isinstance(v, dict)}
+    cmd = ln.get("release")
+    return {"": {"command": cmd}} if isinstance(cmd, str) and cmd.strip() else {}
+
+
+def target_name(target) -> str:
+    """How a release target is named in words: 'target NAME', or '' for a lane's unnamed one."""
+    return f"target {target}" if target else ""
+
+
+def target_problems(ln: dict) -> list:
+    """What is wrong with a lane's named release targets, in words."""
+    named = ln.get("targets", {})
+    if not isinstance(named, dict) or len(named) > MAX_TARGETS:
+        return [f"targets must be an object of up to {MAX_TARGETS} release targets by name"]
+    p = []
+    if named and isinstance(ln.get("release"), str) and ln["release"].strip():
+        p.append("has a release command and named release targets: the release command is the lane's one unnamed "
+                 "target, so give it a name (hansa lane target L NAME \"<command>\") and take it out (hansa lane set "
+                 "L release none)")
+    for name, t in named.items():
+        at = f"release target {name}"
+        if not isinstance(name, str) or not NAME.match(name):
+            p.append(f"{at}: use lowercase letters, digits and '-'")
+        if not isinstance(t, dict):
+            p.append(f"{at}: must be an object with command, and optionally timeout_min and after")
+            continue
+        extra = set(t) - set(TARGET_FIELDS)
+        if extra:
+            p.append(f"{at}: unknown field(s): {', '.join(sorted(map(str, extra)))}")
+        cmd = t.get("command")
+        if not isinstance(cmd, str) or not cmd.strip() or len(cmd) > 1000:
+            p.append(f"{at}: command must be one shell command line (up to 1000 characters)")
+        if "timeout_min" in t and not _is_int(t["timeout_min"], 1, 1440):
+            p.append(f"{at}: timeout_min must be from 1 to 1440")
+        after = t.get("after")
+        if after is not None and (not isinstance(after, str) or after == name or after not in named):
+            p.append(f"{at}: after must name another release target of the same lane")
+    for name in named:  # an order that comes back to where it began can never be kept
+        seen, at = {name}, named.get(name)
+        while isinstance(at, dict) and isinstance(at.get("after"), str) and at["after"] in named:
+            if at["after"] in seen:
+                p.append(f"release target {name}: the order of targets (after) goes round in a circle")
+                break
+            seen.add(at["after"])
+            at = named.get(at["after"])
+    return p
+
+
 def _listed_ok(x) -> bool:
-    """An entry of releases_without_asking: a lane name as the page sends it, or as recorded when the page saved it."""
+    """An entry of releases_without_asking: a lane name (its unnamed target) or {lane, target} as the page sends
+    it, or as recorded when the page saved it."""
     if isinstance(x, str):
         return bool(NAME.match(x))
-    return (isinstance(x, dict) and set(x) <= {"lane", *LISTED_AS} and isinstance(x.get("lane"), str)
-            and bool(NAME.match(x["lane"])) and all(isinstance(x.get(k, ""), str) and len(x.get(k, "")) <= 4000
-                                                     for k in LISTED_AS))
+    return (isinstance(x, dict) and set(x) <= set(LISTED_KEYS) and isinstance(x.get("lane"), str)
+            and bool(NAME.match(x["lane"])) and isinstance(x.get("target", ""), str)
+            and (x.get("target", "") == "" or bool(NAME.match(x["target"])))
+            and all(isinstance(x.get(k, ""), str) and len(x.get(k, "")) <= 4000 for k in (*LISTED_AS, "release")))
 
 
-def listed_as(ln: dict | None) -> dict:
-    """What the principal's list of lanes released without asking records of a lane when the page saves it: its
-    repository, base branch and release command (empty when there is no such lane)."""
+def listed_as(ln: dict | None, target: str = "") -> dict:
+    """What the principal's list of releases without asking records of a lane's release target when the page saves
+    it: the lane's repository and base branch, and the target's command and the target it must follow ('' for none;
+    all empty when there is no such lane)."""
     if not isinstance(ln, dict) or not isinstance(ln.get("repo"), str):
-        return {"repo": "", "base": "", "release": ""}
+        return {"repo": "", "base": "", "command": "", "after": ""}
+    t = lane_targets(ln).get(target, {})
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
-            "release": str(ln.get("release") or "")}
+            "command": str(t.get("command") or ""), "after": str(t.get("after") or "")}
+
+
+def listed_key(entry) -> tuple:
+    """(lane, target) of an entry of the list; an entry without a target stands for the lane's unnamed one."""
+    if isinstance(entry, str):
+        return entry, ""
+    if isinstance(entry, dict):
+        return entry.get("lane"), entry.get("target", "")
+    return None, None
 
 
 def record_listed(listed, lanes: dict) -> list:
-    """The page's save of the list: a lane name it sends is recorded with what the lane is now; an entry recorded
-    before is kept as it was."""
+    """The page's save of the list: a lane name, or {lane, target}, it sends is recorded with what the lane and the
+    target are now; an entry recorded before is kept as it was."""
     if not isinstance(listed, list):
         return listed
-    return [{"lane": x, **listed_as(lanes.get(x))} if isinstance(x, str) and NAME.match(x) else x for x in listed]
+    out = []
+    for x in listed:
+        fresh = isinstance(x, str) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
+        if fresh and _listed_ok(x):
+            lane, target = listed_key(x)
+            x = {"lane": lane, "target": target, **listed_as(lanes.get(lane), target)}
+        out.append(x)
+    return out
+
+
+def stamp_alert(given, before) -> object:
+    """The page's save of the alert command: who saved it and when, as hansa records them (not as the page sends
+    them); kept as they were while the command is unchanged."""
+    if not isinstance(given, dict) or not isinstance(given.get("command", ""), str):
+        return given  # refused by validate
+    before = before if isinstance(before, dict) else {}
+    cmd = given.get("command", "").strip()
+    if cmd == (before.get("command") or "").strip():
+        return {"command": cmd, **{k: before[k] for k in ("by", "at") if k in before}}
+    return {"command": cmd, "by": "page", "at": now()}
 
 
 def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
-    """'' while a lane on the principal's list of lanes released without asking is what it was when the page saved
-    the list; otherwise what is no longer so (zh: in Chinese, for the page)."""
-    lane = entry if isinstance(entry, str) else entry.get("lane") if isinstance(entry, dict) else None
+    """'' while a release target on the principal's list of releases without asking is what it was when the page
+    saved the list; otherwise what is no longer so (zh: in Chinese, for the page)."""
+    lane, target = listed_key(entry)
     if not isinstance(entry, dict):
         return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
                 "the list was saved before hansa recorded each lane's repository, base branch and release command")
@@ -799,19 +907,28 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
         return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
     if not entry.get("repo"):
         return f"保存清单时工作线 {lane} 还不在桌面上" if zh else f"lane {lane} was not on the desk when the list was saved"
-    now_as = listed_as(ln)
+    if target not in lane_targets(ln):
+        if zh:
+            return f"工作线 {lane} 现在没有发布目标 {target}" if target else f"工作线 {lane} 现在没有不带名字的发布命令"
+        return (f"lane {lane} has no release target {target} now" if target else
+                f"lane {lane} has no unnamed release command now (its targets have names)")
+    now_as = listed_as(ln, target)
+    # an entry saved without after (before hansa recorded it) stands for a target that must follow none
+    then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
-                                    ("release", ("release command", "发布命令"))) if entry.get(k, "") != now_as[k]]
+                                    ("command", ("release command", "发布命令")),
+                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")))
+               if then.get(k, "") != now_as[k]]
     if not changed:
         return ""
     return (f"保存清单之后它的{'和'.join(w[1] for w in changed)}变了" if zh else
             f"its {' and '.join(w[0] for w in changed)} changed since the list was saved")
 
 
-def listed_lanes(s: dict) -> list:
-    """The lane names on the principal's list of lanes released without asking, as the page shows them."""
+def listed_targets(s: dict) -> list:
+    """(lane, target) of each entry on the principal's list of releases without asking, as the page shows them."""
     listed = s.get("releases_without_asking") or []
-    return [x if isinstance(x, str) else x.get("lane", "") for x in listed if isinstance(x, (str, dict))]
+    return [listed_key(x) for x in listed if isinstance(x, (str, dict))]
 
 
 def message_problem(form) -> str:
@@ -1430,8 +1547,9 @@ class Desk:
                             for k in theirs]
             else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
                 lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
-                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes)}
-            problems = validate(new, self.root) + self.keys_in_release(old, new)
+                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes),
+                       "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
+            problems = validate(new, self.root) + self.keys_in_release(old, new) + self.keys_in_alert(old, new)
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -1446,15 +1564,28 @@ class Desk:
         lanes, before = new.get("lanes"), old.get("lanes") or {}
         out = []
         for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
-            cmd = ln.get("release") if isinstance(ln, dict) else None
-            if not isinstance(cmd, str) or cmd == (before.get(name) or {}).get("release"):
-                continue
-            found = self.keys_in(cmd)
-            if found:
-                out.append(f"lanes.{name}: the release command holds the key of {', '.join(found)}, and a release "
-                           "command is stored and shown as written; have the command read the key from where the "
-                           "tool keeps it (its own login or configuration file, or a file the command reads) instead")
+            was = lane_targets(before.get(name))
+            for target, t in lane_targets(ln).items():
+                cmd = t.get("command")
+                if not isinstance(cmd, str) or cmd == (was.get(target) or {}).get("command"):
+                    continue
+                found = self.keys_in(cmd)
+                if found:
+                    out.append(f"lanes.{name}: the release command{' of target ' + target if target else ''} holds "
+                               f"the key of {', '.join(found)}, and a release command is stored and shown as written; "
+                               "have the command read the key from where the tool keeps it (its own login or "
+                               "configuration file, or a file the command reads) instead")
         return out
+
+    def keys_in_alert(self, old: dict, new: dict) -> list:
+        """A new or changed alert command that holds a key the desk knows: refused, as the command is stored and
+        shown as written (in the settings, on the page, in hansa explain)."""
+        cmd = (new.get("alert") or {}).get("command") if isinstance(new.get("alert"), dict) else None
+        if not isinstance(cmd, str) or cmd == ((old.get("alert") or {}).get("command")):
+            return []
+        found = self.keys_in(cmd)
+        return [f"the alert command holds the key of {', '.join(found)}, and it is stored and shown as written; have "
+                "the command read the key from a file instead"] if found else []
 
     # -- keys -------------------------------------------------------------
     def key_file(self, provider: str) -> Path:
@@ -1546,6 +1677,14 @@ class Desk:
         line = json.dumps({"ts": now(), "event": kind, **{k: clean(v) for k, v in fields.items()}}, ensure_ascii=False)
         with open(self.events_path, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+        if kind in ALERTED:  # what waits for the principal, for the principal's own alert command (hansa/alert.py)
+            from .alert import from_event
+            try:
+                from_event(self, kind, fields)
+            except Exception as e:  # noqa: BLE001 - an alert never keeps an event from being recorded
+                with open(self.events_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ts": now(), "event": "alert_error", "error": self.redact(str(e))[:300]},
+                                        ensure_ascii=False) + "\n")
 
     @contextlib.contextmanager
     def lock(self):
@@ -1723,7 +1862,8 @@ def public_settings(desk: Desk) -> dict:
     # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:
     # their releases wait for the yes until the list is saved again
     listed = s.get("releases_without_asking") if isinstance(s.get("releases_without_asking"), list) else []
-    unmatched = [{"lane": x if isinstance(x, str) else x.get("lane"), "why": why, "why_zh": listed_mismatch(s, x, True)}
+    unmatched = [{"lane": listed_key(x)[0], "target": listed_key(x)[1], "why": why,
+                  "why_zh": listed_mismatch(s, x, True)}
                  for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped,
             "deny_skipped": not_kept, "release_unmatched": unmatched}

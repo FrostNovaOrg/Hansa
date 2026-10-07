@@ -9302,7 +9302,8 @@ class DeskTest(unittest.TestCase):
         self.with_release(f"touch {out}")
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         [entry] = self.desk.settings()["releases_without_asking"]
-        self.assertEqual(entry, {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "release": f"touch {out}"})
+        self.assertEqual(entry, {"lane": "a", "target": "", "repo": str(self.repo.resolve()), "base": "main",
+                                 "command": f"touch {out}", "after": ""})
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
 
         def asked():
@@ -9600,6 +9601,665 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         self.assertIn("for lanes a, which the principal lets go out without asking", self.hansa("explain"))
 
+    # -- release targets (hansa lane target; hansa release L TARGET) ---------------------------------------------
+    def with_targets(self, **targets):
+        """Name the lane's release targets: name=command, or name=(command, {timeout_min, after})."""
+        for name, t in targets.items():
+            cmd, opts = (t, {}) if isinstance(t, str) else t
+            args = [*(["--minutes", str(opts["timeout_min"])] if "timeout_min" in opts else []),
+                    *(["--after", opts["after"]] if "after" in opts else [])]
+            self.hansa("lane", "target", "a", name, cmd, *args)
+
+    def tick_targets(self, *ticked):
+        """The page ticks these targets of lane a (and no other) for going out without asking."""
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
+            {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
+
+    def test_an_old_settings_file_with_one_release_command_and_an_old_entry_works_unchanged(self):
+        from hansa import release
+        out = self.tmp / "ran.txt"
+        s = self.desk.settings()
+        s["lanes"]["a"]["release"] = f"echo x >> {out}"
+        s["releases_without_asking"] = [{"lane": "a", "repo": str(self.repo.resolve()), "base": "main",
+                                         "release": f"echo x >> {out}"}]  # as a page before targets saved it
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(public_settings(self.desk)["problems"], [])
+        self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
+        told = self.hansa("release", "a", "first", "cut")
+        self.assertIn("on the principal's list of lanes released without asking", told)
+        self.assertNotIn("target", told)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["target"], r["note"]), ("approved", "", "first cut"))
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(out.read_text(), "x\n")
+        self.assertIn("#1 lane a at", self.hansa("release"))
+        self.assertIn("release: echo x", self.hansa("explain", "lane", "a"))
+        self.assertIn("(unnamed: the release command)", self.hansa("lane", "target", "a"))
+        # a request recorded before targets had names is the unnamed target's last release
+        release.change(self.desk, 1, lambda x: {"target": None})
+        self.commit_in_repo("b.txt", "b\n")
+        self.hansa("release", "a")
+        self.assertEqual((release.get(self.desk, 2)["since_release"], release.get(self.desk, 2)["count"]), (1, 1))
+        # the entry is left as it was saved
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0].get("release"), f"echo x >> {out}")
+
+    def test_two_targets_one_listed_and_one_not(self):
+        from hansa import release
+        push, test = self.tmp / "pushed.txt", self.tmp / "installed.txt"
+        self.with_targets(push=f"touch {push}", test=f"touch {test}")
+        self.assertEqual(sorted(self.desk.settings()["lanes"]["a"]["targets"]), ["push", "test"])
+        self.assertEqual([(e["field"], e["target"]) for e in self.events("lane_command_changed")],
+                         [("release", "push"), ("release", "test")])
+        listed = self.hansa("lane", "target", "a")
+        self.assertIn(f"push: touch {push}", listed)
+        # a lane has its unnamed target or named ones, not both
+        self.assertIn("named release targets", self.refused("lane", "set", "a", "release", "git push"))
+        self.tick_targets("test")
+        [entry] = self.desk.settings()["releases_without_asking"]
+        self.assertEqual(entry, {"lane": "a", "target": "test", "repo": str(self.repo.resolve()), "base": "main",
+                                 "command": f"touch {test}", "after": ""})
+        said = self.refused("release", "a", "now")
+        self.assertIn("lane a has 2 release targets (push, test); say which: hansa release a TARGET", said)
+        told = self.hansa("release", "a", "test", "for", "the", "demo")
+        self.assertIn("by target test", told)
+        self.assertIn("lane a target test is on the principal's list of releases without asking", told)
+        self.assertIn("waits for the principal's yes", self.hansa("release", "a", "push", "public"))
+        t1, p2 = release.get(self.desk, 1), release.get(self.desk, 2)
+        self.assertEqual((t1["target"], t1["state"], t1["note"]), ("test", "approved", "for the demo"))
+        self.assertEqual((p2["target"], p2["state"], p2["note"], p2["command"]), ("push", "waiting", "public",
+                                                                                  f"touch {push}"))
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        for _ in range(3):  # a tick for one target never covers another
+            d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        self.assertTrue(test.exists())
+        self.assertFalse(push.exists())
+        s = self.desk.settings()
+        self.assertEqual((release.lane_listed(s, "a", "test"), release.lane_listed(s, "a", "push"),
+                          release.lane_listed(s, "a")), (True, False, False))
+        # everywhere a release is named, so is its target
+        self.assertIn("#2 lane a target push at", self.hansa("release"))
+        self.assertIn("#1 lane a target test at", self.hansa("release"))
+        self.assertIn("#2 lane a target push at", views.status_text(views.status(self.desk)))
+        rows = {r["id"]: r for r in views.status(self.desk)["releases"]}
+        self.assertEqual((rows[1]["target"], rows[2]["target"]), ("test", "push"))
+        self.assertEqual({e["target"] for e in self.events("release_asked")}, {"test", "push"})
+        self.assertEqual([e["target"] for e in self.events("release_ended")], ["test"])
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_ended"), {"key": "k", "session": None})]
+        self.assertIn("release #1 of lane a target test", heard[0])
+        explained = self.hansa("explain", "lane", "a")
+        self.assertIn("release target push: touch", explained)
+        self.assertIn("hansa release a push asks for it", explained)
+        self.assertIn("the principal lets it go out without asking", explained)
+        self.assertIn("last release of test: #1 lane a target test", explained)
+        self.assertIn("lanes a target test, which the principal lets go out without asking", self.hansa("explain"))
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("releaseTarget:", "laneTargets:"):
+            self.assertEqual(ui.count(x), 2, x)
+        # the principal's yes on the page, to the push
+        self.assertEqual(release.answer(self.desk, 2, True, "", p2["commit"], p2["command"]), {"ok": True})
+        self.assertEqual(self.settle_release(d, 2)["state"], "done")
+        self.assertTrue(push.exists())
+        # a target changed after it was ticked waits for the yes; taking one out voids what was asked for it
+        self.hansa("lane", "target", "a", "test", f"touch {test}; true")
+        self.commit_in_repo("b.txt", "b\n")
+        self.hansa("release", "a", "test")
+        self.assertEqual(release.get(self.desk, 3)["state"], "waiting")
+        self.assertIn("release command changed", public_settings(self.desk)["release_unmatched"][0]["why"])
+        self.assertEqual(public_settings(self.desk)["release_unmatched"][0]["target"], "test")
+        self.hansa("lane", "target", "a", "test", "none")
+        self.assertEqual(sorted(self.desk.settings()["lanes"]["a"]["targets"]), ["push"])
+        self.assertIn("has no release target test any more", {r["id"]: r for r in views.status(self.desk)["releases"]}[3]["moved"])
+        self.assertIn("has no release target test now", public_settings(self.desk)["release_unmatched"][0]["why"])
+        # with one target left, hansa release L [note] asks for it
+        self.hansa("release", "a", "the", "rest")
+        r = release.releases(self.desk)[-1]
+        self.assertEqual((r["target"], r["note"]), ("push", "the rest"))
+
+    def test_a_target_that_must_follow_another_waits_for_its_commit(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["prod"], {"command": "true", "after": "test"})
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        # refused before the earlier target sent the commit out, in one line that says which release goes first
+        said = self.refused("release", "a", "prod")
+        self.assertEqual(len(said.splitlines()), 1, said)
+        self.assertIn("lane a target prod goes out only after target test sent out the same commit", said)
+        self.assertIn("release test first (hansa release a test)", said)
+        self.assertIn("Nothing was asked", said)
+        self.assertEqual(release.releases(self.desk), [])
+        # allowed after it
+        self.hansa("release", "a", "test")
+        self.assertIn("goes out only after target test", self.refused("release", "a", "prod"))  # not done yet
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.hansa("release", "a", "prod")
+        r = release.get(self.desk, 2)
+        self.assertEqual((r["target"], r["state"], r["commit"]), ("prod", "waiting", release.get(self.desk, 1)["commit"]))
+        # refused again once the base moved
+        self.commit_in_repo("b.txt", "b\n")
+        said = self.refused("release", "a", "prod")
+        self.assertIn(f"test's last release that went out (#1) was {r['commit'][:10]}", said)
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")  # nothing replaced it
+        # and looked at again when it is about to start: prod must now follow a target that sent nothing out
+        sh("git", "reset", "-q", "--hard", r["commit"], cwd=self.repo)
+        self.assertEqual(release.answer(self.desk, 2, True, "", r["commit"], r["command"]), {"ok": True})
+        self.with_targets(stage="true")
+        self.hansa("lane", "target", "a", "prod", "--after", "stage")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["prod"], {"command": "true", "after": "stage"})
+        d.tick()
+        r = release.get(self.desk, 2)
+        self.assertEqual(r["state"], "void", r)
+        self.assertIn("goes out only after target stage", r["void"])
+        self.assertIn("工作线 a 的目标 prod 要等目标 stage 先发出同一个提交才能发出", r["void_zh"])
+        self.assertNotIn("goes out only", r["void_zh"])  # its own Chinese, not the English line
+        # the order is checked as the lane is set
+        self.assertIn("after must name another release target", self.refused("lane", "target", "a", "prod", "--after", "nope"))
+        self.assertIn("goes round in a circle", self.refused("lane", "target", "a", "stage", "--after", "prod"))
+        self.assertIn("goes out only after stage", self.refused("lane", "target", "a", "stage", "none"))
+        self.hansa("lane", "target", "a", "prod", "--after", "none")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["prod"], {"command": "true"})
+        self.hansa("release", "a", "prod")  # no order now
+        self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
+
+    def test_each_target_counts_what_goes_out_from_its_own_last_release(self):
+        from hansa import release
+        self.with_targets(test="true", push="true")
+        self.tick_targets("test", "push")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.commit_in_repo("b.txt", "b\n")
+        told = self.hansa("release", "a", "test")
+        self.assertIn("1 commit(s) since release #1", told)
+        t2 = release.get(self.desk, 2)
+        self.assertEqual((t2["since_release"], t2["since"], [c["subject"] for c in t2["commits"]]),
+                         (1, release.get(self.desk, 1)["commit"], ["Add b.txt"]))
+        self.assertEqual(self.settle_release(d, 2)["state"], "done")
+        # the push never went out: all of it goes out by the push
+        told = self.hansa("release", "a", "push")
+        self.assertIn("2 commit(s) on no remote-tracking branch (no release of it went out before)", told)
+        p3 = release.get(self.desk, 3)
+        self.assertEqual((p3["since_release"], p3["since"], p3["count"]), (None, "", 2))
+        self.assertEqual(p3["files"], ["README.md", "b.txt"])
+        self.assertEqual(self.settle_release(d, 3)["state"], "done")
+        self.commit_in_repo("c.txt", "c\n")
+        self.hansa("release", "a", "push")
+        self.assertEqual((release.get(self.desk, 4)["since_release"], release.get(self.desk, 4)["count"]), (3, 1))
+        # the forbidden words are checked for every target
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["internal-only"])),
+                         {"ok": True, "problems": []})
+        self.commit_in_repo("d.txt", "internal-only\n", "Add d")
+        said = self.refused("release", "a", "test")
+        self.assertIn("words the principal keeps from going out", said)
+        self.assertEqual(release.releases(self.desk)[-1]["target"], "test")
+
+    def test_a_release_stops_at_its_targets_own_time_limit(self):
+        from hansa import release
+        self.with_targets(install=("echo started; sleep 60", {"timeout_min": 1}), push="true")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["install"]["timeout_min"], 1)
+        self.assertIn("timeout_min must be from 1 to 1440", self.refused("lane", "target", "a", "push", "--minutes", "0"))
+        self.assertIn("timeout_min must be from 1 to 1440",
+                      self.refused("lane", "target", "a", "push", "--minutes", "1441"))
+        s = self.desk.settings()
+        self.assertEqual(release.minutes(s, {"lane": "a", "target": "push"}), (240, "the lane's"))
+        self.assertEqual(release.minutes(s, {"lane": "a", "target": "install"}), (1, "target install's"))
+        self.tick_targets("install")
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        release.change(self.desk, 1, lambda x: {"started": x["started"] - 61})  # a minute and more went by
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["problem"]), ("failed", "stopped at target install's time limit (1 min)"))
+        # unset, the lane's timeout_min again
+        self.hansa("lane", "target", "a", "install", "--minutes", "none")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["install"], {"command": "echo started; sleep 60"})
+        self.assertIn("[240 min, the lane's]", self.hansa("lane", "target", "a"))
+
+    def test_the_page_refuses_a_malformed_target_entry(self):
+        self.with_targets(test="true")
+        for bad in ({"lane": "a", "target": "Not A Target"}, {"lane": "a", "target": 5},
+                    {"lane": "a", "target": "test", "when": "always"}, {"lane": "Not A Lane", "target": "test"},
+                    {"target": "test"}):
+            said = self.page_save(lambda s: s.update(releases_without_asking=[bad]))
+            self.assertFalse(said["ok"], bad)
+            self.assertTrue(any("releases without asking" in x for x in said["problems"]), said)
+            self.assertEqual(self.desk.settings()["releases_without_asking"], [])
+        # and a lane whose targets are malformed is refused like any other field of a lane
+        s = self.desk.settings()
+        s["lanes"]["a"]["targets"] = {"test": {"command": "true", "timeout_min": 0, "after": "test", "x": 1}}
+        said = self.desk.save_settings(s)
+        for x in ("timeout_min must be from 1 to 1440", "after must name another release target", "unknown field(s): x"):
+            self.assertTrue(any(x in p for p in said), (x, said))
+        self.tick_targets("test")
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0]["target"], "test")
+
+
+    # -- a tick counts only while the target's order (after) is what the principal ticked ----------------------------
+    def test_dropping_after_unticks_a_target_and_its_release_waits_for_the_yes(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.tick_targets("prod")
+        [entry] = self.desk.settings()["releases_without_asking"]
+        self.assertEqual(entry, {"lane": "a", "target": "prod", "repo": str(self.repo.resolve()), "base": "main",
+                                 "command": "true", "after": "test"})
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+        self.hansa("lane", "target", "a", "prod", "--after", "none")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        [u] = public_settings(self.desk)["release_unmatched"]
+        self.assertEqual((u["lane"], u["target"]), ("a", "prod"))
+        self.assertIn("its order (the target it must follow) changed", u["why"])
+        self.assertIn("顺序", u["why_zh"])
+        # test never sent anything out, and prod no longer goes out without the principal's yes
+        told = self.hansa("release", "a", "prod")
+        self.assertIn("waits for the principal's yes", told)
+        self.assertNotIn("without asking", told.split("waits")[0])
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["state"], r.get("without_asking")), ("prod", "waiting", None))
+        d = Dispatcher(self.desk)
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        # the principal saves the list again: what it now records is what counts
+        self.tick_targets("prod")
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0]["after"], "")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+
+    def test_changing_after_unticks_a_target(self):
+        from hansa import release
+        self.with_targets(test="true", stage="true", prod=("true", {"after": "test"}))
+        self.tick_targets("prod", "test")
+        self.hansa("lane", "target", "a", "prod", "--after", "stage")
+        s = self.desk.settings()
+        self.assertEqual((release.lane_listed(s, "a", "prod"), release.lane_listed(s, "a", "test")), (False, True))
+        # nor does an approved release of it start once its order changed
+        self.hansa("lane", "target", "a", "prod", "--after", "test")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.hansa("release", "a", "prod")
+        self.assertEqual(release.get(self.desk, 2)["state"], "approved")
+        self.hansa("lane", "target", "a", "prod", "--after", "none")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        # --minutes alone leaves the tick as it was
+        self.hansa("lane", "target", "a", "test", "--minutes", "5")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "test"))
+
+    def test_a_target_removed_and_added_again_keeps_its_tick_only_when_nothing_differs(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.tick_targets("prod", "test")
+        # prod taken out and set again with the same command but no order: what the principal saw differs
+        self.hansa("lane", "target", "a", "prod", "none")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        self.hansa("lane", "target", "a", "prod", "true")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        # with the same command and after again, it is what the principal ticked
+        self.hansa("lane", "target", "a", "prod", "--after", "test")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "prod"))
+        # another command voids it, as does an order the new target has and the ticked one had not
+        self.hansa("lane", "target", "a", "prod", "none")
+        self.hansa("lane", "target", "a", "prod", "true; true", "--after", "test")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "prod"))
+        self.hansa("lane", "target", "a", "prod", "none")
+        self.hansa("lane", "target", "a", "test", "none")
+        self.hansa("lane", "target", "a", "push", "true")
+        self.hansa("lane", "target", "a", "test", "true", "--after", "push")
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", "test"))
+
+    def test_an_entry_saved_without_after_counts_only_for_a_target_that_follows_none(self):
+        from hansa import release
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        s = self.desk.settings()
+        at = {"repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        s["releases_without_asking"] = [{"lane": "a", "target": "test", **at}, {"lane": "a", "target": "prod", **at}]
+        self.desk.settings_path.write_text(json.dumps(s))  # as the page saved it before it recorded after
+        self.assertEqual(public_settings(self.desk)["problems"], [])
+        s = self.desk.settings()
+        self.assertEqual((release.lane_listed(s, "a", "test"), release.lane_listed(s, "a", "prod")), (True, False))
+        self.assertEqual([u["target"] for u in public_settings(self.desk)["release_unmatched"]], ["prod"])
+
+
+    # -- the principal's alert command (hansa/alert.py) ------------------------------------------------------------
+    ALERT_FAKE = ("import json, os, sys\n"
+                  "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'kind': os.environ.get('HANSA_ALERT_KIND'),"
+                  " 'text': sys.stdin.buffer.read().decode('utf-8'), 'cwd': os.getcwd(),"
+                  " 'task': os.environ.get('HANSA_TASK'), 'mine': os.environ.get('ALERT_TEST_MINE')}) + '\\n')\n")
+
+    def alert_fake(self) -> Path:
+        """A fake alert command that writes what it read and HANSA_ALERT_KIND to a file; set on the page."""
+        script, out = self.tmp / "alert.py", self.tmp / "alerts.jsonl"
+        script.write_text(self.ALERT_FAKE)
+        cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {shlex.quote(str(out))}"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        return out
+
+    def alerted(self, out) -> list:
+        return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()] if out.exists() else []
+
+    def test_the_alert_command_is_the_principals_alone(self):
+        from hansa import alert
+        self.assertEqual(self.desk.settings()["alert"], {"command": ""})
+        self.assertIn("no alert command is set", self.hansa("explain"))
+        self.assertFalse(alert.add(self.desk, "ask", "nothing set"))  # no command: nothing queued
+        self.assertEqual(alert.queued(self.desk), [])
+        # no command of the coordinator's sets, changes or clears it
+        s = self.desk.settings()
+        s["alert"] = {"command": "echo hi"}
+        said = self.desk.save_settings(s, by="coordinator")
+        self.assertTrue(any("alert" in x and "principal's" in x for x in said), said)
+        self.assertEqual(self.desk.settings()["alert"], {"command": ""})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "alert", "echo hi"])
+        self.assertIn("invalid choice: 'alert'", err.getvalue())  # lane set has nothing like it
+        # the page's save is the only way, and it records who saved it and when
+        before = time.time()
+        out = self.alert_fake()
+        saved = self.desk.settings()["alert"]
+        self.assertEqual(saved["by"], "page")
+        self.assertGreaterEqual(saved["at"], before - 1)
+        self.assertEqual(json.loads(self.desk.settings_path.read_text())["alert"], saved)
+        for change in ({"command": "echo other"}, {"command": ""}):
+            s = self.desk.settings()
+            s["alert"] = change
+            self.assertTrue(self.desk.save_settings(s, by="coordinator"))
+            self.assertEqual(self.desk.settings()["alert"], saved)
+        # the coordinator's own changes leave it as the page saved it
+        self.hansa("lane", "set", "a", "check", "true")
+        self.hansa("concurrency", "2")
+        self.assertEqual(self.desk.settings()["alert"], saved)
+        # a page save of something else leaves who and when as they were; what the page sends for them counts for nothing
+        self.assertEqual(self.page_save(lambda s: s.update(cool_minutes=20, alert={**s["alert"], "at": 1, "by": "x"})),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["alert"], saved)
+        told = self.hansa("explain")
+        self.assertIn("the principal's alert command is", told)
+        self.assertIn(str(out), told)
+        self.assertIn("You send no alerts and cannot set it", told)
+        # one line only, and no key
+        self.assertFalse(self.page_save(lambda s: s.update(alert={"command": "echo a\necho b"}))["ok"])
+        self.desk.write_key("demo", "sk-demo-alert-123456")
+        said = self.page_save(lambda s: s.update(alert={"command": "curl -H 'x: sk-demo-alert-123456' example.org"}))
+        self.assertFalse(said["ok"])
+        self.assertIn("holds the key of demo", " ".join(said["problems"]))
+        # the page has its field and its test button; no hansa command sends an alert
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("alertCmd:", "alertTest:"):
+            self.assertEqual(ui.count(x), 2, x)
+        self.assertIn('"/api/alert/test"', ui)
+        self.assertNotIn("hansa alert", self.hansa("help"))
+        self.assertIn("the coordinator does not send them", self.hansa("help"))
+
+    def test_each_kind_of_alert_reaches_the_command_with_its_text(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        os.environ.update(HANSA_TASK="t0099", ALERT_TEST_MINE="yes")  # hansa's own environment, without a task's mark
+        # a request to the principal
+        n = self.desk.add_ask("Please renew the deploy login")
+        self.assertEqual(alert.send_due(self.desk, gather=0)["ok"], True)
+        [a] = self.alerted(out)
+        self.assertEqual(a["kind"], "ask")
+        self.assertIn(f"request #{n} waits for you on the page: Please renew the deploy login", a["text"])
+        self.assertEqual((a["cwd"], a["task"], a["mine"]), (str(self.desk.root), None, "yes"))
+        os.environ.pop("HANSA_TASK")
+        # a release waits for the yes, and ends void
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a", "first")
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
+        self.assertIn("release #1 of lane a, target (unnamed) (main at", self.alerted(out)[-1]["text"])
+        self.assertIn("waits for your yes on the page", self.alerted(out)[-1]["text"])
+        release.void(self.desk, 1, "the test says so")
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
+        self.assertIn("void: the test says so", self.alerted(out)[-1]["text"])
+        # a release that runs and ends done; one that fails
+        d = Dispatcher(self.desk)
+        for rid, command, end in ((2, "true", "done"), (3, "exit 4", "FAILED")):
+            if command != "true":
+                self.hansa("lane", "set", "a", "release", command)
+            self.hansa("release", "a")
+            r = release.get(self.desk, rid)
+            self.assertEqual(release.answer(self.desk, rid, True, "", r["commit"], r["command"]), {"ok": True})
+            self.settle_release(d, rid)
+            alert.send_due(self.desk, gather=0)
+            self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting,release_ended")
+            self.assertIn(f"release #{rid} of lane a, target (unnamed) (main at", self.alerted(out)[-1]["text"])
+            self.assertIn(end, self.alerted(out)[-1]["text"])
+        self.assertIn("(exit 4)", self.alerted(out)[-1]["text"])
+        # one refused for a forbidden word
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["unshippable"])), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "echo unshippable")
+        self.refused("release", "a")
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
+        self.assertIn("refused: what goes out holds words", self.alerted(out)[-1]["text"])
+        # hansa serve finishing no round for a long time: once, until rounds come again
+        write_json(self.desk.state_dir / "heartbeat", time.time() - alert.STUCK_ALERT - 60)
+        told = alert.stuck_check(self.desk, 0.0)
+        self.assertTrue(told)
+        self.assertEqual(alert.stuck_check(self.desk, told), told)
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.alerted(out)[-1]["kind"], "server_stuck")
+        self.assertIn("hansa serve has finished no round for", self.alerted(out)[-1]["text"])
+        write_json(self.desk.state_dir / "heartbeat", time.time())
+        self.assertEqual(alert.stuck_check(self.desk, told), 0.0)
+        # the page's test button
+        self.assertTrue(alert.test(self.desk)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["kind"], "test")
+        # ordinary task events are the coordinator's: no alert
+        count = len(self.alerted(out))
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.alerted(out)), count)
+        self.assertEqual(len(self.events("alert_sent")), count)
+
+    def test_alerts_that_come_close_together_go_out_in_one_run_one_run_at_a_time(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.desk.add_ask("first")
+        self.desk.add_ask("second")
+        self.assertIsNone(alert.send_due(self.desk))  # the last came just now: it waits for others to gather
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        # another run holds the lock: this one sends nothing and leaves them queued
+        with open(self.desk.state_dir / "alert.lock", "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
+            fcntl.flock(f, fcntl.LOCK_UN)
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        time.sleep(0.3)
+        self.assertTrue(alert.send_due(self.desk, gather=0.2)["ok"])
+        [a] = self.alerted(out)
+        self.assertEqual(a["kind"], "ask")
+        self.assertIn("2 alerts", a["text"])
+        self.assertIn("- request #1 waits for you on the page: first\n- request #2 waits for you on the page: second",
+                      a["text"])
+        self.assertEqual(alert.queued(self.desk), [])
+        # alerts that keep coming go out once the first has waited long enough
+        q = [{"kind": "ask", "text": "old", "at": time.time() - alert.MOST_WAIT - 1},
+             {"kind": "test", "text": "new", "at": time.time()}]
+        write_json(alert.queue_file(self.desk), q)
+        self.assertTrue(alert.send_due(self.desk)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["kind"], "ask,test")
+
+    def test_a_failed_or_timed_out_alert_is_recorded_and_shown_and_not_retried(self):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "echo no phone here; exit 3"})),
+                         {"ok": True, "problems": []})
+        self.assertEqual(alert.failure_line(self.desk), "")
+        self.desk.add_ask("are you there")
+        r = alert.send_due(self.desk, gather=0)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (False, 3, False, ["no phone here"]))
+        [e] = self.events("alert_failed")
+        self.assertEqual((e["exit"], e["kinds"], e["tail"]), (3, "ask", ["no phone here"]))
+        shown = self.hansa("status")
+        self.assertIn("alert command FAILED", shown)
+        self.assertIn("(exit 3): no phone here", shown)
+        self.assertEqual(alert.queued(self.desk), [])  # no retry: the next alert tries again
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        # a command that takes too long is stopped
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "echo waiting; sleep 30"})),
+                         {"ok": True, "problems": []})
+        self.desk.add_ask("still there?")
+        t0 = time.time()
+        r = alert.send_due(self.desk, gather=0, timeout=0.5)
+        self.assertLess(time.time() - t0, 10)
+        self.assertEqual((r["ok"], r["timed_out"]), (False, True))
+        self.assertTrue(self.events("alert_failed")[-1]["timed_out"])
+        self.assertIn("timed out after", self.hansa("status"))
+        # the next that goes out says so beside the failure; the page's test reports a failure too
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "true"})), {"ok": True, "problems": []})
+        self.assertTrue(alert.test(self.desk)["ok"])
+        self.assertIn("a later one went out", self.hansa("status"))
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "exit 9"})), {"ok": True, "problems": []})
+        self.assertEqual(alert.test(self.desk)["exit"], 9)
+
+    def test_an_alert_has_keys_removed_and_is_short(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.desk.write_key("demo", "sk-demo-alert-987654")
+        self.desk.add_ask("the login is sk-demo-alert-987654, " + "é" * 3000)
+        alert.send_due(self.desk, gather=0)
+        [a] = self.alerted(out)
+        self.assertNotIn("sk-demo-alert", a["text"])
+        self.assertIn("[key of demo]", a["text"])
+        self.assertLessEqual(len(a["text"]), alert.MOST_TEXT)
+        self.assertIn("é", a["text"])  # read as UTF-8
+        # a key saved after an alert was queued is removed too, and so is one in what a failed run wrote
+        write_json(alert.queue_file(self.desk), [{"kind": "test", "text": "new key sk-later-key-24680", "at": 0}])
+        self.desk.write_key("later", "sk-later-key-24680")
+        alert.send_due(self.desk, gather=0)
+        self.assertIn("new key [key of later]", self.alerted(out)[-1]["text"])
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat; exit 1"})), {"ok": True, "problems": []})
+        write_json(alert.queue_file(self.desk), [{"kind": "test", "text": "sk-later-key-24680", "at": 0}])
+        r = alert.send_due(self.desk, gather=0)
+        self.assertNotIn("sk-later-key", json.dumps(r) + self.desk.events_path.read_text() + self.hansa("status"))
+
+    def test_an_alert_queue_entry_that_cannot_be_read_is_dropped_once_and_the_others_go(self):
+        from hansa import alert
+        out = self.alert_fake()
+        q = [{"kind": "ask", "text": "first", "at": 0}, {"kind": "ask", "text": "bad time", "at": "soon"},
+             {"kind": "ask", "text": "no time"}, "not an entry", {"kind": "ask", "text": "second", "at": 1}]
+        alert.queue_file(self.desk).write_text(json.dumps(q))
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("- first\n- second", self.alerted(out)[-1]["text"])
+        [e] = self.events("alert_dropped")
+        self.assertEqual(e["entries"], 3)
+        # text that is not UTF-8 loses no alert, and a bad entry is recorded once, not on every look
+        raw = b'[{"kind": "ask", "text": "caf\xe9 \xff", "at": 0}, {"kind": "ask", "text": "x", "at": null}]'
+        alert.queue_file(self.desk).write_bytes(raw)
+        self.desk.add_ask("third")
+        self.assertEqual(len(self.events("alert_dropped")), 2)
+        self.assertEqual([x["text"] for x in alert.queued(self.desk)][-1], "request #1 waits for you on the page: third")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("caf", self.alerted(out)[-1]["text"])
+        self.assertIn("third", self.alerted(out)[-1]["text"])
+        for _ in range(3):
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.events("alert_dropped")), 2)
+        self.assertEqual(self.events("alert_error"), [])
+        # a whole file that is not JSON is dropped, once
+        alert.queue_file(self.desk).write_bytes(b"\xff{not json")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.events("alert_dropped")), 3)
+
+    def test_an_alert_command_that_exits_leaving_a_child_ends_with_its_own_exit(self):
+        from hansa import alert
+        mark = self.tmp / "child-done"
+        cmd = f"(sleep 3; touch {shlex.quote(str(mark))}) & echo sent; exit 0"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        self.desk.add_ask("are you there")
+        t0 = time.time()
+        r = alert.send_due(self.desk, gather=0, timeout=2)
+        self.assertLess(time.time() - t0, 1.5)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (True, 0, False, ["sent"]))
+        self.assertEqual(self.events("alert_failed"), [])
+        self.assertNotIn("FAILED", self.hansa("status"))
+        # the same, with the child holding stdin and output and the exit code its own
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "(sleep 5 &); echo nope; exit 6"})),
+                         {"ok": True, "problems": []})
+        self.desk.add_ask("again")
+        r = alert.send_due(self.desk, gather=0, timeout=2)
+        self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (False, 6, False, ["nope"]))
+        # the child is left alone: only the time limit kills the group
+        deadline = time.time() + 10
+        while not mark.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertTrue(mark.exists())
+
+    def test_at_most_twenty_alert_runs_an_hour_and_what_is_held_back_goes_out_together(self):
+        from hansa import alert
+        out = self.alert_fake()
+        t = time.time()
+        write_json(alert.last_file(self.desk), {"runs": [t - alert.HOUR - 5] + [t - 3000 + i for i in range(alert.MOST_RUNS - 1)]})
+        self.desk.add_ask("one")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])  # the 20th run of the hour
+        self.assertNotIn("held back", self.alerted(out)[-1]["text"])
+        self.assertEqual(len(alert._last(self.desk)["runs"]), alert.MOST_RUNS)  # the one over an hour old is gone
+        self.desk.add_ask("two")
+        self.desk.add_ask("three")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # the limit holds them
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(alert.queued(self.desk)), 2)
+        self.assertEqual(len(self.events("alert_held")), 1)  # recorded once per hold
+        self.assertEqual(len(self.alerted(out)), 1)
+        self.desk.add_ask("four")
+        # the hour frees a run: what was held goes out in one run, saying how many were held back
+        rec = alert._last(self.desk)
+        rec["runs"][0] = time.time() - alert.HOUR - 1
+        write_json(alert.last_file(self.desk), rec)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        a = self.alerted(out)[-1]
+        self.assertIn("(3 held back by the limit of 20 runs an hour)", a["text"])
+        self.assertIn("- request #2 waits for you on the page: two", a["text"])
+        self.assertIn("four", a["text"])
+        self.assertEqual(alert.queued(self.desk), [])
+        self.desk.add_ask("five")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # full again
+        self.assertTrue(alert.test(self.desk)["ok"])  # the principal's own test press is not held
+        self.assertIn("five", self.alerted(out)[-1]["text"])
+
+
+    def test_release_alerts_name_the_target_and_a_tick_that_no_longer_holds_alerts_like_any_wait(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.with_targets(test="true", prod=("true", {"after": "test"}))
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        # a ticked target goes out without asking: no wait, but its end names it
+        self.hansa("release", "a", "test")
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        alert.send_due(self.desk, gather=0)
+        a = self.alerted(out)[-1]
+        self.assertEqual(a["kind"], "release_ended")
+        self.assertIn("release #1 of lane a, target test (main at", a["text"])
+        # an approved release whose tick no longer holds goes back to waiting, and alerts like any wait
+        self.hansa("release", "a", "test")
+        self.assertEqual(release.get(self.desk, 2)["state"], "approved")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.hansa("lane", "target", "a", "test", "echo changed")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        alert.send_due(self.desk, gather=0)
+        a = self.alerted(out)[-1]
+        self.assertEqual(a["kind"], "release_waiting")
+        self.assertIn("release #2 of lane a, target test (main at", a["text"])
+        self.assertIn("waits for your yes on the page", a["text"])
+        # a target that was never ticked waits for the yes from the start, named
+        self.hansa("release", "a", "prod")
+        alert.send_due(self.desk, gather=0)
+        a = self.alerted(out)[-1]
+        self.assertEqual(a["kind"], "release_waiting")
+        self.assertIn("release #3 of lane a, target prod (main at", a["text"])
 
 class PortSkipTest(unittest.TestCase):
     """skip_unless_ports tells a sandbox that refuses ports from a machine where they work."""
