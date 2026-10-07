@@ -155,13 +155,16 @@ page gives.
   downloads needs its registry on the network list. Design sessions, which the
   principal works in directly, and the coordinator run outside it.
 - One Bash call of a task or verification worker may run as long as the lane's
-  check may, plus 5 minutes, but never past the worker's own limit: hansa gives
-  Claude Code `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` (without them it
-  stops a call after 2 minutes unless the call asks for more, and allows at most
-  10). The check's limit is the lane's `merge_timeout_min`, else its
-  `timeout_min`; the worker's is `timeout_min`. Workers are told both numbers,
-  and to run a long build or suite in the foreground, in one Bash call, never in
-  the background while they end their turn. A worker that does end its turn while
+  check may, plus 5 minutes, but never past the worker's own limit: hansa sets
+  Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most
+  10 minutes). The check's limit is the lane's `merge_timeout_min`, else its
+  `timeout_min`; the worker's is `timeout_min`. A call that asks for no timeout
+  still stops after 10 minutes (`BASH_DEFAULT_TIMEOUT_MS`; less when the most is
+  less), so a command that hangs does not hold it for the whole limit. Workers
+  are told these limits in minutes, to give the Bash tool's timeout (in
+  milliseconds, up to the most) for a long build or suite, and to run it in the
+  foreground, in one Bash call, never in the background while they end their
+  turn. A worker that does end its turn while
   background work it started still runs is resumed once, in the same session,
   with a short message: that work was stopped with it, so it runs it again in the
   foreground, waits for it, then reports. A second time it is not resumed; `hansa

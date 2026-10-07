@@ -3290,7 +3290,8 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         seen, argvs = self.tmp / "bash.jsonl", self.tmp / "argv.jsonl"
         d = Dispatcher(self.desk)
-        for merge_min, minutes in ((20, 25), (None, 240), (600, 240)):  # the check's limit + 5, capped by the worker's
+        # the most is the check's limit + 5, capped by the worker's; a call that asks for none, 10 or that if less
+        for merge_min, minutes, default in ((20, 25, 10), (None, 240, 10), (600, 240, 10), (3, 8, 8)):
             with self.subTest(merge_timeout_min=merge_min):
                 seen.unlink(missing_ok=True)
                 argvs.unlink(missing_ok=True)
@@ -3306,17 +3307,23 @@ class DeskTest(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     main(["--desk", str(self.desk.root), "verify", tid])
                 self.settle(d, self.desk.meta(tid)["verify"])
-                ms = str(60000 * minutes)
                 self.assertEqual([json.loads(x) for x in seen.read_text().splitlines()],
-                                 [{"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}] * 2)
+                                 [{"BASH_DEFAULT_TIMEOUT_MS": str(60000 * default),
+                                   "BASH_MAX_TIMEOUT_MS": str(60000 * minutes)}] * 2)
                 for argv in map(json.loads, argvs.read_text().splitlines()):
                     said = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
-                    self.assertIn(f"one call may run up to {minutes} minutes, and the lane's check may run "
-                                  f"{merge_min or 240} minutes", said)
+                    self.assertIn(f"give the Bash tool's timeout, in milliseconds, up to {60000 * minutes} "
+                                  f"({minutes} minutes, the most one call may run here)", said)
+                    self.assertIn(f"A call that gives none stops after {default} minutes", said)
+                    self.assertIn(f"The lane's check may run {merge_min or 240} minutes", said)
                     self.assertIn("Run a long build or test suite in the foreground, in one Bash call", said)
                     self.assertIn("Never start one in the background and end your turn while it runs", said)
         self.assertEqual(run.bash_minutes({"timeout_min": 30}), 30)
         self.assertEqual(run.bash_minutes({"timeout_min": 60, "merge_timeout_min": 10}), 15)
+        self.assertEqual(run.bash_limits({"timeout_min": 60, "merge_timeout_min": 30}),
+                         {"BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "2100000"})
+        self.assertEqual(run.bash_limits({"timeout_min": 6}),
+                         {"BASH_DEFAULT_TIMEOUT_MS": "360000", "BASH_MAX_TIMEOUT_MS": "360000"})
 
     def test_a_verification_that_lost_the_connection_twice_says_how_to_run_it_again(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -8254,6 +8261,8 @@ class DeskTest(unittest.TestCase):
         self.assertIn("This is the only time hansa resumes you", prompt)
         self.assertEqual(calls[0]["env"]["HANSA_TASK"], tid)
         self.assertEqual(calls[0]["env"]["BASH_MAX_TIMEOUT_MS"], str(60000 * 240))
+        self.assertEqual(calls[0]["env"]["BASH_DEFAULT_TIMEOUT_MS"], str(60000 * 10))
+        self.assertIn(f"the Bash tool's timeout, in milliseconds, up to {60000 * 240}: 240 minutes", prompt)
         self.assertEqual(m["resumed"]["left"], ["Run the full test suite"])
         self.assertEqual(m["background_left"], [])  # the first run's work was run again, in the foreground
         self.assertEqual(m["turns"], 5 + 2)  # both runs'

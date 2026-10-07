@@ -213,9 +213,10 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 """
 
 LONG_RUNS = """- Run a long build or test suite in the foreground, in one Bash call with a timeout long enough
-  for it: here one call may run up to {bash_min} minutes, and the lane's check may run {check_min}
-  minutes, so a command near that is long. Never start one in the background and end your turn
-  while it runs: when your turn ends, your run ends, and what it was waiting for is lost.
+  for it: give the Bash tool's timeout, in milliseconds, up to {bash_ms} ({bash_min} minutes, the most
+  one call may run here). A call that gives none stops after {default_min} minutes. The lane's check
+  may run {check_min} minutes, so a command near that is long. Never start one in the background and
+  end your turn while it runs: when your turn ends, your run ends, and what it was waiting for is lost.
 """
 
 VERIFY_TASK = """Find out, by running things, whether task {id} does what it asked. Its change is
@@ -2021,7 +2022,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     brief = desk.lanes_dir / lane_name / "brief.md"
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
-    long = LONG_RUNS.format(bash_min=bash_minutes(lane), check_min=merge_minutes(lane))
+    long = LONG_RUNS.format(bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane),
+                            default_min=bash_default_minutes(lane), check_min=merge_minutes(lane))
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
                                                                  long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
@@ -2105,7 +2107,8 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
 RESUME_ARGV = "worker-argv.json"
 RESUME_NOTE = """Your turn ended while work you started in the background was still running: {left}.
 hansa stopped it when your turn ended. Run what you still need of it again in the foreground, in one
-Bash call with a long enough timeout (up to {bash_min} minutes here), and wait for it to finish. Then
+Bash call with a long enough timeout (the Bash tool's timeout, in milliseconds, up to {bash_ms}: {bash_min}
+minutes), and wait for it to finish. Then
 write your report, as your instructions say. This is the only time hansa resumes you.
 """
 
@@ -2137,7 +2140,7 @@ def resume(desk: Desk, tid: str):
     except (GitFileChanged, OSError, ValueError):  # finish says what happened
         return None
     sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
-    note = RESUME_NOTE.format(left="; ".join(left), bash_min=bash_minutes(lane))
+    note = RESUME_NOTE.format(left="; ".join(left), bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane))
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     with desk.lock():
         if desk.meta(tid).get("cancel"):
@@ -2648,12 +2651,21 @@ def bash_minutes(lane: dict) -> int:
     return min(merge_minutes(lane) + BASH_MARGIN_MIN, lane.get("timeout_min", 240))
 
 
+BASH_DEFAULT_MIN = 10  # one Bash call that asks for no timeout: a command that hangs holds it no longer
+
+
+def bash_default_minutes(lane: dict) -> int:
+    """How long one Bash call that asks for no timeout may run: BASH_DEFAULT_MIN, or bash_minutes if less."""
+    return min(BASH_DEFAULT_MIN, bash_minutes(lane))
+
+
 def bash_limits(lane: dict) -> dict:
-    """Claude Code's own limits on one Bash call, both bash_minutes (it stops a call after 2 minutes unless the
-    call asks for more, and allows at most 10): a long suite then runs in one call in the foreground, even one
-    that does not ask for a timeout, instead of moving to the background while the worker ends its turn."""
-    ms = str(60000 * bash_minutes(lane))
-    return {"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}
+    """Claude Code's own limits on one Bash call (it stops a call after 2 minutes unless the call asks for more,
+    and allows at most 10): a call that asks for a timeout may run bash_minutes, so a long suite runs in one call
+    in the foreground instead of moving to the background while the worker ends its turn; one that asks for
+    none stops after bash_default_minutes, so a command that hangs does not hold it for the whole limit."""
+    return {"BASH_DEFAULT_TIMEOUT_MS": str(60000 * bash_default_minutes(lane)),
+            "BASH_MAX_TIMEOUT_MS": str(60000 * bash_minutes(lane))}
 
 
 def own_merge_check(lane: dict) -> bool:
