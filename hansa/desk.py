@@ -27,6 +27,7 @@ import json
 import os
 import re
 import secrets as _secrets
+import shlex
 import shutil
 import site
 import string
@@ -68,14 +69,15 @@ PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
 # The events that may call for an alert to the principal (alert.from_event)
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "ask")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
-# it: {lane, target, repo, base, command, after} (after: the target it must follow, "" for none); a target goes out
-# without asking only while it still has all of them. An entry saved before targets had names holds {lane, repo,
-# base, release}: the lane's unnamed target and its command; an entry without after counts only for a target that
-# must follow none
-LISTED_AS = ("repo", "base", "command", "after")
+# it: {lane, target, repo, base, command, after, fixed?} (after: the target it must follow, "" for none; fixed: "yes"
+# for a target that runs from a fixed checkout, left out for one that runs in the repository); a target goes out without asking only while it still has
+# all of them. An entry saved before targets had names holds {lane, repo, base, release}: the lane's unnamed target
+# and its command; an entry without after or fixed counts only for a target that must follow none and runs in the
+# repository
+LISTED_AS = ("repo", "base", "command", "after", "fixed")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release")
 MAX_TARGETS = 20  # named release targets on one lane
-TARGET_FIELDS = ("command", "timeout_min", "after")
+TARGET_FIELDS = ("command", "timeout_min", "after", "fixed")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
@@ -849,7 +851,7 @@ def target_problems(ln: dict) -> list:
         if not isinstance(name, str) or not NAME.match(name):
             p.append(f"{at}: use lowercase letters, digits and '-'")
         if not isinstance(t, dict):
-            p.append(f"{at}: must be an object with command, and optionally timeout_min and after")
+            p.append(f"{at}: must be an object with command, and optionally timeout_min, after and fixed")
             continue
         extra = set(t) - set(TARGET_FIELDS)
         if extra:
@@ -859,6 +861,14 @@ def target_problems(ln: dict) -> list:
             p.append(f"{at}: command must be one shell command line (up to 1000 characters)")
         if "timeout_min" in t and not _is_int(t["timeout_min"], 1, 1440):
             p.append(f"{at}: timeout_min must be from 1 to 1440")
+        if "fixed" in t and t["fixed"] is not True:
+            p.append(f"{at}: fixed must be true (or left out)")
+        named_base = t.get("fixed") is True and isinstance(cmd, str) and names_branch(cmd, ln.get("base") or "main")
+        if named_base:
+            p.append(f"{at}: runs from a fixed checkout of the release's commit, but its command names the base "
+                     f"branch ({named_base}), which by the time it runs may have moved past the commit the principal "
+                     "saw; name the commit instead: $HANSA_RELEASE_COMMIT (git push origin "
+                     f"\"$HANSA_RELEASE_COMMIT:refs/heads/{ln.get('base') or 'main'}\", say), or HEAD")
         after = t.get("after")
         if after is not None and (not isinstance(after, str) or after == name or after not in named):
             p.append(f"{at}: after must name another release target of the same lane")
@@ -871,6 +881,24 @@ def target_problems(ln: dict) -> list:
             seen.add(at["after"])
             at = named.get(at["after"])
     return p
+
+
+def names_branch(command: str, branch: str) -> str:
+    """The word of a command line that names the branch as what to read or send (main, refs/heads/main, the source
+    side of main:dest, and any of these followed by git's revision syntax: main~0, main^{commit}, main@{0}), '' for
+    none; naming it only as where to send (HEAD:main, $X:refs/heads/main) is not reading it. Only the command line
+    itself is read: a variable it expands or a script it runs is not looked into."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        words = command.split()
+    for w in words:
+        src = re.split(r"[~^]|@\{", w.lstrip("+").split(":", 1)[0], maxsplit=1)[0]
+        if src in (branch, f"refs/heads/{branch}", f"heads/{branch}"):
+            return w
+    return ""
 
 
 def _listed_ok(x) -> bool:
@@ -892,7 +920,8 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
         return {"repo": "", "base": "", "command": "", "after": ""}
     t = lane_targets(ln).get(target, {})
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
-            "command": str(t.get("command") or ""), "after": str(t.get("after") or "")}
+            "command": str(t.get("command") or ""), "after": str(t.get("after") or ""),
+            **({"fixed": "yes"} if t.get("fixed") else {})}
 
 
 def listed_key(entry) -> tuple:
@@ -904,14 +933,17 @@ def listed_key(entry) -> tuple:
     return None, None
 
 
-def record_listed(listed, lanes: dict) -> list:
+def record_listed(listed, lanes: dict, before=()) -> list:
     """The page's save of the list: a lane name, or {lane, target}, it sends is recorded with what the lane and the
-    target are now; an entry recorded before is kept as it was."""
+    target are now; an entry on the list before (before: the list as it was) is kept as it was, a bare lane name
+    saved by an older page as much as a recorded entry: either is taken back in only when the page sends it as a
+    tick ({lane, target}, as its button to take them back in does)."""
     if not isinstance(listed, list):
         return listed
+    kept = [x for x in before if isinstance(x, str)] if isinstance(before, list) else []
     out = []
     for x in listed:
-        fresh = isinstance(x, str) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
+        fresh = (isinstance(x, str) and x not in kept) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
         if fresh and _listed_ok(x):
             lane, target = listed_key(x)
             x = {"lane": lane, "target": target, **listed_as(lanes.get(lane), target)}
@@ -953,8 +985,9 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
                                     ("command", ("release command", "发布命令")),
-                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")))
-               if then.get(k, "") != now_as[k]]
+                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")),
+                                    ("fixed", ("way it runs (--fixed)", "运行方式（--fixed）")))
+               if then.get(k, "") != now_as.get(k, "")]
     if not changed:
         return ""
     return (f"保存清单之后它的{'和'.join(w[1] for w in changed)}变了" if zh else
@@ -1610,7 +1643,8 @@ class Desk:
                             for k in theirs]
             else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
                 lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
-                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes),
+                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes,
+                                                                       old.get("releases_without_asking")),
                        "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
             problems = validate(new, self.root) + self.keys_in_release(old, new) + self.keys_in_alert(old, new)
             if problems:
