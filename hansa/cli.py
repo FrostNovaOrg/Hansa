@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json,
+                   kept_from_workers, lane_targets, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json,
                    PROJECT_INTRO)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
@@ -748,9 +748,14 @@ def cmd_release(a):
     if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
         raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
                          "cannot. Say in your report that it may be ready to go out")
-    r = release.ask(desk, a.lane, " ".join(a.note), by=os.environ.get("HANSA_ROLE", "cli"),
-                    session=notify.session_here())
-    head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}, "
+    note, target = list(a.note), None
+    if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
+        target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
+    r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
+                    session=notify.session_here(), target=target)
+    who = release.what(r)
+    head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
+            + (f" by target {r['target']}" if r.get("target") else "") + ", "
             + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
                f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']}")
@@ -766,10 +771,12 @@ def cmd_release(a):
              "hansa release shows how it goes")
     if r["state"] == "approved":
         paused = desk.paused()
-        print(desk.redact(f"{head}\nlane {a.lane} is on the principal's list of lanes released without asking, but the "
+        listed = (f"{who} is on the principal's list of releases without asking" if r.get("target") else
+                  f"lane {a.lane} is on the principal's list of lanes released without asking")
+        print(desk.redact(f"{head}\n{listed}, but the "
                           f"desk is paused ({paused}): while it is, only a release the principal said yes to runs, so "
                           f"this one waits until the desk is resumed. {after}" if paused else
-                          f"{head}\nlane {a.lane} is on the principal's list of lanes released without asking: hansa "
+                          f"{head}\n{listed}: hansa "
                           f"serve runs the command in {r['repo']} within seconds. {after}"))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
@@ -1388,6 +1395,8 @@ def cmd_lane(a):
             return _lane_remove(desk, a, s, new)
         if a.name not in s["lanes"]:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}")
+        if a.action == "target":
+            return _lane_target(desk, a, new)
         if a.action == "brief":  # through hansa only: on a server the coordinator's own tools run as root
             brief = desk.lanes_dir / a.name / "brief.md"
             if not a.text and not a.file:
@@ -1527,6 +1536,88 @@ def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool) -> s
     _remember_git_file(desk, wt, None)
     desk.event("lane_worktree_removed", lane=lane, worktree=str(wt), **({"kept": kept} if kept else {}))
     return kept
+
+
+def _target_text(name: str, t: dict, ln: dict) -> str:
+    return (f"{name or '(unnamed: the release command)'}: {t.get('command')}  "
+            f"[{t.get('timeout_min') or ln.get('timeout_min', 240)} min"
+            + ("" if t.get("timeout_min") else ", the lane's") + "]"
+            + (f"  after {t['after']}" if t.get("after") else ""))
+
+
+def _lane_target(desk: Desk, a, new: dict) -> None:
+    """hansa lane target L [NAME [COMMAND|none] [--minutes N|none] [--after T|none]]: list, set or remove a lane's
+    named release targets."""
+    ln = new["lanes"][a.name]
+    if not a.target:
+        shown = lane_targets(ln)
+        for name, t in sorted(shown.items()):
+            print(_target_text(name, t, ln))
+        if not shown:
+            print(f"lane {a.name} has no release target: hansa lane target {a.name} NAME \"<command>\" names one "
+                  f"(or hansa lane set {a.name} release \"<command>\" sets its one unnamed target)")
+        return
+    if len(a.command) > 1:
+        raise SystemExit("hansa: a target takes one command line; quote it if it has spaces. Nothing was changed")
+    cmd = a.command[0] if a.command else None
+    named = ln.get("targets") if isinstance(ln.get("targets"), dict) else {}
+    old = named.get(a.target)
+    if cmd == "none":  # the help's word for taking it out
+        if a.minutes is not None or a.after is not None:
+            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes or --after. "
+                             "Nothing was changed")
+        if old is None:
+            raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; its targets: "
+                             f"{', '.join(sorted(named)) or 'none'}. Nothing was changed")
+        followers = sorted(n for n, x in named.items() if isinstance(x, dict) and x.get("after") == a.target)
+        if followers:
+            raise SystemExit(f"hansa: target {', '.join(followers)} of lane {a.name} goes out only after "
+                             f"{a.target}; change that first (hansa lane target {a.name} {followers[0]} --after none). "
+                             "Nothing was changed")
+        del named[a.target]
+        if not named:
+            ln.pop("targets", None)
+        _save(desk, new)
+        desk.event("lane_set", lane=a.name, field="targets", target=a.target)
+        desk.event("lane_command_changed", lane=a.name, field="release", target=a.target, old=old.get("command", ""),
+                   new="")
+        print(f"lane {a.name} release target {a.target} is taken out ({old.get('command')}); a release asked for it "
+              "no longer runs. Tell the principal, in the conversation, what you changed and why.")
+        return
+    if old is None and not cmd:
+        raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; a new one needs its command: "
+                         f"hansa lane target {a.name} {a.target} \"<command>\". Nothing was changed")
+    t = dict(old or {})
+    if cmd is not None:
+        if not cmd.strip():
+            raise SystemExit("hansa: a target's command cannot be empty (none takes the target out). Nothing was changed")
+        t["command"] = cmd
+    if a.minutes is not None:
+        if a.minutes == "none":
+            t.pop("timeout_min", None)
+        else:
+            try:
+                t["timeout_min"] = int(a.minutes)
+            except ValueError:
+                raise SystemExit("hansa: --minutes takes one whole number from 1 to 1440, or none (the lane's "
+                                 "timeout_min). Nothing was changed")
+    if a.after is not None:
+        if a.after == "none":
+            t.pop("after", None)
+        else:
+            t["after"] = a.after
+    ln["targets"] = {**named, a.target: t}
+    _save(desk, new)
+    desk.event("lane_set", lane=a.name, field="targets", target=a.target)
+    print(f"lane {a.name} release target {a.target}: {_shown(old) if old else 'none'} -> {_shown(t)}")
+    if (old or {}).get("command") != t["command"]:
+        desk.event("lane_command_changed", lane=a.name, field="release", target=a.target,
+                   old=(old or {}).get("command", ""), new=t["command"])
+        print(f"A release target's command sends the lane's base branch out: hansa runs it as the desk's account, "
+              f"outside the sandbox, only after the principal says yes on the page (each target is ticked on its own "
+              f"for going out without asking), so this change is recorded and a release asked with the old command no "
+              f"longer runs. Tell the principal, in the conversation, what you changed and why. Ask for a release "
+              f"with: hansa release {a.name} {a.target} \"<note>\"")
 
 
 def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
@@ -1820,16 +1911,22 @@ def main(argv=None):
     add("resume", cmd_resume, "let new tasks start again")
     p = add("release", cmd_release, "ask for a release of a lane's base branch (its release command, run by hansa "
             "after the principal's yes on the page), or list the releases")
-    p.description = ("hansa release L [note]: ask for a release of lane L's base branch as it is now. hansa records "
-                     "the commit, the lane's release command (hansa lane set L release \"...\"), the note, the commits "
-                     "that go out (on no remote-tracking branch and not in the lane's last release) and the files they "
-                     "change; a word the principal keeps from going out, in the command line or in a line, a file name "
-                     "or a message of any of those commits, refuses it. It waits for the principal's yes on the web "
-                     "page (unless the principal lists the lane as released without asking and the desk is not "
-                     "paused); then hansa serve runs the command in the lane's repository, as "
-                     "the desk's account, outside the sandbox, with hansa's environment and the lane's minutes as its "
-                     "limit, and only while the base branch and the command are what the principal saw. hansa release "
-                     "alone lists the open and recent releases. Only the coordinator asks")
+    p.description = ("hansa release L [TARGET] [note]: ask for a release of lane L's base branch as it is now, by "
+                     "one of its release targets: its release command (hansa lane set L release \"...\"), or a named "
+                     "target (hansa lane target L NAME \"...\"); TARGET is needed when the lane has more than one. "
+                     "hansa records the commit, the target and its command, the note, the commits that go out (on no "
+                     "remote-tracking branch and not in that target's last release) and the files they change; a word "
+                     "the principal keeps from going out, in the command line or in a line, a file name or a message "
+                     "of any of those commits, refuses it. A target that must follow another (--after) is asked only "
+                     "for a commit the other one already sent out. It waits for the principal's yes on the web page "
+                     "(unless the principal lists that target as released without asking and the desk is not "
+                     "paused; a tick stops counting when the lane's repository or base branch, or the target's "
+                     "command or --after, changes, not when only --minutes does); then hansa serve runs the command in the lane's repository, as the desk's account, "
+                     "outside the sandbox, with hansa's environment and the target's minutes (else the lane's) as its "
+                     "limit, and only while the base branch and the command are what the principal saw. One release "
+                     "runs at a time per repository, and it holds the repository: merges there wait while it runs, "
+                     "a long install too (a later change may let such a target run from a fixed checkout instead). "
+                     "hansa release alone lists the open and recent releases. Only the coordinator asks")
     p.add_argument("lane", nargs="?")
     p.add_argument("note", nargs="*")
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
@@ -1855,7 +1952,7 @@ def main(argv=None):
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server", "notify"])
     p.add_argument("name", nargs="?")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
-    lane = p.add_subparsers(dest="action", metavar="add | set | brief | remove | try")
+    lane = p.add_subparsers(dest="action", metavar="add | set | target | brief | remove | try")
     q = lane.add_parser("add", help="a new lane on a git checkout", description=(
         "A new lane on a git checkout. A lane runs one task at a time, in its own full worktree (the repository's "
         "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
@@ -1900,7 +1997,9 @@ def main(argv=None):
         "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
         "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
         "commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
-        "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). " +
+        "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). It is the lane's one "
+        "unnamed release target; a lane that sends its base branch out in more than one way names its targets "
+        "instead (hansa lane target L NAME ...), and then has no release. " +
         "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
@@ -1911,6 +2010,27 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("field", choices=LANE_FIELDS)
     q.add_argument("values", nargs="*", metavar="value")
+    q = lane.add_parser("target", help="list a lane's release targets, or set or remove a named one", description=(
+        "A lane's release targets are the ways its base branch goes out: a push to the public repository, an install "
+        "on a test server, an install on the production server. hansa lane target L lists them. hansa lane target L "
+        "NAME \"<command>\" sets one (a new one, or a new command for one); --minutes N gives it its own time limit "
+        "(1-1440; none: the lane's timeout_min); --after OTHER says it goes out only with a commit target OTHER of "
+        "the same lane already sent out (none: no order). Options alone change only those fields. hansa lane target "
+        "L NAME none takes it out. The lane's release command (hansa lane set L release) is its one unnamed target: "
+        "a lane has either that or named targets, so take it out (hansa lane set L release none) when you name its "
+        "first target. hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
+        "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
+        "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
+        "command and --after keeps it; --minutes alone does not untick). A release holds the lane's repository while it runs: "
+        "merges there wait for it, a long install too; a later change may let such a target run from a fixed "
+        "checkout instead"))
+    q.add_argument("name")
+    q.add_argument("target", nargs="?", metavar="NAME")
+    q.add_argument("command", nargs="*", metavar="COMMAND", help="the command line (/bin/sh -c), quoted; none takes "
+                   "the target out")
+    q.add_argument("--minutes", metavar="N", help="its own time limit, 1-1440 (none: the lane's timeout_min)")
+    q.add_argument("--after", metavar="TARGET", help="another target of the lane that must have sent out the same "
+                   "commit first (none: no order)")
     q = lane.add_parser("brief", help="print a lane's standing instructions, or replace them with TEXT or --file")
     q.add_argument("name")
     q.add_argument("text", nargs="*")

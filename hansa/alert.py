@@ -114,7 +114,9 @@ def _release_text(desk: Desk, rid, waiting: bool) -> str:
     r = release.get(desk, rid)
     if not r:
         return ""
-    head = f"release #{r['id']} of lane {r.get('lane')} ({r.get('base')} at {str(r.get('commit') or '')[:10]})"
+    target = r.get("target") or ""  # "": the lane's one unnamed target, its release command
+    head = (f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} "
+            f"({r.get('base')} at {str(r.get('commit') or '')[:10]})")
     if waiting:
         return (f"{head} waits for your yes on the page: {r.get('count', 0)} commit(s), command: {r.get('command')}"
                 + (f"; note: {r['note']}" if r.get("note") else ""))
