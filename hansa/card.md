@@ -313,8 +313,10 @@ all new is designed elsewhere and comes to you as a finished design.
 - While it is open, do not queue tasks that change the same part of the code.
   One design session per lane at a time.
 - Its commands run in the lane's sandbox, as a worker's do (it may also commit
-  and merge, and on macOS serve a preview to the browser); a command the
-  sandbox refuses does not run outside it. On Linux an app it starts cannot be
+  and merge into its own branch, and on macOS serve a preview to the browser);
+  a command the sandbox refuses does not run outside it. In git it may write
+  only what committing and merging into its own branch takes: it cannot move
+  the base, another branch or a tag, or touch another worktree's git folder. On Linux an app it starts cannot be
   reached from the browser, so it shows its work in screenshots of files and in
   words: say so to the principal when you open one there.
 - When they end it, it comes back like a finished task: the lane's check runs,

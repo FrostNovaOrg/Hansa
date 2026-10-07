@@ -155,9 +155,8 @@ page gives.
   downloads needs its registry on the network list. A design session's commands
   run in the sandbox of its lane's workers too (the same network list, write
   list, what may not be read and keys kept from the environment), with two
-  differences: it may write git's history, since it commits and merges (never
-  git's settings, hooks or `info/`, the repository's `HEAD` or the worktree's
-  `.git` file), and on macOS it may bind local ports, so a preview it starts
+  differences: it may write in git what committing and merging into its own
+  branch (`task/<id>`) takes, and on macOS it may bind local ports, so a preview it starts
   serves the principal's browser (that also lets its commands reach every
   service on the Mac's loopback). It runs only its allowed commands, as
   before, and a command the sandbox refuses does not run outside it: the
@@ -168,6 +167,23 @@ page gives.
   and the session shows its work in screenshots of files and in words; the
   principal can start the app outside the session to see it running. The
   coordinator runs outside the sandbox.
+  What each may write in git's folders: a worker, and a design session, only
+  their own worktree's folder under `.git/worktrees/`, not its `HEAD`, logs,
+  `commondir` or `gitdir` (a design session may move its `HEAD`, but not the
+  last two or its `config.worktree`). A design session may also write git's
+  objects and its own branch's ref and reflog (each with git's `.lock` beside
+  it), and nothing else: not `packed-refs`, the base or any other branch, tags,
+  another worktree's folder, git's settings, hooks or `info/`, or the
+  worktree's `.git` file; this holds for branches and worktrees made while it
+  runs too (named with letters, digits, `.`, `_` and `-`, as hansa names them). Its commands run git with automatic gc, maintenance and rerere off
+  (through the environment), since those write what it may not; git still tries
+  to lock `packed-refs` on each commit and merge, prints that it could not, and
+  goes on. The lane's setup and check may write nothing of git's folders.
+  Before hansa runs git in a worktree, it checks the worktree's `.git` file and
+  that the git folder it leads to still points back to the repository
+  (`commondir`) and to the worktree (`gitdir`) as git wrote them, and in the
+  lane's own checkout that `.git` holds no `commondir`; when one was changed,
+  hansa runs no git there, keeps what it found and puts git's line back.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a

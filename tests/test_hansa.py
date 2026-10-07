@@ -322,6 +322,27 @@ def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
 
 
+def sandbox_glob(pattern: str) -> str:
+    """A deny pattern as the sandbox reads it (srt's globToRegex): * and ? within a name, [...] as written,
+    and all beneath what it names."""
+    rx = re.sub(r"[.^$+{}()|\\]", lambda m: "\\" + m.group(0), pattern)
+    rx = rx.replace("**/", "\0").replace("**", "\1").replace("*", "[^/]*").replace("?", "[^/]")
+    return "^" + rx.replace("\0", "(.*/)?").replace("\1", ".*") + "(/.*)?$"
+
+
+def may_write(box: dict, path, rules=None) -> bool:
+    """Whether a command in this sandbox may write `path` (with links resolved, as the operating system checks
+    it): under a folder of allowWrite, or of a .git folder above it, which Claude Code opens for writing in a
+    linked worktree, and under nothing of denyWrite. `rules`: (allowWrite, denyWrite) instead of box's."""
+    allow, deny = rules or (box["filesystem"].get("allowWrite", []), box["filesystem"]["denyWrite"])
+    p = str(Path(path).resolve())
+    under = lambda x: p == x or p.startswith(x.rstrip("/") + "/")
+    opened = [str(a) for a in Path(p).parents if a.name == ".git"]
+    if not any(under(x) for x in [*allow, *opened]):
+        return False
+    return not any(re.match(sandbox_glob(x), p) if any(c in x for c in "*?[") else under(x) for x in deny)
+
+
 
 @contextlib.contextmanager
 def as_home(home, **env):
@@ -7590,27 +7611,167 @@ class DeskTest(unittest.TestCase):
         for x in worker["filesystem"]["allowWrite"]:  # the lane's write list
             self.assertIn(x, box["filesystem"]["allowWrite"])
         self.assertEqual(env["TMPDIR"], env["CLAUDE_CODE_TMPDIR"])  # its own temporary folder, as a worker's
-        # it commits and merges, so it writes git's history, but never what git would run or obey outside it
-        common = (self.repo / ".git").resolve()
+        # it commits and merges into its own branch, so it writes what that takes in git's folders, no more
         own = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=wt, capture_output=True,
                                   text=True, check=True).stdout.strip()).resolve()
-        for d in (common, own):
-            self.assertIn(str(d), box["filesystem"]["allowWrite"])
-        for f in ("objects", "refs", "logs", "packed-refs"):
-            self.assertNotIn(str(common / f), box["filesystem"]["denyWrite"])
-        for f in ("config", "hooks", "info", "HEAD"):
-            self.assertIn(str(common / f), box["filesystem"]["denyWrite"])
-        for f in ("commondir", "gitdir", "config.worktree"):
-            self.assertIn(str(own / f), box["filesystem"]["denyWrite"])
-        self.assertNotIn(str(own / "HEAD"), box["filesystem"]["denyWrite"])
-        self.assertIn(str(Path(wt) / ".git"), box["filesystem"]["denyWrite"])
+        self.assertTrue(may_write(box, own / "index"))
+        self.assertFalse(may_write(box, own / "commondir"))
+        self.assertFalse(may_write(box, Path(wt) / ".git"))
         # local binding on macOS only, whatever the lane's list says
         lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
-        on_mac = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), mac=True)["sandbox"]["network"]
-        on_linux = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), mac=False)["sandbox"]["network"]
+        on_mac = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), f"task/{tid}", mac=True)["sandbox"]["network"]
+        on_linux = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), f"task/{tid}", mac=False)["sandbox"]["network"]
         self.assertIs(on_mac["allowLocalBinding"], True)
         self.assertNotIn("allowLocalBinding", on_linux)
         self.assertEqual(on_linux, worker["network"])
+
+    def test_a_design_session_may_write_in_git_only_what_its_own_commits_and_merges_take(self):
+        from hansa import run
+        first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))  # lane a's worktree
+        self.assertEqual(first["state"], "done", first)
+        sh("git", "tag", "v1", cwd=self.repo)
+        tid = self.desk.new_task("Make the badge bigger")
+        wt = Path(self.design_worktree(tid))
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(wt), session_id="sid-d", model_asked="sonnet")
+        argv, env, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        box = self.sandbox_of(argv)
+        common = (self.repo / ".git").resolve()
+        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt)).resolve()
+        other = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=first["worktree"])).resolve()
+        mine = common / "refs" / "heads" / "task" / tid
+        log = common / "logs" / "refs" / "heads" / "task" / tid
+        for p in (own / "index", own / "HEAD", own / "MERGE_HEAD", own / "ORIG_HEAD", own / "logs" / "HEAD",
+                  common / "objects" / "ab" / "cdef", mine, Path(f"{mine}.lock"), log, Path(f"{log}.lock")):
+            self.assertTrue(may_write(box, p), p)
+        for p in (common / "refs" / "heads" / "main", common / "logs" / "refs" / "heads" / "main",  # the base
+                  common / "packed-refs", common / "packed-refs.lock",
+                  common / "refs" / "heads" / "task" / first["id"], common / "refs" / "tags" / "v1",
+                  common / "refs" / "heads" / "task" / "t9999",  # a task's branch made after the session started
+                  common / "refs" / "heads" / "task" / f"{tid}-try1", common / "refs" / "heads" / "task" / f"{tid}x",
+                  common / "refs" / "heads" / "other", common / "refs" / "remotes" / "origin" / "main",
+                  common / "logs" / "refs" / "heads" / "task" / first["id"],
+                  other / "commondir", other / "gitdir", other / "HEAD", common / "worktrees" / "later" / "commondir",
+                  common / "config.worktree", common / "commondir", common / "config", common / "hooks" / "post-checkout",
+                  common / "HEAD", common / "index", common / "info" / "attributes",
+                  own / "commondir", own / "gitdir", own / "config.worktree", wt / ".git"):
+            self.assertFalse(may_write(box, p), p)
+        self.assertEqual({k: env[k] for k in run.DESIGN_GIT_ENV}, run.DESIGN_GIT_ENV)  # no gc of git's own accord
+
+    def test_a_design_session_commits_and_merges_within_its_git_write_rules(self):
+        # the sandbox cannot be run inside the tests, so its write rules are checked on what git really wrote
+        from hansa import run
+        sh("git", "worktree", "add", "-q", "-b", "task/t0001", str(self.tmp / "wt-other"), cwd=self.repo)
+        wt = self.tmp / "wt-design"
+        sh("git", "worktree", "add", "-q", "-b", "task/t0002", str(wt), cwd=self.repo)
+        sh("git", "tag", "v1", cwd=self.repo)
+        (self.repo / "base.txt").write_text("moved on\n")
+        sh("git", "add", "base.txt", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base moves", cwd=self.repo)
+        sh("git", "pack-refs", "--all", cwd=self.repo)  # the session's branch then is in packed-refs alone
+        common = (self.repo / ".git").resolve()
+        self.assertFalse((common / "refs" / "heads" / "task").exists())
+        run.make_git_write_deny(wt, "task/t0002")
+        self.assertTrue((common / "refs" / "heads" / "task").is_dir())  # git could not make it in the sandbox
+        rules = (run.design_git_write(wt, "task/t0002"), run.git_write_deny(wt, "task/t0002"))
+
+        def state():
+            out = {}
+            for d, dirs, files in os.walk(common):
+                for n in [".", *dirs, *files]:
+                    st = os.lstat(os.path.join(d, n))
+                    out[os.path.normpath(os.path.join(d, n))] = (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns,
+                                                                 st.st_ino)
+            return out
+        holders = {str(Path(a).parent) for a in rules[0] if a.endswith(".lock")}  # where git makes and renames them
+        # what the rules let git make nothing new in is made read-only for the while, so git cannot make
+        # even what it would remove again (a .lock); what it changes in place is found by comparing
+        shut = [d for d, _, _ in os.walk(common) if not may_write({}, d, rules) and d not in holders]
+        before = state()
+        env = {**os.environ, **run.DESIGN_GIT_ENV, **run.GIT_ID}
+        (wt / "badge.txt").write_text("big\n")
+        said = ""
+        for d in shut:
+            os.chmod(d, 0o555)
+        try:
+            for c in (["add", "badge.txt"], ["commit", "-q", "-m", "t0002: a bigger badge"],
+                      ["merge", "-q", "--no-edit", "main"]):
+                r = subprocess.run(["git", *c], cwd=wt, env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                said += r.stderr
+        finally:
+            for d in shut:
+                os.chmod(d, 0o755)
+        # git tries to lock packed-refs on each ref update; refused, it goes on without it
+        self.assertFalse([x for x in said.splitlines() if x.strip() and "packed-refs.lock" not in x], said)
+        self.assertEqual(len(self.git_out("log", "-1", "--format=%P", cwd=wt).split()), 2)  # a real merge
+        self.assertEqual(self.git_out("rev-parse", "task/t0002"), self.git_out("rev-parse", "HEAD", cwd=wt))
+        after = state()
+        changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+        self.assertTrue(changed)
+        for p in changed:
+            folder = stat.S_ISDIR((after.get(p) or before[p])[0])
+            self.assertTrue(may_write({}, p, rules) or folder and p in holders, p)
+        # what git wrote outside the session's own folder: objects, the branch's ref and log
+        self.assertEqual({str(Path(p).relative_to(common)).split("/")[0] for p in changed
+                          if not Path(p).is_relative_to(Path(rules[0][0]).resolve())}, {"objects", "refs", "logs"})
+
+    def test_a_workers_sandbox_keeps_the_common_git_folder_and_other_worktrees_folders(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        sh("git", "worktree", "add", "-q", "--detach", str(self.tmp / "wt-other"), cwd=self.repo)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(m["state"], "done", m)
+        box = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))
+        common = (self.repo / ".git").resolve()
+        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=m["worktree"])).resolve()
+        other = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=self.tmp / "wt-other")).resolve()
+        self.assertTrue(may_write(box, own / "index"))  # git status and git add still work
+        for p in (other / "commondir", other / "gitdir", other / "config.worktree", common / "worktrees" / "later" / "commondir",
+                  common / "commondir", common / "config.worktree", common / "index", common / "ORIG_HEAD",
+                  common / "refs" / "heads" / "main", own / "commondir", own / "gitdir"):
+            self.assertFalse(may_write(box, p), p)
+        # the lane's setup and check (srt) may write nothing of git's folders: srt opens none of its own accord
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        fs = run.srt_settings(self.desk, lane, "claude", p, Path(m["worktree"]), str(self.tmp))["filesystem"]
+        for x in fs["allowWrite"]:
+            self.assertFalse(Path(x).resolve() == common or Path(x).resolve().is_relative_to(common), x)
+
+    def test_a_worktrees_git_folder_changed_gets_no_git_and_is_put_right(self):
+        from hansa import run
+        lane = self.desk.settings()["lanes"]["a"]
+        wt, _ = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Add hello.txt")))
+        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt))
+        evil, marker = self.tmp / "evil", self.tmp / "hook-ran"
+        shutil.copytree(self.repo / ".git", evil)  # a git folder of a worker's making, with a hook
+        (evil / "hooks" / "post-checkout").write_text(f"#!/bin/sh\ntouch {marker}\n")
+        (evil / "hooks" / "post-checkout").chmod(0o755)
+        right = (own / "commondir").read_text()
+        for name, planted, said in (("commondir", f"{evil}\n", "commondir now holds"),
+                                    ("gitdir", "/elsewhere/.git\n", "gitdir now holds")):
+            (own / name).write_text(planted)
+            tid = self.desk.new_task("Add hello.txt again")
+            with unittest.mock.patch.object(run, "git", wraps=run.git) as ran:
+                with self.assertRaisesRegex(RuntimeError, f"the worktree's git folder was changed: .*{said}"):
+                    run.prepare(self.desk, "a", lane, self.desk.meta(tid))
+                self.assertFalse([c for c in ran.call_args_list if c.kwargs.get("cwd") == wt])
+            self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob(f"worktree-git-*/found.{name}")).read_text(),
+                             planted)
+            self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0], wt)  # put right: it works again
+        self.assertEqual((own / "commondir").read_text(), right)
+        self.assertFalse(marker.exists())
+        # the lane's own checkout: a commondir in its .git folder would lead git elsewhere too
+        (self.repo / ".git" / "commondir").write_text(f"{evil}\n")
+        with self.assertRaisesRegex(RuntimeError, "commondir was made, which git does not make there"):
+            run.git("checkout", "-q", "main", cwd=self.repo)
+        with self.assertRaisesRegex(RuntimeError, "commondir"):  # nor in a worktree, whose commondir leads there
+            run.check_git_folder(wt, (wt / ".git").read_text().strip())
+        self.assertFalse(marker.exists())
+        (self.repo / ".git" / "commondir").unlink()
+        self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Once more")))[0], wt)
 
     def test_a_design_session_runs_no_command_outside_the_sandbox(self):
         from hansa import run
