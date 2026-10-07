@@ -600,11 +600,28 @@ def _off_data(path: str) -> str:
     return ""
 
 
+def resolved(path: str) -> str:
+    """A path with its links resolved; '' when the system does not say where they lead: a folder on the way that
+    this account may not look into (/proc/1/root on Linux, but for root: Python before 3.10 raises there), or a
+    loop of links."""
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError, RuntimeError):
+        return ""
+
+
+def unresolved_why(path: str) -> str:
+    """'' for a path whose links can be followed; otherwise, in a line, why hansa refuses it: what the path
+    opens cannot be checked."""
+    return "" if resolved(path) else ("hansa cannot follow its links to see where it leads (a folder on the way "
+                                      "cannot be looked into), so it cannot check what it would open")
+
+
 @_once
 def _forms(path: str) -> set:
-    """A full path as given and with links resolved; on macOS, one under the data volume also as the path
-    from /."""
-    out = {_plain(path), _plain(os.path.realpath(path))}
+    """A full path as given and with links resolved (as given only, when they cannot be followed: a list that
+    opens refuses such a path itself, unresolved_why; the deny list keeps it); on macOS, one under the data volume also as the path from /."""
+    out = {_plain(w) for w in (path, resolved(path)) if w}
     if sys.platform == "darwin":
         out |= {w for w in map(_off_data, out) if w}
     return out
@@ -741,6 +758,20 @@ def _above(a: str, b: str) -> bool:
 def _overlaps(a: str, b: str) -> bool:
     """Whether one of two full paths is the other or inside it."""
     return _above(a, b) or _above(b, a)
+
+
+def _as_written(path: str, f: str, why: str) -> str:
+    """A fence's refusal of a full path, naming the fenced folder as the path spells it when the fence names it
+    through a link: /usr/lib/x is in /lib where /lib is a link to /usr/lib. (Where the path itself goes through
+    a link, the fence's name is where it leads.)"""
+    pre, fold = f"it would open {f}", lambda n: unicodedata.normalize("NFD", n).casefold()
+    if not why.startswith(pre) or not f.startswith("/"):
+        return why
+    at = _seen(_plain(f))
+    u = next((u for u in _ups(_plain(path)) if _seen(u) == at), "")
+    if not u or fold(u) == fold(_plain(f)) or _plain(resolved(u) or "/") != u:  # the same name; or u is the link
+        return why
+    return f"it would open {u} (the same folder as {f}){why[len(pre):]}"
 
 
 def claude_home(state_dir, name: str, p: dict) -> Path:
@@ -1007,8 +1038,8 @@ def _hops(path: str) -> list:
         except (OSError, ValueError):
             break
         out.append(_plain(os.path.join(os.path.dirname(out[-1]), to)))
-    real = _plain(os.path.realpath(path))
-    return out if real in out else out + [real]
+    real = resolved(path)
+    return out if not real or _plain(real) in out else out + [_plain(real)]
 
 
 def _install(path: str) -> list:
@@ -1120,7 +1151,7 @@ def _run_fence(home: str, lane_env=None) -> list:
             fence(os.path.join(d, "pyvenv.cfg"), "which says where the python that runs hansa loads its library from")
     for d in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
         if d.startswith("/"):  # the prefix and above; what it holds is named below (other tools may share it)
-            for f in _install(os.path.join(_plain(os.path.realpath(d)), "bin", "python")):  # unless it is a bundle
+            for f in _install(os.path.join(_plain(resolved(d) or d), "bin", "python")):  # unless it is a bundle
                 fence(f, "where the python that runs hansa is installed")
             out.append((_plain(d), _above, f"it would open {_plain(d)}, the prefix of the python that runs hansa"))
             for sub in ("bin", "lib", "lib64", "libexec", "pyvenv.cfg"):
@@ -1338,10 +1369,12 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
             continue
         for f, hit, why in fenced:
             if hit(x, f):  # as the disk sees both: as given and with links resolved, in any case it ignores
-                p.append(f"write cannot include {x}: {why}")
+                p.append(f"write cannot include {x}: {_as_written(x, f, why)}")
                 break
         else:
-            if _breaks(x):  # the sandbox may read it as a pattern
+            if unresolved_why(x):  # what it opens cannot be checked
+                p.append(f"write cannot include {x}: {unresolved_why(x)}")
+            elif _breaks(x):  # the sandbox may read it as a pattern
                 p.append(f"write cannot include {x}: {BREAKS_WHY}, which the sandbox may read as a pattern and "
                          "open more than the one folder")
     return p
@@ -1384,7 +1417,7 @@ def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
         if _has_format(x):
             p.append(f"the coordinator cannot be let read {json.dumps(x)}: {FORMAT_WHY}")
             continue
-        why = next((why for f, hit, why in fenced if hit(x, f)), "")
+        why = next((_as_written(x, f, why) for f, hit, why in fenced if hit(x, f)), "") or unresolved_why(x)
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which a permission rule cannot hold"
         if not why and not os.path.isdir(x):
@@ -1406,7 +1439,8 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
     """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
     wrong with the others, one line each). None may close what a worker needs in order to run: the home folder
     or a folder above it, the desk or above it, a lane's repository or above it, a folder on the PATH or above
-    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted."""
+    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted, and so is one
+    whose links cannot be followed (unresolved_why): it is denied as given, in every form hansa can work out."""
     if not isinstance(paths, list) or len(paths) > MAX_DENY:
         return [], [DENY_LIST_WHY]
     home = account_home()
@@ -1431,6 +1465,7 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         if _has_format(x):
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
+        # one whose links cannot be followed is kept, denied as given: refused, it would be read
         why = next((why for f, hit, why in fenced if hit(x, f)), "")
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"

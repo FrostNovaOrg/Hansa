@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, other_envs, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
-                   merge_message, program_candidates, read_json, task_message, update_message, write_json,
+                   merge_message, program_candidates, read_json, resolved, task_message, update_message, write_json,
                    write_problems)
 from .desk import lane_env as checked_env
 
@@ -696,8 +696,9 @@ def isolated(cwd, settings: dict | None = None) -> list:
 
 
 def full_paths(paths) -> list:
-    """Each path as given and with links resolved (/tmp is /private/tmp on macOS), once."""
-    return list(dict.fromkeys(str(x) for q in paths for x in (Path(q), Path(q).resolve())))
+    """Each path as given and with links resolved (/tmp is /private/tmp on macOS), once; as given only where
+    its links cannot be followed."""
+    return list(dict.fromkeys(str(x) for q in paths for x in (Path(q), Path(resolved(str(q)) or q))))
 
 
 def git_write_deny(wt: Path) -> list:
