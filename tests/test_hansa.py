@@ -7411,7 +7411,8 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
         [call] = self.srt_calls()
-        self.assertEqual(call["argv"][2:], ["--", "sh", "-c", 'test -f hello.txt && echo "tmp=$TMPDIR"'])
+        self.assertEqual(call["argv"][2:-1], ["--", "sh", "-c"])
+        self.assertEqual(self.ran(call), 'test -f hello.txt && echo "tmp=$TMPDIR"')  # after the prelude
         self.assertEqual(call["stdout"], "pipe")  # not the log file in the raw folder srt hides
         self.assertEqual(Path(call["cwd"]).resolve(), Path(m["worktree"]).resolve())
         got = call["settings"]
