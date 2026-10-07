@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import account, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, now, read_json, read_split, stored, write_json)
+                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_target, not_looking, proc_start, provider_env, pulse,
@@ -388,7 +388,7 @@ def cmd_merge(a):
                      if note else ""))
             return
         try:
-            git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
+            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], a.id, m["title"]), m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
         except RuntimeError as e:
             files = conflicted_files(lambda *x: git(*x, cwd=repo))
             places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
@@ -1143,7 +1143,7 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 LANE_LISTS = ("providers", "allow", "network", "write")
 LANE_NUMBERS = ("max_turns", "timeout_min")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "preview", "setup", "release", "max_turns",
-               "timeout_min", "note")
+               "timeout_min", "note", *MESSAGE_FIELDS)
 OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -1183,6 +1183,8 @@ def _lane_value(field: str, values: list):
             raise SystemExit(f"hansa: {field} takes one whole number. Nothing was changed")
     if field == "base" and not "".join(values).strip():
         raise SystemExit("hansa: base takes the name of a branch. Nothing was changed")
+    if field in MESSAGE_FIELDS and values and message_problem(values[0]):
+        raise SystemExit(f"hansa: {field} {_shown(values[0])} {message_problem(values[0])}. Nothing was changed")
     return values[0] if values else ""
 
 
@@ -1245,7 +1247,8 @@ def cmd_lane(a):
     desk = Desk.find(a.desk)
     if not a.action:
         lanes = desk.settings()["lanes"]
-        rows = [(name, ln["repo"], f"base {ln.get('base', 'main')}", "providers " + " > ".join(ln["providers"]))
+        rows = [(name, ln["repo"], f"base {ln.get('base', 'main')}", "providers " + " > ".join(ln["providers"])
+                 + "".join(f"  {f} {_shown(ln[f])}" for f in MESSAGE_FIELDS if ln.get(f)))
                 for name, ln in sorted(lanes.items())]
         widths = [max((len(r[i]) for r in rows), default=0) for i in range(3)]
         for r in rows:
@@ -1840,8 +1843,13 @@ def main(argv=None):
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; base, check, preview, setup, release and note take one value (none: empty); max_turns and "
-        "timeout_min take one whole number. release is the command line that sends the base branch out (git push "
+        "lane's env; base, check, preview, setup, release, note, commit_message and merge_message take one value "
+        "(none: empty); max_turns and timeout_min take one whole number. "
+        "commit_message is the form of the message of the commit hansa makes of a task's work (unset: "
+        "t0001: <title>), and of the merge of the base into a task's branch (retry --update); merge_message is the "
+        "form of the message of a task's merge into the base (unset: Merge t0001: <title>). Each is one line with "
+        "{task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes to a public repository "
+        "usually leaves {task} out of both. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). " +
         "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
