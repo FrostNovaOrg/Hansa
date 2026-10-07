@@ -84,6 +84,15 @@ page gives.
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) and asking for a release
   (`hansa release L "note"`), never pushing or deploying by itself.
+  Each lane may also set the form of the messages hansa writes into its
+  repository: `commit_message` for the commit of a task's work (and the merge
+  of the base into a task's branch on `retry --update`), `merge_message` for a
+  task's merge into the base, each one line with `{task}`, `{title}` and
+  `{lane}` that holds `{task}` or `{title}`
+  (`hansa lane set L merge_message "Merge: {title}"`). Unset, they are
+  `t0001: <title>` and `Merge t0001: <title>`. A lane whose release goes to a
+  public repository usually leaves `{task}` out; the release's word check reads
+  every outgoing commit message all the same.
   Setup, check and preview run outside the worker, so each change to them is
   recorded and the coordinator tells the principal about it. It is not a
   worker: it runs on this machine outside any sandbox, and besides `hansa` it
