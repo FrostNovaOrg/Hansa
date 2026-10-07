@@ -20,7 +20,8 @@ from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, ho
                    PROJECT_INTRO)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
-                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_target, not_looking, proc_start, provider_env, pulse,
+                  MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
+                  not_looking, own_merge_check, proc_start, provider_env, pulse,
                   quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
                   is_local, mac_loopback_listeners)
 
@@ -334,29 +335,34 @@ def cmd_merge(a):
         sess = notify.recorded(notify.session_here())  # the session that hears how a merge check ends
         tip = git("rev-parse", base, cwd=repo)
         if a.recheck:
-            if not lane.get("check"):
+            if not merge_command(lane):
                 raise SystemExit(f"hansa: lane {m['lane']} has no check to run again; nothing was merged")
             by = os.environ.get("HANSA_ROLE", "cli")
             desk.update(a.id, state="merging", merge_check_result=None,
                         merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by}, **sess)
-            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by)
-            print(f"{a.id} is not merged yet: hansa runs the lane's check again. It merges {a.id} onto {base} as it is "
-                  f"now in lane {m['lane']}'s worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check "
-                  f"there, and merges exactly that if the check passes. {_runs_when(desk, a.id, base)} "
+            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(lane))
+            print(f"{a.id} is not merged yet: hansa runs the lane's {_merge_what(lane)} again. It merges {a.id} onto "
+                  f"{base} as it is now in lane {m['lane']}'s worktree, runs {_merge_step(lane)} there, and merges "
+                  f"exactly that if it passes. {_runs_when(desk, a.id, base)} "
                   f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
                   + _unverified_later(desk, m))
             return
-        # the base has commits the task's branch does not: the two together were never checked
-        unchecked = bool(lane.get("check")) and bool(m.get("commits")) and base_moved(repo, tip, m["head"])
+        # the base has commits the task's branch does not: the two together were never checked; or the lane's
+        # merge check runs a command of its own, which ran on neither
+        why_check = merge_needs_check(lane, m, repo, tip)
+        unchecked = bool(why_check)
         if unchecked and not a.despite_check:
             desk.update(a.id, state="merging", merge_check={"phase": "queued", "queued": now(), "moves": 0},
                         merge_check_result=None, **sess)
             behind = git("rev-list", "--count", f"{m['head']}..{tip}", cwd=repo)
-            desk.event("merge_check_queued", task=a.id, onto=tip)
-            print(f"{a.id} is not merged yet: {base} has {behind} commit(s) that {a.id}'s branch does not, so the two "
-                  f"together were never checked. hansa merges {a.id} onto {base} as it is now in lane {m['lane']}'s "
-                  f"worktree, runs the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges "
-                  f"exactly that if the check passes. "
+            desk.event("merge_check_queued", task=a.id, onto=tip, command=merge_command(lane))
+            why = (f"{base} has {behind} commit(s) that {a.id}'s branch does not, so the two together were never "
+                   f"checked" if why_check == "moved" else
+                   f"lane {m['lane']} has a merge check of its own, which hansa runs before every merge, not after "
+                   f"each task")
+            print(f"{a.id} is not merged yet: {why}. hansa merges {a.id} onto {base} as it is now in lane "
+                  f"{m['lane']}'s worktree, runs {_merge_step(lane)} there, and merges "
+                  f"exactly that if it passes. "
                   f"{_runs_when(desk, a.id, base)} {_wait_for(desk, a.id)} "
                   f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)" + _unverified_later(desk, m))
             return
@@ -376,8 +382,8 @@ def cmd_merge(a):
             then = ("without a check, as --despite-check asks" if a.despite_check else
                     f"without a check if {base} has still not moved" + (
                         f"; if it has, it merges {a.id} onto {base} as it is then in lane {m['lane']}'s worktree, runs "
-                        f"the lane's {'setup and ' if lane.get('setup') else ''}check there, and merges exactly that if "
-                        f"the check passes" if lane.get("check") else ""))
+                        f"{_merge_step(lane)} there, and merges exactly that if it passes"
+                        if merge_command(lane) else ""))
             note = unverified_note(desk, m)
             checks = any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
                          and not (x.get("merge_check") or {}).get("plain") for x in desk.tasks())
@@ -408,7 +414,9 @@ def cmd_merge(a):
     desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
-                                                     f"since it was made)" if unchecked else ""))
+                                                     f"since it was made)" if why_check == "moved" else
+                                                     f" (without running the lane's merge check, "
+                                                     f"{merge_command(lane)})" if unchecked else ""))
     if note:
         print(f"note: {note}. It is merged: this is a note, not a stop")
 
@@ -416,8 +424,19 @@ def cmd_merge(a):
 def _unverified_later(desk: Desk, m: dict) -> str:
     """For a merge that waits for its merge check: the line saying that nothing verified the change, or ''."""
     note = unverified_note(desk, m)
-    return (f"\nnote: {note}. The merge check runs the lane's check, not a verification; if it passes, {m['id']} is "
-            f"merged all the same: this is a note, not a stop") if note else ""
+    lane = desk.settings()["lanes"].get(m.get("lane")) or {}
+    return (f"\nnote: {note}. The merge check runs the lane's {_merge_what(lane)}, not a verification; if it passes, "
+            f"{m['id']} is merged all the same: this is a note, not a stop") if note else ""
+
+
+def _merge_what(lane: dict) -> str:
+    """What a lane's merge check runs, named: its check, or its merge check when that is a command of its own."""
+    return "merge check" if own_merge_check(lane) else "check"
+
+
+def _merge_step(lane: dict) -> str:
+    """What a lane's merge check runs, with the command, for hansa merge to say."""
+    return f"the lane's {'setup and ' if lane.get('setup') else ''}{_merge_what(lane)} ({merge_command(lane)})"
 
 
 def _mergeable(desk: Desk, a):
@@ -1144,10 +1163,12 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 
 LANE_LISTS = ("providers", "allow", "network", "write")
-LANE_NUMBERS = ("max_turns", "timeout_min")
-LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "preview", "setup", "release", "max_turns",
-               "timeout_min", "note", *MESSAGE_FIELDS)
-OUTSIDE_WORKER = ("setup", "check", "preview")  # run by hansa itself, not by a worker or design session
+LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min")
+LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
+               "release", "max_turns", "timeout_min", "merge_timeout_min", "note", *MESSAGE_FIELDS)
+# empty (none) takes them out: the check's command and limit again, hansa's own message forms
+LANE_UNSET = ("merge_check", "merge_timeout_min", *MESSAGE_FIELDS)
+OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
 
 
 def _shown(v) -> str:
@@ -1179,6 +1200,10 @@ def _lane_value(field: str, values: list):
         return env
     if len(values) > 1:
         raise SystemExit(f"hansa: {field} takes one value; quote it if it has spaces. Nothing was changed")
+    if field in MESSAGE_FIELDS and values and message_problem(values[0]):
+        raise SystemExit(f"hansa: {field} {_shown(values[0])} {message_problem(values[0])}. Nothing was changed")
+    if field in LANE_UNSET and not "".join(values).strip():
+        return None
     if field in LANE_NUMBERS:
         try:
             return int(values[0])
@@ -1186,8 +1211,6 @@ def _lane_value(field: str, values: list):
             raise SystemExit(f"hansa: {field} takes one whole number. Nothing was changed")
     if field == "base" and not "".join(values).strip():
         raise SystemExit("hansa: base takes the name of a branch. Nothing was changed")
-    if field in MESSAGE_FIELDS and values and message_problem(values[0]):
-        raise SystemExit(f"hansa: {field} {_shown(values[0])} {message_problem(values[0])}. Nothing was changed")
     return values[0] if values else ""
 
 
@@ -1284,7 +1307,7 @@ def cmd_lane(a):
                 like = s["lanes"][a.like]
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
-                for f in ("check", "setup"):
+                for f in ("check", "setup", "merge_check"):
                     if ln.get(f) == "":
                         del ln[f]
                 repo, base = ln["repo"], ln.get("base", "main")
@@ -1321,7 +1344,8 @@ def cmd_lane(a):
                 brief.write_text("", encoding="utf-8")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
-                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check") if ln.get(f)))
+                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check",
+                                                              "merge_timeout_min") if ln.get(f)))
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
                       f"{a.like}'s, and the earlier ones are kept in {aside}")
@@ -1335,10 +1359,10 @@ def cmd_lane(a):
                 warning = _loopback_warning(a.name, ln["network"])
                 if warning:
                     print(desk.redact(warning))
-            if ln.get("setup") or ln.get("check"):
+            if ln.get("setup") or ln.get("check") or ln.get("merge_check"):
                 print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
                       "in the conversation, what they run and why.")
-            if not ln.get("check"):
+            if not ln.get("check") and not ln.get("merge_check"):
                 print(f"Lane {a.name} has no check, so its tasks will be merged untested: hansa merge checks nothing "
                       f"before it merges them, not even when {base} has moved since a task was made. Set one with: "
                       f"hansa lane set {a.name} check \"<the command that runs the tests>\"")
@@ -1378,7 +1402,11 @@ def cmd_lane(a):
             return
         value = _lane_value(a.field, a.values)
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
-        new["lanes"][a.name][a.field] = value
+        if value is None:  # unset: the check's command and limit, hansa's own message forms
+            new["lanes"][a.name].pop(a.field, None)
+            value = ""
+        else:
+            new["lanes"][a.name][a.field] = value
         _save(desk, new)
         desk.event("lane_set", lane=a.name, field=a.field)
     print(f"lane {a.name} {a.field}: {_shown(old)} -> {_shown(value)}")
@@ -1409,6 +1437,9 @@ def cmd_lane(a):
     if a.field in ("setup", "check", "network", "write") and old != value and (ln.get("setup") or ln.get("check")):
         print(f"To see that the lane's setup and check work in its sandbox before a task needs them: "
               f"hansa lane try {a.name}")
+    if a.field in ("setup", "merge_check", "network", "write") and old != value and own_merge_check(ln):
+        print(f"To see that the lane's merge check works in its sandbox before a merge needs it: "
+              f"hansa lane try {a.name} --merge-check")
 
 
 def _lane_worktrees(desk: Desk, name: str, lanes: dict) -> list:
@@ -1560,9 +1591,14 @@ def _lane_try(desk: Desk, a) -> None:
         ln = desk.settings()["lanes"].get(a.name)
         if not ln:
             raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
-        if not ln.get("setup") and not ln.get("check"):
+        if a.merge_check and not merge_command(ln):
+            raise SystemExit(f"hansa: lane {a.name} has no merge check and no check, so there is no merge check to "
+                             f"try. Set one with hansa lane set {a.name} merge_check|check \"<command>\"")
+        if not a.merge_check and not ln.get("setup") and not ln.get("check"):
             raise SystemExit(f"hansa: lane {a.name} has no setup and no check, so there is nothing to try. Set them "
-                             f"with hansa lane set {a.name} setup|check \"<command>\"")
+                             f"with hansa lane set {a.name} setup|check \"<command>\""
+                             + (f"; its merge check: hansa lane try {a.name} --merge-check"
+                                if ln.get("merge_check") else ""))
         t = read_try(desk, a.name)
         if t.get("phase") in ("queued", "running"):  # asked for before, by a command that stopped waiting
             print(f"a try of lane {a.name} is already {t['phase']}; waiting for it", flush=True)
@@ -1582,10 +1618,14 @@ def _lane_try(desk: Desk, a) -> None:
                 raise SystemExit(f"hansa: hansa serve (pid {st['pid']}) is busy or stuck: no round finished for "
                                  f"{quiet_text(st['quiet'])}, and a try runs through it; nothing was run. See hansa "
                                  f"explain server, then try again")
-            t = {"id": uuid.uuid4().hex[:12], "phase": "queued", "asked": now()}
+            t = {"id": uuid.uuid4().hex[:12], "phase": "queued", "asked": now(),
+                 **({"merge": True} if a.merge_check else {})}
             write_try(desk, a.name, t)
-            desk.event("lane_try_queued", lane=a.name)
-            print(f"lane {a.name}: hansa serve runs its " + " and ".join(x for x in ("setup", "check") if ln.get(x))
+            desk.event("lane_try_queued", lane=a.name, **({"merge_check": True} if a.merge_check else {}))
+            steps = ["setup"] * bool(ln.get("setup")) + (
+                [f"merge check ({merge_command(ln)}, stopped after {merge_minutes(ln)} minutes)"] if a.merge_check
+                else ["check"] * bool(ln.get("check")))
+            print(f"lane {a.name}: hansa serve runs its " + " and ".join(steps)
                   + f" in its worktree, at {ln.get('base') or 'main'}'s tip, in its sandbox; waiting for the result",
                   flush=True)
     gone = None
@@ -1837,7 +1877,7 @@ def main(argv=None):
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
-                   "(/bin/sh -c)")
+                   "unless the lane has a merge_check (/bin/sh -c)")
     q.add_argument("--setup", help="the command that installs dependencies before each task (/bin/sh -c)")
     q.add_argument("--network", nargs="+", metavar="HOST", help="the hosts its workers, setup and check may reach "
                    "(default: none)")
@@ -1846,13 +1886,19 @@ def main(argv=None):
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; base, check, preview, setup, release, note, commit_message and merge_message take one value "
-        "(none: empty); max_turns and timeout_min take one whole number. "
-        "commit_message is the form of the message of the commit hansa makes of a task's work (unset: "
-        "t0001: <title>), and of the merge of the base into a task's branch (retry --update); merge_message is the "
-        "form of the message of a task's merge into the base (unset: Merge t0001: <title>). Each is one line with "
-        "{task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes to a public repository "
-        "usually leaves {task} out of both. release is the command line that sends the base branch out (git push "
+        "lane's env; base, check, merge_check, preview, setup, release, note, commit_message and merge_message take "
+        "one value (none: empty); max_turns, timeout_min and merge_timeout_min take one whole number. check runs "
+        "after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
+        "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
+        "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
+        "lane's setup, before every merge of a task that changed something, and never after a task; a lane with only "
+        "a merge_check has no check after each task. merge_timeout_min is the merge check's own time limit in minutes "
+        "(default: timeout_min). commit_message is the form of the message of the commit hansa makes of a task's "
+        "work (unset: t0001: <title>), and of the merge of the base into a task's branch (retry --update); "
+        "merge_message is the form of the message of a task's merge into the base (unset: Merge t0001: <title>). "
+        "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
+        "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
+        "commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). " +
         "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
@@ -1881,6 +1927,8 @@ def main(argv=None):
     q = lane.add_parser("try", help="run a lane's setup and check once in its worktree and sandbox, as for a task "
                         "but with no worker, and print how they ended")
     q.add_argument("name")
+    q.add_argument("--merge-check", action="store_true", help="run the setup and the lane's merge check command (its "
+                   "merge_check, else its check) instead, under the merge check's time limit")
     q.add_argument("--every", type=float, default=0.5, help=argparse.SUPPRESS)
     p = add("notes", cmd_notes, "the coordinator's notes: list the files under notes/ with their headings, or move "
             "a finished section out of one: hansa notes archive FILE HEADING [--to OTHER]")

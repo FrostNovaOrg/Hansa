@@ -233,13 +233,16 @@ def _item(desk: Desk, e: dict):
             key = ("merge", tid)
             from .views import waited_text
             said = (f"{tid}'s merge: {waited_text(e)}" if e.get("waited") else
-                    f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}")
+                    f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}"
+                    + (f" (it ran: {desk.redact(e['command'])})" if e.get("command") else ""))
             line = f"{said}: {m.get('title', '')} · next: {_next_step(desk, tid)}"
         elif kind == "task_merged":
             how = ("in its turn behind a merge check, without a check of its own" if e.get("waited") else
                    "after its merge check passed")
             key, line = ("merge", tid), (f"{tid} merged into {e.get('into')} {how}: {m.get('title', '')}"
-                                         + (f" · note: {m['unverified']}" if m.get("unverified") else ""))
+                                         + (f" · note: {m['unverified']}" if m.get("unverified") else "")
+                                         + (f" · its merge check ran: {desk.redact(e['command'])}"
+                                            if e.get("command") and not e.get("waited") else ""))
         else:
             key, line = ("task", tid), task_line(desk, m)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
