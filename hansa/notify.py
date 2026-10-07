@@ -263,7 +263,8 @@ def _item(desk: Desk, e: dict):
                 + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
                 + " (the principal closes a request on the page; if it is done, close it: hansa ask --close N \"why\")",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
-    if kind in ("release_answered", "release_ended", "release_void", "release_forbidden") and not e.get("quiet"):
+    if kind in ("release_answered", "release_ended", "release_void", "release_forbidden",
+                "release_stopped") and not e.get("quiet"):
         return _release_item(desk, e)
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
@@ -298,6 +299,13 @@ def _release_item(desk: Desk, e: dict):
                 f"{head} FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                 + (f": {e.get('problem')}" if e.get("problem") else "") + (f" · last lines: {tail}" if tail else "")
                 + " · next: hansa release; fix what failed, then ask again: " + release.ask_again(r))
+    elif kind == "release_stopped":
+        key = ("release", rid)
+        who = "the principal" if e.get("by") == "page" else e.get("by") or "?"
+        line = (f"{head} was stopped by {who}" + (f": {e.get('reason')}" if e.get("reason") else "")
+                + (f" · its command had run and got TERM{' then KILL' if e.get('killed') else ''}; the server may be "
+                   "half-switched: hansa release shows its last lines" if e.get("ran") else " · nothing was run")
+                + " · next: ask again when it should go out, " + release.ask_again(r))
     elif kind == "release_void":
         key = ("release", rid)
         line = f"{head} is void: {e.get('why')}; nothing was run · next: ask again, {release.ask_again(r)}"

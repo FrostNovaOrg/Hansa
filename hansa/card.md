@@ -38,6 +38,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
 | `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
+| `hansa release --stop ID ["<reason>"]` | call release ID off: one not started yet is closed as stopped; a running one's command gets TERM, then KILL 30 s later, and is recorded as stopped (the server may be left half-switched) |
 | `hansa release L [TARGET] ["<note>"]` | ask for a release of lane L's base branch as it is now, by one of its release targets (TARGET is needed when the lane has more than one): hansa runs that target's command after the principal's yes on the page (see Releasing). `hansa release` alone lists the open and recent releases |
 | `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
@@ -276,7 +277,8 @@ to a public repository, a deploy to production) waits for the principal:
   checks again before it starts only when the commit, the starting point, the
   words or the command changed since.
 - hansa tells you when the principal answers and when the release ends: done,
-  or failed with its exit code and last lines. `hansa release` lists them;
+  or failed with its exit code and last lines, or stopped (by the principal's
+  Stop on the page, or your `hansa release --stop`). `hansa release` lists them;
   `hansa explain lane L` shows each target's command and its last release.
 - Never push or deploy yourself, not even when a release failed: fix what
   failed and ask again. Your settings deny pushing and publishing from your

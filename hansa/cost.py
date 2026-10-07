@@ -1,7 +1,9 @@
 """Tokens and what they are worth, from Claude Code's own records and the principal's prices.
 
 Two sources, never counted twice:
-- worker runs: the usage Claude Code returned for each task (tasks/<id>/meta.json);
+- worker runs: the usage Claude Code returned for each run of each task (tasks/<id>/meta.json): its last run, and
+  each earlier try, kept on its attempt record when the task went back to the queue (or in earlier_runs, for a run
+  an earlier hansa serve started and lost track of); each run counted once;
 - the coordinator and its helpers: the transcripts Claude Code writes for sessions
   started in the desk (<config dir>/projects/<desk path>/**/*.jsonl).
 
@@ -61,24 +63,44 @@ def _day(ts: float) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
+def task_runs(m: dict) -> list:
+    """Every run of a task that has numbers, oldest first: {when, provider, usage, turns}. Earlier tries are on the
+    attempt records (and in earlier_runs); the task's own usage is its last run's. Each is there once: a run's
+    numbers move to its attempt record as the task is queued again, and the task's own are cleared then
+    (run.finish); a lost run is kept only when its session is in neither (run.keep_lost_run)."""
+    out = []
+    for x in [*(m.get("attempts") or []), *(m.get("earlier_runs") or []),
+              {"usage": m.get("usage"), "turns": m.get("turns"), "ended": m.get("finished"),
+               "provider": m.get("provider", "")}]:
+        if not isinstance(x, dict) or not isinstance(x.get("usage"), dict) or not x["usage"]:
+            continue
+        out.append({"when": x.get("ended") or x.get("at") or 0, "provider": x.get("provider") or m.get("provider", ""),
+                    "usage": x["usage"], "turns": x.get("turns") or 0})
+    return sorted(out, key=lambda r: r["when"])
+
+
 def worker_rows(desk: Desk, since: float) -> list:
+    """One row per model of each run of each task that ended in the window. A run's turns, and the run itself
+    (runs), are on its first row, so that they add up."""
     s = desk.settings()
     rows = []
     for m in desk.tasks():
-        when = m.get("finished") or 0
-        if when < since or not m.get("usage"):
-            continue
-        kind = s["providers"].get(m.get("provider"), {}).get("kind", "")
-        for model, u in m["usage"].items():
-            usd = value(model, u, s["prices"])
-            source = "price table"
-            if usd is None and kind == "subscription" and u.get("claude_code_usd") is not None:
-                usd, source = u["claude_code_usd"], "Claude Code list price"
-            seat = {"design": "design", "verify": "verify"}.get(m.get("kind"), "worker")
-            rows.append({"day": _day(when), "seat": seat, "lane": m.get("lane", ""), "task": m["id"],
-                         "provider": m.get("provider", ""), "model": model,
-                         **{k: u.get(k, 0) for k in TOKEN_FIELDS}, "usd": usd,
-                         "priced_by": source if usd is not None else "no price"})
+        seat = {"design": "design", "verify": "verify"}.get(m.get("kind"), "worker")
+        for run in task_runs(m):
+            when = run["when"]
+            if when < since:
+                continue
+            kind = s["providers"].get(run["provider"], {}).get("kind", "")
+            for i, (model, u) in enumerate(run["usage"].items()):
+                usd = value(model, u, s["prices"])
+                source = "price table"
+                if usd is None and kind == "subscription" and u.get("claude_code_usd") is not None:
+                    usd, source = u["claude_code_usd"], "Claude Code list price"
+                rows.append({"day": _day(when), "seat": seat, "lane": m.get("lane", ""), "task": m["id"],
+                             "provider": run["provider"], "model": model,
+                             **{k: u.get(k, 0) for k in TOKEN_FIELDS}, "usd": usd,
+                             "priced_by": source if usd is not None else "no price",
+                             "turns": run["turns"] if i == 0 else 0, "runs": 1 if i == 0 else 0})
     return rows
 
 
@@ -322,11 +344,13 @@ def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     rows = worker_rows(desk, since) + transcript_rows(desk, since)
     by = {}
     for key in ("day", "seat", "lane", "task", "model", "provider"):
-        agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0})
+        agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0, "turns": 0, "runs": 0})
         for r in rows:
             a = agg[r[key] or unassigned(r)]  # the coordinator's usage has no lane or task: a row of its own
             t = sum(r[k] for k in TOKEN_FIELDS)
             a["tokens"] += t
+            a["turns"] += r.get("turns", 0)  # the workers' runs: the coordinator's turns are hansa cost --turns
+            a["runs"] += r.get("runs", 0)
             if r["usd"] is None:
                 a["unpriced_tokens"] += t
             else:
@@ -334,7 +358,8 @@ def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
         by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
     total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
     return {"days": days, "window": window, "rows": rows, "by": by,
-            "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6)},
+            "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6),
+                      "turns": sum(r.get("turns", 0) for r in rows), "runs": sum(r.get("runs", 0) for r in rows)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
             "coordinator_uncounted": coordinator_uncounted(desk),
             "coordinator_user": (read_json(desk.state_dir / "coordinator.json", {}) or {}).get("user", ""),

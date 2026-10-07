@@ -1040,6 +1040,8 @@ def cost_text(rep: dict, by: str = "day") -> str:
            f"worth ${rep['total']['usd']:.2f}"]
     for k, v in rows.items():
         extra = f" (+{v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] else ""
+        if by == "task" and v.get("runs"):  # every run of the task: its earlier tries too
+            extra += f"  {v['runs']} run(s), {v.get('turns', 0):,} turn(s)"
         out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")
     if rep["unpriced_models"]:
         out.append("no price yet for: " + ", ".join(rep["unpriced_models"]) + " (the principal sets prices on the page)")

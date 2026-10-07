@@ -2704,8 +2704,14 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         final, message = ("cancelled", "cancelled") if now_meta.get("cancel") and not changed else (state, error)
         checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                     and meta.get("kind") != "verify")  # a verification is never merged, so never checked
+        tries, kept = attempts, {}
+        if final == "queued" and len(attempts) > len(meta.get("attempts", [])):
+            # queued for another try: this run's numbers go with its attempt record, and the task's own fields are
+            # left for the next run, so each try counts once (cost.task_runs)
+            tries = [*attempts[:-1], {**attempts[-1], **run_numbers(meta, fields)}]
+            kept = {"usage": {}, "turns": None}
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
-                "error": desk.redact(message), "attempts": attempts, "pid_start": "", **fields}
+                "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept}
     meta = desk.change(tid, decide)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
@@ -2713,6 +2719,32 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         sweep(desk, tid)
         meta = desk.meta(tid)
     return meta
+
+
+def run_numbers(meta: dict, fields: dict) -> dict:
+    """What one run of a task used, as kept on its attempt record when the task is queued for another try."""
+    return {"usage": fields.get("usage") or {}, "turns": fields.get("turns"), "session_id": fields.get("session_id", ""),
+            "ran_from": meta.get("started"), "ended": fields.get("finished") or now(), "model": meta.get("model_asked", "")}
+
+
+def keep_lost_run(desk: Desk, m: dict) -> dict:
+    """For a task an earlier server started that goes back to the queue: the numbers of the run it may have started
+    meanwhile, from its session record, to keep in earlier_runs; {} when there is none, or it is already kept."""
+    sid = m.get("session_id") or ""
+    if not sid or m.get("launch") != sid or m.get("kind") == "design":
+        return {}
+    if any(x.get("session_id") == sid for x in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])]
+           if isinstance(x, dict)):
+        return {}
+    p = desk.settings()["providers"].get(m.get("provider") or "")
+    usage = read_detail(desk, m["id"], "usage", {}, lambda: usage_from_record(
+        config_home(desk, m["provider"], p), sid)) if p else {}
+    if not usage:
+        return {}
+    return {"earlier_runs": [*(m.get("earlier_runs") or []), {
+        "provider": m.get("provider", ""), "at": now(), "usage": usage, "turns": None, "session_id": sid,
+        "ran_from": m.get("started"), "ended": now(), "model": m.get("model_asked", ""),
+        "why": "hansa serve stopped while it started this run; the task went back to the queue"}]}
 
 
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
@@ -3438,11 +3470,12 @@ class Dispatcher:
                                capture_output=True, timeout=30)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 pass
+        lost = keep_lost_run(self.desk, m)  # read before the lock: a session record can be long
         if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
                             {"state": "cancelled", "phase": "", "error": "cancelled before it started",
-                             "finished": now()} if x.get("cancel") else
+                             "finished": now(), **lost} if x.get("cancel") else
                             {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
-                             "lookup_failing_since": None}):
+                             "lookup_failing_since": None, **lost}):
             remove_sandbox_tmp(self.desk, m["id"])  # what it made for a worker that never started
 
     def check(self, m: dict, s: dict) -> None:

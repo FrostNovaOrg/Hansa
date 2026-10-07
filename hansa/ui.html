@@ -92,8 +92,9 @@ const T = ZH ? {
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
   last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
-  costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
+  costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件活重新排队再试时，每次尝试的 token 都算在里面。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
+  runs:"运行次数（每次尝试都算）", turns:"轮数",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
@@ -112,10 +113,12 @@ const T = ZH ? {
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
+  releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
+  releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL，到那时的输出留着。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令、它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，勾就不再算数）",
   releaseForbidden:"不许发出去的字眼（每行一个词或短语，不分大小写；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   laneRelease:"发布命令：你在这页点头后由 hansa 运行，把基础分支发出去（空＝没有）", f_release:"发布命令",
-  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者向你提了请求、hansa serve 很久没跑完一轮）由 hansa 运行，以这台机器的账号在沙箱外、在桌面文件夹里运行；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
+  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮）由 hansa 运行，以这台机器的账号在沙箱外、在桌面文件夹里运行；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
@@ -158,7 +161,8 @@ const T = ZH ? {
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
   last24h:"Last 24 h", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
   days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
-  costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill.",
+  costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill. A task queued again for another try counts every try's tokens.",
+  runs:"Runs (every try)", turns:"Turns",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
@@ -177,10 +181,12 @@ const T = ZH ? {
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
+  releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
+  releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs, and its output so far is kept. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command, the target it must follow or the way it runs (fixed), changes)",
   releaseForbidden:"Words or phrases no release may send out (one per line, any case; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   laneRelease:"Release command: hansa runs it after your yes on this page, to send the base branch out (blank = none)", f_release:"release",
-  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator files a request, hansa serve finishes no round for a long time), as this machine's account, outside the sandbox, in the desk's folder; the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time), as this machine's account, outside the sandbox, in the desk's folder; the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
@@ -319,16 +325,24 @@ function releaseBlock(r) {
     h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", onclick: () => answer(true)}, T.releaseYes),
       reason, h("button", {onclick: () => answer(false)}, T.releaseNo)));
 }
+function releaseStop(r) {
+  if (!["approved", "starting", "running"].includes(r.state) || r.stop_asked) return null;
+  const reason = h("input", {placeholder:T.releaseStopReason});
+  return h("div", {class:"row", style:"margin-top:4px"}, reason,
+    h("button", {title:T.releaseStopNote, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
+      .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
+}
 function releasesSection(rel) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
   if (!rel.length) return null;
   return section(T.releases, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
       "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs)),
-      h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused"].includes(r.state) ? "bad" : "muted"},
+      h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
         (ZH && r.what_zh) || r.what, r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
         (r.hits || []).length ? h("div", {class:"mono"}, T.releaseHits + ":", r.hits.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line}`))) : null,
-        (r.tail || []).length && r.state === "failed" ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null)]))] : null);
+        (r.tail || []).length && ["failed", "stopped"].includes(r.state) ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null,
+        releaseStop(r))]))] : null);
 }
 function checkButton(name, after) {
   const b = h("button", {onclick: async () => { b.disabled = true; b.textContent = T.checking;
@@ -498,8 +512,10 @@ async function loadCost() {
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
     if (!rows.length) return null;
-    return h("div", {}, h("h3", {}, T["by" + key]), table(["", T.tokens, "$ " + T.listValue, T.tokensNoPrice],
-      rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : ""])));
+    const tries = key === "task";  // every run of a task counts: its earlier tries too
+    return h("div", {}, h("h3", {}, T["by" + key]), table(["", T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
+      rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
+        ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
   };
   $("#tab-cost").replaceChildren(
     h("section", {},
@@ -515,7 +531,7 @@ async function loadCost() {
 }
 async function exportCsv() {
   const r = await api(`/api/cost?days=${costDays}&rows=1`);
-  const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by"];
+  const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by", "runs", "turns"];
   const esc = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
   const a = h("a", {href:URL.createObjectURL(new Blob([csv], {type:"text/csv"})), download:`cost-${costDays}d.csv`});

@@ -169,6 +169,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     return self._send(200, release.answer(desk, int(body["id"]), body.get("yes") is True,
                                                           str(body.get("reason") or ""), str(body.get("commit") or ""),
                                                           str(body.get("command") or ""), by="page"))
+                if path == "/api/release/stop":  # the principal's Stop: one not started is closed, a running one ended
+                    return self._send(200, release.stop_release(desk, int(body["id"]), str(body.get("reason") or ""),
+                                                                by="page"))
                 if path == "/api/alert/test":  # the principal's test of the alert command; no command sends one
                     return self._send(200, alert.test(desk))
                 if path == "/api/ask/close":

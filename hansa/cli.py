@@ -692,6 +692,29 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
                          f"on a lane on that repository{nothing}")
 
 
+def _stop_release(desk: Desk, a) -> None:
+    """hansa release --stop ID [reason]: call a release off."""
+    if os.environ.get("HANSA_TASK"):
+        raise SystemExit("hansa: only the coordinator stops a release; a worker, verification or design session "
+                         "cannot. Say in your report why it should not go out")
+    rid = a.stop.lstrip("#")
+    if not rid.isdigit():
+        raise SystemExit(f"hansa: --stop takes a release's number (hansa release lists them), not {a.stop!r}")
+    reason = " ".join(([a.lane] if a.lane else []) + list(a.note))
+    out = release.stop_release(desk, int(rid), reason, by=os.environ.get("HANSA_ROLE", "cli"))
+    if not out["ok"]:
+        raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
+    r = release.get(desk, int(rid)) or {}
+    if out["state"] == "stopped":
+        print(desk.redact(f"release #{rid} of {release.what(r)} is stopped; nothing was run"))
+        return
+    print(desk.redact(
+        f"release #{rid} of {release.what(r)} is being stopped: hansa serve sends TERM to its command's process group "
+        f"within seconds, and KILL {release.STOP_GRACE} s later to what still runs; it is then recorded as stopped, "
+        f"its output so far kept" + (" and its checkout removed" if r.get("fixed") else "")
+        + ". The server may be left half-switched: hansa release shows its last lines"))
+
+
 def cmd_pause(a):
     Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
     print("paused: no new tasks start until `hansa resume`; running tasks finish")
@@ -761,6 +784,9 @@ def cmd_ask(a):
 
 def cmd_release(a):
     desk = Desk.find(a.desk)
+    if a.stop is not None:
+        _stop_release(desk, a)
+        return
     if not a.lane:
         print(desk.redact(release.list_text(desk)))
         return
@@ -1973,7 +1999,16 @@ def main(argv=None):
                      "page and hansa serve go on meanwhile), each commit's own change once (a merge's: only what it "
                      "adds beyond its parents); hansa serve checks again at the start only when the commit, the "
                      "starting point, the words or the command changed since. hansa release alone lists the open and "
-                     "recent releases. Only the coordinator asks")
+                     "recent releases. Only the coordinator asks. hansa release --stop ID [reason] calls one off: one "
+                     "waiting for the principal or approved and waiting its turn is closed as stopped; a running one "
+                     f"gets TERM to its command's whole process group, then KILL {release.STOP_GRACE} seconds later to "
+                     "what still runs, and is recorded as stopped, with who stopped it and why, its output so far kept "
+                     "(a fixed target's checkout is removed as at any other end). The principal's alert command is "
+                     "told (release_stopped). A stopped release went out for no --after. A stopped install may leave "
+                     "the server half-switched: a release command for which that matters should handle TERM (finish "
+                     "or undo the step it is in)")
+    p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
+                   f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("lane", nargs="?")
     p.add_argument("note", nargs="*")
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
