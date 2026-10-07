@@ -29,6 +29,7 @@ import re
 import secrets as _secrets
 import shutil
 import site
+import string
 import subprocess
 import sys
 import sysconfig
@@ -66,6 +67,11 @@ PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden")
 # What the principal's list of lanes released without asking records of each lane, as the page saves it: a lane
 # goes out without asking only while it still has them
 LISTED_AS = ("repo", "base", "release")
+# a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
+MESSAGE_FIELDS = ("commit_message", "merge_message")
+MESSAGE_PLACES = "{task}, {title} and {lane}"
+MAX_MESSAGE = 200
+RETRY_OF = " (retry of t"  # what hansa retry adds to a task's title
 # Files and folders under the home folder of the user hansa runs as that no worker command may read: logins,
 # keys and tokens for other services, browsing data and messages. Nothing a build or test tool needs to read
 # (not .gitconfig, .m2, .gradle, .cargo/config.toml, .npm); a name that does not exist costs nothing. The
@@ -309,7 +315,7 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "preview", "setup",
-                           "release", "max_turns", "timeout_min", "note"}
+                           "release", "max_turns", "timeout_min", "note", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -343,6 +349,7 @@ def validate(s: dict, root=None) -> list:
         for field in ("check", "preview", "setup", "release"):
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
+        p += [f"{at}: {f} {message_problem(ln[f])}" for f in MESSAGE_FIELDS if message_problem(ln.get(f, ""))]
         if not _is_int(ln.get("max_turns", 300), 1, 1000):
             p.append(f"{at}: max_turns must be from 1 to 1000")
         if not _is_int(ln.get("timeout_min", 240), 1, 1440):
@@ -771,6 +778,69 @@ def listed_lanes(s: dict) -> list:
     """The lane names on the principal's list of lanes released without asking, as the page shows them."""
     listed = s.get("releases_without_asking") or []
     return [x if isinstance(x, str) else x.get("lane", "") for x in listed if isinstance(x, (str, dict))]
+
+
+def message_problem(form) -> str:
+    """'' for a commit_message or merge_message hansa can use ('' is unset); otherwise why not, in one line that
+    names the placeholders."""
+    if form == "":
+        return ""
+    why = ""
+    if not isinstance(form, str):
+        why = "must be text"
+    elif len(form) > MAX_MESSAGE:
+        why = f"must be up to {MAX_MESSAGE} characters"
+    elif _has_control(form):
+        why = "must be one line: it cannot hold a newline"
+    else:
+        try:
+            names = [(f, spec, conv) for _, f, spec, conv in string.Formatter().parse(form) if f is not None]
+        except ValueError:
+            names, why = [], "has a { or } that opens or closes no placeholder (a brace itself is {{ or }})"
+        bad = ["{" + f + (f"!{conv}" if conv else "") + (f":{spec}" if spec else "") + "}" for f, spec, conv in names
+               if f not in ("task", "title", "lane") or spec or conv]
+        if bad:
+            why = f"has an unknown placeholder {bad[0]}"
+        elif not why and not {"task", "title"} & {f for f, _, _ in names}:
+            why = ("gives every task the same message, or an empty one: it needs {task} or {title}"
+                   if form.strip() else "gives an empty message")
+    return f"{why}; the placeholders are {MESSAGE_PLACES}" if why else ""
+
+
+def own_title(title: str) -> str:
+    """A title without the " (retry of t0001)" a retry adds to it (hansa retry, which cuts titles at 80
+    characters, perhaps within that), for a form that names no task."""
+    found = re.search(r" \(retry of t\d", title)
+    if found:
+        return title[:found.start()]
+    cut = next((n for n in range(len(RETRY_OF), 1, -1) if title.endswith(RETRY_OF[:n])), 0) if len(title) == 80 else 0
+    return title[:len(title) - cut]
+
+
+def _message(ln, field: str, tid: str, title: str, lane: str) -> str | None:
+    form = (ln or {}).get(field)
+    if not form or message_problem(form):
+        return None
+    title = title if "{task}" in form.replace("{{", "") else own_title(title)
+    return form.format(task=tid, title=title or "work", lane=lane or "")
+
+
+def task_message(ln, lane: str, tid: str, title: str) -> str:
+    """The message of the commit hansa makes of a task's work: the lane's commit_message, or t0001: <title>."""
+    return (_message(ln, "commit_message", tid, title, lane) or f"{tid}: {title or 'work'}")[:100]
+
+
+def merge_message(ln, lane: str, tid: str, title: str) -> str:
+    """The message of the merge of a task into the lane's base: the lane's merge_message, or Merge t0001: <title>."""
+    return _message(ln, "merge_message", tid, title, lane) or f"Merge {tid}: {title}"
+
+
+def update_message(ln, lane: str, tid: str, title: str, base: str) -> str:
+    """The message of the merge of the base into a task's branch (retry --update). With a commit_message it is
+    named after the task's commit, which comes after it on that branch; else Merge main into task/t0001."""
+    if _message(ln, "commit_message", tid, title, lane) is None:
+        return f"Merge {base} into task/{tid}"
+    return f"Merge {base} into the branch of: {task_message(ln, lane, tid, title)}"
 
 
 def _has_control(x: str) -> bool:

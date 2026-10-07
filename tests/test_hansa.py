@@ -1401,13 +1401,15 @@ class DeskTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
                               text=True).stdout.strip()
 
-    def two_lanes(self, check="", names=("a.txt", "b.txt")):
+    def two_lanes(self, check="", names=("a.txt", "b.txt"), more=None):
         """Lanes a and b on the one repository, each worker writing a file of its own (a.txt, b.txt), and one
-        finished task on each, both made from the same base."""
+        finished task on each, both made from the same base. more: other fields for each lane ({lane: {...}})."""
         s = self.desk.settings()
         s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
         s["lanes"]["a"].update(env={"FAKE_HELLO": names[0]}, check=check)
         s["lanes"]["b"].update(env={"FAKE_HELLO": names[1]}, check=check)
+        for lane, fields in (more or {}).items():
+            s["lanes"][lane].update(fields)
         self.assertEqual(self.desk.save_settings(s), [])
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task(f"Add {names[0]}", lane="a"), self.desk.new_task(f"Add {names[1]}", lane="b")
@@ -1492,6 +1494,87 @@ class DeskTest(unittest.TestCase):
         self.assertIn("moved each time before hansa could merge it; nothing was merged", m["merge_check_result"]["note"])
         self.assertEqual([e["moves"] for e in self.events("merge_check_base_moved")], [1, 2])
         self.assertFalse((self.repo / "b.txt").exists())
+
+    def messages_written(self, forms: dict) -> tuple:
+        """Lanes a and b with these message forms (lane: {field: form}); t1 merged at once, t2 retried --update
+        onto it as t3, and t3 merged after a merge check. The subjects on main, and (t1, t2, t3, t3's title)."""
+        d, t1, t2 = self.two_lanes(check="test -f README.md", more=forms)
+        self.hansa("merge", t1)
+        self.hansa("retry", t2, "--update", "Add b.txt again")
+        t3 = self.desk.meta(t2)["replaced_by"]
+        m = self.settle(d, t3)
+        self.assertEqual((m["state"], m["update_conflicts"]), ("done", []), m)
+        self.move_main()  # so its merge goes through a merge check
+        self.hansa("merge", t3)
+        m = self.settle_merge(d, t3)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])
+        got = [x.removesuffix("\n") for x in self.git_out("log", "-z", "--format=%B", "main").split("\0") if x]
+        return sorted(got), (t1, t2, t3, m["title"])
+
+    def test_unset_message_forms_write_hansas_own_messages(self):
+        got, (t1, t2, t3, title) = self.messages_written({})
+        self.assertEqual(got, sorted([
+            "init", "moved", f"{t1}: Add a.txt", f"Merge {t1}: Add a.txt", f"{t2}: Add b.txt",
+            f"Merge main into task/{t3}", f"{t3}: {title}", f"Merge {t3}: {title}"]))
+
+    def test_a_lanes_message_forms_name_every_commit_and_merge_it_writes(self):
+        got, (t1, t2, t3, title) = self.messages_written({
+            "a": {"commit_message": "{title} [{lane}]", "merge_message": "Merge {task} ({lane}): {title}"},
+            "b": {"commit_message": "{title}", "merge_message": "Merge: {title}"}})
+        self.assertEqual(title, f"Add b.txt (retry of {t2})")  # a form without {task} leaves that out too
+        self.assertEqual(got, sorted([
+            "init", "moved", "Add a.txt [a]", f"Merge {t1} (a): Add a.txt", "Add b.txt",
+            "Merge main into the branch of: Add b.txt", "Add b.txt", "Merge: Add b.txt"]))
+        self.assertNotIn(t2, " ".join(got))
+        self.assertNotIn(t3, " ".join(got))
+        out = self.hansa("lane")
+        self.assertIn('commit_message "{title} [{lane}]"  merge_message "Merge {task} ({lane}): {title}"', out)
+        shown = self.hansa("explain", "lane", "b")
+        self.assertIn('commit_message (the form of the message of the commit of a task\'s work', shown)
+        self.assertIn('merge_message (the form of the message of a task\'s merge into the base): "Merge: {title}"',
+                      shown)
+
+    def test_message_forms_that_would_read_badly_are_refused_on_lane_set(self):
+        before = self.desk.settings()["lanes"]["a"]
+        for field, form, why in (("commit_message", "{title} {when}", "an unknown placeholder {when}"),
+                                 ("merge_message", "{title!r}", "an unknown placeholder {title!r}"),
+                                 ("merge_message", "Merge {task", "a { or } that opens or closes no placeholder"),
+                                 ("commit_message", "{title}\nmore", "must be one line"),
+                                 ("commit_message", "   ", "gives an empty message"),
+                                 ("merge_message", "Merge {lane}", "gives every task the same message"),
+                                 ("merge_message", "{{title}}", "gives every task the same message")):
+            with self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "set", "a", field, form)
+            said = str(e.exception.code)
+            self.assertIn(why, said)
+            self.assertIn("the placeholders are {task}, {title} and {lane}", said)
+            self.assertEqual(len(said.splitlines()), 1, said)
+            self.assertEqual(self.desk.settings()["lanes"]["a"], before)
+            s = self.desk.settings()  # the page's save is checked the same way
+            s["lanes"]["a"][field] = form
+            self.assertTrue(any(f"lane a: {field} " in x and why in x for x in self.desk.save_settings(s)))
+        self.assertNotIn("_message", self.hansa("lane"))
+        self.assertNotIn("_message (the form", self.hansa("explain", "lane", "a"))
+        self.assertIn('-> "{task}: {title}"', self.hansa("lane", "set", "a", "commit_message", "{task}: {title}"))
+        self.assertIn('commit_message (the form', self.hansa("explain", "lane", "a"))
+        self.hansa("lane", "set", "a", "commit_message", "none")  # back to hansa's own
+        self.assertNotIn("_message (the form", self.hansa("explain", "lane", "a"))
+        self.assertNotIn("_message", self.hansa("lane"))
+        from hansa.desk import merge_message, task_message, update_message
+        self.assertEqual(task_message({}, "a", "t0007", ""), "t0007: work")
+        self.assertEqual(task_message({"commit_message": "{task}"}, "a", "t0007", "x"), "t0007")
+        self.assertEqual(merge_message({"merge_message": "{{{lane}}} {title}"}, "a", "t0007", "x"), "{a} x")
+        self.assertEqual(update_message({}, "a", "t0007", "x", "dev"), "Merge dev into task/t0007")
+        long = "x" * 75 + " (retry of t0006)"  # cut at 80 by hansa retry
+        self.assertEqual(task_message({"commit_message": "{title}"}, "a", "t0007", long[:80]), "x" * 75)
+        self.assertEqual(task_message({"commit_message": "{task} {title}"}, "a", "t0007", long[:80]),
+                         "t0007 " + long[:80])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        self.assertIn("A lane whose release goes to a public repository usually leaves {task} out",
+                      " ".join(out.getvalue().split()))
 
     def move_main(self, repo=None):
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved",

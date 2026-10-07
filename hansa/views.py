@@ -765,6 +765,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
             *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
               for r in ln.get("allow", [])],
             *release.lane_lines(desk, name, ln),
+            *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"
+              for f, what in (("commit_message", "message of the commit of a task's work, and of the merge of the base"
+                                                 " into a task's branch"),
+                              ("merge_message", "message of a task's merge into the base")) if ln.get(f)],
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             f" read and change them with hansa lane brief {name})"])
     if what == "provider":
