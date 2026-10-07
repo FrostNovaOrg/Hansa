@@ -409,6 +409,12 @@ class DeskTest(unittest.TestCase):
         keep = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "srt").exists()]
         return unittest.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(keep)})
 
+    def design_worktree(self, tid) -> str:
+        """Lane a's design worktree on task tid's branch, made as start_design makes it."""
+        from hansa import run
+        lane = self.desk.settings()["lanes"]["a"]
+        return str(run.prepare(self.desk, "a", lane, self.desk.meta(tid), wt=self.desk.worktrees_dir / "a-design")[0])
+
     def settle(self, d, tid, timeout=20):
         end = time.time() + timeout
         while time.time() < end:
@@ -1380,7 +1386,7 @@ class DeskTest(unittest.TestCase):
     def test_a_verification_and_a_design_session_are_swept_at_their_end_too(self):
         from hansa import run
         tid = self.desk.new_task("Make the badge bigger")
-        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
                          model_asked="sonnet", kind="design")
         _, env, _ = run.design_command(self.desk, tid)
         tmp = self.desk.meta(tid)["worker_tmp"]
@@ -3322,7 +3328,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(self.settle(d, vid)["verdict"], "holds")
         self.assertEqual(retries, {tid: {"8"}, vid: {"8"}})  # a task and a verification
         did = self.desk.new_task("Make the badge bigger")
-        self.desk.update(did, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
                          model_asked="sonnet", kind="design")
         self.assertEqual(run.design_command(self.desk, did)[1]["CLAUDE_CODE_MAX_RETRIES"], "8")
         self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["env"]["CLAUDE_CODE_MAX_RETRIES"], "8")
@@ -5948,11 +5954,11 @@ class DeskTest(unittest.TestCase):
             self.assertIn("If a command you need is refused", prompt)
         self.assertIn("Bash(git commit:*)", self.denied_by(task))
         self.assertIn("Bash(git checkout:*)", self.allowed_by(verify))
-        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, tid)
         self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
-        self.assertNotIn("Bash", self.allowed_by(argv))  # outside the sandbox: the lane's rules and its own git
+        self.assertNotIn("Bash", self.allowed_by(argv))  # in the sandbox, but only the lane's rules and its own git
         self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
 
     def test_workers_verifiers_and_design_sessions_cannot_read_the_desks_notes_or_card(self):
@@ -5979,7 +5985,7 @@ class DeskTest(unittest.TestCase):
         srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
         self.assertIn(str(notes), srt)  # the setup and the check
         self.assertIn(str(card), srt)
-        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, tid)
         self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
@@ -7557,15 +7563,110 @@ class DeskTest(unittest.TestCase):
         self.assertIn("folders a worker may also write (a build or test tool's cache): none",
                       views.explain_text(self.desk, "lane", "a"))
 
-    def test_design_sessions_and_provider_checks_run_outside_the_sandbox(self):
+    def test_a_design_session_runs_in_the_sandbox_of_a_worker_of_its_lane(self):
         from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(env={"FAKE_SHOW_ARGV": str(seen)}, network=["registry.npmjs.org"], write=["/opt/m2"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual(self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))["state"], "done")
+        worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))
         tid = self.desk.new_task("Make the badge bigger")
-        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+        wt = self.design_worktree(tid)
+        self.desk.update(tid, lane="a", provider="claude", worktree=wt, session_id="sid-d", model_asked="sonnet")
+        argv, env, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
+        box = self.sandbox_of(argv)
+        self.assertEqual((box["enabled"], box["failIfUnavailable"]), (True, True))
+        network = dict(box["network"])
+        self.assertIs(network.pop("allowLocalBinding", None), True if sys.platform == "darwin" else None)
+        self.assertEqual(network, worker["network"])  # the lane's list, nothing else
+        self.assertEqual(box["filesystem"]["denyRead"], worker["filesystem"]["denyRead"])
+        for d in (self.desk.secrets_dir, self.desk.state_dir, self.desk.notes_dir, self.desk.root / "CLAUDE.md"):
+            self.assertIn(str(d), box["filesystem"]["denyRead"])
+        self.assertNotIn(wt, box["filesystem"]["denyRead"])  # its own worktree stays readable and writable
+        self.assertNotIn(wt, box["filesystem"]["denyWrite"])
+        self.assertEqual(box["credentials"], worker["credentials"])
+        for x in worker["filesystem"]["allowWrite"]:  # the lane's write list
+            self.assertIn(x, box["filesystem"]["allowWrite"])
+        self.assertEqual(env["TMPDIR"], env["CLAUDE_CODE_TMPDIR"])  # its own temporary folder, as a worker's
+        # it commits and merges, so it writes git's history, but never what git would run or obey outside it
+        common = (self.repo / ".git").resolve()
+        own = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=wt, capture_output=True,
+                                  text=True, check=True).stdout.strip()).resolve()
+        for d in (common, own):
+            self.assertIn(str(d), box["filesystem"]["allowWrite"])
+        for f in ("objects", "refs", "logs", "packed-refs"):
+            self.assertNotIn(str(common / f), box["filesystem"]["denyWrite"])
+        for f in ("config", "hooks", "info", "HEAD"):
+            self.assertIn(str(common / f), box["filesystem"]["denyWrite"])
+        for f in ("commondir", "gitdir", "config.worktree"):
+            self.assertIn(str(own / f), box["filesystem"]["denyWrite"])
+        self.assertNotIn(str(own / "HEAD"), box["filesystem"]["denyWrite"])
+        self.assertIn(str(Path(wt) / ".git"), box["filesystem"]["denyWrite"])
+        # local binding on macOS only, whatever the lane's list says
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        on_mac = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), mac=True)["sandbox"]["network"]
+        on_linux = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), mac=False)["sandbox"]["network"]
+        self.assertIs(on_mac["allowLocalBinding"], True)
+        self.assertNotIn("allowLocalBinding", on_linux)
+        self.assertEqual(on_linux, worker["network"])
+
+    def test_a_design_session_runs_no_command_outside_the_sandbox(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["preview"] = "npm run dev"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Make the badge bigger")
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
-        self.assertIsNone(self.sandbox_of(argv))
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        box = self.sandbox_of(argv)
+        self.assertIs(box["allowUnsandboxedCommands"], False)  # dangerouslyDisableSandbox is refused
+        self.assertNotIn("excludedCommands", box)
+        # its permissions stay as they were: the lane's commands, the preview and its own git, not every command
+        self.assertIs(box["autoAllowBashIfSandboxed"], False)
+        self.assertNotIn("Bash", self.allowed_by(argv))
+        for r in ("Bash(npm run dev:*)", "Bash(git commit:*)", "Bash(git merge:*)"):
+            self.assertIn(r, self.allowed_by(argv))
         self.assertFalse([r for r in self.denied_by(argv) if r.startswith("Bash(git")])
+        prompt = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("Your commands run in the lane's sandbox", prompt)
+        self.assertIn("refuses does not run outside it", prompt)
+
+    def test_a_design_sessions_instructions_say_what_holds_on_linux(self):
+        from hansa import account, run
+        s = self.desk.settings()
+        s["lanes"]["a"]["preview"] = "npm run dev"
+        self.assertEqual(self.desk.save_settings(s), [])
+        prompts = {}
+        for linux in (True, False):
+            tid = self.desk.new_task("Make the badge bigger")
+            self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
+                             model_asked="sonnet")
+            with unittest.mock.patch.object(account, "LINUX", linux):
+                argv, _, _ = run.design_command(self.desk, tid)
+            self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+            prompts[linux] = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+        self.assertIn("each of your commands runs with a network of its own", prompts[True])
+        self.assertIn("cannot be reached from the browser", prompts[True])
+        self.assertIn("not with git add -A", prompts[True])
+        self.assertNotIn("To look at the app, start it", prompts[True])  # the preview is not suggested there
+        self.assertIn("To look at the app, start it with `npm run dev`", prompts[False])
+        self.assertNotIn("network of its own", prompts[False])
+        for linux in (True, False):  # and hansa design says it
+            out = io.StringIO()
+            with unittest.mock.patch.object(account, "LINUX", linux), contextlib.redirect_stdout(out):
+                main(["--desk", str(self.desk.root), "design", "Make the title bolder", "--lane", "a"])
+            self.assertEqual("network of their own" in out.getvalue(), linux)
+            self.assertEqual("cannot be reached from the browser" in out.getvalue(), linux)
+            for m in self.desk.tasks():
+                if m.get("kind") == "design" and m["state"] == "queued":
+                    self.desk.update(m["id"], state="cancelled")
+
+    def test_provider_checks_run_outside_the_sandbox(self):
+        from hansa import run
         seen = {}
 
         def answer(argv, **kwargs):
@@ -7890,7 +7991,7 @@ class DeskTest(unittest.TestCase):
                 self.assertIn(t, self.denied_by(argv))
             self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
         did = self.desk.new_task("Make the badge bigger")
-        self.desk.update(did, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
                          model_asked="sonnet")
         argv, _, _ = run.design_command(self.desk, did)
         self.addCleanup(run.remove_sandbox_tmp, self.desk, did)  # the run folder it made for the session

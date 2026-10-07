@@ -211,6 +211,10 @@ def cmd_design(a):
              if why_not else "hansa opens the design session in seconds and")
     print(f"{tid} queued: {opens} asks the principal to join it. "
           f"It comes back for review when they are done: {notify.wait_step(desk, tid)}")
+    if account.LINUX:
+        print("On Linux the session's commands run in the lane's sandbox with a network of their own: an app it starts "
+              "(the lane's preview among them) cannot be reached from the browser or by the principal, so it shows "
+              "its work in screenshots of files and in words, not in the running app.")
 
 
 def cmd_status(a):

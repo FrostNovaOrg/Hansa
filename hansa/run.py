@@ -220,6 +220,11 @@ GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "r
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs")
 GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir")
 GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
+# A design session commits and merges, so its sandbox lets it write git's history (objects, refs, logs, the
+# worktree's own HEAD and index) but not what git would run or obey outside it the next time hansa runs git
+# there (settings and hooks), nor what moves the repository's own branch or ties the worktree to another folder.
+DESIGN_GIT_COMMON_DENY = ("config", "hooks", "info", "HEAD")
+DESIGN_GIT_OWN_DENY = ("commondir", "gitdir", "config.worktree")
 # What a worker's sandbox on Linux (bubblewrap, in Claude Code and srt alike) mounts an empty file over at the top
 # of the worktree when it is missing, so it cannot be made: its fixed list of files a program may run or obey
 # (.gitconfig to .mcp.json) and the folders .vscode and .idea. It removes them once no sandbox of its run is
@@ -253,6 +258,10 @@ You work only in this directory, on branch task/{tid}, which was made for this s
   each commit message with "{tid}:".
 - Do not push, do not switch branches, do not touch other directories. If a command you need is
   refused, say which one and why; do not look for a way around it.
+- Your commands run in the lane's sandbox, as its workers' do: files written only in this
+  directory, your temporary folder, the lane's write list and git's history; no network but the
+  lane's list; no reading of the desk's keys, state, notes and card. A command the sandbox
+  refuses does not run outside it: tell the principal what it needed.
 - When the principal says it is done: bring in the latest {base} (git merge {base}) and settle any
   conflict here, run the checks, commit, stop the app if you started it, then write your hand-in
   report as one message (what changed, how it was checked, anything left) and ask the principal
@@ -267,6 +276,16 @@ now. Then say in a few lines what you would change first, and wait for the princ
 PREVIEW_NOTE = """
 To look at the app, start it with `{preview}` (the Bash tool's background option) and open
 the address it prints in the browser.
+"""
+# On Linux Claude Code's sandbox (bubblewrap, as srt) gives each command a network of its own (--unshare-net): a
+# server started there listens on a loopback nothing outside reaches, the browser among them
+DESIGN_LINUX_NOTE = """
+On this machine (Linux) each of your commands runs with a network of its own: an app you start
+cannot be reached from the browser, or by the principal, so do not start the preview to look at
+it. Show the change in screenshots of what can be opened as files, or say in words what changed
+and where; the principal can start the app outside this session to see it running. The sandbox
+also puts empty files where the paths it protects are missing (.bashrc, .gitconfig and the like):
+add files to a commit by name, not with git add -A or git add ., and never commit those.
 """
 NO_BROWSER_NOTE = """
 No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
@@ -704,29 +723,40 @@ def full_paths(paths) -> list:
     return list(dict.fromkeys(str(x) for q in paths for x in (Path(q), Path(resolved(str(q)) or q))))
 
 
-def git_write_deny(wt: Path) -> list:
+def git_write_deny(wt: Path, committing: bool = False) -> list:
     """The paths in git's folders for the worktree `wt` that a sandboxed worker may not write, worked
     out now: Claude Code opens a linked worktree's shared git folder for writing. The worktree's own
     .git file is among them: pointed at a git folder of the worker's making, it would run the worker's
-    hooks and settings the next time hansa runs git there, outside the sandbox."""
-    return full_paths([*_git_folder_deny(wt), Path(wt) / ".git"])
+    hooks and settings the next time hansa runs git there, outside the sandbox. `committing` (a design
+    session): only the DESIGN_GIT_ ones, and the .git file of a linked worktree."""
+    common, own = git_folders(wt)
+    dot = [Path(wt) / ".git"] if not committing or own.resolve() != common.resolve() else []
+    return full_paths([*_git_folder_deny(wt, committing), *dot])
 
 
-def _git_folder_deny(wt: Path) -> list:
-    """The paths of git_write_deny in git's folders: the repository's common folder and the worktree's own.
-    A main checkout has no folder of its own (and no commondir or gitdir): its folder is the common one."""
+def git_folders(wt: Path) -> tuple:
+    """(the repository's common git folder, the worktree's own). A main checkout has no folder of its own
+    (and no commondir or gitdir): its folder is the common one."""
     common = Path(wt) / git("rev-parse", "--git-common-dir", cwd=wt)  # relative to wt, or absolute
-    own = Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
-    return [*(common / f for f in GIT_COMMON_DENY),
-            *(own / f for f in GIT_OWN_DENY if own.resolve() != common.resolve())]
+    return common, Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
 
 
-def make_git_write_deny(wt: Path) -> None:
+def _git_folder_deny(wt: Path, committing: bool = False) -> list:
+    """The paths of git_write_deny in git's folders: the repository's common folder and the worktree's own."""
+    common, own = git_folders(wt)
+    linked = own.resolve() != common.resolve()
+    in_common, in_own = (DESIGN_GIT_COMMON_DENY, DESIGN_GIT_OWN_DENY) if committing else (GIT_COMMON_DENY, GIT_OWN_DENY)
+    # a design session in a main checkout may move its HEAD: that HEAD is its own
+    return [*(common / f for f in in_common if linked or not committing or f != "HEAD"),
+            *(own / f for f in in_own if linked)]
+
+
+def make_git_write_deny(wt: Path, committing: bool = False) -> None:
     """Create each path of git_write_deny that is missing, empty. On Linux the sandbox (bwrap) puts a device
     nobody can open where a listed path does not exist, and git then fails reading it: packed-refs, say,
     which a repository made with git init has only once refs are packed. Git takes an empty packed-refs
     as none. A path that exists is left as it is."""
-    for f in _git_folder_deny(wt):
+    for f in _git_folder_deny(wt, committing):
         if os.path.lexists(f):
             continue
         try:
@@ -1050,14 +1080,15 @@ def desk_read_rules(desk: Desk) -> list:
     return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
 
 
-def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
+def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, committing: bool = False) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
     check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), every provider's Claude
     Code folder (the login and the session records of whoever runs on it) and ~/.claude, whichever provider
     this run uses, the built-in logins and keys, and what the principal keeps from workers, "denyWrite":
     git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
-    may be written."""
-    make_git_write_deny(wt)  # before anything starts in the sandbox
+    may be written. `committing` (a design session): git's folders may be written too, but for what
+    git_write_deny keeps."""
+    make_git_write_deny(wt, committing)  # before anything starts in the sandbox
     home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
     homes = [config_home(desk, pname, p)]
     homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
@@ -1065,16 +1096,17 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     deny = full_paths([*desk_private(desk), *homes, home / ".claude",
                        *(home / f for f in home_secrets()), *no_read(desk)[0]])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
-    return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
-                                           "allowWrite": full_paths(write_list(desk, lane)[0])}
+    allow = full_paths([*write_list(desk, lane)[0], *(git_folders(wt) if committing else ())])
+    return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt, committing),
+                                           "allowWrite": allow}
 
 
-def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
+def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, committing: bool = False) -> dict:
     """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
     any command, but files changed only in the worktree (and the lane's write list) and never git's
     history, no reading of keys and logins, no network but the lane's list, and no keys in the environment. It never falls back to
-    running unsandboxed."""
-    hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
+    running unsandboxed. `committing`: git's history may be written (design_sandbox)."""
+    hosts, fs = lane_sandbox(desk, lane, pname, p, wt, committing)
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
         # macOS: a worker may bind ports and reach the whole loopback (Seatbelt allows outbound to localhost:*,
@@ -1091,6 +1123,19 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> d
         "network": network,
         "credentials": {"envVars": [{"name": v, "mode": "deny"} for v in KEY_VARS]},
     }}
+
+
+def design_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, mac: bool | None = None) -> dict:
+    """A design session's Bash sandbox: its lane's workers' (network, write list, what may not be read, the keys
+    kept from the environment, nothing run outside it), but it may commit and merge (git_write_deny), and its
+    commands are not let through by being sandboxed: its allowed commands stay what they were. On macOS it may
+    bind local ports, so a preview it starts serves the principal's browser; on Linux the sandbox's network is
+    its own, so nothing outside it reaches a server there (DESIGN_LINUX_NOTE)."""
+    settings = sandbox_settings(desk, lane, pname, p, wt, committing=True)
+    settings["sandbox"]["autoAllowBashIfSandboxed"] = False
+    if _ON_MAC if mac is None else mac:
+        settings["sandbox"]["network"]["allowLocalBinding"] = True
+    return settings
 
 
 def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str) -> dict:
@@ -1935,12 +1980,19 @@ def design_command(desk: Desk, tid: str):
         argv += ["--mcp-config", str(cfg)]
     else:
         system += NO_BROWSER_NOTE
-    if lane.get("preview"):
+    if account.LINUX:
+        system += DESIGN_LINUX_NOTE
+    elif lane.get("preview"):
         system += PREVIEW_NOTE.format(preview=lane["preview"])
+    if lane.get("preview"):
         extra.append(f"Bash({lane['preview']}:*)")
     if lane.get("check"):  # it is told to keep the checks passing, so it may run them
         extra += command_rules(lane["check"])
-    argv += isolated(wt)
+    try:
+        check_git_file(desk, wt)  # design_sandbox asks git in the worktree
+    except GitFileChanged as e:
+        raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    argv += isolated(wt, design_sandbox(desk, lane, pname, p, wt))
     tmp = make_worker_tmp(desk, tid)  # its own, as a worker's: what it leaves running there is found at its end (sweep)
     kept, not_kept = no_read(desk)
     desk.update(tid, no_read_left_out=not_kept)
@@ -1949,7 +2001,7 @@ def design_command(desk: Desk, tid: str):
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
     env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), "HANSA_TASK": tid, "CLAUDE_CODE_TMPDIR": tmp,
-           "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
+           "TMPDIR": tmp, "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
            "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
     return with_setup(desk, tid, argv, lane, pname, p, wt), env, wt

@@ -152,8 +152,22 @@ page gives.
   own branch, and merges only what the coordinator merges. The lane's setup,
   before the worker, and its check, after it, run in the same sandbox (with
   `srt`): the lane's network and write lists hold for them too, so a setup that
-  downloads needs its registry on the network list. Design sessions, which the
-  principal works in directly, and the coordinator run outside it.
+  downloads needs its registry on the network list. A design session's commands
+  run in the sandbox of its lane's workers too (the same network list, write
+  list, what may not be read and keys kept from the environment), with two
+  differences: it may write git's history, since it commits and merges (never
+  git's settings, hooks or `info/`, the repository's `HEAD` or the worktree's
+  `.git` file), and on macOS it may bind local ports, so a preview it starts
+  serves the principal's browser (that also lets its commands reach every
+  service on the Mac's loopback). It runs only its allowed commands, as
+  before, and a command the sandbox refuses does not run outside it: the
+  sandbox's `allowUnsandboxedCommands` is off, so Claude Code ignores
+  `dangerouslyDisableSandbox`. On Linux the sandbox (bubblewrap) gives each
+  command a network of its own, so an app the session starts cannot be
+  reached from the browser: the session is told so, `hansa design` says so,
+  and the session shows its work in screenshots of files and in words; the
+  principal can start the app outside the session to see it running. The
+  coordinator runs outside the sandbox.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a
@@ -376,9 +390,10 @@ looks like an empty box: it may send the guess as if you wrote it.
 
 ## Current limits
 - Alpha: settings, commands and files may still change between versions.
-- A worker's commands, and the lane's setup and check commands, run in the
-  operating system's sandbox; the lane's preview command, design sessions and
-  the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
+- A worker's and a design session's commands (the lane's preview among them),
+  and the lane's setup and check commands, run in the operating system's
+  sandbox; the coordinator does not, and runs as the desk's user. On Linux a
+  preview a design session starts cannot be reached from the browser. Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the

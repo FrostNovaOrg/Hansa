@@ -312,6 +312,11 @@ all new is designed elsewhere and comes to you as a finished design.
   them.
 - While it is open, do not queue tasks that change the same part of the code.
   One design session per lane at a time.
+- Its commands run in the lane's sandbox, as a worker's do (it may also commit
+  and merge, and on macOS serve a preview to the browser); a command the
+  sandbox refuses does not run outside it. On Linux an app it starts cannot be
+  reached from the browser, so it shows its work in screenshots of files and in
+  words: say so to the principal when you open one there.
 - When they end it, it comes back like a finished task: the lane's check runs,
   and you verify and merge as usual. How it looks and works is the principal's
   decision: send back only what does not work or does not fit the code.
@@ -380,9 +385,10 @@ here; work that needs code changed or a browser goes to a worker.
   its own lane.
 - A lane's setup, check and preview run outside the worker: hansa runs them
   itself, not a worker's or a design session's rules. The setup and
-  check run in the lane's sandbox (its network and write lists apply); the
-  preview does not. So each change to them is recorded, and you tell the
-  principal in the conversation what you changed and why. The setup and check
+  check run in the lane's sandbox (its network and write lists apply); so
+  does the preview, which a design session starts in its own sandbox. So
+  each change to them is recorded, and you tell the principal in the
+  conversation what you changed and why. The setup and check
   run with `/bin/sh -c`: POSIX shell only, no bash syntax (`[[ ]]`, arrays,
   `source`). The preview is started by a design session's Bash tool; write it
   the same way.
