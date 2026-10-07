@@ -107,6 +107,12 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
     if os.environ.get("FAKE_RESUMED"):
         open(os.environ["FAKE_RESUMED"], "a").write(json.dumps({"prompt": prompt, "argv": sys.argv, "env": {
             k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "HANSA_TASK")}}) + "\n")
+    drop = os.environ.get("FAKE_RESUME_DROP")  # a file: the first resumed run ends on a dropped connection
+    if drop and not os.path.exists(drop):
+        open(drop, "w").write("dropped\n")
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "session_id": sid,
+                          "result": "API Error: Connection error."}))
+        sys.exit(1)
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
     rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}}]
     kind = os.environ.get("FAKE_TRANSCRIPT", "")
@@ -8284,6 +8290,35 @@ class DeskTest(unittest.TestCase):
         self.transcript_run("bg-cmd-noticed", env={"FAKE_RESUMED": str(seen)})
         self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
         self.assertFalse(seen.exists())
+
+    def test_a_retry_after_a_resumed_run_dropped_its_connection_keeps_its_own_record(self):
+        # Resumed, the run ends on a dropped connection: the task is queued again, in a new session, which also
+        # leaves background work. That try is resumed in its own right, and nothing of the first try's carries.
+        seen, drop = self.tmp / "resumed.jsonl", self.tmp / "dropped"
+        report = self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen), "FAKE_RESUME_DROP": str(drop)})
+        self.assertEqual(report, "Report after the resume: the suite passes.\n")
+        tid = self.desk.tasks()[-1]["id"]
+        m = self.desk.meta(tid)
+        self.assertTrue(drop.exists())
+        calls = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(len(calls), 2)  # each try resumed once
+        first, second = [c["argv"][c["argv"].index("--resume") + 1] for c in calls]
+        self.assertNotEqual(first, second)
+        self.assertEqual(second, m["session_id"])
+        self.assertEqual(m["resumed"]["left"], ["Run the full test suite"])
+        self.assertEqual(m["background_left"], [])
+        self.assertEqual(m["turns"], 5 + 2)  # this try's runs only
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["turns"]), ("network", 5 + 1))  # the first try's, kept in its attempt
+        self.assertIn("usage", a)
+        from hansa import run
+        for text in ("API Error: Unable to connect to API. Check your internet connection",
+                     "API Error: Unable to connect to API (ENETUNREACH)", "connect ENETUNREACH 10.0.0.1:443 (ENETUNREACH)",
+                     "Connection lost while your computer was asleep"):
+            self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
+        # a certificate the machine does not trust is not a dropped connection: running it again changes nothing
+        self.assertEqual(run.network_reason({"is_error": True, "result": "API Error: Unable to connect to API: "
+                                             "SSL certificate has expired"}, ""), "")
 
     def test_background_agents_with_notices_are_not_listed_as_still_running(self):
         # Four background agents each have a "completed" notice; a test run has none.

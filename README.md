@@ -169,12 +169,17 @@ page gives.
   with a short message: that work was stopped with it, so it runs it again in the
   foreground, waits for it, then reports. A second time it is not resumed; `hansa
   show` then says what was still running. The time limit counts from the task's
-  start, across both runs.
+  start, across both runs. When the task is queued again for a new try (after a
+  dropped connection, say), that try starts with nothing of the earlier try's
+  resume: it may be resumed once in its own right, and the earlier try's turns
+  and tokens stay in its attempt record.
 - A run that ended on a dropped connection is tried once more by itself. hansa
   reads only Claude Code's own error lines for this: one that begins `API Error`
   (a 5xx, a connection error or reset, a request that timed out, an overloaded
-  provider), one that begins with a connection reset, refused or closed, a socket
-  hang up or a fetch that failed, and the API's `overloaded_error`. A test that
+  provider, unable to connect, but not a certificate error), one that begins
+  with a connection reset, refused or closed, a socket hang up, a fetch that failed or "Connection lost while your
+  computer was asleep", one that ends `(ENETUNREACH)`, and the API's
+  `overloaded_error`. A test that
   timed out, or a log line saying "overloaded", is the task's own failure.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a

@@ -43,16 +43,20 @@ LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itse
 # The connection to the provider failed, or the provider did (overloaded, a server error): nothing the task
 # did, and nothing that says the provider's key or quota is wrong. The task is tried once more by itself.
 # Only on Claude Code's own error lines: one that begins "API Error" (a 5xx, a connection or timeout, the provider
-# overloaded), one that begins with a connection reset, refused or closed, a socket hang up or a fetch that failed
-# (after an "Error:" maybe), or the API's own overloaded error. A test that timed out, or a log line saying
+# overloaded, unable to connect), one that begins with a connection reset, refused, closed or lost while the
+# computer was asleep, a socket hang up or a fetch that failed (after an "Error:" maybe), one that ends
+# "(ENETUNREACH)", or the API's own overloaded error. A test that timed out, or a log line saying
 # "overloaded", is the task's output, not a dropped connection. The phrase found is the one named group that matched.
 NETWORK = re.compile(r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?P<server>API Error:?[ \t]*5\d\d)\b|"
                      r"^[ \t]*(?:[\w.]*Error:[ \t]+)?API Error:?[^\n]{0,80}?(?P<api>Repeated 529 Overloaded errors|"
-                     r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|"
-                     r"Connection (?:dropped|error|reset|closed|refused|timed out)|socket hang up|fetch failed|"
+                     r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|ENETUNREACH|"
+                     r"EHOSTUNREACH|Unable to connect to API(?![ \t]*:)|"  # not "...: SSL certificate ...": no drop
+                     r"Connection (?:dropped|error|reset|closed|refused|timed out|lost)|socket hang up|fetch failed|"
                      r"(?:request|connection) tim(?:ed[ -]?out|eout)|overloaded_error|\boverloaded\b)|"
                      r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?:(?:read|write|connect)[ \t]+)?(?P<line>ECONNRESET|ECONNREFUSED|"
-                     r"Connection (?:reset|refused|closed)|socket hang up|fetch failed)|"
+                     r"Connection (?:reset|refused|closed|lost while your computer was asleep)|socket hang up|"
+                     r"fetch failed)|"
+                     r"\((?P<unreach>ENETUNREACH)\)[ \t.]*$|"  # the network itself out of reach, at a line's end
                      r"\"type\"[ \t]*:[ \t]*\"(?P<json>overloaded_error)\"", re.I | re.M)
 OVERLOADED_STATUS = 529
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
@@ -2080,7 +2084,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
         desk.update(tid, launch=sid, session_id=sid, base=base, branch=f"task/{tid}", worktree=str(wt),
-                    setup_ran=bool(lane.get("setup")))
+                    setup_ran=bool(lane.get("setup")), resumed=None)  # a new session: an earlier try's resume is not its own
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(command, cwd=str(wt), env=env, stdin=stdin, stdout=out,
@@ -2542,13 +2546,17 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
+    if state == "queued":  # this try's numbers stay in its attempt; the next try is a new session
+        attempts[-1].update(usage=usage, turns=fields["turns"])
 
     def decide(now_meta):
         final, message = ("cancelled", "cancelled") if now_meta.get("cancel") and not changed else (state, error)
         checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                     and meta.get("kind") != "verify")  # a verification is never merged, so never checked
+        # what this try's resume recorded (resume) is keyed to its session: a new try starts without it
+        again = {"resumed": None} if final == "queued" else {}
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
-                "error": desk.redact(message), "attempts": attempts, "pid_start": "", **fields}
+                "error": desk.redact(message), "attempts": attempts, "pid_start": "", **fields, **again}
     meta = desk.change(tid, decide)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
