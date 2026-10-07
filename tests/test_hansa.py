@@ -780,6 +780,9 @@ class DeskTest(unittest.TestCase):
         says = ("web page: not served now, since hansa serve is not running; it serves it at http://127.0.0.1:8765/ "
                 "(the default)")
         self.assertIn(says, views.status_text(st))
+        lines = views.status_text({**st, "serve_code": "hansa serve runs old code: restart it",
+                                   "alert_failed": "the alert command failed"}).splitlines()
+        self.assertEqual(lines[1:4], ["hansa serve runs old code: restart it", "the alert command failed", says])
         self.assertIn(says, self.hansa_out("explain"))
         self.assertIn(says, self.hansa_out("explain", "server"))
         (self.desk.state_dir / "web-port").write_text("9001")

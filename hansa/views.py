@@ -444,13 +444,13 @@ def status_text(st: dict) -> str:
     out += ["cost audit on"] if st.get("audits_cost") else []
     out = [" · ".join(out + [f"hansa {st['build']}", installed_text(st.get("installed") or 0) or "installed ?",
                               time.strftime("now %H:%M")])]
-    out += [page_text(st["page"])] if st.get("page") else []
-    out += [st["serve_code"]] if st.get("serve_code") else []
+    out += [st["serve_code"]] if st.get("serve_code") else []  # what asks for action first, then information
     out += [st["srt_missing"]] if st.get("srt_missing") else []
+    out += [st["alert_failed"]] if st.get("alert_failed") else []
+    out += [page_text(st["page"])] if st.get("page") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out += [project_text(st["project"])] if st.get("project") else []
-    out += [st["alert_failed"]] if st.get("alert_failed") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
