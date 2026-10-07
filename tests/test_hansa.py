@@ -694,26 +694,28 @@ class DeskTest(unittest.TestCase):
         self.assertIn("1 line, loaded with the card from the coordinator's next start\n",
                       views.status_text(views.status(self.desk)))
 
-    UNITTEST_OUT = ("test_a (t.T.test_a) ... ok\n" * 40 + "test_b (t.T.test_b) ... FAIL\n\n" + "=" * 70
-                    + "\nFAIL: test_b (t.T.test_b)\n" + "-" * 70 + "\nTraceback (most recent call last):\n"
-                    "  File \"t.py\", line 9, in test_b\n    self.assertEqual(1, 2)\nAssertionError: 1 != 2\n\n"
-                    + "-" * 70 + "\nRan 41 tests in 0.010s\n\nFAILED (failures=1)\n")
+    UNITTEST_OUT = ("test_a (t.T.test_a) ... ok\n" * 40 + "test_b (t.T.test_b) ... FAIL\n"
+                    "test_c (t.T.test_c) ... ok\n\n" + "=" * 70 + "\nFAIL: test_b (t.T.test_b)\n" + "-" * 70
+                    + "\nTraceback (most recent call last):\n  File \"t.py\", line 9, in test_b\n    self.check(1)\n"
+                    "  File \"t.py\", line 14, in check\n    self.assertEqual(n, 2)\nAssertionError: 1 != 2\n\n"
+                    + "-" * 70 + "\nRan 42 tests in 0.010s\n\nFAILED (failures=1)\n" + "x.log written\n" * 8)
+
+    @staticmethod
+    def lifted(text):
+        lines = text.splitlines()
+        return [lines[k] for _, keep in views.failure_spans(lines) for k in keep]
 
     def test_failure_spans_lift_the_failing_tests_of_common_runners(self):
-        def lifted(text):
-            lines = text.splitlines()
-            return [x for a, b in views.failure_spans(lines) for x in lines[a:b]]
-        got = lifted(self.UNITTEST_OUT)
-        self.assertEqual(got[:3], ["test_b (t.T.test_b) ... FAIL", "=" * 70, "FAIL: test_b (t.T.test_b)"])
-        self.assertIn("AssertionError: 1 != 2", got)
-        self.assertNotIn("Ran 41 tests in 0.010s", got)
-        self.assertEqual(got[-1], "FAILED (failures=1)")
+        got = self.lifted(self.UNITTEST_OUT)
+        self.assertEqual(got[:2], ["=" * 70, "FAIL: test_b (t.T.test_b)"])
+        self.assertEqual(got[-1], "AssertionError: 1 != 2")
+        self.assertNotIn("Ran 42 tests in 0.010s", got)
         self.assertNotIn("test_a (t.T.test_a) ... ok", got)
         pytest_out = ("t.py ..F.                                    [100%]\n\n" + "=" * 10 + " FAILURES " + "=" * 10
                       + "\n____ test_c ____\n\n    def test_c():\n>       assert 1 == 2\nE       assert 1 == 2\n\n"
                       "t.py:4: AssertionError\n" + "=" * 10 + " short test summary info " + "=" * 10
                       + "\nFAILED t.py::test_c - assert 1 == 2\n" + "=" * 10 + " 1 failed, 3 passed in 0.1s " + "=" * 10)
-        got = lifted(pytest_out)
+        got = self.lifted(pytest_out)
         self.assertIn("E       assert 1 == 2", got)
         self.assertIn("____ test_c ____", got)
         self.assertIn("FAILED t.py::test_c - assert 1 == 2", got)
@@ -723,14 +725,96 @@ class DeskTest(unittest.TestCase):
                     "  <<< FAILURE!\norg.opentest4j.AssertionFailedError: expected: <1> but was: <2>\n\tat "
                     "com.x.FooTest.bar(FooTest.java:12)\n\n[INFO]\n[INFO] Results:\n[INFO]\n[ERROR] Failures: \n"
                     "[ERROR]   FooTest.bar:12 expected: <1> but was: <2>\n[INFO]\n[ERROR] Tests run: 2, Failures: 1\n")
-        got = lifted(surefire)
+        got = self.lifted(surefire)
         self.assertIn("org.opentest4j.AssertionFailedError: expected: <1> but was: <2>", got)
         self.assertIn("\tat com.x.FooTest.bar(FooTest.java:12)", got)
         self.assertIn("[ERROR]   FooTest.bar:12 expected: <1> but was: <2>", got)
+        self.assertIn("[ERROR] Tests run: 2, Failures: 1", got)
         self.assertNotIn("[INFO] Running com.x.FooTest", got)
-        got = lifted("=== RUN   TestX\n--- FAIL: TestX (0.00s)\n    x_test.go:9: got 2\nok  other\nFAIL\tpkg\t0.01s\n")
-        self.assertEqual(got, ["--- FAIL: TestX (0.00s)", "    x_test.go:9: got 2", "FAIL\tpkg\t0.01s"])
-        self.assertEqual(lifted("all good\nexit 1\n"), [])
+        got = self.lifted("=== RUN   TestX\n--- FAIL: TestX (0.00s)\n    x_test.go:9: got 2\n    --- PASS: TestX/a "
+                          "(0.00s)\nok  other\nFAIL\tpkg\t0.01s\n")
+        self.assertEqual(got, ["--- FAIL: TestX (0.00s)", "    x_test.go:9: got 2"])  # never its passing subtest
+        self.assertEqual(self.lifted("all good\nFAIL one\nexit 1\n"), [])  # the word alone is no runner's marker
+
+    def failing_show(self, out):
+        """hansa show of a task whose check failed with out."""
+        tid = self.desk.new_task("Add hello.txt")
+        (self.desk.tasks_dir / tid / "check.log").write_text(out)
+        self.desk.update(tid, state="done", commits=1, check={"command": "make test", "ok": False, "exit": 1,
+                                                              "note": "", "seconds": 2, "tail": out.splitlines()[-15:]})
+        shown = views.show_text(self.desk, tid)
+        for x in out.rstrip().splitlines()[-15:]:  # never less than its last lines told
+            self.assertIn("  " + x.rstrip()[:200], shown)
+        return shown
+
+    def test_show_never_lifts_passing_lines_that_say_fail(self):
+        doc = "".join(f"test_reports_{i} (t.T.test_reports_{i})\nReports FAIL lines {i} ... ok\n" for i in range(70))
+        shown = self.failing_show(doc + "test_says (t.T.test_says)\nSays FAIL when a check fails. ... ok\n"
+                                  + self.UNITTEST_OUT)
+        self.assertIn("  the failing tests, from its output:\n    " + "=" * 70 + "\n    FAIL: test_b (t.T.test_b)\n",
+                      shown)
+        self.assertIn("    AssertionError: 1 != 2\n", shown)
+        self.assertNotIn("... ok", shown)
+        ids = "".join(f"t.py::test_parse[FAIL-{i}] PASSED{' ' * 20}[{i:3d}%]\n" for i in range(70))
+        shown = self.failing_show(ids + "t.py::test_c FAILED                     [100%]\n\n" + "=" * 20 + " FAILURES "
+                                  + "=" * 20 + "\n" + "_" * 20 + " test_c " + "_" * 20 + "\n\n    def test_c():\n"
+                                  "        got = parse('x')\n>       assert got == 2\nE       assert 1 == 2\n\n"
+                                  "t.py:9: AssertionError\n" + "=" * 10 + " short test summary info " + "=" * 10
+                                  + "\nFAILED t.py::test_c - assert 1 == 2\n" + "=" * 10 + " 1 failed, 70 passed in "
+                                  "0.3s " + "=" * 10 + "\n" + "coverage: 81%\n" * 12)
+        self.assertIn("    E       assert 1 == 2\n", shown)
+        self.assertNotIn("PASSED", shown)
+
+    def test_show_keeps_go_tests_messages_and_a_panics_trace(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(20))
+        shown = self.failing_show("=== RUN   TestAdd\n    sub_test.go:14: got 3, want 4\n--- FAIL: TestAdd (0.00s)\n"
+                                  + passing + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestAdd\n        sub_test.go:14: got 3, "
+                      "want 4\n    --- FAIL: TestAdd (0.00s)\n  its last lines:\n", shown)
+        trace = "".join(f"example.com/m.f{i}()\n\t/src/m/f.go:{i} +0x1d\n" for i in range(20))
+        shown = self.failing_show(
+            passing + "=== RUN   TestIdx\n--- FAIL: TestIdx (0.00s)\npanic: runtime error: index out of range [5] "
+            "with length 3 [recovered]\n\tpanic: runtime error: index out of range [5] with length 3\n\ngoroutine 7 "
+            "[running]:\ntesting.tRunner.func1.2({0x1, 0x2})\n\t/go/src/testing/testing.go:1545 +0x238\n" + trace
+            + "exit status 2\nFAIL\texample.com/m\t0.003s\n" + "".join(f"ok  \texample.com/m/p{i}\t0.01s\n"
+                                                                        for i in range(14)))
+        self.assertIn("    --- FAIL: TestIdx (0.00s)\n    panic: runtime error: index out of range [5] with length 3 "
+                      "[recovered]\n", shown)
+        self.assertIn("    goroutine 7 [running]:\n    testing.tRunner.func1.2({0x1, 0x2})\n", shown)
+        self.assertIn("example.com/m.f6()", shown)
+        self.assertNotIn("example.com/m.f7()", shown)  # its trace, bounded
+
+    def test_show_lifts_a_maven_compile_error_as_the_errors(self):
+        err = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n  符号:   类 Foo{i}\n  位置: 类 a.App\n"
+                      for i in range(5, 12))
+        again = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n[ERROR]   符号:   类 Foo{i}\n"
+                        for i in range(5, 12))
+        shown = self.failing_show(
+            "[INFO] Scanning for projects...\n[INFO] --- compiler:3.11.0:compile (default-compile) @ p ---\n"
+            "[INFO] -------------------------------------------------------------\n[ERROR] COMPILATION ERROR : \n"
+            "[INFO] -------------------------------------------------------------\n" + err + "[INFO] 7 errors \n"
+            "[INFO] -------------------------------------------------------------\n[INFO] " + "-" * 72 + "\n"
+            "[INFO] BUILD FAILURE\n[INFO] " + "-" * 72 + "\n[INFO] Total time:  0.9 s\n[ERROR] Failed to execute goal "
+            "org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile) on project p: Compilation "
+            "failure: Compilation failure: \n" + again + "[ERROR] -> [Help 1]\n[ERROR] \n"
+            "[ERROR] Re-run Maven using the -X switch to enable full debug logging.\n")
+        self.assertIn("  the errors, from its output:\n    [ERROR] COMPILATION ERROR : \n    [ERROR] /src/p/src/main/"
+                      "java/a/App.java:[5,9] 找不到符号\n      符号:   类 Foo5\n", shown)
+        self.assertIn("App.java:[9,9]", shown)
+        self.assertNotIn("the failing tests", shown)
+        self.assertEqual(shown.count("App.java:[5,9]"), 1)  # Maven prints them twice: once here
+
+    def test_show_lifts_jests_failing_test_with_what_it_expected(self):
+        shown = self.failing_show(
+            " FAIL  ./sum.test.js\n  sum\n    ✓ adds (2 ms)\n    ✕ subtracts (3 ms)\n\n  ● sum › subtracts\n\n"
+            "    expect(received).toBe(expected) // Object.is equality\n\n    Expected: 1\n    Received: 2\n\n"
+            "      4 |\n      5 | test('subtracts', () => {\n    > 6 |   expect(sub(3, 1)).toBe(1);\n"
+            "        |                     ^\n      7 | });\n\n      at Object.toBe (sum.test.js:6:21)\n\n"
+            + "".join(f" PASS  ./m{i}.test.js\n" for i in range(16))
+            + "\nTest Suites: 1 failed, 16 passed, 17 total\nTests:       1 failed, 40 passed, 41 total\n")
+        self.assertIn("  the failing tests, from its output:\n     FAIL  ./sum.test.js\n      ● sum › subtracts\n", shown)
+        self.assertIn("        Expected: 1\n        Received: 2\n", shown)
+        self.assertNotIn("✓ adds", shown)
 
     def test_show_lifts_the_failing_tests_and_show_check_prints_the_whole_output_without_keys(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -743,8 +827,7 @@ class DeskTest(unittest.TestCase):
         self.desk.write_key("mimo", key)  # saved after the check ran: removed when it is shown all the same
         shown = views.show_text(self.desk, tid)
         self.assertIn("check (run by hansa, not the worker): FAILED (exit 1) in 2 s: python3 -m unittest\n"
-                      "  the failing tests, from its output:\n    test_b (t.T.test_b) ... FAIL\n    " + "=" * 70
-                      + "\n    FAIL: test_b (t.T.test_b)", shown)
+                      "  the failing tests, from its output:\n    " + "=" * 70 + "\n    FAIL: test_b (t.T.test_b)", shown)
         self.assertIn("    AssertionError: 1 != 2\n", shown)
         self.assertIn(f"  the whole output: hansa show {tid} --check", shown)
         self.assertNotIn("test_a (t.T.test_a) ... ok", shown)
@@ -756,7 +839,8 @@ class DeskTest(unittest.TestCase):
         # a long run of failures is cut, and says how much more there is
         (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"--- FAIL: Test{i} (0.00s)\n" for i in range(90)))
         shown = views.show_text(self.desk, tid)
-        self.assertIn("    --- FAIL: Test59 (0.00s)\n    ... 30 more lines of them\n", shown)
+        self.assertIn("    --- FAIL: Test59 (0.00s)\n    ... 15 more lines of them\n  its last lines:\n"
+                      "    --- FAIL: Test75 (0.00s)\n", shown)
         self.assertNotIn("Test60 ", shown)
         # nothing in it names a failing test: its last lines, as before
         (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"line {i}\n" for i in range(30)) + "not good\n")
@@ -776,7 +860,8 @@ class DeskTest(unittest.TestCase):
 
     def test_status_and_explain_say_where_the_web_page_is(self):
         st = views.status(self.desk)
-        self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "served": False})
+        self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "stuck": False, "answers": True,
+                                      "served": False})
         says = ("web page: not served now, since hansa serve is not running; it serves it at http://127.0.0.1:8765/ "
                 "(the default)")
         self.assertIn(says, views.status_text(st))
@@ -789,8 +874,19 @@ class DeskTest(unittest.TestCase):
         (self.desk.state_dir / "web-host").write_text("0.0.0.0")
         with unittest.mock.patch("hansa.views.server_state", return_value={"state": "up", "pid": 1, "quiet": 0,
                                                                             "answers": True}):
-            self.assertIn("web page: http://0.0.0.0:9001/, served now by hansa serve", self.hansa_out("explain"))
-        self.assertIn("it serves it at http://0.0.0.0:9001/ (where it last did)", self.hansa_out("explain"))
+            self.assertIn("web page: http://127.0.0.1:9001/ (it listens on every address), served now by hansa serve",
+                          self.hansa_out("explain"))  # an address one can open, not 0.0.0.0
+        self.assertIn("it serves it at http://127.0.0.1:9001/ (it listens on every address) (where it last did)",
+                      self.hansa_out("explain"))
+        # a server whose rounds are stuck: its page answers while its process does, and not when that is stopped
+        stuck = {"state": "stuck", "pid": 1, "quiet": 900, "answers": True}
+        with unittest.mock.patch("hansa.views.server_state", return_value=stuck):
+            self.assertIn("served now by hansa serve, though its rounds are stuck", self.hansa_out("explain"))
+        with unittest.mock.patch("hansa.views.server_state", return_value={**stuck, "answers": False}):
+            said = self.hansa_out("explain")
+        self.assertIn("web page: http://127.0.0.1:9001/ (it listens on every address), but hansa serve is not "
+                      "answering now", said)
+        self.assertNotIn("served now", said)
 
     def test_init_on_a_repository_with_no_commit_says_to_make_one(self):
         empty = self.tmp / "empty"
@@ -2256,6 +2352,8 @@ class DeskTest(unittest.TestCase):
         self.hansa("lane", "set", "a", "env", "PORT_BASE=4000")
         self.hansa("lane", "set", "a", "write", str(self.tmp / "cache"))
         self.hansa("lane", "set", "a", "timeout_min", "90")
+        self.hansa("lane", "set", "a", "preview", "make serve")
+        self.hansa("lane", "set", "a", "note", "the C++ lane")
         self.hansa("lane", "brief", "a", "Use C++20.")
         s = self.desk.settings()
         s["providers"]["mimo"] = {**s["providers"]["claude"]}
@@ -2265,6 +2363,16 @@ class DeskTest(unittest.TestCase):
         out = self.hansa("lane", "add", "m", "--like", "a", "--providers", "mimo")
         m = self.desk.settings()["lanes"]["m"]
         self.assertEqual(m, {**a, "providers": ["mimo"]})
+        self.assertEqual((m["preview"], m["note"]), ("make serve", "the C++ lane"))
+        card = (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
+        row = next(x for x in card.splitlines() if x.startswith("| `hansa lane add L --like"))
+        with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
+            main(["lane", "add", "--help"])
+        said = " ".join(helped.getvalue().split())
+        for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
+                      "commit_message", "merge_message", "release targets", "note"):  # all it copies, said
+            self.assertIn(field, row)
+            self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
                                                                                  "brief.md").read_text())
         self.assertIn("Use C++20.", (self.desk.lanes_dir / "m" / "brief.md").read_text())
@@ -2275,7 +2383,8 @@ class DeskTest(unittest.TestCase):
         self.assertIn("they are recorded", out)
         self.assertIn('registry.npmjs.org', out)
         self.assertTrue(out.endswith("try it: hansa lane try m\n"), out)
-        self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")[before:]), ["check", "setup"])
+        self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")[before:]),
+                         ["check", "preview", "setup"])  # each run outside the worker: recorded
         self.assertEqual(self.events("lane_added")[-1].get("like"), "a")
         self.hansa("lane", "set", "a", "check", "make check")  # a copy: a's later changes do not reach m
         self.assertEqual(self.desk.settings()["lanes"]["m"]["check"], "make test && make lint")
@@ -7652,7 +7761,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         shown = views.show_text(self.desk, m["id"])
-        self.assertIn("  the failing tests, from its output:\n    FAIL one\n", shown)  # lifted, read without them
+        self.assertIn("  ✓ passed\n  FAIL one\n", shown)  # its last lines (FAIL alone is no runner's marker), read without them
         self.assertNotIn("\x1b", shown)
         self.assertIn("\x1b[32m", (self.desk.tasks_dir / m["id"] / "check.log").read_text())  # the log keeps them
         said = views.try_text("a", {"ok": False, "onto": "abc", "steps": {"check": {

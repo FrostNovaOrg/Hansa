@@ -40,22 +40,43 @@ def plain(line: str, width: int | None = 200) -> str:
     return ESCAPES.sub("", line)[:width]
 
 
-# What marks a failing test in a check's output, for hansa show to lift out (failure_spans)
-UNITTEST_HEAD = re.compile(r"^(FAIL|ERROR): \S")  # Python's unittest, after a line of =
+# What marks a failing test, or an error that kept the tests from running, in a check's output, by each runner's
+# own markers (never a line merely holding the word FAIL), for hansa show to lift out (failure_spans)
+RULE = re.compile(r"={20,}|-{20,}")
+UNITTEST_HEAD = re.compile(r"^(FAIL|ERROR): \S")  # Python's unittest, after a line of =, to its next = or - line
 PYTEST_SECTION = re.compile(r"^=+ (FAILURES|ERRORS) =+$")  # pytest, to its next ==== heading ====
+PYTEST_SUMMARY = re.compile(r"^=+ short test summary info =+$")  # its FAILED/ERROR lines
 PYTEST_HEADING = re.compile(r"^=+ .+ =+$")
+PYTEST_TEST = re.compile(r"^_{3,} .+ _{3,}$")  # one test's part of its FAILURES section
 SUREFIRE = re.compile(r"<<< (FAILURE|ERROR)!")  # JUnit run by Maven's Surefire, with its stack trace
-SUREFIRE_SUMMARY = re.compile(r"^\[ERROR\] (Failures|Errors): *$")
-GENERIC_FAIL = re.compile(r"\bFAIL(ED|URE|S)?\b")  # go test, jest, Gradle, pytest's summary, a build's last word
-FAILURE_LINES = 60  # of the failing tests' sections hansa show gives; hansa show ID --check: the whole output
-TAIL_LINES = 15  # and of the output's last lines after them
+SUREFIRE_SUMMARY = re.compile(r"^\[ERROR\] (Failures|Errors|Tests in error|Failed tests): *$")
+SUREFIRE_RUN = re.compile(r"^\[ERROR\] Tests run: \d+")  # its count of a run that failed ([INFO] when it passed)
+MAVEN_COMPILE = re.compile(r"^\[ERROR\] COMPILATION ERROR")
+MAVEN_ERROR = re.compile(r"^\[ERROR\] .+:\[\d+,\d+\] ")  # a compiler's error at path:[line,col], in any language
+GO_FAIL = re.compile(r"^\s*--- FAIL: \S")  # go test, its messages above it (-v) or under it
+GO_PASS = re.compile(r"^\s*--- (PASS|SKIP): ")
+GO_RUN = re.compile(r"^=== (RUN|CONT|NAME|PAUSE) ")
+GO_PANIC = re.compile(r"^panic: ")  # with the first part of its goroutine trace
+GO_BUILD = re.compile(r"^# \S+$")  # go's build errors of a package: file.go:line:col: message under it
+GO_ERROR = re.compile(r"^\S+\.go:\d+:\d+: ")
+JEST_BLOCK = re.compile(r"^\s+● (?!Console$)\S")  # jest's failing test, with its Expected/Received and code
+JEST_FILE = re.compile(r"^ ?FAIL  \S")
+GRADLE_FAIL = re.compile(r"^\S.* > .+ FAILED$")  # Gradle: Class > test() FAILED, its exception under it
+BLOCK_LINES = 30  # of one failing test hansa show gives
+FAILURE_LINES = 60  # of all of them; hansa show ID --check: the whole output
+TAIL_LINES = 15  # and the output's last lines after them, always
+COMPILE_ERRORS = 5  # of a compiler's errors, the first
 
 
 def failure_spans(lines: list) -> list:
-    """The (start, end) line ranges of a check's output that name a failing test and say why: unittest's and
-    pytest's FAIL/ERROR sections with their tracebacks, Surefire's <<< FAILURE! with its stack trace and its
-    Failures:/Errors: summary, and any other line saying FAIL or FAILED with the indented lines under it."""
-    spans, i, n = [], 0, len(lines)
+    """The parts of a check's output that name a failing test and say why, or an error that kept the tests from
+    running, as (kind, line numbers) in order, kind 'test' or 'error': unittest's FAIL:/ERROR: blocks, pytest's
+    FAILURES and ERRORS sections (a part each test) and its short summary, Surefire's <<< FAILURE!/<<< ERROR!
+    blocks with their stack traces, its Failures:/Errors: summary and its Tests run count, Maven's COMPILATION
+    ERROR and its first path:[line,col] errors, go's --- FAIL blocks with their messages above or under them, a
+    go panic with the first part of its trace, go's build errors, jest's FAIL file lines and ● blocks, Gradle's
+    FAILED tests. A line a runner marks as passing (go's --- PASS, say) is never one of them."""
+    spans, i, n, floor, errors, seen = [], 0, len(lines), 0, 0, set()
 
     def until(j, stop, cap=None):
         k = j + 1
@@ -64,45 +85,106 @@ def failure_spans(lines: list) -> list:
         while k > j + 1 and not lines[k - 1].strip():
             k -= 1
         return k
+
+    def indented(k):
+        return bool(lines[k].strip()) and lines[k][:1].isspace()
     while i < n:
-        x = lines[i]
-        if PYTEST_SECTION.match(x):
+        x, kind, start = lines[i], "test", i
+        if PYTEST_SECTION.match(x):  # a part each test, the first with the section's heading
             end = until(i, lambda k: bool(PYTEST_HEADING.match(lines[k])))
+            cuts = [k for k in range(i + 1, end) if PYTEST_TEST.match(lines[k])] or [i + 1]
+            for a, b in zip([i] + cuts[1:], cuts[1:] + [end]):
+                b = until(a, lambda k: k >= b) if b > a + 1 else b  # without the blank lines it ends with
+                spans.append(("test", list(range(a, b))))
+            floor = i = end
+            continue
+        if PYTEST_SUMMARY.match(x):
+            end = until(i, lambda k: bool(PYTEST_HEADING.match(lines[k])))
+            keep = [i] + [k for k in range(i + 1, end) if lines[k].startswith(("FAILED ", "ERROR "))]
         elif UNITTEST_HEAD.match(x) and i and re.fullmatch(r"={20,}", lines[i - 1]):
             end = until(i, lambda k: bool(re.fullmatch(r"={20,}", lines[k])) or bool(
                 re.fullmatch(r"-{20,}", lines[k]) and k + 1 < n and lines[k + 1].startswith("Ran ")))
-            i -= 1  # the line of = above it
+            keep = list(range(i - 1, end))  # with the line of = above it
         elif SUREFIRE.search(x):
-            end = until(i, lambda k: not lines[k].strip() or lines[k].startswith("["))
+            keep = list(range(i, until(i, lambda k: not lines[k].strip() or lines[k].startswith("["))))
         elif SUREFIRE_SUMMARY.match(x):
-            end = until(i, lambda k: not lines[k].startswith(("[ERROR]   ", "[ERROR] \t", "  ", "\t")))
-        elif GENERIC_FAIL.search(x):
-            end = until(i, lambda k: not lines[k][:1].isspace() or not lines[k].strip(), 20)
+            keep = list(range(i, until(i, lambda k: not lines[k].startswith(("[ERROR]   ", "[ERROR] \t", "  ", "\t")))))
+        elif SUREFIRE_RUN.match(x):
+            keep = [i]
+        elif MAVEN_COMPILE.match(x):
+            keep, kind = [i], "error"
+        elif MAVEN_ERROR.match(x):
+            end = until(i, lambda k: not re.match(r"(\[ERROR\]\s{2,}|\s+)\S", lines[k]), 5)
+            key = x.strip()
+            if key in seen or errors >= COMPILE_ERRORS:  # Maven prints them twice: the first time, the first few
+                i = end
+                continue
+            seen.add(key)
+            errors += 1
+            keep, kind = list(range(i, end)), "error"
+        elif GO_FAIL.match(x):
+            while start > floor and indented(start - 1) and not GO_PASS.match(lines[start - 1]) and i - start < 20:
+                start -= 1  # go test -v prints a test's messages as it runs: above its --- FAIL line
+            if start > floor and GO_RUN.match(lines[start - 1]) and start < i:
+                start -= 1
+            end = until(i, lambda k: not indented(k), 20)
+            keep = [k for k in range(start, end) if not GO_PASS.match(lines[k])]
+        elif GO_PANIC.match(x):
+            k = i + 1
+            while k < n and k - i < 8 and not re.match(r"goroutine \d+ \[", lines[k]):
+                k += 1
+            if k < n and lines[k].startswith("goroutine "):
+                end = until(k, lambda j: not lines[j].strip() or lines[j].startswith(("exit status ", "FAIL")), 16)
+            else:
+                end = until(i, lambda j: not indented(j), 8)
+            keep = list(range(i, end))
+        elif GO_BUILD.match(x) and i + 1 < n and GO_ERROR.match(lines[i + 1]):
+            end = until(i, lambda k: not GO_ERROR.match(lines[k]) and not indented(k), 12)
+            keep, kind = list(range(i, end)), "error"
+        elif JEST_BLOCK.match(x):
+            at = len(x) - len(x.lstrip())  # to the next line as far left as it, or further
+            end = until(i, lambda k: bool(lines[k].strip()) and len(lines[k]) - len(lines[k].lstrip()) <= at, 40)
+            keep = list(range(i, end))
+        elif JEST_FILE.match(x):
+            keep = [i]
+        elif GRADLE_FAIL.match(x):
+            keep = list(range(i, until(i, lambda k: not indented(k), 20)))
         else:
             i += 1
             continue
-        spans.append((i, end))
-        i = end
+        spans.append((kind, keep))
+        floor = i = max(keep[-1] + 1, i + 1)
     return spans
 
 
 def failed_check_lines(log: str, tail: list, tid: str) -> list:
-    """For hansa show, a check or merge check that failed: the failing tests' sections lifted out of its whole
-    output (failure_spans), cut to FAILURE_LINES, then the output's last lines after them; only its last lines
-    when nothing in it names a failing test, or when the output is not kept (tail: the last lines as recorded)."""
-    lines = [plain(x, None) for x in log.strip().splitlines()]
-    spans = failure_spans(lines) if lines else []
-    whole = [f"  the whole output: hansa show {tid} --check"] if lines else []
-    if not spans:
-        return ["  " + plain(x) for x in (lines[-TAIL_LINES:] if lines else tail)] + whole
-    picked = [x for a, b in spans for x in lines[a:b]]
-    out = ["  the failing tests, from its output:"] + ["    " + x[:200] for x in picked[:FAILURE_LINES]]
+    """For hansa show, a check or merge check that failed: the failing tests (or the errors that kept them from
+    running) lifted out of its whole output (failure_spans) above its last TAIL_LINES lines, each cut to
+    BLOCK_LINES and all to FAILURE_LINES, then those last lines, always: never less than its last lines alone,
+    which is all it gives when nothing in it is recognised, or when the output is not kept (tail: the last lines
+    as recorded)."""
+    lines = [plain(x, None) for x in log.rstrip().splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return ["  " + plain(x) for x in tail]
+    whole = [f"  the whole output: hansa show {tid} --check"]
+    last = max(0, len(lines) - TAIL_LINES)  # the lines from here are shown as its last lines
+    picked, kinds = [], set()
+    for kind, keep in failure_spans(lines[:last]):
+        kinds.add(kind)
+        picked += ["    " + lines[k][:200] for k in keep[:BLOCK_LINES]]
+        if len(keep) > BLOCK_LINES:
+            picked.append(f"      ... {len(keep) - BLOCK_LINES} more lines of it")
+    rest = [x[:200] for x in lines[last:]]
+    if not picked:
+        return ["  " + x for x in rest] + whole
+    what = {frozenset({"test"}): "the failing tests", frozenset({"error"}): "the errors"}.get(
+        frozenset(kinds), "the failing tests and errors")
+    out = [f"  {what}, from its output:"] + picked[:FAILURE_LINES]
     if len(picked) > FAILURE_LINES:
         out.append(f"    ... {len(picked) - FAILURE_LINES} more lines of them")
-    after = lines[spans[-1][1]:][-TAIL_LINES:]
-    if any(x.strip() for x in after):
-        out += ["  its last lines:"] + ["    " + x[:200] for x in after]
-    return out + whole
+    return out + ["  its last lines:"] + ["    " + x for x in rest] + whole
 
 
 def as_closed_now(m: dict) -> dict:
@@ -338,18 +420,26 @@ def web_address(desk: Desk) -> tuple:
 
 
 def page_text(page: dict) -> str:
-    """Where the desk's web page is, and whether it is served now, for hansa status and hansa explain."""
-    at = f"http://{page['host']}:{page['port']}/"
+    """Where the desk's web page is, and whether it is served now, for hansa status and hansa explain. A server
+    listening on every address (0.0.0.0, ::) is given at 127.0.0.1 (or ::1), an address one can open."""
+    every = page["host"] in ("0.0.0.0", "", "::")
+    host = ("[::1]" if page["host"] == "::" else "127.0.0.1") if every else page["host"]
+    at = f"http://{host}:{page['port']}/" + (" (it listens on every address)" if every else "")
+    if page["up"] and not page.get("answers", True):
+        return (f"web page: {at}, but hansa serve is not answering now (its process is stopped or stuck: "
+                "hansa status says more), so neither is the page")
     if page["up"]:
-        return f"web page: {at}, served now by hansa serve (hansa web prints it with its key, for the principal)"
+        return (f"web page: {at}, served now by hansa serve" + (", though its rounds are stuck (hansa status says more)"
+                if page.get("stuck") else " (hansa web prints it with its key, for the principal)"))
     return (f"web page: not served now, since hansa serve is not running; it serves it at {at}"
             + (" (where it last did)" if page.get("served") else " (the default)"))
 
 
 def page_of(desk: Desk, server: dict) -> dict:
     host, port = web_address(desk)
-    return {"host": host, "port": port, "up": server["state"] != "gone",
-            "served": (desk.state_dir / "web-port").exists()}
+    stuck = server["state"] == "stuck"  # its rounds stopped coming; its page answers while its process does
+    return {"host": host, "port": port, "up": server["state"] != "gone", "stuck": stuck,
+            "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists()}
 
 
 def status(desk: Desk) -> dict:

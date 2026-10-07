@@ -1991,8 +1991,9 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
-                   "providers, setup, check, merge_check, network, folders it may write, env, allow, limits with "
-                   "merge_timeout_min, commit_message, merge_message, release targets) and standing instructions; "
+                   "providers, setup, check, merge_check, preview, network, folders it may write, env, allow, limits "
+                   "with merge_timeout_min, commit_message, merge_message, release targets, note) and standing "
+                   "instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Not with --repo")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
