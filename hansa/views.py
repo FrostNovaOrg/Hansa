@@ -12,7 +12,7 @@ from pathlib import Path
 from . import alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
+from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of, provider_problem,
                   rest_minutes, rest_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -611,6 +611,22 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if shots:
         out.append(f"browser files ({len(shots)}) in {d / 'browser'}: " + ", ".join(x.name for x in shots[:6])
                    + (" ..." if len(shots) > 6 else ""))
+    pv = m.get("preview") or {}
+    if pv:
+        log = d / "preview.log"
+        where = f"; its output, keys removed: {log}" if log.exists() else ""
+        if not pv.get("started"):
+            out.append(f"preview (started by hansa for the browser): not started: {pv.get('why', '')}")
+        elif pv.get("ready"):
+            out.append(f"preview (started by hansa for the browser): ready at {pv.get('address')} after "
+                       f"{pv.get('waited', 0)} s, stopped when the worker ended{where}")
+        elif pv.get("stopped"):
+            out.append(f"preview (started by hansa for the browser): did not start: {pv.get('why') or 'no answer'}"
+                       f"{where}")
+        else:
+            out.append(f"preview (started by hansa for the browser): running now: {pv.get('command', '')}")
+        if (d / PREVIEW_FIRST_LOG).exists():
+            out.append(f"preview of the run before hansa resumed it, stopped then; its output: {d / PREVIEW_FIRST_LOG}")
     chk = m.get("check")
     if chk and chk.get("could_not_run"):
         out.append(f"check (run by hansa, not the worker): {chk['note']}: {chk['command']}")
@@ -746,6 +762,27 @@ def local_servers_text(mac: bool, listed: bool) -> str:
             + ("; this lane lists it, and need not" if listed else ""))
 
 
+def preview_text(mac: bool, ln: dict) -> list:
+    """What becomes of a lane's preview on this machine, for hansa explain lane: its lines."""
+    if not ln.get("preview"):
+        return ["  preview: none (a design session or a task with a browser has no app started for it)"]
+    head = (f"  preview: {ln['preview']} (a design session starts it itself with its Bash tool; for a task or"
+            " verification with a browser, hansa starts it")
+    if mac:
+        return [head + " before the worker, in the worktree after the lane's setup, in srt with the lane's sandbox"
+                " plus local binding for this one process, waits up to"
+                f" {ln.get('preview_wait_s', 120)} s (preview_wait_s) for the first http://localhost:PORT address it"
+                " prints or a port it names that answers, tells the worker the address, and stops it with its whole"
+                " process group, and each process seen below it (looked for every half second), when the worker"
+                " ends; its output is kept in the task's folder, keys removed, its first and last 2 MB at most)",
+                "    on macOS, while it runs this preview can reach every service on this machine's loopback, as a"
+                " lane with localhost on its network list can: the price of looking at the app in a browser on a Mac"]
+    return [head + " on macOS only)",
+            "    on Linux hansa does not start it: srt runs it with a network of its own (a namespace with its own"
+            " loopback), so the browser, outside the sandbox, could not reach a server bound there; the worker is"
+            " told so"]
+
+
 def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
     s = desk.settings()
     if what == "lane":
@@ -793,6 +830,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "") -> str:
                " setup, check, network or write list, or moving the desk to another machine)"
                + (f"; its merge check: hansa lane try {name} --merge-check" if own_merge_check(ln) else "")]
               if ln.get("setup") or ln.get("check") or ln.get("merge_check") else []),
+            *preview_text(sys.platform == "darwin", ln),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"

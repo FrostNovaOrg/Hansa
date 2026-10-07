@@ -366,8 +366,8 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
-                           "preview", "setup", "release", "targets", "max_turns", "timeout_min", "merge_timeout_min",
-                           "note", *MESSAGE_FIELDS}
+                           "preview", "preview_wait_s", "setup", "release", "targets", "max_turns", "timeout_min",
+                           "merge_timeout_min", "note", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -409,6 +409,8 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: timeout_min must be from 1 to 1440")
         if "merge_timeout_min" in ln and not _is_int(ln["merge_timeout_min"], 1, 1440):
             p.append(f"{at}: merge_timeout_min must be from 1 to 1440")
+        if "preview_wait_s" in ln and not _is_int(ln["preview_wait_s"], 1, 1800):
+            p.append(f"{at}: preview_wait_s must be from 1 to 1800")
 
     co = s.get("coordinator")
     if not isinstance(co, dict):
