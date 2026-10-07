@@ -20,7 +20,14 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    meanwhile, hansa checks the merge before it lands (see Merging).
 6. Releasing is the last step: `hansa release L` asks for the lane's base branch
    to go out, the principal says yes on the page, and only then does hansa run
-   the lane's release command (see Releasing). You never push or deploy yourself.
+   the lane's release command (see Releasing). You never push or deploy yourself:
+   your settings deny `git push`, `gh release`, `gh pr merge`, `gh repo`, and
+   publishing to a package or image registry (`npm`, `pnpm` and `yarn publish`,
+   `twine upload`, `uv` and `poetry publish`, `cargo publish`, `gem push`,
+   `docker` and `podman push`, `mvn deploy`) from your own shell, written plainly
+   or with options before the subcommand (`git -C DIR push`, `mvn -B deploy`).
+   Run through another program or shell (`bash -c "git push"`, `xargs`, a
+   script) they are not caught; in manual mode such a command asks the principal.
 
 ## Commands
 | command | what it does |
@@ -42,8 +49,8 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa explain [lane L [--all] \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from; alone, also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
-| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min, commit_message, merge_message, release targets, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min` (a whole number; none takes `merge_timeout_min` out), `commit_message`, `merge_message` (below) |
+| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below) |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`) and another target of the lane that must have sent out the same commit first; options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
@@ -254,7 +261,8 @@ to a public repository, a deploy to production) waits for the principal:
   or failed with its exit code and last lines. `hansa release` lists them;
   `hansa explain lane L` shows each target's command and its last release.
 - Never push or deploy yourself, not even when a release failed: fix what
-  failed and ask again.
+  failed and ask again. Your settings deny pushing and publishing from your
+  shell (see How work moves); `hansa release` runs the command itself.
 - The principal may have alerts (their own command, run by hansa when a release
   waits or ends, or you file a request); the coordinator does not send them.
 
@@ -383,6 +391,7 @@ here; work that needs code changed or a browser goes to a worker.
   run with `/bin/sh -c`: POSIX shell only, no bash syntax (`[[ ]]`, arrays,
   `source`). The preview is started by a design session's Bash tool; write it
   the same way.
+- For a task or verification with a browser on a lane with a preview, hansa starts the preview itself on macOS (in srt with the lane's sandbox plus local binding, so it can reach every service on the machine's loopback while it runs), waits up to the lane's `preview_wait_s` (default 120) for its address, tells the worker, and stops it when the worker ends; on Linux it does not start it (the browser could not reach it) and tells the worker; `hansa show` has its output.
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`) to run a
   lane's setup and check. hansa looks for it on the PATH of `hansa serve`,
   never on a lane's; node must be on that PATH too (srt is a node
@@ -461,7 +470,9 @@ here; work that needs code changed or a browser goes to a worker.
   what to run are refused (any starting with `LD_`, `DYLD_`, `GIT_` or
   `CLAUDE_`, and `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
   `HOME`): set such a thing inside the check or setup command, where it runs
-  in the sandbox. A saved env that holds one: a run leaves that variable out,
+  in the sandbox. Nor the names sh, bash or zsh keep for themselves (read-only
+  or special, such as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's
+  `path`, `keymaps` and `dis_aliases`; each one tried in sh, bash and zsh): setting one would stop every command of the lane's workers. A saved env that holds one: a run leaves that variable out,
   with a line in `hansa show`.
   The env names that point common tools at a folder (`hansa lane set L env
   NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
@@ -494,7 +505,14 @@ here; work that needs code changed or a browser goes to a worker.
   cost audit, the folders you read without asking, and the folders and files
   workers may not read (no worker, verifier, setup or check reads them, and
   Read is denied there to you and to design sessions too; no lane's repository
-  or write list may be one, inside one or above one); which lanes' releases go
+  or write list may be one, inside one or above one; and none may be or be above
+  what every worker needs: the home folder, the desk, a lane's repository or
+  worktree, the desk's worktrees folder, a folder on the `PATH`, the system's
+  programs and libraries (`/usr/lib`, `/etc`), Homebrew's `Cellar`, `opt` and
+  `Caskroom` (where its program links lead), `~/.config`, `~/.local`,
+  `~/.cache` (and `~/Library` on macOS) or the temporary folder; a file or folder
+  inside one may be listed, one formula's folder in `Cellar` too; nor `/dev` or
+  anything in it, such as `/dev/null`); which lanes' releases go
   out without the principal's yes, and the words no release may send out.
   Ask with `hansa ask`; do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.
@@ -503,6 +521,9 @@ here; work that needs code changed or a browser goes to a worker.
 - A provider that reports it is out of quota rests for a while and the task
   moves to the lane's next provider; `hansa status` shows this. A provider that
   refuses one task (its content filter) does not rest; that task alone moves on.
+- A run stopped by its provider's usage limit costs the task no try (5 times; then each counts): the
+  provider rests until the reset time the error gives, else its own `rest_minutes` or the desk's
+  `cool_minutes`, and `hansa show <id>` says until when the task waits.
 - While a task runs, `hansa status` and `hansa show <id>` say how far the worker has
   got: model replies so far, minutes since it last did anything, its last note.
   Some providers take minutes per reply; a task is stuck only when nothing has
@@ -546,7 +567,8 @@ rewrites it without the section it moves out. This card, by contrast, hansa
 replaces. The file is yours and the principal's to keep: write there what you would otherwise have to be told again,
 without asking. Keep it short, since you reread it at every turn; `hansa status`
 says its size and when it is long. Plans and findings go in other files under
-`notes/`. Workers do not see it: rules for a lane's workers go in its brief
+`notes/`. Workers do not see it, and no worker, verifier or design session may read `notes/` or
+this card: rules for a lane's workers go in its brief
 (`hansa lane brief L`). If the file is missing, nothing loads and nothing breaks.
 
 @notes/PROJECT.md

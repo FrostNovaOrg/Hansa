@@ -90,7 +90,15 @@ page gives.
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) or its named release
   targets (`hansa lane target L NAME "<command>"`) and asking for a release
-  (`hansa release L [TARGET] "note"`), never pushing or deploying by itself.
+  (`hansa release L [TARGET] "note"`), never pushing or deploying by itself:
+  its settings deny `git push`, `gh release`, `gh pr merge`, `gh repo` and the
+  usual publish commands (`npm`, `pnpm`, `yarn`, `uv` and `poetry publish`,
+  `twine upload`, `cargo publish`, `gem push`, `docker` and `podman push`,
+  `mvn deploy`) from its own shell, whatever its mode, written plainly or with
+  options before the subcommand (`git -C DIR push`); run through another
+  program or shell (`bash -c "git push"`, `xargs`, a script) they are not
+  caught, and in manual mode such a command asks the principal. `hansa release`
+  runs the release command itself after the principal's yes.
   Each lane may also set the form of the messages hansa writes into its
   repository: `commit_message` for the commit of a task's work (and the merge
   of the base into a task's branch on `retry --update`), `merge_message` for a
@@ -122,7 +130,8 @@ page gives.
   report, inside Claude Code's sandbox, which the operating system enforces: any
   command, but files changed only in the worktree (and its temporary folder and
   the lane's write list, `hansa lane set L write ...`), no
-  reading of the desk's keys and state, of any provider's Claude Code folder or
+  reading of the desk's keys and state, the coordinator's notes (`notes/`) and
+  card (the desk's `CLAUDE.md`; design sessions may not read these either), of any provider's Claude Code folder or
   `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
   shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
   macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
@@ -132,7 +141,15 @@ page gives.
   keychains, cookies, mail and messages under `~/Library`), or of
   the folders and files the principal lists on the page (Settings, "workers may
   not read": this machine's own folders of keys; Read is denied there to every
-  Claude Code run hansa starts, the coordinator too), no network but the
+  Claude Code run hansa starts, the coordinator too. An entry that would stop
+  every worker is refused on saving, each with its reason: the home folder,
+  the desk, a lane's repository, a folder on the `PATH`, the system's programs
+  and libraries (`/usr/lib`, `/etc` and the like), Homebrew's `Cellar`, `opt`
+  and `Caskroom`, `~/.config`, `~/.local`, `~/.cache` (and `~/Library` on
+  macOS), the temporary folder, the desk's worktrees folder or a lane's
+  worktree, or a folder above any of them, and `/dev` or anything in it; a
+  file or folder inside one of the others, such as one file in `~/.config` or
+  one formula's folder in `Cellar`, may be listed), no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
   own branch, and merges only what the coordinator merges. The lane's setup,
@@ -182,8 +199,61 @@ page gives.
   check command, not in the lane's env. A lane's env takes no name that tells
   a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
   `GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
-  `HOME`), no `PATH` entry that is empty or not a full path, and no place
-  inside the desk. `hansa/card.md` says the same.
+  `HOME`), no name sh, bash or zsh keeps for itself (read-only or special, such
+  as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's `path` and
+  `keymaps`, each one tried in sh, bash and zsh: setting one
+  would stop every command of the lane's workers), no `PATH` entry that is empty
+  or not a full path, and no place inside the desk. The file hansa writes it to
+  for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
+- A task or verification with a browser (`hansa add --browser`, `hansa verify
+  --browser`) on a lane with a `preview` (the command that starts the app, such
+  as `npm run dev`) gets the app started for it. On macOS hansa starts the
+  preview itself before the worker: in the lane's worktree, after the lane's
+  setup, in `srt` with the lane's sandbox (network and write lists, env, the
+  prelude), with local binding allowed for that one process; the worker's own
+  sandbox stays as the lane sets it. hansa waits up to the lane's
+  `preview_wait_s` (default 120 seconds) for the first `http://localhost:PORT`
+  or `http://127.0.0.1:PORT` address the preview prints, or a port it names
+  that answers, and puts the address in the worker's instructions; a preview
+  not ready by then is stopped, and the worker is told it did not start, with
+  its last lines, and goes on without it. hansa stops the preview with its
+  whole process group when the worker ends, however it ends (done, failed,
+  cancelled, stopped at the ceiling, or ended while `hansa serve` was
+  restarted). It stops the processes the preview started that left that group
+  too: while the preview runs, hansa looks every half second for what runs
+  below it and records each one (its number and start time), and at the end
+  stops each recorded one still running, whatever its group or environment,
+  and any orphan (a process whose parent is the system's first process, as a
+  daemon that forked twice is) started since whose working folder is in the
+  worktree or the preview's temporary folder. A process with a living parent
+  that the preview did not start is not touched, so a shell, an editor or a
+  file watcher you start in the worktree while a browser task runs there is
+  left alone. But a process you start there with `nohup` (or an editor that
+  detaches itself from the shell that started it) becomes an orphan once that
+  shell ends, and is stopped at the end of the task. What can still escape on macOS: a process that forks twice,
+  leaves the group, clears its environment and changes folder all between two
+  looks (half a second). It keeps running after the task, with the
+  preview's sandbox, local binding included: it can reach the machine's
+  loopback, write in the worktree and the lane's write list, and reach the
+  hosts on the lane's network list, until it ends or the machine restarts. A
+  worker's own processes are not recorded this way: hansa still finds what a
+  worker leaves by `HANSA_TASK` in its environment or its run's folder in its
+  arguments, as before. Its output is kept in the task's folder as
+  `preview.log`, keys removed, at most its first and last 2 MB on disk with a
+  line saying how much was left out between them (a byte that is not UTF-8 is
+  kept as one `?`; where a cut falls inside a line, 4 KB more on each side of
+  it are left out, so no key is kept in part, and the line says so; if
+  removing keys made it longer, it is cut again after; hansa reads the whole output as
+  it comes, so a preview that prints without end never waits on it and never
+  fills the disk); `hansa show` says where and what became of it. **On macOS such a
+  preview can reach every service on this machine's loopback while it runs**,
+  as a lane with `localhost` on its network list can: that is the price of
+  looking at the app in a browser on a Mac. **On Linux hansa does not start
+  it**: `srt` runs a command there in a network namespace of its own
+  (bubblewrap's `--unshare-net`; local binding is a macOS setting), so a
+  server bound inside listens on the sandbox's own loopback, and the browser,
+  which runs outside the sandbox, cannot reach it. The worker is told so. A
+  design session starts its own preview, as before.
 - Releases are the last step. hansa merges into a lane's base branch and stops
   there; a lane's release command (a push, a wait for CI such as `gh run watch
   --exit-status`, a deploy script) is how the base branch goes out. A lane
@@ -253,7 +323,8 @@ page gives.
   has a button that sends a test alert; no coordinator command sends one.
   `hansa explain` says whether a command is set and what it is.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
-  and not the settings, plugins, hooks or MCP servers of the account they run as.
+  and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
+  verifier or a design session read the desk's card or `notes/`.
 - Nobody reads hansa's code to use it. If the card or a command's output is not
   enough, fix the card or the output.
 
@@ -320,6 +391,27 @@ Mockito documents; in the pom:
 Gradle is not covered yet: the prelude sets nothing for it but
 `JAVA_TOOL_OPTIONS`.
 
+## When a provider hits a usage limit
+When a provider answers with a usage limit (HTTP 402 or 429, or the wording of one), it rests: no task
+starts on it until the rest ends, and a task stopped by the limit moves to the next ready provider of its
+lane, or waits for one.
+
+- **Until the reset time, when the error gives one**, and a minute, for at most 31 days. hansa reads a
+  clock time (`You've hit your session limit · resets 3pm (Europe/Berlin)`, as Claude Code prints a
+  subscription's limit), a date and time (`resets Oct 9, 3pm (Europe/Berlin)`, `resets 2026-08-08 00:00
+  UTC`), a Unix time (`usage limit reached|1760000000`, `resets_at`), a `retry-after` value given in the
+  message, and "in N minutes" or "in N hours" (`Please try again in 20 minutes`). A time without a zone is
+  the machine's local time; a month and day without a year is in the year that puts it nearest to now.
+  A form hansa is unsure of, a time already past, or a line it cannot read gets the fixed length below.
+- **Else for the provider's own rest**, `rest_minutes` on the page (1 to 44640, a month), or the desk's
+  `cool_minutes` (30 by default) when it is empty. Fit it to the provider: a subscription's window is a
+  few hours, an API key's limit may be per minute, a plan's allowance may be monthly.
+- **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
+  using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
+  limit again right after each rest cannot hold a task forever. Any other failure counts as before.
+  `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
+  when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
+
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the
@@ -361,8 +453,10 @@ looks like an empty box: it may send the guess as if you wrote it.
 ## Current limits
 - Alpha: settings, commands and files may still change between versions.
 - A worker's commands, and the lane's setup and check commands, run in the
-  operating system's sandbox; the lane's preview command, design sessions and
-  the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
+  operating system's sandbox, and so does the preview hansa starts for a task
+  with a browser (on macOS only, with local binding: it can reach every service
+  on the machine's loopback while it runs); the preview a design session starts,
+  design sessions and the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the

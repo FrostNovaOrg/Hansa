@@ -87,7 +87,24 @@ def permissions(desk: Desk) -> dict:
     # an Edit rule covers every file-editing tool (Write too); //path is absolute. Claude Code allows a write only
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win
     return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/notes/**)"],
-            "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]}
+            "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]
+            + [f"Bash({c}:*)" for c in NO_PUBLISH] + [f"Bash({r})" for r in no_publish_with_options()]}
+
+
+# What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
+# and publishing. A release goes out through hansa release, which runs the lane's command itself after the
+# principal's yes; the coordinator reads a repository through hansa git.
+NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
+              "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
+              "docker push", "podman push", "mvn deploy")
+
+
+def no_publish_with_options() -> list:
+    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
+    reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
+    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. They stop
+    nothing run through another program or shell (bash -c, xargs, a script)."""
+    return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
 
 
 def _text(args) -> str:
@@ -1189,11 +1206,11 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 
 LANE_LISTS = ("providers", "allow", "network", "write")
-LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min")
+LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "max_turns", "timeout_min", "merge_timeout_min", "note", *MESSAGE_FIELDS)
-# empty (none) takes them out: the check's command and limit again, hansa's own message forms
-LANE_UNSET = ("merge_check", "merge_timeout_min", *MESSAGE_FIELDS)
+               "release", "max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s", "note", *MESSAGE_FIELDS)
+# empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait
+LANE_UNSET = ("merge_check", "merge_timeout_min", "preview_wait_s", *MESSAGE_FIELDS)
 OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -1980,7 +1997,7 @@ def main(argv=None):
         "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
         "concurrency in all, and to split work among providers give each its own lane with its provider order. "
         "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax; so write its preview "
-        "(started by a design session's Bash tool) the same way. " +
+        "(started by a design session's Bash tool, or by hansa for a task with a browser) the same way. " +
         "The network list is the hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
@@ -1992,8 +2009,8 @@ def main(argv=None):
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
                    "providers, setup, check, merge_check, preview, network, folders it may write, env, allow, limits "
-                   "with merge_timeout_min, commit_message, merge_message, release targets, note) and standing "
-                   "instructions; "
+                   "with merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note) "
+                   "and standing instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Not with --repo")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
@@ -2009,7 +2026,19 @@ def main(argv=None):
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message and merge_message take "
-        "one value (none: empty); max_turns, timeout_min and merge_timeout_min take one whole number. check runs "
+        "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
+        "preview is the command that starts the app (npm run dev, say). A design session starts it itself. For a task "
+        "or verification with a browser (hansa add --browser), hansa starts it on macOS before the worker: in the "
+        "worktree after the lane's setup, in srt with the lane's sandbox plus local binding for that one process "
+        "(the worker's own sandbox stays as the lane sets it); it waits up to preview_wait_s seconds (default 120; "
+        "none: back to that) for the first http://localhost:PORT or http://127.0.0.1:PORT address the preview prints, "
+        "or a port it names that answers, and tells the worker the address, or that it did not start, with its last "
+        "lines; it stops the preview, with its whole process group and each process seen below it (looked for every "
+        "half second), when the worker ends, however it ends; its output is kept in the task's folder, keys removed, "
+        "its first and last 2 MB at most (hansa show says where). On macOS such a preview can reach every "
+        "service on the machine's loopback while it runs, as a lane with localhost on its network list can: the price "
+        "of looking at the app in a browser on a Mac. On Linux hansa does not start it: srt gives the command a network "
+        "of its own, so the browser, outside the sandbox, could not reach the app; the worker is told so. check runs "
         "after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
         "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
         "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
@@ -2020,7 +2049,7 @@ def main(argv=None):
         "merge_message is the form of the message of a task's merge into the base (unset: Merge t0001: <title>). "
         "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
         "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
-        "commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
+        "preview_wait_s, commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). It is the lane's one "
         "unnamed release target; a lane that sends its base branch out in more than one way names its targets "
         "instead (hansa lane target L NAME ...), and then has no release. " +

@@ -128,9 +128,10 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
         open("partial.txt", "w").write("half done\n")
         status = int(what) if what.isdigit() else None
         text = {"econnreset": "API Error: Connection dropped (ECONNRESET)", "529": "API Error: Repeated 529 Overloaded errors",
-                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error"}[what]
+                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
+                "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
-                          "api_error_status": 429 if what == "quota" else status,
+                          "api_error_status": 429 if what in ("quota", "limit") else status,
                           "result": text, "session_id": "s-net", "num_turns": 3}))
         sys.exit(1)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
@@ -138,6 +139,14 @@ if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given
     open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
+if os.environ.get("FAKE_SEE_PREVIEW"):  # "pid file:out file": whether the preview hansa started runs as the worker does
+    pidf, outf = os.environ["FAKE_SEE_PREVIEW"].split(":")
+    pid = int(open(pidf).read()) if os.path.exists(pidf) else 0
+    try:
+        group = os.getpgid(pid) if pid else None
+    except OSError:
+        group = None
+    open(outf, "w").write(json.dumps({"up": group is not None, "group": group, "mine": os.getpgrp()}))
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -2447,7 +2456,7 @@ class DeskTest(unittest.TestCase):
             main(["lane", "add", "--help"])
         said = " ".join(helped.getvalue().split())
         for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
-                      "commit_message", "merge_message", "release targets", "note"):  # all it copies, said
+                      "preview_wait_s", "commit_message", "merge_message", "release targets", "note"):  # all it copies, said
             self.assertIn(field, row)
             self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
@@ -3586,7 +3595,7 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["attempts"][0]["error"], m["attempts"][0].get("kind")),
-                         ("queued", "out of quota (HTTP 429)", None), m)
+                         ("queued", "out of quota (HTTP 429)", "limit"), m)
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "claude"))
         self.desk.set_provider_state("claude", cool_until=0, reason="")
         self.assertEqual(self.settle(d, tid)["state"], "done")
@@ -3595,6 +3604,244 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
         self.assertEqual(count.read_text(), "1")
+
+    def test_a_limit_s_reset_time_is_read_in_each_form(self):
+        from datetime import datetime, timedelta, timezone
+        from zoneinfo import ZoneInfo
+        from hansa import run
+        zone = unittest.mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"})  # the machine's zone, for times that name none
+        zone.start()
+        self.addCleanup(time.tzset)  # cleanups run last first: TZ is put back, then read again
+        self.addCleanup(zone.stop)
+        time.tzset()
+        berlin, tokyo, ny = ZoneInfo("Europe/Berlin"), ZoneInfo("Asia/Tokyo"), ZoneInfo("America/New_York")
+        at = datetime(2026, 10, 8, 12, 0, tzinfo=berlin).timestamp()  # 19:00 in Tokyo
+        cases = [
+            # a clock time, as Claude Code prints a subscription's limit (within a day: hour, minutes when not :00)
+            ("You've hit your session limit · resets 3pm (Europe/Berlin)", datetime(2026, 10, 8, 15, 0, tzinfo=berlin)),
+            ("You've hit your session limit · resets 3:30pm (Europe/Berlin) · progress saved",
+             datetime(2026, 10, 8, 15, 30, tzinfo=berlin)),
+            ("You've hit your session limit · resets 9am (Europe/Berlin)", datetime(2026, 10, 9, 9, 0, tzinfo=berlin)),
+            ("Your limit resets at 13:45 UTC", datetime(2026, 10, 8, 13, 45, tzinfo=timezone.utc)),
+            ("You've hit your session limit · resets 3pm", datetime(2026, 10, 9, 15, 0, tzinfo=tokyo)),  # passed today
+            ("You've hit your session limit · resets 11pm", datetime(2026, 10, 8, 23, 0, tzinfo=tokyo)),
+            # a date and time: Claude Code's reset more than a day out; a gateway's spend limit; ISO 8601
+            ("You've hit your weekly limit · resets Oct 12, 3pm (Europe/Berlin)", datetime(2026, 10, 12, 15, 0, tzinfo=berlin)),
+            ("You've hit your Opus limit · resets Jan 2, 2027, 3:30pm (America/New_York)",
+             datetime(2027, 1, 2, 15, 30, tzinfo=ny)),
+            ('API Error: 429 {"type":"error","error":{"type":"billing_error","message":"spend limit reached (daily; '
+             'resets 2026-10-09 00:00 UTC) — request an increase"}}', datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)),
+            ("quota exceeded; resets at 2026-10-08T20:00:00+08:00",
+             datetime(2026, 10, 8, 20, 0, tzinfo=timezone(timedelta(hours=8)))),
+            ("quota exceeded until 2026-10-09 08:00", datetime(2026, 10, 9, 8, 0, tzinfo=tokyo)),  # local time
+            # a Unix time
+            ("Claude AI usage limit reached|1791460800", datetime.fromtimestamp(1791460800, timezone.utc)),
+            ('API Error: 429 {"rate_limits":{"resets_at":1791460800,"rate_limit_type":"five_hour"}}',
+             datetime.fromtimestamp(1791460800, timezone.utc)),
+            # in N minutes or hours, and a retry-after value passed on
+            ("API Error: 429 Rate limit reached for requests. Please try again in 20 minutes.", at + 1200),
+            ("API Error: 429 insufficient_quota: usage resets in 3 hours", at + 3 * 3600),
+            ("API Error: 429 too many requests, try again in 45s", at + 45),
+            ("API Error: 429 rate_limit_error retry-after: 120", at + 120),
+        ]
+        for text, want in cases:
+            with self.subTest(text):
+                want = want if isinstance(want, float) else want.timestamp()
+                self.assertEqual(run.reset_time(text, at), want)
+        for text in ("API Error: 429 rate_limit_error",  # no time: the fixed length
+                     "API Error: 429 This request would exceed the rate limit of 50,000 input tokens per minute",
+                     "You've hit your session limit · resets 3pm (Mars/Olympus)",  # a zone hansa does not know
+                     "usage limit reached; resets 3",  # no clock time
+                     "You've hit your weekly limit · resets Oct 7, 3pm (Europe/Berlin) · 2025",  # the day before
+                     "usage limit reached|1600000000",  # long past
+                     "resets 25:00 UTC"):
+            with self.subTest(text):
+                self.assertIsNone(run.reset_time(text, at))
+        self.assertEqual(run.unusable_reason({"is_error": True, "result": cases[0][0]}, "")[0], "quota")
+        # until the reset and a minute, at most 31 days; what it read is said
+        s = self.desk.settings()
+        t0 = time.time()
+        until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)",
+                                  f"API Error: 429 usage resets in 2 hours")
+        self.assertAlmostEqual(until, t0 + 7200 + 60, delta=5)
+        self.assertEqual(self.desk.provider_state()["claude"]["rest_how"], "reset")
+        until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota",
+                                  "Claude AI usage limit reached|" + str(int(t0) + 90 * 86400))
+        self.assertAlmostEqual(until, t0 + 31 * 86400, delta=5)
+
+    def test_a_provider_s_own_rest_overrides_cool_minutes(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["cool_minutes"] = 30
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid",
+                                  "rest_minutes": 300}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        s = self.desk.settings()
+        self.assertEqual((run.rest_minutes(s, "mimo"), run.rest_minutes(s, "claude")), (300, 30))
+        t0 = time.time()
+        for name, minutes in (("mimo", 300), ("claude", 30)):
+            until = run.rest_provider(self.desk, s, name, "quota", "out of quota (HTTP 429)", "API Error: 429 rate_limit_error")
+            self.assertAlmostEqual(until, t0 + 60 * minutes, delta=5)
+        self.assertIn(f"no reset time in its error, so its rest of 300 minutes",
+                      provider_problem(self.desk, s, "mimo"))
+        out = views.status_text(views.status(self.desk))
+        self.assertRegex(out, r"\n  mimo +compatible +mimo-x +rest 300 min +resting until")
+        self.assertRegex(out, r"\n  claude +subscription +opus +rest 30 min \(desk\) +resting until")
+        self.assertIn("else 300 minutes (its own rest_minutes)", views.explain_text(self.desk, "provider", "mimo"))
+        self.assertIn("else 30 minutes (the desk's cool_minutes)", views.explain_text(self.desk, "provider", "claude"))
+        status = views.status(self.desk)["providers"]
+        self.assertEqual([(p["name"], p["rest_minutes"], p["rest_own"]) for p in status],
+                         [("claude", 30, False), ("mimo", 300, True)])  # what the page shows
+
+    def test_a_usage_limit_costs_no_try_and_the_task_starts_again_after_the_rest(self):
+        from hansa import run
+        count = self.net_lane("limit", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = "You've hit your session limit · resets 3pm (Europe/Berlin)"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        self.assertEqual(run.tries_used(m["attempts"]), 0)
+        self.assertIn("queued again without using a try", m["error"])
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "reset")
+        reset = run.reset_time(s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"])
+        self.assertAlmostEqual(st["cool_until"], max(reset, time.time()) + 60, delta=30)
+        when = time.strftime("%m-%d %H:%M", time.localtime(st["cool_until"]))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"waits for the rest of claude after its usage limit, until {when} (the reset time its error "
+                      "gave, and a minute)", shown)
+        self.assertIn("That return used no try.", shown)
+        self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; no try used)", shown)
+        out = views.status_text(views.status(self.desk))  # until when, and why
+        self.assertIn(f"resting until {when} (out of quota (HTTP 429)): the reset time its error gave, and a minute", out)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not while its only provider rests
+        self.assertEqual(count.read_text(), "1")
+        self.desk.set_provider_state("claude", cool_until=time.time() - 1)  # the rest ran out
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["error"]), ("done", ""), m)
+        self.assertEqual(count.read_text(), "2")
+        self.assertNotIn("waits for the rest", views.show_text(self.desk, tid))
+
+    def test_a_provider_that_hits_its_limit_after_each_rest_uses_up_the_task_s_tries(self):
+        from hansa import run
+        count = self.net_lane("limit", 99)
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end, seen = time.time() + 60, 0
+        while time.time() < end and self.desk.meta(tid)["state"] in ("queued", "running"):
+            d.tick()
+            if len(self.desk.meta(tid).get("attempts", [])) > seen:
+                seen = len(self.desk.meta(tid)["attempts"])
+                self.desk.set_provider_state("claude", cool_until=time.time() - 1)  # each rest runs out
+            time.sleep(0.05)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertEqual(run.LIMIT_RETURNS, 5)
+        self.assertEqual([a["counted"] for a in m["attempts"]], [False] * 5 + [True] * 3)
+        self.assertEqual(count.read_text(), "8")
+        self.assertTrue(m["error"].endswith("gave up after 3 tries"), m["error"])
+        self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; counted as a try)",
+                      views.show_text(self.desk, tid))
+
+    def test_a_limit_line_with_an_impossible_offset_does_not_raise(self):
+        from hansa import run
+        for offset in ("+99:99", "+24:00", "-24:00", "+2400"):
+            with self.subTest(offset):
+                self.assertIsNone(run.reset_time(f"API Error: 429 quota exceeded; resets at 2026-10-08T20:00:00{offset}"))
+
+    def limit_run(self, text: str) -> dict:
+        """One run of the fake worker that hits a usage limit whose error says `text`; the task as it ends."""
+        self.net_lane("limit", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = text
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        return self.desk.meta(tid)
+
+    def test_a_limit_line_with_an_impossible_offset_still_ends_the_run(self):
+        t0 = time.time()
+        m = self.limit_run("API Error: 429 quota exceeded; resets at 2026-10-08T20:00:00+99:99")
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "fixed")
+        self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+
+    def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
+        from hansa import run
+
+        def broken(*_):
+            raise RuntimeError("a reader broke")
+        for name in ("usage_of", "reset_time", "background_left"):
+            patch = unittest.mock.patch.object(run, name, broken)
+            patch.start()
+            self.addCleanup(patch.stop)
+        t0 = time.time()
+        m = self.limit_run("You've hit your session limit · resets 3pm (Europe/Berlin)")
+        self.assertEqual(m["state"], "queued", m)  # the plainest reading: a limit, with the fixed rest
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        self.assertEqual((m["usage"], m["background_left"]), ({}, []))
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "fixed")
+        self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+        events = [json.loads(x) for x in self.desk.events_path.read_text().splitlines()]
+        unread = sorted(e["what"] for e in events if e["event"] == "detail_unread")
+        self.assertEqual(unread, ["background work left", "reset time", "usage"])
+        self.assertTrue(all("a reader broke" in e["error"] for e in events if e["event"] == "detail_unread"))
+
+    def test_a_month_and_day_takes_the_year_nearest_to_now(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from hansa import run
+        berlin = ZoneInfo("Europe/Berlin")
+        new_year = datetime(2027, 1, 1, 12, 0, tzinfo=berlin).timestamp()
+        self.assertIsNone(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)", new_year))
+        self.assertIsNone(run.reset_time("You've hit your weekly limit · resets Oct 7, 3pm (Europe/Berlin)",
+                                         datetime(2026, 10, 8, 12, 0, tzinfo=berlin).timestamp()))
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Jan 2, 3pm (Europe/Berlin)",
+                                        datetime(2026, 12, 31, 12, 0, tzinfo=berlin).timestamp()),
+                         datetime(2027, 1, 2, 15, 0, tzinfo=berlin).timestamp())
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)",
+                                        datetime(2026, 12, 30, 12, 0, tzinfo=berlin).timestamp()),
+                         datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
+        # within the hour hansa allows for a skewed clock, a time just past is still this year's
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)",
+                                        datetime(2026, 12, 31, 23, 30, tzinfo=berlin).timestamp()),
+                         datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
+
+    def test_the_page_checks_a_provider_s_rest_minutes(self):
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn('bind(p, "rest_minutes", "number")', ui)
+        self.assertIn("T.restNote", ui)
+        want = ("provider claude: rest_minutes (its rest after a usage limit) must be a whole number from 1 to 44640, "
+                "or empty for the desk's cool_minutes")
+        for bad in (0, 44641, "30", 1.5, True):
+            with self.subTest(bad):
+                r = self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=bad))
+                self.assertEqual((r["ok"], r["problems"]), (False, [want]))
+        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
+        for good in (1, 300, 44640):
+            self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=good)),
+                             {"ok": True, "problems": []})
+            self.assertEqual(self.desk.settings()["providers"]["claude"]["rest_minutes"], good)
+        self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].pop("rest_minutes")),  # emptied on the page
+                         {"ok": True, "problems": []})
+        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
 
     def test_rejected_key_rests_provider_until_a_new_key(self):
         s = self.desk.settings()
@@ -5618,8 +5865,10 @@ class DeskTest(unittest.TestCase):
                 self.assertTrue(self.covered(rules, tool, str(dot)), (tool, dot))
             for f in ("projects/-desk/memory/MEMORY.md", "projects/-desk/s.jsonl", "projects"):
                 self.assertFalse(self.covered(rules, tool, f"{cc}/{f}"), (tool, f))  # the session's memory: its own
-        # hansa relies on no other form: a lone * is not in them
-        self.assertEqual([r for r in rules if "*" in r.replace("/**)", ")")], [])
+        # hansa relies on no other form: a lone * is not in its folder rules (the Bash ones are not about folders)
+        folders = [r for r in rules if r.startswith(("Read(", "Edit("))]
+        self.assertTrue(folders)
+        self.assertEqual([r for r in folders if "*" in r.replace("/**)", ")")], [])
 
     def test_the_coordinator_neither_reads_nor_edits_its_own_claude_code_folder(self):
         echo = self.tmp / "echo-claude"
@@ -6285,6 +6534,141 @@ class DeskTest(unittest.TestCase):
         self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
         self.assertNotIn("Bash", self.allowed_by(argv))  # outside the sandbox: the lane's rules and its own git
         self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
+
+    def test_workers_verifiers_and_design_sessions_cannot_read_the_desks_notes_or_card(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        task, verify = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
+        notes, card = self.desk.notes_dir, self.desk.root / "CLAUDE.md"
+        rules = [run.rule("Read", notes), f"Read(//{str(card).lstrip('/')})"]
+        for argv in (task, verify):
+            for r in rules:
+                self.assertIn(r, self.denied_by(argv))
+            deny = self.sandbox_of(argv)["filesystem"]["denyRead"]  # their commands too
+            self.assertIn(str(notes), deny)
+            self.assertIn(str(card), deny)
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+        self.assertIn(str(notes), srt)  # the setup and the check
+        self.assertIn(str(card), srt)
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(self.repo), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        for r in rules:
+            self.assertIn(r, self.denied_by(argv))
+
+    def test_the_coordinator_cannot_push_or_publish_from_its_own_shell(self):
+        self.assertEqual(self.echo_coordinator().returncode, 0)  # the desk's permissions brought up to date
+        deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
+        rules = [r[5:-1] for r in deny if r.startswith("Bash(")]
+
+        def matches(rule, cmd):  # as Claude Code matches a Bash rule: a prefix before :*, else * as any text
+            if rule.endswith(":*") and "*" not in rule[:-2]:
+                return cmd == rule[:-2] or cmd.startswith(rule[:-2] + " ")
+            pattern = ".*".join(re.escape(x) for x in rule.split("*"))
+            if rule.endswith(" *") and rule.count("*") == 1:
+                pattern = pattern[:-3] + "( .*)?"
+            return re.fullmatch(pattern, cmd, re.S) is not None
+
+        def denied(cmd):
+            return any(matches(r, cmd) for r in rules)
+        for cmd in ("git push origin main", "git push", "gh release create v1", "gh pr merge 3 --squash",
+                    "gh repo delete x", "npm publish", "twine upload dist/*", "cargo publish", "docker push img:1",
+                    "git -C /some/repo push", "git -C /some/repo push origin main", "git --no-pager push",
+                    "git -c http.extraHeader=x push --force", "npm --prefix pkg publish", "mvn -B deploy",
+                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img"):
+            self.assertTrue(denied(cmd), cmd)
+        for cmd in ("hansa status", "hansa git a log --oneline", "hansa git a show HEAD", "hansa release a",
+                    "hansa lane set a release \"git push origin main\"", "hansa merge t0001", "git status",
+                    "gh pr view 3", "git -C /some/repo status", "git -C /some/repo log --oneline",
+                    "hansa git a -C x push", "npm --prefix pkg test"):
+            self.assertFalse(denied(cmd), cmd)
+        self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
+
+    def test_a_lanes_env_refuses_the_shells_own_names_and_its_file_is_the_desks_alone(self):
+        from hansa import run
+        for name in ("UID", "EUID", "PPID", "SHELLOPTS", "BASHOPTS", "ZSH_SUBSHELL", "path", "status"):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {name: "0"}
+            told = self.desk.save_settings(s)
+            self.assertTrue(any(f"env {name} cannot be set" in x and "sh, bash or zsh" in x for x in told), (name, told))
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["env"], {})
+        s = self.desk.settings()  # saved another way: the run's file leaves it out
+        s["lanes"]["a"]["env"] = {"UID": "0", "FINE": "1"}
+        write_json(self.desk.settings_path, s)
+        tid = self.desk.new_task("Add hello.txt")
+        f = self.desk.raw_dir(tid) / "lane-env.sh"
+        f.write_text("old\n")
+        f.chmod(0o644)  # one written before, with the umask's mode
+        self.assertEqual(run.env_file(self.desk, tid, s["lanes"]["a"]), {"CLAUDE_ENV_FILE": str(f)})
+        text = f.read_text()
+        self.assertTrue(text.startswith("export FINE=1\n"), text)
+        self.assertNotIn("export UID", text)
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        f.unlink()
+        run.env_file(self.desk, tid, s["lanes"]["a"])
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        r = subprocess.run(["/bin/sh", "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True)
+        self.assertEqual(r.stdout, "ran\n", r.stderr)
+
+    def test_no_name_a_lanes_env_accepts_stops_sh_bash_or_zsh(self):
+        from hansa.desk import ENV_NAME, SHELL_ENV_NAMES, env_problems
+        shells = [s for s in ("/bin/sh", "/bin/bash", "/bin/zsh") if os.access(s, os.X_OK)]
+        names = set(SHELL_ENV_NAMES)  # every variable the shells present know, besides the listed ones
+        for sh, ask in (("/bin/bash", "compgen -v"), ("/bin/zsh", "print -l ${(k)parameters}")):
+            if sh in shells:
+                names |= set(subprocess.run([sh, "-c", ask], capture_output=True, text=True,
+                                            env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}).stdout.split())
+        names = sorted(n for n in names if ENV_NAME.match(n))
+        for n in SHELL_ENV_NAMES:
+            self.assertEqual([k for k, _ in env_problems({n: "0"})], [n], n)
+        accepted = [n for n in names if not env_problems({n: "0"})]
+        self.assertIn("TERM", accepted)
+        f = self.tmp / "lane-env.sh"
+
+        def stops(sh, some):
+            f.write_text("".join(f"export {n}=0\n" for n in some))
+            return subprocess.run([sh, "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True,
+                                  env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}).stdout != "ran\n"
+        for sh in shells:
+            if stops(sh, accepted):  # one at a time, to name them
+                self.fail(f"{sh} stops on {[n for n in accepted if stops(sh, [n])]}")
+
+    def test_what_every_worker_needs_cannot_be_kept_from_them(self):
+        from hansa.desk import account_home
+        home, systmp = Path(account_home()), (self.tmp / "systmp").resolve()
+        systmp.mkdir()
+        wts = self.desk.root / "worktrees"
+        bad = {"/usr/lib": "programs and libraries", "/etc": "programs and libraries",
+               str(home / ".config"): "settings and caches in the home folder",
+               str(home / ".cache"): "settings and caches in the home folder",
+               str(systmp): "the temporary folder", "/var/tmp": "the temporary folder",
+               str(wts): "the desk's worktrees folder", str(wts / "a"): "a lane's worktree",
+               str(wts / "a-design"): "a lane's worktree",
+               "/dev": "devices", "/dev/null": "devices", "/dev/tty": "devices", "/dev/fd": "devices",
+               "/opt/homebrew/Cellar": "Homebrew's programs", "/opt/homebrew/opt": "Homebrew's programs",
+               "/usr/local/Cellar": "Homebrew's programs", "/usr/local/opt": "Homebrew's programs",
+               "/opt/homebrew": "workers could not run their tools"}
+        with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)):
+            for path, why in bad.items():
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                self.assertFalse(told["ok"], path)
+                self.assertEqual(len(told["problems"]), 1, (path, told))
+                self.assertIn(f"workers cannot be kept from reading {path}: ", told["problems"][0])
+                self.assertIn(why, told["problems"][0], path)
+                self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+            fine = [str(home / ".config" / "myproject" / "keys.json"), "/usr/lib/myproject-keys", str(systmp / "keys"),
+                    str(self.desk.root / "elsewhere"), "/opt/homebrew/Cellar/myformula/1.0/keys"]
+            self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
         from hansa import run
@@ -7712,7 +8096,9 @@ class DeskTest(unittest.TestCase):
             self.assertIn(str(good), deny)
             self.assertFalse(set(bad) & set(deny), deny)
             self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
-                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir)])
+                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir,
+                                                                          self.desk.notes_dir)]
+                             + [f"Read(//{str(self.desk.root).lstrip('/')}/CLAUDE.md)"])
             self.assertEqual(len(m["no_read_left_out"]), len(bad))
             shown = views.show_text(self.desk, tid)
             for path, why in bad.items():
@@ -8010,6 +8396,385 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(cfg["mcpServers"]["browser"]["args"][1:], [str(self.desk.tasks_dir / "t0001" / "browser"),
                                                                     "/usr/bin/env true"])
         self.assertIn("with a browser", views.show_text(self.desk, "t0001"))
+
+    def preview_lane(self, preview: str, wait: int = 20, **env):
+        """Lane a with a browser on the desk, this preview, and the stand-in worker telling (FAKE_SEE_PREVIEW) whether
+        the preview runs as it works; the preview writes its pid to self.tmp/preview.pid. hansa starts the preview as
+        on macOS. Returns (the argv file, the file the worker writes what it saw to)."""
+        seen, saw = self.tmp / "argv.jsonl", self.tmp / "saw-preview.json"
+        s = self.desk.settings()
+        s["browser"] = "/usr/bin/env true"
+        s["lanes"]["a"].update(preview=f"echo $$ > {shlex.quote(str(self.tmp / 'preview.pid'))}; {preview}",
+                               preview_wait_s=wait, env={"FAKE_SHOW_ARGV": str(seen),
+                                                         "FAKE_SEE_PREVIEW": f"{self.tmp / 'preview.pid'}:{saw}", **env})
+        self.assertEqual(self.desk.save_settings(s), [])
+        starts = unittest.mock.patch("hansa.run.PREVIEW_STARTS", True)
+        starts.start()
+        self.addCleanup(starts.stop)
+        self.addCleanup(self.kill_preview)
+        return seen, saw
+
+    def preview_pid(self) -> int:
+        f = self.tmp / "preview.pid"
+        return int(f.read_text()) if f.exists() else 0
+
+    def kill_preview(self):
+        if self.preview_pid() > 0:  # never 0: that is this process's own group
+            try:
+                os.killpg(self.preview_pid(), signal.SIGKILL)
+            except OSError:
+                pass
+
+    def preview_gone(self, wait=15) -> bool:
+        from hansa import run
+        pid, end = self.preview_pid(), time.time() + wait
+        while time.time() < end:
+            if not run.alive(pid) or run._state(pid) == "Z":
+                return True
+            time.sleep(0.1)
+        return False
+
+    def add_browser_task(self) -> str:
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
+        return self.desk.tasks()[-1]["id"]
+
+    def test_preview_starts_in_srt_with_local_binding_for_it_alone_and_the_worker_gets_its_address(self):
+        seen, saw = self.preview_lane("echo booting; echo '  Local:   http://localhost:\x1b[1m5173\x1b[22m/'; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        [call] = [c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]
+        self.assertTrue(call["settings"]["network"]["allowLocalBinding"])  # for the preview's own process
+        self.assertEqual(call["settings"]["network"]["allowedDomains"], [])  # the lane's list, nothing added
+        self.assertEqual(Path(call["cwd"]).resolve(), (self.desk.worktrees_dir / "a").resolve())
+        self.assertEqual(call["env"].get("HANSA_TASK"), tid)
+        self.assertFalse({"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} & set(call["env"]))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        worker = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["network"]
+        self.assertNotIn("allowLocalBinding", worker)  # the worker's own sandbox stays as the lane sets it
+        prompt = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("the app\nis at http://localhost:5173/. Open that address in the browser.", prompt)
+        self.assertEqual(json.loads(saw.read_text())["up"], True)  # it ran while the worker did, in a group of its own
+        self.assertNotEqual(json.loads(saw.read_text())["group"], json.loads(saw.read_text())["mine"])
+        self.assertTrue(self.preview_gone())  # and was stopped when the worker ended
+        self.assertEqual((m["preview"]["ready"], m["preview"]["address"]), (True, "http://localhost:5173/"))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("preview (started by hansa for the browser): ready at http://localhost:5173/", shown)
+        self.assertIn(str(self.desk.tasks_dir / tid / "preview.log"), shown)
+        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.json").exists())
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview-sandbox.json").exists())
+        plain = self.desk.new_task("No browser")  # a task without a browser gets no preview
+        self.settle(Dispatcher(self.desk), plain)
+        self.assertEqual(len([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]), 1)
+        self.assertNotIn("preview", self.desk.meta(plain))
+
+    def test_preview_ready_once_a_port_it_names_answers(self):
+        skip_unless_ports(self)
+        self.preview_lane(f"exec {shlex.quote(sys.executable)} -u -c " + shlex.quote(
+            "import socket, time; s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(5); "
+            "print('listening on port', s.getsockname()[1]); time.sleep(600)"))
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertTrue(m["preview"]["ready"], m["preview"])
+        self.assertRegex(m["preview"]["address"], r"^http://localhost:\d+$")
+
+    def test_preview_not_ready_in_time_is_stopped_and_the_worker_told_with_its_last_lines(self):
+        seen, saw = self.preview_lane("echo installing; echo still compiling; exec sleep 600", wait=1)
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)  # the task goes on without it
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("and it did not\nstart: it was not ready within 1 seconds", prompt)
+        self.assertIn("    installing\n    still compiling\n", prompt)
+        self.assertEqual(json.loads(saw.read_text())["up"], False)  # stopped before the worker started
+        self.assertTrue(self.preview_gone())
+        self.assertFalse(m["preview"]["ready"])
+        self.assertIn("did not start: it was not ready within 1 seconds", views.show_text(self.desk, tid))
+        self.preview_lane("echo no address; exit 3")  # one that ends first
+        tid = self.add_browser_task()
+        self.settle(Dispatcher(self.desk), tid)
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("it ended (exit 3) before it was ready", prompt)
+        self.assertIn("    no address\n", prompt)
+
+    def test_preview_is_stopped_when_the_worker_fails_or_is_cancelled(self):
+        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_STOP_AT_TURNS="1")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(self.preview_gone())
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"])
+        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
+                          FAKE_TMP_WAIT="60")
+        (self.tmp / "preview.pid").unlink()
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        end = time.time() + 20
+        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.assertTrue(self.preview_pid() and not self.preview_gone(wait=0.5))
+        self.desk.update(tid, cancel=True)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertTrue(self.preview_gone())
+
+    def test_preview_left_by_a_worker_an_earlier_server_started_is_stopped(self):
+        self.preview_lane("echo http://localhost:8124; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
+                          FAKE_TMP_WAIT="60")
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        end = time.time() + 20
+        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        pid = self.desk.meta(tid)["pid"]
+        os.killpg(pid, signal.SIGKILL)  # the worker and what hansa ran around it, gone with no chance to stop it
+        d.procs[tid].wait()
+        self.assertFalse(self.preview_gone(wait=0.5))  # the preview, in a group of its own, still runs
+        m = self.settle(Dispatcher(self.desk), tid)  # a server started again
+        self.assertNotIn(m["state"], ("queued", "running"))
+        self.assertTrue(self.preview_gone())
+        self.assertTrue(m["preview"]["stopped"])
+        self.assertTrue((self.desk.tasks_dir / tid / "preview.log").exists())
+
+    def test_preview_is_stopped_and_its_log_kept_when_the_detail_readers_at_the_end_break(self):
+        from hansa import run
+
+        def broken(*_):
+            raise RuntimeError("a reader broke")
+        for name in ("usage_of", "usage_from_record", "report_after_notices", "background_left"):
+            patch = unittest.mock.patch.object(run, name, broken)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.preview_lane("echo booting; echo http://localhost:8126/; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertNotIn(m["state"], ("queued", "running"))
+        self.assertTrue(self.preview_gone())  # stopping it is not a detail: no reader's error keeps it running
+        self.assertTrue(m["preview"]["stopped"])
+        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
+        events = [json.loads(x) for x in self.desk.events_path.read_text().splitlines()]
+        self.assertIn("usage", {e["what"] for e in events if e["event"] == "detail_unread"})
+
+    def test_preview_output_is_kept_with_keys_removed(self):
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        self.preview_lane(f"echo token {key}; echo http://localhost:8125/; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        log = (self.desk.tasks_dir / tid / "preview.log").read_text()
+        self.assertIn("token [key of registry]", log)
+        self.assertNotIn(key, log)
+        self.assertNotIn(key, json.dumps(m))
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.log").exists())
+
+    def test_preview_not_ready_note_has_the_desks_keys_removed(self):
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        seen, _ = self.preview_lane(f"echo token {key}; exec sleep 600", wait=1)
+        tid = self.add_browser_task()
+        self.settle(Dispatcher(self.desk), tid)
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("    token [key of registry]\n", prompt)
+        self.assertNotIn(key, prompt)
+
+    def test_preview_flooding_its_output_keeps_a_bounded_log_and_does_not_hold_up_the_server(self):
+        from hansa import run
+        flood = ("import sys, time\nline = b'A' * 999 + b'\\n'\nend, n = time.time() + 3, 0\n"
+                 "while time.time() < end and n < 2 ** 30:\n    sys.stdout.buffer.write(line * 1024); n += 2 ** 20\n"
+                 "sys.stdout.buffer.flush()\nprint('the end of it', flush=True)\ntime.sleep(600)\n")
+        self.preview_lane(f"echo http://localhost:8128/; exec {shlex.quote(sys.executable)} -c {shlex.quote(flood)}",
+                          FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="5")
+        raw_log, sizes = self.desk.state_dir / "runs" / "t0001" / "preview.log", []
+        took, real_finish = [], run.finish
+
+        def timed(*a):
+            t = time.time()
+            try:
+                return real_finish(*a)
+            finally:
+                took.append(time.time() - t)
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.run.finish", timed):
+            end = time.time() + 60
+            while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
+                d.tick()
+                if raw_log.exists():
+                    sizes.append(raw_log.stat().st_size)
+                time.sleep(0.2)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertLess(max(sizes), 2 ** 23)  # a few MB at most on disk, while it ran too
+        log = self.desk.tasks_dir / tid / "preview.log"
+        self.assertLess(log.stat().st_size, 2 ** 23)
+        text = log.read_text()
+        self.assertTrue(text.startswith("http://localhost:8128/\n"))
+        self.assertRegex(text, r"\n\[hansa: \d+ bytes of the preview's output left out here\]\nA{999}\n")
+        self.assertTrue(text.endswith("the end of it\n"))
+        self.assertLess(max(took), 10)  # hansa serve read no more than that
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
+        big = self.tmp / "big.log"  # what publish reads of a log hansa did not write itself is bounded too
+        with open(big, "wb") as f:
+            f.write(b"first line\n")
+            f.truncate(2 ** 30)
+            f.seek(0, 2)
+            f.write(b"\nlast line\n")
+        text = run.read_bounded(big, 2 ** 20, 2 ** 20)
+        self.assertLess(len(text), 2 ** 21 + 200)
+        self.assertTrue(text.startswith("first line\n") and text.endswith("\nlast line\n"))
+
+    def test_preview_stops_what_it_started_that_left_its_group_and_cleared_its_environment(self):
+        from hansa import run
+        py, d1, d2 = shlex.quote(sys.executable), self.tmp / "d1.pid", self.tmp / "d2.pid"
+        away = (f"import os\nopen({str(d1)!r}, 'w').write(str(os.getpid()))\nos.setsid()\nos.chdir('/')\n"
+                "os.execve('/bin/sleep', ['sleep', '600'], {})\n")  # its own session, no environment, elsewhere
+        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
+                 f"open({str(d2)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
+        self.preview_lane(f"echo http://localhost:8129/; {py} -c {shlex.quote(away)} & {py} -c {shlex.quote(twice)} & "
+                          "exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="3")
+
+        def pid_of(f):
+            return int(f.read_text()) if f.exists() and f.read_text() else 0
+
+        def kill_daemons():
+            for f in (d1, d2):
+                if pid_of(f):
+                    try:
+                        os.kill(pid_of(f), signal.SIGKILL)
+                    except OSError:
+                        pass
+        self.addCleanup(kill_daemons)
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertTrue(pid_of(d1) and pid_of(d2))
+        for f in (d1, d2):  # the first seen below the preview, the second working in its worktree
+            end = time.time() + 10
+            while run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z" and time.time() < end:
+                time.sleep(0.1)
+            self.assertFalse(run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z", f.name)
+
+    def kept_preview_log(self, tid: str, *chunks: bytes) -> str:
+        """What the task's folder keeps of this preview output, as preview.py and hansa serve keep it."""
+        from hansa import preview, run
+        raw = self.desk.raw_dir(tid)
+        raw.mkdir(parents=True, exist_ok=True)
+        kept = preview.Kept(str(raw / "preview.log"), run.PREVIEW_KEEP // 2)
+        for c in chunks:
+            for i in range(0, len(c), 65536):  # as drain reads the pipe
+                kept.add(c[i:i + 65536])
+        kept.close()
+        run.publish(self.desk, tid, "preview.log", most=run.PREVIEW_KEEP + 4096)
+        return str(self.desk.tasks_dir / tid / "preview.log")
+
+    def test_preview_a_key_cut_inside_a_long_line_of_the_kept_log_leaves_no_part_of_it(self):
+        from hansa import run
+        key = b"sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_bytes(key)
+        half, tid = run.PREVIEW_KEEP // 2, self.desk.new_task("Keys at the cuts")
+
+        def only_filler(text):
+            body = re.sub(r"\n\[hansa: [^\]]*\]\n", "", text)
+            self.assertLessEqual(set(body), set("xyz\n"), "a part of the key is left")
+            self.assertIn(f"with {run.PREVIEW_MARGIN} bytes on each side of a cut inside a line", text)
+        # one line with no newline: a key across the end of the kept start, another across the start of the kept end
+        out = b"x" * (half - 10) + key + b"y" * (3 * half) + key + b"z" * (half - 10)
+        log = self.kept_preview_log(tid, out)
+        only_filler(Path(log).read_text())
+        big = self.tmp / "big.log"  # read_bounded cuts the same way
+        big.write_bytes(out)
+        only_filler(self.desk.redact(run.read_bounded(big, half, half)))
+        b2 = self.desk.new_task("A key just after the start's last line")  # its start ends at a line, its end not
+        only_filler(Path(self.kept_preview_log(b2, b"x" * 100 + b"\n" + b"y" * (half - 20) + key + b"z" * half)).read_text())
+
+    def test_preview_binary_output_is_kept_within_its_bound_on_disk(self):
+        from hansa import run
+        tid = self.desk.new_task("Binary output")
+        log = self.kept_preview_log(tid, os.urandom(3 * run.PREVIEW_KEEP))
+        self.assertLessEqual(Path(log).stat().st_size, run.PREVIEW_KEEP + 4096)
+        self.assertIn("left out here", Path(log).read_text(encoding="utf-8"))  # and it is UTF-8 still
+
+    def test_preview_kept_log_with_many_short_keys_stays_within_its_bound_on_disk(self):
+        from hansa import run
+        K = run.PREVIEW_KEEP
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry-of-the-team.key").write_bytes(b"k1234567")
+        tid = self.desk.new_task("Keys flood")
+        log = Path(self.kept_preview_log(tid, (b"\xff" + b"k1234567" + b"\xfe") * (3 * K // 10)))
+        self.assertLessEqual(log.stat().st_size, K + 4096)
+        text = log.read_bytes().decode("utf-8")
+        self.assertNotIn("k1234567", text)
+        self.assertIn("[key of registry-of-the-team]", text)
+        self.assertTrue(re.search(r"\n\[hansa: \d+ bytes left out here, after keys were removed\]\n", text))
+
+    def test_preview_end_stops_an_orphan_in_the_worktree_but_not_a_process_with_a_parent_there(self):
+        from hansa import run
+        tid, folder = self.desk.new_task("Look at the page"), self.tmp / "wt"
+        (folder / "sub").mkdir(parents=True)
+        orphan_pid = self.tmp / "orphan.pid"
+        raw = self.desk.raw_dir(tid)
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / "preview.json").write_text(json.dumps({"pgid": 2 ** 22 + 7, "started": time.time() - 1, "seen": {},
+                                                      "cwd": str(folder), "tmp": str(self.tmp / "ptmp")}))
+        self.desk.change(tid, lambda x: {"preview": {"started": True}})
+        shell = subprocess.Popen(["sleep", "600"], cwd=folder / "sub")  # the principal's own, its parent alive
+        self.addCleanup(lambda: (shell.kill(), shell.wait()))
+        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
+                 f"open({str(orphan_pid)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
+        subprocess.run([sys.executable, "-c", twice], cwd=folder, check=True)
+        end = time.time() + 10
+        while not (orphan_pid.exists() and orphan_pid.read_text()) and time.time() < end:
+            time.sleep(0.05)
+        orphan = int(orphan_pid.read_text())
+
+        def kill_orphan():
+            try:
+                os.kill(orphan, signal.SIGKILL)
+            except OSError:
+                pass
+        self.addCleanup(kill_orphan)
+        while run.process_table().get(orphan, (0,))[0] != 1 and time.time() < end:
+            time.sleep(0.05)
+        run.end_preview(self.desk, tid)
+        self.assertIsNone(shell.poll())  # left alone
+        self.assertFalse(run.alive(orphan) and run._state(orphan) != "Z")
+        events = self.desk.events_path.read_text()
+        self.assertIn(f"{orphan} (an orphan working in the preview's folders)", events)
+        self.assertNotIn(str(shell.pid), events)
+
+    def test_preview_is_not_started_on_linux_and_the_worker_is_told(self):
+        seen, _ = self.preview_lane("echo http://localhost:8126/; exec sleep 600")
+        with unittest.mock.patch("hansa.run.PREVIEW_STARTS", False):
+            tid = self.add_browser_task()
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]], [])
+        self.assertFalse(self.preview_pid())
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("hansa does not start it on Linux", prompt)
+        self.assertIn("not started: hansa does not start a preview on Linux", views.show_text(self.desk, tid))
+        lines = "\n".join(views.preview_text(False, self.desk.settings()["lanes"]["a"]))
+        self.assertIn("on Linux hansa does not start it", lines)
+        mac = "\n".join(views.preview_text(True, self.desk.settings()["lanes"]["a"]))
+        self.assertIn("can reach every service on this machine's loopback", mac)
+        self.assertIn("up to 20 s (preview_wait_s)", mac)
+        self.assertIn("preview: ", views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "preview_wait_s", "45")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["preview_wait_s"], 45)
+        with self.assertRaises(SystemExit):
+            self.hansa("lane", "set", "a", "preview_wait_s", "0")
+        self.hansa("lane", "set", "a", "preview_wait_s", "none")
+        self.assertNotIn("preview_wait_s", self.desk.settings()["lanes"]["a"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        said = " ".join(out.getvalue().split())
+        self.assertIn("On Linux hansa does not start it", said)
+        self.assertIn("can reach every service on the machine's loopback", said)
 
     def test_stopped_worker_still_hands_in_what_it_wrote(self):
         s = self.desk.settings()

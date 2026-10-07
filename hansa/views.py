@@ -13,7 +13,8 @@ from . import alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
-                  markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, progress_of, provider_problem, serve_code, server_state,
+                  markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of, provider_problem,
+                  rest_minutes, rest_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
@@ -519,6 +520,7 @@ def status(desk: Desk) -> dict:
                    "trying": n in tried}  # a `hansa lane try` queued or running holds the lane
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
+                       "rest_minutes": rest_minutes(s, n), "rest_own": own_rest_minutes(s, n) is not None,
                        "problem": provider_problem(desk, s, n), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
@@ -628,8 +630,10 @@ def status_text(st: dict) -> str:
         out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
     out.append("providers:")
     wn, wm = (max((len(p[k]) for p in st["providers"]), default=0) for k in ("name", "model"))
-    for p in st["providers"]:
-        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {p['problem'] or 'ready'}")
+    rests = [rest_words(p) for p in st["providers"]]
+    wr = max(map(len, rests), default=0)
+    for p, rest in zip(st["providers"], rests):
+        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
     if [r for r in st.get("releases") or [] if r["state"] in release.OPEN]:
         out.append("releases (hansa release):")
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
@@ -641,6 +645,29 @@ def status_text(st: dict) -> str:
     out.append(f"last 24 h: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
                f" (worth ${t['worker_usd']:.2f}; hansa cost for everything)")
     return "\n".join(out)
+
+
+def rest_words(p: dict) -> str:
+    """A provider's rest after a usage limit whose error gives no reset time, for hansa status."""
+    if p.get("rest_minutes") is None:
+        return ""
+    return f"rest {p['rest_minutes']} min" + ("" if p.get("rest_own") else " (desk)")
+
+
+def limit_wait(desk: Desk, m: dict) -> str:
+    """For hansa show: the line of a queued task whose last run ended on its provider's usage limit while that
+    provider still rests; '' otherwise."""
+    last = (m.get("attempts") or [{}])[-1]
+    if m.get("state") != "queued" or last.get("kind") != "limit":
+        return ""
+    st = desk.provider_state().get(last["provider"]) or {}
+    if st.get("cool_until", 0) <= time.time():
+        return ""
+    how = rest_text(st)
+    return (f"waits for the rest of {last['provider']} after its usage limit, until "
+            f"{time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))}" + (f" ({how})" if how else "")
+            + f"; it starts again then, or sooner on another provider of lane {m.get('lane') or 'any'} that is ready."
+            + (" That return used a try." if last.get("counted") else " That return used no try."))
 
 
 def markers_of(desk: Desk, m: dict) -> dict:
@@ -783,7 +810,11 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out += [f"env: {x}" for x in m.get("env_left_out") or []]
     out += [f"what workers may not read: {x}" for x in m.get("no_read_left_out") or []]
     for a in m.get("attempts", []):
-        out.append(f"earlier try on {a['provider']}: {a['error']}")
+        out.append(f"earlier try on {a['provider']}: {a['error']}" if a.get("kind") != "limit" else
+                   f"earlier run on {a['provider']}: {a['error']} (its usage limit; "
+                   + ("counted as a try)" if a.get("counted") else "no try used)"))
+    if limit_wait(desk, m):
+        out.append(limit_wait(desk, m))
     report = report_of(desk, tid)
     if report:
         lines = report.splitlines()
@@ -848,6 +879,20 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if shots:
         out.append(f"browser files ({len(shots)}) in {d / 'browser'}: " + ", ".join(x.name for x in shots[:6])
                    + (" ..." if len(shots) > 6 else ""))
+    pv = m.get("preview") or {}
+    if pv:
+        log = d / "preview.log"
+        where = f"; its output, keys removed: {log}" if log.exists() else ""
+        if not pv.get("started"):
+            out.append(f"preview (started by hansa for the browser): not started: {pv.get('why', '')}")
+        elif pv.get("ready"):
+            out.append(f"preview (started by hansa for the browser): ready at {pv.get('address')} after "
+                       f"{pv.get('waited', 0)} s, stopped when the worker ended{where}")
+        elif pv.get("stopped"):
+            out.append(f"preview (started by hansa for the browser): did not start: {pv.get('why') or 'no answer'}"
+                       f"{where}")
+        else:
+            out.append(f"preview (started by hansa for the browser): running now: {pv.get('command', '')}")
     chk = m.get("check")
     if chk and chk.get("could_not_run"):
         out.append(f"check (run by hansa, not the worker): {chk['note']}: {chk['command']}")
@@ -983,6 +1028,27 @@ def local_servers_text(mac: bool, listed: bool) -> str:
             + ("; this lane lists it, and need not" if listed else ""))
 
 
+def preview_text(mac: bool, ln: dict) -> list:
+    """What becomes of a lane's preview on this machine, for hansa explain lane: its lines."""
+    if not ln.get("preview"):
+        return ["  preview: none (a design session or a task with a browser has no app started for it)"]
+    head = (f"  preview: {ln['preview']} (a design session starts it itself with its Bash tool; for a task or"
+            " verification with a browser, hansa starts it")
+    if mac:
+        return [head + " before the worker, in the worktree after the lane's setup, in srt with the lane's sandbox"
+                " plus local binding for this one process, waits up to"
+                f" {ln.get('preview_wait_s', 120)} s (preview_wait_s) for the first http://localhost:PORT address it"
+                " prints or a port it names that answers, tells the worker the address, and stops it with its whole"
+                " process group, and each process seen below it (looked for every half second), when the worker"
+                " ends; its output is kept in the task's folder, keys removed, its first and last 2 MB at most)",
+                "    on macOS, while it runs this preview can reach every service on this machine's loopback, as a"
+                " lane with localhost on its network list can: the price of looking at the app in a browser on a Mac"]
+    return [head + " on macOS only)",
+            "    on Linux hansa does not start it: srt runs it with a network of its own (a namespace with its own"
+            " loopback), so the browser, outside the sandbox, could not reach a server bound there; the worker is"
+            " told so"]
+
+
 def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False) -> str:
     """hansa explain. whole (--all): for a lane, the built-in list of what workers may not read, name by name."""
     s = desk.settings()
@@ -1031,6 +1097,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                " setup, check, network or write list, or moving the desk to another machine)"
                + (f"; its merge check: hansa lane try {name} --merge-check" if own_merge_check(ln) else "")]
               if ln.get("setup") or ln.get("check") or ln.get("merge_check") else []),
+            *preview_text(sys.platform == "darwin", ln),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
@@ -1067,6 +1134,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         return "\n".join([
             f"provider {name} (set by the principal on the web page)",
             f"  kind: {p['kind']} · model: {p['model']} · effort: {p.get('effort') or 'default'}",
+            f"  rest after a usage limit: until the reset time the error gives, and a minute; else "
+            f"{rest_minutes(s, name)} minutes"
+            + (" (its own rest_minutes)" if own_rest_minutes(s, name) is not None else " (the desk's cool_minutes)"),
             f"  {'login' if p['kind'] == 'subscription' else 'endpoint'}: {where}"
             + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
