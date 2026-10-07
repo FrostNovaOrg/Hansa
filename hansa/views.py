@@ -53,9 +53,9 @@ SUREFIRE_SUMMARY = re.compile(r"^\[ERROR\] (Failures|Errors|Tests in error|Faile
 SUREFIRE_RUN = re.compile(r"^\[ERROR\] Tests run: \d+")  # its count of a run that failed ([INFO] when it passed)
 MAVEN_COMPILE = re.compile(r"^\[ERROR\] COMPILATION ERROR")
 MAVEN_ERROR = re.compile(r"^\[ERROR\] .+:\[\d+,\d+\] ")  # a compiler's error at path:[line,col], in any language
-GO_FAIL = re.compile(r"^\s*--- FAIL: \S")  # go test, its messages above it (-v) or under it
+GO_FAIL = re.compile(r"^\s*--- FAIL: (\S+)")  # go test, its messages above it (-v) or under it
 GO_PASS = re.compile(r"^\s*--- (PASS|SKIP): ")
-GO_RUN = re.compile(r"^=== (RUN|CONT|NAME|PAUSE) ")
+GO_RUN = re.compile(r"^=== (RUN|CONT|NAME|PAUSE)\s+(\S+)")
 GO_PANIC = re.compile(r"^panic: ")  # with the first part of its goroutine trace
 GO_BUILD = re.compile(r"^# \S+$")  # go's build errors of a package: file.go:line:col: message under it
 GO_ERROR = re.compile(r"^\S+\.go:\d+:\d+: ")
@@ -123,12 +123,28 @@ def failure_spans(lines: list) -> list:
             errors += 1
             keep, kind = list(range(i, end)), "error"
         elif GO_FAIL.match(x):
-            while start > floor and indented(start - 1) and not GO_PASS.match(lines[start - 1]) and i - start < 20:
-                start -= 1  # go test -v prints a test's messages as it runs: above its --- FAIL line
-            if start > floor and GO_RUN.match(lines[start - 1]) and start < i:
-                start -= 1
             end = until(i, lambda k: not indented(k), 20)
-            keep = [k for k in range(start, end) if not GO_PASS.match(lines[k])]
+            failing = {m.group(1) for k in range(i, end) if (m := GO_FAIL.match(lines[k]))}
+            name = GO_FAIL.match(x).group(1)
+            top = next((k for k in range(i - 1, floor - 1, -1) if (m := GO_RUN.match(lines[k]))
+                        and m.group(1) == "RUN" and m.group(2) == name), None)
+            above, part = [], []  # go test -v prints a test's messages as it runs, under its own === RUN line,
+            if top is not None:  # a subtest's too, before its parent's --- FAIL: those of the failing ones
+                for k in range(top, i + 1):
+                    m = GO_RUN.match(lines[k])
+                    if m or k == i or GO_FAIL.match(lines[k]) or GO_PASS.match(lines[k]) or not indented(k):
+                        if len(part) > 1 and len(above) < 40:  # its === RUN line, with the messages under it
+                            above += part
+                        part = [k] if m and m.group(1) != "PAUSE" and m.group(2) in failing else []
+                    elif part:
+                        part.append(k)
+            else:  # or without one above them
+                while start > floor and indented(start - 1) and not GO_PASS.match(lines[start - 1]) and i - start < 20:
+                    start -= 1
+                if start > floor and GO_RUN.match(lines[start - 1]) and start < i:
+                    start -= 1
+                above = list(range(start, i))
+            keep = above + [k for k in range(i, end) if not GO_PASS.match(lines[k])]
         elif GO_PANIC.match(x):
             k = i + 1
             while k < n and k - i < 8 and not re.match(r"goroutine \d+ \[", lines[k]):

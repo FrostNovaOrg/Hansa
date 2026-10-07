@@ -784,6 +784,21 @@ class DeskTest(unittest.TestCase):
         self.assertIn("example.com/m.f6()", shown)
         self.assertNotIn("example.com/m.f7()", shown)  # its trace, bounded
 
+    def test_go_test_v_keeps_a_failing_subtests_message_with_its_test(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(20))
+        shown = self.failing_show(
+            "=== RUN   TestSum\n    sum_test.go:30: table of 3\n=== RUN   TestSum/neg\n    sum_test.go:12: got -1, "
+            "want 1\n=== RUN   TestSum/pos\n    sum_test.go:14: pos is fine\n=== RUN   TestSum/zero\n"
+            "    sum_test.go:12: got 1, want 0\n--- FAIL: TestSum (0.00s)\n    --- FAIL: TestSum/neg (0.00s)\n"
+            "    --- PASS: TestSum/pos (0.00s)\n    --- FAIL: TestSum/zero (0.00s)\n" + passing
+            + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestSum\n        sum_test.go:30: table of 3\n"
+                      "    === RUN   TestSum/neg\n        sum_test.go:12: got -1, want 1\n    === RUN   TestSum/zero\n"
+                      "        sum_test.go:12: got 1, want 0\n    --- FAIL: TestSum (0.00s)\n        --- FAIL: "
+                      "TestSum/neg (0.00s)\n        --- FAIL: TestSum/zero (0.00s)\n  its last lines:\n", shown)
+        self.assertNotIn("pos is fine", shown)  # never a passing subtest's lines
+        self.assertNotIn("TestSum/pos", shown)
+
     def test_show_lifts_a_maven_compile_error_as_the_errors(self):
         err = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n  符号:   类 Foo{i}\n  位置: 类 a.App\n"
                       for i in range(5, 12))
