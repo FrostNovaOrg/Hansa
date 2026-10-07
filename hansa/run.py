@@ -221,20 +221,32 @@ GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "r
 # (git_write_deny): of the common folder only the worktree's own folder under worktrees/ is left, not
 # another worktree's folder (its commondir or gitdir would lead hansa's git there to hooks of a worker's making).
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs", "config.worktree")
-GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir")
+# config.worktree: with extensions.worktreeConfig on (git sparse-checkout sets it), git takes settings from it,
+# core.fsmonitor among them, which runs a command at the next git status there, hansa's own outside the sandbox
+GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir", "config.worktree")
 GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
 # A design session commits and merges into its own branch, so its sandbox lets it write just what that takes
 # (design_git_write): its worktree's own folder, git's objects, and its branch's ref and log, each with the
 # .lock git takes on it. Not packed-refs, another ref or tag (the base among them), another worktree's
-# folder, git's settings and hooks, or the worktree's commondir, gitdir and config.worktree.
+# folder, git's settings and hooks, or the worktree's HEAD, commondir, gitdir and config.worktree. Git commits
+# and merges on a branch without writing HEAD (it locks it, HEAD.lock, and leaves it as it was); a HEAD the
+# session pointed elsewhere would lead hansa's commit at the session's end onto that branch, the base say.
 DESIGN_GIT_COMMON_DENY = ("config", "hooks", "info", "HEAD", "packed-refs", "config.worktree")
-DESIGN_GIT_OWN_DENY = ("commondir", "gitdir", "config.worktree")
+DESIGN_GIT_OWN_DENY = ("HEAD", "commondir", "gitdir", "config.worktree")
 DESIGN_GIT_COMMON_OPEN = ("objects", "refs", "logs", "worktrees")  # what in the common folder is not kept whole
 # What a design session's commands run git with: no gc, maintenance or rerere of git's own accord, which
-# would rewrite packed-refs, pack objects or write in the common folder, all of which its sandbox refuses
-DESIGN_GIT_ENV = {"GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
-                  "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false",
-                  "GIT_CONFIG_KEY_2": "rerere.enabled", "GIT_CONFIG_VALUE_2": "false"}
+# would rewrite packed-refs, pack objects or write in the common folder, all of which its sandbox refuses.
+# Added after any GIT_CONFIG_* pairs there already are (git_config_env).
+DESIGN_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
+# Why there is no design session on Linux. Claude Code opens a linked worktree's whole common git folder for
+# writing (it finds it from the worktree's .git file and adds it to the sandbox's write list); srt on Linux
+# (bubblewrap) drops every denyWrite entry holding * ? [ ], keeps only paths there when a command starts, and
+# mounts each denied folder read-only after every allowed one, so a branch's folder cannot be opened beneath a
+# refs/heads that is kept. The session's commands could then make a loose ref over a packed base, or move a
+# branch hansa makes while it runs.
+DESIGN_ON_LINUX = ("design sessions do not run on Linux: there the sandbox cannot keep a session that commits from "
+                   "making or moving other branches in git's shared folder (the base among them), so hansa does not "
+                   "start one; work on the lane with tasks, or open the design session on a Mac")
 # The characters a deny pattern lists in a [...] class (others_than), with - last: those of the names hansa and
 # git give branches, worktrees' folders and git's own files. A name made later with another character is not
 # kept by the patterns (one there when the run starts is, by name), and hansa never uses one.
@@ -274,7 +286,8 @@ You work only in this directory, on branch task/{tid}, which was made for this s
   refused, say which one and why; do not look for a way around it.
 - Your commands run in the lane's sandbox, as its workers' do: files written only in this
   directory, your temporary folder, the lane's write list, and in git only what committing and
-  merging into task/{tid} takes (no other branch or tag); no network but the lane's list; no
+  merging into task/{tid} takes (no other branch or tag, nor HEAD: stay on this branch); no
+  network but the lane's list; no
   reading of the desk's keys, state, notes and card. A command the sandbox
   refuses does not run outside it: tell the principal what it needed. When git says it cannot
   create packed-refs.lock, that is the sandbox: the commit or merge still went through.
@@ -292,16 +305,6 @@ now. Then say in a few lines what you would change first, and wait for the princ
 PREVIEW_NOTE = """
 To look at the app, start it with `{preview}` (the Bash tool's background option) and open
 the address it prints in the browser.
-"""
-# On Linux Claude Code's sandbox (bubblewrap, as srt) gives each command a network of its own (--unshare-net): a
-# server started there listens on a loopback nothing outside reaches, the browser among them
-DESIGN_LINUX_NOTE = """
-On this machine (Linux) each of your commands runs with a network of its own: an app you start
-cannot be reached from the browser, or by the principal, so do not start the preview to look at
-it. Show the change in screenshots of what can be opened as files, or say in words what changed
-and where; the principal can start the app outside this session to see it running. The sandbox
-also puts empty files where the paths it protects are missing (.bashrc, .gitconfig and the like):
-add files to a commit by name, not with git add -A or git add ., and never commit those.
 """
 NO_BROWSER_NOTE = """
 No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
@@ -473,10 +476,32 @@ def join_command(m: dict) -> str:
     return f"tmux -u -S {tmux_socket_path(sock)} attach -t {name}"
 
 
+_NO_HOOKS = []  # the empty folder hansa's git in a worktree takes its hooks from, made once (no_hooks)
+
+
+def no_hooks() -> str:
+    if not _NO_HOOKS:
+        _NO_HOOKS.append(tempfile.mkdtemp(prefix="hansa-no-hooks-"))  # 0700, the desk's account's alone
+    if not os.path.isdir(_NO_HOOKS[0]):  # removed meanwhile (a /tmp cleaner): a new one
+        _NO_HOOKS[0] = tempfile.mkdtemp(prefix="hansa-no-hooks-")
+    return _NO_HOOKS[0]
+
+
+def worktree_git_settings() -> list:
+    """What hansa runs git with in a linked worktree, whatever a setting there says: no fsmonitor (a command git
+    runs at status, diff and add), hooks from an empty folder (hansa commits and merges with --no-verify, but a
+    checkout, a merge's post-merge and the like still run hooks), and no signing program for its commits and
+    tags. The lane's own checkout runs its hooks as before: hansa's merge into the base relies on them."""
+    return ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={no_hooks()}",
+            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
+
+
 def git(*args, cwd, env=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
     e = {**os.environ, **GIT_ID, **(env or {})}
-    r = subprocess.run(["git", *args], cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
+    linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
+    r = subprocess.run(["git", *(worktree_git_settings() if linked else ()), *args], cwd=str(cwd), env=e,
+                       capture_output=True, text=True, errors="replace")
     if r.returncode:
         refused = account.git_refusal(r.stderr or "", cwd)
         if refused:
@@ -925,6 +950,65 @@ def check_git_folder(wt: Path, line: str) -> None:
             raise GitFolderChanged(wt, admin / name, f"now holds {text[:200]!r}", right)
     if os.path.lexists(common / "commondir"):  # git would take the repository's settings and hooks from there
         raise GitFolderChanged(wt, common / "commondir", "was made", None)
+    # settings of this worktree's own, which git obeys once extensions.worktreeConfig is on: hansa makes it
+    # empty (make_git_write_deny), and no worker or design session may write it
+    if os.path.lexists(admin / "config.worktree"):
+        text, what = _plain_text(admin / "config.worktree")
+        if text is None or text:
+            raise GitFolderChanged(wt, admin / "config.worktree", what or f"now holds {text[:200]!r}", "")
+
+
+def worktree_config_on(common: Path) -> bool:
+    """Whether the repository's settings turn extensions.worktreeConfig on: git then also obeys each worktree's
+    config.worktree. Read by git from that one file, with nothing it includes, and no repository around it."""
+    try:
+        with open(Path(common) / "config", "rb") as fh:
+            if b"worktreeconfig" not in fh.read().lower():  # git spells names in any case; not there, not on
+                return False
+    except OSError:
+        return False
+    r = subprocess.run(["git", "config", "--file", str(Path(common) / "config"), "--type=bool", "--get",
+                        "extensions.worktreeConfig"], cwd="/", capture_output=True, text=True, errors="replace",
+                       env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+    return r.stdout.strip() == "true"
+
+
+def check_git_settings(desk: Desk, wt: Path, line: str) -> None:
+    """Raise GitFolderChanged when the repository's settings for worktrees are not as hansa first saw them (it
+    remembers them, in .hansa/git-settings.json, the first time it runs git in one of its worktrees):
+    extensions.worktreeConfig turned on since, or the common folder's config.worktree (the main checkout's,
+    which git then obeys there) changed and not empty, as hansa makes it."""
+    admin = Path(line[len("gitdir:"):].strip())
+    common = (admin if admin.is_absolute() else Path(wt) / admin).resolve().parent.parent
+    on = worktree_config_on(common)
+    cw, cw_what = _plain_text(common / "config.worktree") if os.path.lexists(common / "config.worktree") else ("", "")
+    first = (read_json(desk.state_dir / "git-settings.json", {}) or {}).get(str(common))
+    if first is None:
+        with desk.lock():
+            seen = read_json(desk.state_dir / "git-settings.json", {}) or {}
+            first = seen.setdefault(str(common), {"worktree_config": on, "config_worktree": cw})
+            desk.state_dir.mkdir(exist_ok=True)
+            write_json(desk.state_dir / "git-settings.json", seen)
+    if on and not first.get("worktree_config"):
+        raise GitFolderChanged(wt, common / "config", "now turns extensions.worktreeConfig on, which hansa did not "
+                                                      "see on before (git then obeys each worktree's config.worktree)", None)
+    if cw is None or cw and cw != first.get("config_worktree"):
+        raise GitFolderChanged(wt, common / "config.worktree", cw_what or f"now holds {cw[:200]!r}",
+                               first.get("config_worktree") or "")
+
+
+def check_head(desk: Desk, wt: Path, branch: str) -> None:
+    """Raise GitFolderChanged unless the worktree's HEAD names `branch`, the one hansa made for its run: hansa
+    commits and merges on whatever HEAD names, so a HEAD pointed at the base would move the base. Read as a
+    plain file from the worktree's own git folder, after check_git_file."""
+    check_git_file(desk, wt)
+    line = expected_git_line(desk, Path(wt))
+    admin = Path(line[len("gitdir:"):].strip())
+    head = (admin if admin.is_absolute() else Path(wt) / admin) / "HEAD"
+    right = f"ref: refs/heads/{branch}"
+    text, what = _plain_text(head)
+    if text != right:
+        raise GitFolderChanged(wt, head, what or f"now holds {text[:200]!r}, not the task's branch {branch}", right)
 
 
 def check_main_checkout(repo: Path) -> None:
@@ -1028,6 +1112,7 @@ def check_git_file(desk: Desk, wt: Path, repo=None) -> None:
     if found != line:
         raise GitFileChanged(wt, what, line)
     check_git_folder(wt, line)
+    check_git_settings(desk, wt, line)
 
 
 def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
@@ -1048,12 +1133,13 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
                     shutil.copy2(target / name, keep / name)
             except OSError:
                 pass
-        fixable = e.path.name in ("commondir", "gitdir") and e.path.parent.is_dir() and not os.path.isdir(e.path)
+        fixable = (e.path.name in ("commondir", "gitdir", "config.worktree", "HEAD") and e.path.parent.is_dir()
+                   and not os.path.isdir(e.path))
         if fixable:
             if os.path.lexists(e.path):
                 shutil.move(str(e.path), str(keep / f"found.{e.path.name}"))
             if e.right is not None:
-                e.path.write_text(e.right + "\n", encoding="utf-8")
+                e.path.write_text(e.right + "\n" if e.right else "", encoding="utf-8")
         desk.event("worktree_git_changed", task=tid, worktree=str(e.wt), found=f"{e.path} {e.found}",
                    expected=e.expected)
         return (f"{e}. What was found is kept in .hansa/runs/{tid}/{keep.name}; " +
@@ -1224,14 +1310,31 @@ def in_sandbox(desk: Desk, lane: dict, command: str) -> str:
             + " /bin/sh -c " + shlex.quote(with_prelude(command)))
 
 
-def env_file(desk: Desk, tid: str, lane: dict) -> dict:
+def git_config_env(env: dict, pairs) -> dict:
+    """The GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n that give git the settings `pairs` after
+    those `env` gives it already, which are kept: the new ones are numbered on from its count."""
+    n = str(env.get("GIT_CONFIG_COUNT") or "0")
+    n = int(n) if n.isdigit() else 0
+    out = {k: v for k, v in env.items() if re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", k) and int(k.rsplit("_", 1)[1]) < n}
+    for i, (k, v) in enumerate(pairs, n):
+        out.update({f"GIT_CONFIG_KEY_{i}": k, f"GIT_CONFIG_VALUE_{i}": v})
+    return {"GIT_CONFIG_COUNT": str(n + len(pairs)), **out}
+
+
+DESIGN_GIT_ENV = git_config_env({}, DESIGN_GIT_CONFIG)  # as a session gets them when nothing else sets any
+
+
+def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
     """How a worker's Bash commands get the lane's env and JAVA_PRELUDE: {"CLAUDE_ENV_FILE": a file of
     `export K='V'` lines, then the prelude}. Claude Code reads the file itself (it is in the task's raw folder,
     .hansa, which no worker can write or read) and runs its content in front of each Bash command, in the same
     shell, inside its sandbox, where the sandbox's proxy variables and the command's TMPDIR are set. Claude
     Code starts without the lane's env, so its own lookups (git, the sandbox's helpers, its shell, MCP servers)
-    use hansa's environment."""
+    use hansa's environment. `git_config`: settings for git added after any GIT_CONFIG_* the env has (a design
+    session's, git_config_env)."""
     env = sandbox_env(desk, lane)
+    if git_config:
+        env = {**env, **git_config_env(env, git_config)}
     f = desk.raw_dir(tid) / "lane-env.sh"
     fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # only the desk's account reads it
     os.fchmod(fd, 0o600)  # one written before was made with the umask's mode
@@ -1312,8 +1415,8 @@ def design_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, branch
     kept from the environment, nothing run outside it), but it may commit and merge into `branch`, its own
     (design_git_write), and its
     commands are not let through by being sandboxed: its allowed commands stay what they were. On macOS it may
-    bind local ports, so a preview it starts serves the principal's browser; on Linux the sandbox's network is
-    its own, so nothing outside it reaches a server there (DESIGN_LINUX_NOTE)."""
+    bind local ports, so a preview it starts serves the principal's browser. There is no design session on
+    Linux (DESIGN_ON_LINUX); `mac` False gives what the sandbox would be elsewhere."""
     settings = sandbox_settings(desk, lane, pname, p, wt, committing=branch)
     settings["sandbox"]["autoAllowBashIfSandboxed"] = False
     if _ON_MAC if mac is None else mac:
@@ -1934,6 +2037,7 @@ def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: 
     when it merges cleanly; else aborted here and merged again just before the worker starts, after the
     lane's setup (UPDATE_SCRIPT). Returns the files that conflict."""
     try:
+        check_head(desk, wt, f"task/{tid}")
         wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", message or f"Merge {name} into task/{tid}", tip)
         return []
     except GitFileChanged:
@@ -2142,6 +2246,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
 def design_command(desk: Desk, tid: str):
     """The interactive Claude Code run for a design session: (argv, env, directory).
     Built inside the session's own terminal (hansa.session), so no key is on a command line."""
+    if account.LINUX:
+        raise RuntimeError(DESIGN_ON_LINUX)
     s, meta = desk.settings(), desk.meta(tid)
     lane_name = meta["lane"]
     lane, pname = s["lanes"][lane_name], meta["provider"]
@@ -2163,9 +2269,7 @@ def design_command(desk: Desk, tid: str):
         argv += ["--mcp-config", str(cfg)]
     else:
         system += NO_BROWSER_NOTE
-    if account.LINUX:
-        system += DESIGN_LINUX_NOTE
-    elif lane.get("preview"):
+    if lane.get("preview"):
         system += PREVIEW_NOTE.format(preview=lane["preview"])
     if lane.get("preview"):
         extra.append(f"Bash({lane['preview']}:*)")
@@ -2183,7 +2287,8 @@ def design_command(desk: Desk, tid: str):
              "--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
-    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **DESIGN_GIT_ENV, "HANSA_TASK": tid,
+    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane, DESIGN_GIT_CONFIG),
+           **git_config_env(sandbox_env(desk, lane), DESIGN_GIT_CONFIG), "HANSA_TASK": tid,
            "CLAUDE_CODE_TMPDIR": tmp,
            "TMPDIR": tmp, "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
@@ -2194,6 +2299,8 @@ def design_command(desk: Desk, tid: str):
 def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     """Open a design session: an interactive Claude Code run in tmux, in the lane's design
     worktree, which the principal joins. It ends when they leave it with /exit."""
+    if account.LINUX:
+        raise RuntimeError(DESIGN_ON_LINUX)
     s = desk.settings()
     lane = s["lanes"][lane_name]
     ds, co = s.get("design") or {}, s["coordinator"]
@@ -2409,6 +2516,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
         check_git_file(desk, wt, desk.settings()["lanes"].get(meta.get("lane"), {}).get("repo"))
+        check_head(desk, wt, meta.get("branch") or f"task/{tid}")  # what hansa commits or stashes on is the task's
         if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")

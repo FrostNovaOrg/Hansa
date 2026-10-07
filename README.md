@@ -161,29 +161,51 @@ page gives.
   service on the Mac's loopback). It runs only its allowed commands, as
   before, and a command the sandbox refuses does not run outside it: the
   sandbox's `allowUnsandboxedCommands` is off, so Claude Code ignores
-  `dangerouslyDisableSandbox`. On Linux the sandbox (bubblewrap) gives each
-  command a network of its own, so an app the session starts cannot be
-  reached from the browser: the session is told so, `hansa design` says so,
-  and the session shows its work in screenshots of files and in words; the
-  principal can start the app outside the session to see it running. The
-  coordinator runs outside the sandbox.
-  What each may write in git's folders: a worker, and a design session, only
-  their own worktree's folder under `.git/worktrees/`, not its `HEAD`, logs,
-  `commondir` or `gitdir` (a design session may move its `HEAD`, but not the
-  last two or its `config.worktree`). A design session may also write git's
-  objects and its own branch's ref and reflog (each with git's `.lock` beside
-  it), and nothing else: not `packed-refs`, the base or any other branch, tags,
-  another worktree's folder, git's settings, hooks or `info/`, or the
-  worktree's `.git` file; this holds for branches and worktrees made while it
-  runs too (named with letters, digits, `.`, `_` and `-`, as hansa names them). Its commands run git with automatic gc, maintenance and rerere off
-  (through the environment), since those write what it may not; git still tries
-  to lock `packed-refs` on each commit and merge, prints that it could not, and
-  goes on. The lane's setup and check may write nothing of git's folders.
-  Before hansa runs git in a worktree, it checks the worktree's `.git` file and
+  `dangerouslyDisableSandbox`. There are no design sessions on Linux: `hansa
+  design` refuses there with one line, and one queued before does not start.
+  Claude Code opens a worktree's whole shared git folder for writing, and on
+  Linux the sandbox (bubblewrap) keeps only paths that are there when a command
+  starts, takes no name patterns and cannot open a branch's folder beneath a
+  `refs/heads` it keeps, so a session that commits could make or move other
+  branches, the base among them. The coordinator runs outside the sandbox.
+  What each may write in git's folders: a worker only its own worktree's folder
+  under `.git/worktrees/`, not its `HEAD`, logs, `commondir`, `gitdir` or
+  `config.worktree`. A design session (macOS) may write in git exactly what
+  committing and merging into its own branch (`task/<id>`) takes: its own
+  worktree's folder under `.git/worktrees/` but its `HEAD`, `commondir`, `gitdir`
+  and `config.worktree` (git commits and merges on a branch without writing
+  `HEAD`), git's objects, and its branch's ref and reflog, each with git's
+  `.lock` beside it. It cannot move the base, another branch or a tag, or write
+  `packed-refs`, another worktree's folder, git's settings, hooks or `info/`, or
+  the worktree's `.git` file; this holds for branches and worktrees made while
+  it runs too (named with letters, digits, `.`, `_` and `-`, as hansa names
+  them). Its commands run git with automatic gc, maintenance and rerere off
+  (through the environment, after any git settings it already holds), since
+  those write what it may not; git still tries to lock `packed-refs` on each
+  commit and merge, prints that it could not, and goes on. The lane's setup and
+  check may write nothing of git's folders.
+  On Linux a worker's git denials hold for the names there when it starts (the
+  whole `refs/`, `logs/`, `objects/`, `hooks/` and `info/`, git's settings,
+  `packed-refs`, the worktree's `HEAD`, `commondir`, `gitdir` and
+  `config.worktree`, other worktrees' folders), not for the patterns that keep
+  what is made later in the shared folder and under `.git/worktrees/`. What it
+  could make there reaches nothing outside the sandbox: git obeys a new
+  `commondir` or a worktree's folder only through the checks below.
+  Before hansa runs git in a worktree, it checks the worktree's `.git` file;
   that the git folder it leads to still points back to the repository
-  (`commondir`) and to the worktree (`gitdir`) as git wrote them, and in the
-  lane's own checkout that `.git` holds no `commondir`; when one was changed,
-  hansa runs no git there, keeps what it found and puts git's line back.
+  (`commondir`) and to the worktree (`gitdir`) as git wrote them; that its
+  `config.worktree` is empty, as hansa makes it, and the shared folder's is as
+  hansa first saw it or empty; and that `extensions.worktreeConfig`, which makes
+  git obey those files, is not on where hansa first saw it off. When one was
+  changed, hansa runs no git there and keeps what it found; a `.git` file, a
+  `commondir`, `gitdir` or `config.worktree` it puts back as it was. Before it
+  commits or merges in a worktree, it also checks that the worktree's `HEAD`
+  names the branch it made for that run, and puts it back when not; the task
+  fails either way. In the lane's own checkout, a `commondir` in its `.git`
+  stops every hansa git command there until it is removed by hand; hansa does
+  not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
+  hooks from an empty folder and commit and tag signing off, whatever a
+  setting there says; in the lane's own checkout its hooks run as before.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a
@@ -408,8 +430,8 @@ looks like an empty box: it may send the guess as if you wrote it.
 - Alpha: settings, commands and files may still change between versions.
 - A worker's and a design session's commands (the lane's preview among them),
   and the lane's setup and check commands, run in the operating system's
-  sandbox; the coordinator does not, and runs as the desk's user. On Linux a
-  preview a design session starts cannot be reached from the browser. Run a desk as a user, or on a machine, whose files you
+  sandbox; the coordinator does not, and runs as the desk's user. There are no
+  design sessions on Linux (above). Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the

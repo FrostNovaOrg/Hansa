@@ -18,7 +18,7 @@ from . import account, alert, build, cost, installed_text, notes, notify, releas
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
                    kept_from_workers, lane_targets, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
-from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
+from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
@@ -192,6 +192,8 @@ def cmd_add(a):
 
 
 def cmd_design(a):
+    if account.LINUX:
+        raise SystemExit(f"hansa: {DESIGN_ON_LINUX}")
     desk = Desk.find(a.desk)
     s = desk.settings()
     lane = a.lane or (next(iter(s["lanes"])) if len(s["lanes"]) == 1 else "")
@@ -211,10 +213,6 @@ def cmd_design(a):
              if why_not else "hansa opens the design session in seconds and")
     print(f"{tid} queued: {opens} asks the principal to join it. "
           f"It comes back for review when they are done: {notify.wait_step(desk, tid)}")
-    if account.LINUX:
-        print("On Linux the session's commands run in the lane's sandbox with a network of their own: an app it starts "
-              "(the lane's preview among them) cannot be reached from the browser or by the principal, so it shows "
-              "its work in screenshots of files and in words, not in the running app.")
 
 
 def cmd_status(a):

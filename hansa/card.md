@@ -315,10 +315,13 @@ all new is designed elsewhere and comes to you as a finished design.
 - Its commands run in the lane's sandbox, as a worker's do (it may also commit
   and merge into its own branch, and on macOS serve a preview to the browser);
   a command the sandbox refuses does not run outside it. In git it may write
-  only what committing and merging into its own branch takes: it cannot move
-  the base, another branch or a tag, or touch another worktree's git folder. On Linux an app it starts cannot be
-  reached from the browser, so it shows its work in screenshots of files and in
-  words: say so to the principal when you open one there.
+  only what committing and merging into its own branch takes (its worktree's
+  git folder but its HEAD, git's objects, its branch's ref and reflog): it
+  cannot move the base, another branch or a tag, or touch another worktree's
+  git folder. There are no design sessions on Linux: `hansa design` refuses
+  there, because that sandbox cannot keep a session that commits from moving
+  other branches. On a Linux desk, shape a feature with the principal through
+  small tasks instead.
 - When they end it, it comes back like a finished task: the lane's check runs,
   and you verify and merge as usual. How it looks and works is the principal's
   decision: send back only what does not work or does not fit the code.
