@@ -8356,6 +8356,44 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("still running", (d / run.PREVIEW_FIRST_LOG).read_text())
         self.assertIn(str(d / run.PREVIEW_FIRST_LOG), views.show_text(self.desk, tid))
 
+    def test_preview_of_a_run_cancelled_while_its_resume_is_prepared_stays_the_runs_own(self):
+        # A cancel lands while hansa prepares the one resume (sweep can take seconds): the task ends cancelled, not
+        # resumed, and the first run's preview log and record stay as they were, its own.
+        from hansa import run
+        seen = self.tmp / "resumed.jsonl"
+        self.preview_lane("echo http://localhost:8131/; exec sleep 600", FAKE_TRANSCRIPT="bg-cmd", FAKE_RESUMED=str(seen))
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        real_sweep, starts = run.sweep, []
+
+        def cancelled_meanwhile(desk, tid):
+            desk.update(tid, cancel=True)
+            return real_sweep(desk, tid)
+
+        def counted(*a):
+            starts.append(1)
+            return real_preview(*a)
+        real_preview = run.with_preview
+        with unittest.mock.patch.object(run, "sweep", cancelled_meanwhile), \
+                unittest.mock.patch.object(run, "with_preview", counted):
+            tid = self.add_browser_task()
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertIsNone(m.get("resumed"))
+        self.assertFalse(seen.exists())  # no resumed run
+        self.assertEqual(len(starts), 1)  # the first run's preview only
+        d = self.desk.tasks_dir / tid
+        self.assertFalse((d / run.PREVIEW_FIRST_LOG).exists())
+        self.assertIn("http://localhost:8131/", (d / "preview.log").read_text())
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
+        self.assertEqual(m["preview"]["address"], "http://localhost:8131/")
+        shown = views.show_text(self.desk, tid)
+        self.assertNotIn("before hansa resumed it", shown)
+        self.assertNotIn("did not start", shown)
+
     def test_preview_output_is_kept_with_keys_removed(self):
         key = "sk-registry-0123456789abcdef"
         self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)

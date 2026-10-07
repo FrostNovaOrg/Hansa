@@ -2408,18 +2408,21 @@ def resume(desk: Desk, tid: str):
     except (GitFileChanged, OSError, ValueError):  # finish says what happened
         return None
     sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
-    if meta.get("browser") and s.get("browser") and lane.get("preview"):
-        # the first run's preview was stopped with it (end_preview, before this): the resumed run gets one of its
-        # own, started again from the same worktree, and the first one's output is kept beside it
-        first = desk.tasks_dir / tid / "preview.log"
-        if first.exists():
-            first.replace(first.with_name(PREVIEW_FIRST_LOG))
-        argv = with_preview(desk, tid, argv, lane, pname, p, wt)
     note = RESUME_NOTE.format(left="; ".join(left), bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane))
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
-    with desk.lock():
-        if desk.meta(tid).get("cancel"):
+    with desk.lock():  # a cancel or another end lands before this (no resume, its logs as they are) or after it
+        now_meta = desk.meta(tid)
+        if now_meta.get("cancel") or now_meta.get("resumed") or now_meta.get("timed_out") \
+                or now_meta.get("state") != "running" or now_meta.get("session_id") != sid:
             return None
+        if meta.get("browser") and s.get("browser") and lane.get("preview"):
+            # the first run's preview was stopped with it (end_preview, before this): the resumed run gets one of
+            # its own, started again from the same worktree, and the first one's output is kept beside it. Only
+            # here, once the resume is certain, so a run that ends instead keeps its preview's log and record
+            first = desk.tasks_dir / tid / "preview.log"
+            if first.exists():
+                first.replace(first.with_name(PREVIEW_FIRST_LOG))
+            argv = with_preview(desk, tid, argv, lane, pname, p, wt)
         desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
                                   "rows": len(_rows(home, sid) or []), "usage": usage_of(run),
                                   "turns": run.get("num_turns")})
