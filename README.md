@@ -86,6 +86,15 @@ page gives.
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) and asking for a release
   (`hansa release L "note"`), never pushing or deploying by itself.
+  Each lane may also set the form of the messages hansa writes into its
+  repository: `commit_message` for the commit of a task's work (and the merge
+  of the base into a task's branch on `retry --update`), `merge_message` for a
+  task's merge into the base, each one line with `{task}`, `{title}` and
+  `{lane}` that holds `{task}` or `{title}`
+  (`hansa lane set L merge_message "Merge: {title}"`). Unset, they are
+  `t0001: <title>` and `Merge t0001: <title>`. A lane whose release goes to a
+  public repository usually leaves `{task}` out; the release's word check reads
+  every outgoing commit message all the same.
   Setup, check, merge check and preview run outside the worker, so each change to them is
   recorded and the coordinator tells the principal about it. It is not a
   worker: it runs on this machine outside any sandbox, and besides `hansa` it
@@ -213,6 +222,20 @@ asking (its plan and findings, kept past a cleared session); everything else it
 edits asks as before, and the closed files stay closed. `hansa notes archive FILE HEADING`
 moves a finished section from a notes file to `notes/archive/FILE` without the
 coordinator typing it out again.
+
+The project's own rules (how it builds, what may never go out, who decides what)
+go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
+`@notes/PROJECT.md` (Claude Code's import syntax for memory files), so Claude Code
+loads it with the card at every start, after `/clear` and after compaction, and the
+import survives every card refresh. `hansa init` makes the file once, holding only
+an HTML comment that says what it is for (Claude Code drops such comments, so it
+costs nothing until something is written there); hansa never writes it again. A
+missing file loads nothing and stops nothing. The coordinator and you keep it; the
+coordinator edits it without asking, as anything under `notes/`. Workers do not
+see it: rules for a lane's workers go in its brief. `hansa status` shows its size,
+and calls it long past 8 KB: it is part of the conversation's first message, so
+every turn rereads it, and 8 KB (some 2,000 tokens) is about the 200 lines Claude
+Code advises a memory file to stay under.
 
 The coordinator's session does not load the claude.ai connectors of the Claude
 account it logs in with (Claude Code's `disableClaudeAiConnectors`): a connector

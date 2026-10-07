@@ -609,6 +609,51 @@ class DeskTest(unittest.TestCase):
         return {str(p.relative_to(self.desk.notes_dir)): p.read_bytes() for p in self.desk.notes_dir.rglob("*")
                 if p.is_file()}
 
+    def test_project_file_is_made_once_and_the_card_imports_it(self):
+        project = self.desk.root / "notes" / "PROJECT.md"
+        self.assertEqual(project, self.desk.project_path)
+        made = project.read_text()
+        self.assertEqual(len(made.splitlines()), 1)  # one line saying what it is for, as a comment Claude Code drops
+        self.assertTrue(made.startswith("<!--") and made.rstrip().endswith("-->"))
+        card = (self.desk.root / "CLAUDE.md").read_text()
+        # on a line of its own, outside backticks: a path in a code span is not imported
+        self.assertIn("\n@notes/PROJECT.md\n", card)
+        project.write_text("# Rules\nnever push on Fridays\n")
+        (self.desk.root / "CLAUDE.md").write_text("an older card\n")
+        cli.coordinator_desk(self.desk, os.getuid())  # the card refreshed: the import comes back, the file is left
+        self.assertIn("\n@notes/PROJECT.md\n", (self.desk.root / "CLAUDE.md").read_text())
+        self.assertIn("card_refreshed", self.desk.events_path.read_text())
+        self.assertEqual(project.read_text(), "# Rules\nnever push on Fridays\n")
+        project.unlink()  # a missing file stops nothing, and hansa does not make it again
+        cli.coordinator_desk(self.desk, os.getuid())
+        self.assertFalse(project.exists())
+        self.assertIn("\n@notes/PROJECT.md\n", (self.desk.root / "CLAUDE.md").read_text())
+        st = views.status(self.desk)
+        self.assertFalse(st["project"]["present"])
+        self.assertIn("project rules: no notes/PROJECT.md", views.status_text(st))
+        self.assertEqual(self.hansa_notes()[0], 0)
+
+    def test_init_leaves_a_project_file_already_there(self):
+        root = self.tmp / "other"
+        (root / "notes").mkdir(parents=True)
+        (root / "notes" / "PROJECT.md").write_text("ours\n")
+        init_desk(root)
+        self.assertEqual((root / "notes" / "PROJECT.md").read_text(), "ours\n")
+
+    def test_status_says_the_project_file_size_and_when_it_is_long(self):
+        project = self.desk.project_path
+        project.write_text("# Rules\nbuild with make\n")
+        st = views.status(self.desk)
+        self.assertEqual(st["project"], {"file": "notes/PROJECT.md", "present": True, "bytes": 24, "lines": 2,
+                                         "long": False})
+        line = next(x for x in views.status_text(st).splitlines() if x.startswith("project rules:"))
+        self.assertEqual(line, "project rules: notes/PROJECT.md, 24 bytes, 2 lines, loaded with the card")
+        project.write_text("- a rule worth keeping, written out at some length\n" * 200)  # 10,200 bytes
+        text = views.status_text(views.status(self.desk))
+        self.assertIn("project rules: notes/PROJECT.md, 10,200 bytes, 200 lines, loaded with the card; long: the "
+                      "coordinator rereads it at every turn, so keep it under 8 KB", text)
+        self.assertEqual(text.count("rereads it at every turn"), 1)
+
     def test_hansa_notes_lists_files_with_sizes_lines_and_headings(self):
         (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
         (self.desk.notes_dir / "archive").mkdir()
@@ -1356,13 +1401,15 @@ class DeskTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
                               text=True).stdout.strip()
 
-    def two_lanes(self, check="", names=("a.txt", "b.txt")):
+    def two_lanes(self, check="", names=("a.txt", "b.txt"), more=None):
         """Lanes a and b on the one repository, each worker writing a file of its own (a.txt, b.txt), and one
-        finished task on each, both made from the same base."""
+        finished task on each, both made from the same base. more: other fields for each lane ({lane: {...}})."""
         s = self.desk.settings()
         s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
         s["lanes"]["a"].update(env={"FAKE_HELLO": names[0]}, check=check)
         s["lanes"]["b"].update(env={"FAKE_HELLO": names[1]}, check=check)
+        for lane, fields in (more or {}).items():
+            s["lanes"][lane].update(fields)
         self.assertEqual(self.desk.save_settings(s), [])
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task(f"Add {names[0]}", lane="a"), self.desk.new_task(f"Add {names[1]}", lane="b")
@@ -1447,6 +1494,88 @@ class DeskTest(unittest.TestCase):
         self.assertIn("moved each time before hansa could merge it; nothing was merged", m["merge_check_result"]["note"])
         self.assertEqual([e["moves"] for e in self.events("merge_check_base_moved")], [1, 2])
         self.assertFalse((self.repo / "b.txt").exists())
+
+    def messages_written(self, forms: dict) -> tuple:
+        """Lanes a and b with these message forms (lane: {field: form}); t1 merged at once, t2 retried --update
+        onto it as t3, and t3 merged after a merge check. The subjects on main, and (t1, t2, t3, t3's title)."""
+        d, t1, t2 = self.two_lanes(check="test -f README.md", more=forms)
+        self.hansa("merge", t1)
+        self.hansa("retry", t2, "--update", "Add b.txt again")
+        t3 = self.desk.meta(t2)["replaced_by"]
+        m = self.settle(d, t3)
+        self.assertEqual((m["state"], m["update_conflicts"]), ("done", []), m)
+        self.move_main()  # so its merge goes through a merge check
+        self.hansa("merge", t3)
+        m = self.settle_merge(d, t3)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])
+        got = [x.removesuffix("\n") for x in self.git_out("log", "-z", "--format=%B", "main").split("\0") if x]
+        return sorted(got), (t1, t2, t3, m["title"])
+
+    def test_unset_message_forms_write_hansas_own_messages(self):
+        got, (t1, t2, t3, title) = self.messages_written({})
+        self.assertEqual(got, sorted([
+            "init", "moved", f"{t1}: Add a.txt", f"Merge {t1}: Add a.txt", f"{t2}: Add b.txt",
+            f"Merge main into task/{t3}", f"{t3}: {title}", f"Merge {t3}: {title}"]))
+
+    def test_a_lanes_message_forms_name_every_commit_and_merge_it_writes(self):
+        got, (t1, t2, t3, title) = self.messages_written({
+            "a": {"commit_message": "{title} [{lane}]", "merge_message": "Merge {task} ({lane}): {title}"},
+            "b": {"commit_message": "{title}", "merge_message": "Merge: {title}"}})
+        self.assertEqual(title, f"Add b.txt (retry of {t2})")  # a form without {task} leaves that out too
+        self.assertEqual(got, sorted([
+            "init", "moved", "Add a.txt [a]", f"Merge {t1} (a): Add a.txt", "Add b.txt",
+            "Merge main into the branch of: Add b.txt", "Add b.txt", "Merge: Add b.txt"]))
+        self.assertNotIn(t2, " ".join(got))
+        self.assertNotIn(t3, " ".join(got))
+        out = self.hansa("lane")
+        self.assertIn('commit_message "{title} [{lane}]"  merge_message "Merge {task} ({lane}): {title}"', out)
+        shown = self.hansa("explain", "lane", "b")
+        self.assertIn('commit_message (the form of the message of the commit of a task\'s work', shown)
+        self.assertIn('merge_message (the form of the message of a task\'s merge into the base): "Merge: {title}"',
+                      shown)
+
+    def test_message_forms_that_would_read_badly_are_refused_on_lane_set(self):
+        before = self.desk.settings()["lanes"]["a"]
+        for field, form, why in (("commit_message", "{title} {when}", "an unknown placeholder {when}"),
+                                 ("merge_message", "{title!r}", "an unknown placeholder {title!r}"),
+                                 ("merge_message", "Merge {task", "a { or } that opens or closes no placeholder"),
+                                 ("commit_message", "{title}\nmore", "must be one line"),
+                                 ("commit_message", "   ", "gives an empty message"),
+                                 ("merge_message", "Merge {lane}", "gives every task the same message"),
+                                 ("merge_message", "{{title}}", "gives every task the same message")):
+            with self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "set", "a", field, form)
+            said = str(e.exception.code)
+            self.assertIn(why, said)
+            self.assertIn("the placeholders are {task}, {title} and {lane}", said)
+            self.assertEqual(len(said.splitlines()), 1, said)
+            self.assertEqual(self.desk.settings()["lanes"]["a"], before)
+            s = self.desk.settings()  # the page's save is checked the same way
+            s["lanes"]["a"][field] = form
+            self.assertTrue(any(f"lane a: {field} " in x and why in x for x in self.desk.save_settings(s)))
+        self.assertNotIn("_message", self.hansa("lane"))
+        self.assertNotIn("_message (the form", self.hansa("explain", "lane", "a"))
+        self.assertIn('-> "{task}: {title}"', self.hansa("lane", "set", "a", "commit_message", "{task}: {title}"))
+        self.assertIn('commit_message (the form', self.hansa("explain", "lane", "a"))
+        self.hansa("lane", "set", "a", "commit_message", "none")  # back to hansa's own
+        self.assertNotIn("commit_message", self.desk.settings()["lanes"]["a"])  # taken out, as merge_check is
+        self.assertNotIn("_message (the form", self.hansa("explain", "lane", "a"))
+        self.assertNotIn("_message", self.hansa("lane"))
+        from hansa.desk import merge_message, task_message, update_message
+        self.assertEqual(task_message({}, "a", "t0007", ""), "t0007: work")
+        self.assertEqual(task_message({"commit_message": "{task}"}, "a", "t0007", "x"), "t0007")
+        self.assertEqual(merge_message({"merge_message": "{{{lane}}} {title}"}, "a", "t0007", "x"), "{a} x")
+        self.assertEqual(update_message({}, "a", "t0007", "x", "dev"), "Merge dev into task/t0007")
+        long = "x" * 75 + " (retry of t0006)"  # cut at 80 by hansa retry
+        self.assertEqual(task_message({"commit_message": "{title}"}, "a", "t0007", long[:80]), "x" * 75)
+        self.assertEqual(task_message({"commit_message": "{task} {title}"}, "a", "t0007", long[:80]),
+                         "t0007 " + long[:80])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        self.assertIn("A lane whose release goes to a public repository usually leaves {task} out",
+                      " ".join(out.getvalue().split()))
 
     def move_main(self, repo=None):
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved",
@@ -5074,7 +5203,7 @@ class DeskTest(unittest.TestCase):
         show.chmod(0o755)
         notes = self.desk.root / "notes"
         self.assertTrue(notes.is_dir())  # a new desk has it
-        notes.rmdir()  # a desk made before notes/
+        shutil.rmtree(notes)  # a desk made before notes/ (and before notes/PROJECT.md)
         mine = self.desk.root / ".claude" / "settings.json"
         mine.write_text(json.dumps({"permissions": {"allow": ["Bash(hansa:*)"], "deny": []}}))
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
@@ -5083,6 +5212,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(notes.is_dir())  # made when it starts
         self.assertEqual(notes.stat().st_uid, self.desk.root.stat().st_uid)
+        self.assertFalse((notes / "PROJECT.md").exists())  # only init writes it, once
         root = str(self.desk.root).lstrip("/")
         rules = json.loads(mine.read_text())["permissions"]
         self.assertIn(f"Edit(//{root}/notes/**)", rules["allow"])  # one Edit rule: Write and Edit alike

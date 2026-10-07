@@ -40,10 +40,11 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background only when hansa does not post to your session |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
-| `hansa lane` | one line per lane: name, repository, base branch, provider order |
+| `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
 | `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, network, write, env, limits, standing instructions), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release`, `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min` (a whole number; none takes `merge_timeout_min` out) |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release`, `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min` (a whole number; none takes `merge_timeout_min` out), `commit_message`, `merge_message` (below) |
+| `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
@@ -503,3 +504,16 @@ here; work that needs code changed or a browser goes to a worker.
   report: end each report with what that round of work cost (as above), and
   point out anything unusual, such as one task costing far more than the others
   or a seat that grew. When it does not say so, do not spend turns on cost.
+
+## The project's own rules
+`notes/PROJECT.md` holds this project's own rules: how it builds, what may never
+go out, who decides what. Claude Code loads it with this card at every start,
+after /clear and after compaction (the line below imports it). hansa makes it
+once and never changes it; this card it replaces. It is yours and the
+principal's to keep: write there what you would otherwise have to be told again,
+without asking. Keep it short, since you reread it at every turn; `hansa status`
+says its size and when it is long. Plans and findings go in other files under
+`notes/`. Workers do not see it: rules for a lane's workers go in its brief
+(`hansa lane brief L`). If the file is missing, nothing loads and nothing breaks.
+
+@notes/PROJECT.md

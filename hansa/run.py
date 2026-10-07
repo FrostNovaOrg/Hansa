@@ -27,7 +27,8 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, other_envs, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
-                   program_candidates, read_json, write_json, write_problems)
+                   merge_message, program_candidates, read_json, task_message, update_message, write_json,
+                   write_problems)
 from .desk import lane_env as checked_env
 
 # Only the wording providers use for "out of quota", so a task that is itself
@@ -1615,12 +1616,12 @@ def conflict_advice(tid: str, base: str, places: str, error: str = "") -> str:
             f"or, to redo the whole change: hansa retry {tid} --fresh \"<the same change on the current {base}>\"")
 
 
-def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str) -> list:
+def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: str = "") -> list:
     """For `hansa retry --update`: merge the base's current tip into the task's fresh branch. Merged at once
     when it merges cleanly; else aborted here and merged again just before the worker starts, after the
     lane's setup (UPDATE_SCRIPT). Returns the files that conflict."""
     try:
-        wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", f"Merge {name} into task/{tid}", tip)
+        wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", message or f"Merge {name} into task/{tid}", tip)
         return []
     except GitFileChanged:
         raise
@@ -1650,7 +1651,9 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
         wgit(desk, wt, "branch", "-m", branch, f"{branch}-try{n}")
     wgit(desk, wt, "checkout", "-q", "-B", branch, start)
     if updating:
-        desk.update(tid, update_conflicts=update_branch(desk, wt, tid, lane.get("base") or "main", base))
+        desk.update(tid, update_conflicts=update_branch(
+            desk, wt, tid, lane.get("base") or "main", base,
+            update_message(lane, lane_name, tid, meta.get("title") or "", lane.get("base") or "main")))
     return wt, base
 
 
@@ -2085,7 +2088,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
-                commit_work(desk, wt, f"{tid}: {meta.get('title') or 'work'}"[:100])
+                commit_work(desk, wt, task_message(desk.settings()["lanes"].get(meta.get("lane")), meta.get("lane") or "",
+                                                  tid, meta.get("title") or ""))
         head = wgit(desk, wt, "rev-parse", "HEAD")
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
                       files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),
@@ -2432,7 +2436,7 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "note": f"{why}; nothing was merged"})
             return None
         try:
-            git("merge", "--no-ff", "-m", f"Merge {tid}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
+            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], tid, m["title"]), m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
         except RuntimeError as e:
             files = conflicted_files(lambda *x: git(*x, cwd=repo))
             places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
@@ -2474,7 +2478,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         ready_worktree(desk, repo, wt, tid, tip)
         try:
             wgit(desk, wt, "checkout", "-q", "--detach", tip)
-            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", f"Merge {tid}: {m['title']}", m["head"])
+            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", merge_message(lane, lane_name, tid, m["title"]), m["head"])
         except GitFileChanged as e:
             raise RuntimeError(git_file_changed(desk, tid, e)) from None
         except RuntimeError as e:

@@ -16,8 +16,9 @@ from pathlib import Path
 
 from . import account, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, now, read_json, read_split, stored, write_json)
-from .run import (VERIFY_TASK, Dispatcher, check_provider, close_verification, conflict_advice,
+                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json,
+                   PROJECT_INTRO)
+from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
@@ -53,6 +54,8 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         (desk.lanes_dir / lane / "brief.md").write_text("", encoding="utf-8")
     write_json(desk.settings_path, s)
     (desk.root / "CLAUDE.md").write_text(CARD.read_text(encoding="utf-8"), encoding="utf-8")
+    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; never written again
+        desk.project_path.write_text(PROJECT_INTRO, encoding="utf-8")
     (desk.root / ".claude").mkdir(exist_ok=True)
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
@@ -394,7 +397,7 @@ def cmd_merge(a):
                      if note else ""))
             return
         try:
-            git("merge", "--no-ff", "-m", f"Merge {a.id}: {m['title']}", m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
+            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], a.id, m["title"]), m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
         except RuntimeError as e:
             files = conflicted_files(lambda *x: git(*x, cwd=repo))
             places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
@@ -1162,8 +1165,9 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 LANE_LISTS = ("providers", "allow", "network", "write")
 LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "max_turns", "timeout_min", "merge_timeout_min", "note")
-LANE_UNSET = ("merge_check", "merge_timeout_min")  # empty (none) takes them out: the check's command and limit again
+               "release", "max_turns", "timeout_min", "merge_timeout_min", "note", *MESSAGE_FIELDS)
+# empty (none) takes them out: the check's command and limit again, hansa's own message forms
+LANE_UNSET = ("merge_check", "merge_timeout_min", *MESSAGE_FIELDS)
 OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -1196,6 +1200,8 @@ def _lane_value(field: str, values: list):
         return env
     if len(values) > 1:
         raise SystemExit(f"hansa: {field} takes one value; quote it if it has spaces. Nothing was changed")
+    if field in MESSAGE_FIELDS and values and message_problem(values[0]):
+        raise SystemExit(f"hansa: {field} {_shown(values[0])} {message_problem(values[0])}. Nothing was changed")
     if field in LANE_UNSET and not "".join(values).strip():
         return None
     if field in LANE_NUMBERS:
@@ -1267,7 +1273,8 @@ def cmd_lane(a):
     desk = Desk.find(a.desk)
     if not a.action:
         lanes = desk.settings()["lanes"]
-        rows = [(name, ln["repo"], f"base {ln.get('base', 'main')}", "providers " + " > ".join(ln["providers"]))
+        rows = [(name, ln["repo"], f"base {ln.get('base', 'main')}", "providers " + " > ".join(ln["providers"])
+                 + "".join(f"  {f} {_shown(ln[f])}" for f in MESSAGE_FIELDS if ln.get(f)))
                 for name, ln in sorted(lanes.items())]
         widths = [max((len(r[i]) for r in rows), default=0) for i in range(3)]
         for r in rows:
@@ -1395,7 +1402,7 @@ def cmd_lane(a):
             return
         value = _lane_value(a.field, a.values)
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
-        if value is None:  # unset: the merge check runs the check again, under timeout_min
+        if value is None:  # unset: the check's command and limit, hansa's own message forms
             new["lanes"][a.name].pop(a.field, None)
             value = ""
         else:
@@ -1879,14 +1886,19 @@ def main(argv=None):
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; base, check, merge_check, preview, setup, release and note take one value (none: empty); "
-        "max_turns, timeout_min and merge_timeout_min take one whole number. check runs after each task; before a "
-        "merge, hansa runs a merge check on the task merged with the base: by default the check again, when the base "
-        "has moved since the task was made. merge_check gives the merge check a command of its own (a heavier one: "
-        "the whole build, packaging, the slow suites), run in the same sandbox, after the lane's setup, before every "
-        "merge of a task that changed something, and never after a task; a lane with only a merge_check has no check "
-        "after each task. merge_timeout_min is the merge check's own time limit in minutes (default: timeout_min). "
-        "none takes merge_check or merge_timeout_min out again. release is the command line that sends the base branch out (git push "
+        "lane's env; base, check, merge_check, preview, setup, release, note, commit_message and merge_message take "
+        "one value (none: empty); max_turns, timeout_min and merge_timeout_min take one whole number. check runs "
+        "after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
+        "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
+        "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
+        "lane's setup, before every merge of a task that changed something, and never after a task; a lane with only "
+        "a merge_check has no check after each task. merge_timeout_min is the merge check's own time limit in minutes "
+        "(default: timeout_min). commit_message is the form of the message of the commit hansa makes of a task's "
+        "work (unset: t0001: <title>), and of the merge of the base into a task's branch (retry --update); "
+        "merge_message is the form of the message of a task's merge into the base (unset: Merge t0001: <title>). "
+        "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
+        "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
+        "commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). " +
         "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
