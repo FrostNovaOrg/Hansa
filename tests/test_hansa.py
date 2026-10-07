@@ -609,6 +609,51 @@ class DeskTest(unittest.TestCase):
         return {str(p.relative_to(self.desk.notes_dir)): p.read_bytes() for p in self.desk.notes_dir.rglob("*")
                 if p.is_file()}
 
+    def test_project_file_is_made_once_and_the_card_imports_it(self):
+        project = self.desk.root / "notes" / "PROJECT.md"
+        self.assertEqual(project, self.desk.project_path)
+        made = project.read_text()
+        self.assertEqual(len(made.splitlines()), 1)  # one line saying what it is for, as a comment Claude Code drops
+        self.assertTrue(made.startswith("<!--") and made.rstrip().endswith("-->"))
+        card = (self.desk.root / "CLAUDE.md").read_text()
+        # on a line of its own, outside backticks: a path in a code span is not imported
+        self.assertIn("\n@notes/PROJECT.md\n", card)
+        project.write_text("# Rules\nnever push on Fridays\n")
+        (self.desk.root / "CLAUDE.md").write_text("an older card\n")
+        cli.coordinator_desk(self.desk, os.getuid())  # the card refreshed: the import comes back, the file is left
+        self.assertIn("\n@notes/PROJECT.md\n", (self.desk.root / "CLAUDE.md").read_text())
+        self.assertIn("card_refreshed", self.desk.events_path.read_text())
+        self.assertEqual(project.read_text(), "# Rules\nnever push on Fridays\n")
+        project.unlink()  # a missing file stops nothing, and hansa does not make it again
+        cli.coordinator_desk(self.desk, os.getuid())
+        self.assertFalse(project.exists())
+        self.assertIn("\n@notes/PROJECT.md\n", (self.desk.root / "CLAUDE.md").read_text())
+        st = views.status(self.desk)
+        self.assertFalse(st["project"]["present"])
+        self.assertIn("project rules: no notes/PROJECT.md", views.status_text(st))
+        self.assertEqual(self.hansa_notes()[0], 0)
+
+    def test_init_leaves_a_project_file_already_there(self):
+        root = self.tmp / "other"
+        (root / "notes").mkdir(parents=True)
+        (root / "notes" / "PROJECT.md").write_text("ours\n")
+        init_desk(root)
+        self.assertEqual((root / "notes" / "PROJECT.md").read_text(), "ours\n")
+
+    def test_status_says_the_project_file_size_and_when_it_is_long(self):
+        project = self.desk.project_path
+        project.write_text("# Rules\nbuild with make\n")
+        st = views.status(self.desk)
+        self.assertEqual(st["project"], {"file": "notes/PROJECT.md", "present": True, "bytes": 24, "lines": 2,
+                                         "long": False})
+        line = next(x for x in views.status_text(st).splitlines() if x.startswith("project rules:"))
+        self.assertEqual(line, "project rules: notes/PROJECT.md, 24 bytes, 2 lines, loaded with the card")
+        project.write_text("- a rule worth keeping, written out at some length\n" * 200)  # 10,200 bytes
+        text = views.status_text(views.status(self.desk))
+        self.assertIn("project rules: notes/PROJECT.md, 10,200 bytes, 200 lines, loaded with the card; long: the "
+                      "coordinator rereads it at every turn, so keep it under 8 KB", text)
+        self.assertEqual(text.count("rereads it at every turn"), 1)
+
     def test_hansa_notes_lists_files_with_sizes_lines_and_headings(self):
         (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
         (self.desk.notes_dir / "archive").mkdir()
@@ -4935,7 +4980,7 @@ class DeskTest(unittest.TestCase):
         show.chmod(0o755)
         notes = self.desk.root / "notes"
         self.assertTrue(notes.is_dir())  # a new desk has it
-        notes.rmdir()  # a desk made before notes/
+        shutil.rmtree(notes)  # a desk made before notes/ (and before notes/PROJECT.md)
         mine = self.desk.root / ".claude" / "settings.json"
         mine.write_text(json.dumps({"permissions": {"allow": ["Bash(hansa:*)"], "deny": []}}))
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
@@ -4944,6 +4989,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(notes.is_dir())  # made when it starts
         self.assertEqual(notes.stat().st_uid, self.desk.root.stat().st_uid)
+        self.assertFalse((notes / "PROJECT.md").exists())  # only init writes it, once
         root = str(self.desk.root).lstrip("/")
         rules = json.loads(mine.read_text())["permissions"]
         self.assertIn(f"Edit(//{root}/notes/**)", rules["allow"])  # one Edit rule: Write and Edit alike

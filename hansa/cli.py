@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import account, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json)
+                   kept_from_workers, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, stored, write_json,
+                   PROJECT_INTRO)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_target, not_looking, proc_start, provider_env, pulse,
@@ -52,6 +53,8 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         (desk.lanes_dir / lane / "brief.md").write_text("", encoding="utf-8")
     write_json(desk.settings_path, s)
     (desk.root / "CLAUDE.md").write_text(CARD.read_text(encoding="utf-8"), encoding="utf-8")
+    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; never written again
+        desk.project_path.write_text(PROJECT_INTRO, encoding="utf-8")
     (desk.root / ".claude").mkdir(exist_ok=True)
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")

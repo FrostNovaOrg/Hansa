@@ -491,3 +491,16 @@ here; work that needs code changed or a browser goes to a worker.
   report: end each report with what that round of work cost (as above), and
   point out anything unusual, such as one task costing far more than the others
   or a seat that grew. When it does not say so, do not spend turns on cost.
+
+## The project's own rules
+`notes/PROJECT.md` holds this project's own rules: how it builds, what may never
+go out, who decides what. Claude Code loads it with this card at every start,
+after /clear and after compaction (the line below imports it). hansa makes it
+once and never changes it; this card it replaces. It is yours and the
+principal's to keep: write there what you would otherwise have to be told again,
+without asking. Keep it short, since you reread it at every turn; `hansa status`
+says its size and when it is long. Plans and findings go in other files under
+`notes/`. Workers do not see it: rules for a lane's workers go in its brief
+(`hansa lane brief L`). If the file is missing, nothing loads and nothing breaks.
+
+@notes/PROJECT.md
