@@ -9253,7 +9253,11 @@ class DeskTest(unittest.TestCase):
         for x in (f"what workers may not read, entry left out: {self.repo.resolve()}: it is {self.repo.resolve()}, "
                   "lane a's repository", "that folder is open to the runs of that lane"):
             self.assertIn(x, text)
-        self.assertEqual(views.status_text(views.status(self.desk)), text)  # every time, not once
+        def timeless(t):  # the text says the time: the minute may turn between the two calls
+            return re.sub(r"now \d\d:\d\d", "now", t)
+        again = views.status_text(views.status(self.desk))
+        self.assertIn("what workers may not read, entry left out", again)  # every time, not once
+        self.assertEqual(timeless(again), timeless(text))
         shown = public_settings(self.desk)
         self.assertEqual((shown["deny_stops"], shown["no_read_stop"]), ([], ""))
         self.assertEqual(len(shown["deny_skipped"]), 1)
