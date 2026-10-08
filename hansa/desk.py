@@ -1636,15 +1636,25 @@ BREW_FOLDERS = tuple(f"{top}/{d}" for top in ("/opt/homebrew", "/usr/local", "/h
 HOME_TOOL_FOLDERS = (".config", ".local", ".cache")
 
 
-@_one_look
 def deny_split(paths, root=None, lanes=None) -> tuple:
+    """deny_parts without telling apart the entries that stop runs: (those kept, a line for each of the others)."""
+    return deny_parts(paths, root, lanes)[:2]
+
+
+@_one_look
+def deny_parts(paths, root=None, lanes=None) -> tuple:
     """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
-    wrong with the others, one line each). None may close what a worker needs in order to run: the home folder
-    or a folder above it, the desk or above it, a lane's repository or above it, a folder on the PATH or above
-    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted, and so is one
-    whose links cannot be followed (unresolved_why): it is denied as given, in every form hansa can work out."""
+    wrong with the others, one line each, the lines of those among them that stop every run). None may close
+    what a worker needs in order to run: the home folder or a folder above it, the desk or above it, a lane's
+    repository or above it, a folder on the PATH or above it. Each is compared as the disk sees it (_above).
+    One that does not exist yet is accepted, and so is one whose links cannot be followed (unresolved_why): it
+    is denied as given, in every form hansa can work out. Left out of a run, rather than stopping it, is only an
+    entry that would close a lane's repository, a worktree or a folder on the PATH, and nothing else: a
+    contradiction the coordinator and the principal settle (a lane may be added, a worktree made, the PATH differ
+    from where the page was saved). Any other that does not hold now (a pattern character in a name or where a
+    link leads, say) was closed by the principal and cannot be applied: no run starts until it is changed."""
     if not isinstance(paths, list) or len(paths) > MAX_DENY:
-        return [], [DENY_LIST_WHY]
+        return [], [DENY_LIST_WHY], [DENY_LIST_WHY]
     home = account_home()
     fenced = [("/", _above, "it is the whole machine"),
               (home, _above, f"it is {home}, the home folder of the user hansa runs as, or a folder above it")]
@@ -1652,9 +1662,11 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         fenced.append((DATA, _above, f"it is {DATA}, the volume macOS keeps everything on, or a folder above it"))
     if root:
         fenced.append((str(root), _above, f"it is {root}, the desk, or a folder above it"))
+    settled = set()  # the reasons for which an entry is left out of runs rather than stopping them
     for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
             fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
+            settled.add(fenced[-1][2])
     # said along with any other reason, as which folders are on the PATH differs from machine to machine
     path_fenced = [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers "
                                 "could not run their tools")
@@ -1678,15 +1690,18 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         own |= set(wts.iterdir()) if wts.is_dir() else set()
         fenced += [(str(d), _above, f"it is {d}, the desk's worktrees folder or a lane's worktree in it, or a folder "
                                     "above it: workers work there") for d in [wts, *sorted(own)]]
-    good, p, seen = [], [], set()
+        settled |= {f[2] for f in fenced[-1 - len(own):]}
+    good, p, stops, seen = [], [], [], set()
     for x in paths:
         if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
             p.append(f"{DENY_AT}{x if isinstance(x, str) and not _has_control(x) else json.dumps(x)}: it must be a "
                      "full path starting with /, such as /Users/me/.config/myproject/keys, with no line break or "
                      "other control character")
+            stops.append(p[-1])
             continue
         if _has_format(x):
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
+            stops.append(p[-1])
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
         hits = [(f, why) for f, hit, why in fenced if hit(x, f)]
@@ -1698,14 +1713,18 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         on_path = "" if said else next((why for _, why in paths_in), "")
         said = said or next(iter(hits), None)
         why = "; and ".join(w for w in (said[1] if said else "", on_path) if w)
-        if not why and _breaks(x):
-            why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
+        breaks = _breaks(x)  # said first: it is what keeps the entry from being written, whatever else it would close
+        if breaks:
+            why = "; and ".join(w for w in (f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a "
+                                            "pattern", why) if w)
         if why:
             p.append(f"{DENY_AT}{x}: {why}")
+            if breaks or any(w not in settled for _, w in hits):
+                stops.append(p[-1])
         elif _seen(x) not in seen:  # one path once, however it is spelled
             seen.add(_seen(x))
             good.append(stored(x))
-    return good, p
+    return good, p, stops
 
 
 def kept_from_workers(s: dict, root=None) -> tuple:
@@ -1714,6 +1733,32 @@ def kept_from_workers(s: dict, root=None) -> tuple:
     return deny_split(s.get("workers_may_not_read", []), root, s.get("lanes"))
 
 
+def no_read_parts(s: dict, root=None) -> tuple:
+    """deny_parts for a desk's settings: (what the principal keeps workers from reading, a line for each entry
+    left out of runs, a line for each entry that stops them)."""
+    good, said, stops = deny_parts(s.get("workers_may_not_read", []), root, s.get("lanes"))
+    return good, [x + LEFT_OUT_NOTE for x in said if x not in stops], stops
+
+
+LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to the runs of that lane and every other (workers, "
+                 "verifiers, setups, checks, design sessions, the coordinator) until the principal and the coordinator "
+                 "settle it")
+
+
+NO_READ_STOP = ("hansa starts no worker, verifier, design session or coordinator while an entry of what workers may "
+                "not read cannot be applied, as that folder would be open to them: {lines}. The principal changes "
+                "or removes it on the web page, Settings")
+
+
+def no_read_stop(s: dict, root=None) -> str:
+    """'' when every entry of what workers may not read can be applied or is only left out (no_read_parts);
+    otherwise what to say when hansa refuses to start a run, naming each entry and why."""
+    return stop_text(no_read_parts(s, root)[2])
+
+
+def stop_text(stops: list) -> str:
+    """What hansa says when it refuses to start a run for these entries of what workers may not read."""
+    return NO_READ_STOP.format(lines="; ".join(x.removeprefix(DENY_AT) for x in stops)) if stops else ""
 # Claude Code's own tools that reach the network from its own process, outside the sandbox's network list:
 # WebFetch only as WebFetch(domain:HOST), WebSearch as it is. The MCP tools reach servers that run outside the
 # sandbox too, and no rule holds them to listed sites: no lane lists them (hansa gives a task its browser itself).
@@ -2310,7 +2355,7 @@ def public_settings(desk: Desk) -> dict:
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
     # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
-    kept, not_kept = kept_from_workers(s, desk.root)
+    kept, not_kept, stops = no_read_parts(s, desk.root)
     skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)[1]
     # saved entries of what workers may not read that no run applies now (a lane's repository under one, say)
     # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:
@@ -2320,5 +2365,5 @@ def public_settings(desk: Desk) -> dict:
                   "why_zh": listed_mismatch(s, x, True)}
                  for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
-            "read_skipped": skipped, "deny_skipped": not_kept, "release_unmatched": unmatched,
-            "lane_warnings": lane_warnings(s)}
+            "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
+            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}

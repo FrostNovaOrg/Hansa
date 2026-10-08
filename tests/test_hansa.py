@@ -9121,44 +9121,146 @@ class DeskTest(unittest.TestCase):
             # inside a PATH folder, the desk or the repository, and one that is not there: accepted
             fine = [str(good), str(tools / "bin" / "sub"), str(self.repo.resolve() / "private"), "/nowhere/at/all"]
             self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
-            # written into settings.json another way: a run leaves each out and says so in the task
+            # written into settings.json another way: one that would close a lane's repository or a folder on the
+            # PATH is left out of a run, which says so in the task; any other stops the run (the next test)
+            left = {p: why for p, why in bad.items() if why in ("lane a's repository", "a folder on the PATH")}
+            self.assertEqual(len(left), 4)
             s = self.desk.settings()
             s["workers_may_not_read"] = [*bad, str(good)]
             write_json(self.desk.settings_path, s)
-            self.assertEqual(len(public_settings(self.desk)["deny_skipped"]), len(bad))  # the page says which
+            shown = public_settings(self.desk)
+            self.assertEqual(len(shown["deny_skipped"]) + len(shown["deny_stops"]), len(bad))  # the page says which
+            self.assertEqual(len(shown["deny_stops"]), len(bad) - len(left))
+            self.assertIn("hansa starts no worker", shown["no_read_stop"])
+            told = self.hansa("explain", "lane", "a")
+            self.assertIn(f"not applied, and no run starts: {home}: it is {home}, the home folder", told)
+            s["workers_may_not_read"] = [*left, str(good)]
+            write_json(self.desk.settings_path, s)
+            self.assertEqual((len(public_settings(self.desk)["deny_skipped"]), public_settings(self.desk)["no_read_stop"]),
+                             (len(left), ""))
             tid = self.desk.new_task("Add hello.txt")
             m = self.settle(Dispatcher(self.desk), tid)
             self.assertEqual(m["state"], "done", m)
             argv = json.loads(seen.read_text().splitlines()[-1])
             deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
             self.assertIn(str(good), deny)
-            self.assertFalse(set(bad) & set(deny), deny)
+            self.assertFalse(set(left) & set(deny), deny)
             self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
                              [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir,
                                                                           self.desk.notes_dir)]
                              + [f"Read(//{str(self.desk.root).lstrip('/')}/CLAUDE.md)"])
-            self.assertEqual(len(m["no_read_left_out"]), len(bad))
+            self.assertEqual(len(m["no_read_left_out"]), len(left))
             shown = views.show_text(self.desk, tid)
-            for path, why in bad.items():
-                lines = [x for x in shown.splitlines() if why in x and x.startswith(tuple(
-                    f"what workers may not read: left out of this run: {p}: " for p in (path, json.dumps(path))))]
+            for path, why in left.items():
+                lines = [x for x in shown.splitlines() if why in x and x.startswith(
+                    f"what workers may not read: left out of this run: {path}: ") and "open to the runs" in x]
                 self.assertEqual(len(lines), 1, (path, shown))
-            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(bad))
+            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(left))
             told = self.hansa("explain", "lane", "a")
-            self.assertIn(f"not applied: {home}: it is {home}, the home folder", told)
+            self.assertIn(f"not applied: {self.repo.resolve()}: it is {self.repo.resolve()}, lane a's repository", told)
             # the coordinator's start leaves them out too, and says so
             r = self.echo_coordinator()
             self.assertEqual(r.returncode, 0, r.stderr)
             denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
             self.assertIn(f"Read(//{str(good).lstrip('/')}/**)", denied)
-            self.assertNotIn(f"Read(//{str(home).lstrip('/')}/**)", denied)
-            self.assertNotIn("Read(///**)", denied)
-            # a folder on the PATH below it, as on many machines (~/.local/bin), is said after this reason
-            said = [x for x in r.stderr.splitlines()
-                    if f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it" in x]
+            self.assertNotIn(f"Read(//{str(self.repo.resolve()).lstrip('/')}/**)", denied)
+            said = [x for x in r.stderr.splitlines() if f"{tools}: it is {tools / 'bin'}, a folder on the PATH" in x]
             self.assertEqual(len(said), 1, r.stderr)
             self.assertIn("; skipped", said[0])
-            self.assertEqual(len(self.events("no_read_skipped")), len(bad))
+            self.assertEqual(len(self.events("no_read_skipped")), len(left))
+
+    @design_as_on_mac
+    def test_an_entry_of_what_workers_may_not_read_that_cannot_be_written_as_a_rule_stops_every_run(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        plain, odd = (self.tmp / "plain").resolve(), (self.tmp / "keys (old)").resolve()
+        plain.mkdir()
+        odd.mkdir()
+        link = self.tmp.resolve() / "keys-link"
+        link.symlink_to(plain)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        # a valid list runs: the link is kept from workers as given and where it leads
+        self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)])), {"ok": True, "problems": []})
+        done = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), done)["state"], "done")
+        deny = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]["denyRead"]
+        self.assertTrue({str(link), str(plain)} <= set(deny), deny)
+        self.assertEqual(views.status(self.desk)["no_read_stop"], "")
+        # a list saved earlier with a parenthesis in a name, and a link changed since to lead to such a place
+        for entries, said in (([str(odd)], str(odd)), ([str(link)], str(link))):
+            if entries == [str(link)]:
+                link.unlink()
+                link.symlink_to(odd)
+            s = self.desk.settings()
+            s["workers_may_not_read"] = entries
+            write_json(self.desk.settings_path, s)
+            stop = public_settings(self.desk)["no_read_stop"]
+            self.assertIn(said, stop)
+            for x in ("hansa starts no worker, verifier, design session or coordinator", "()[]{}*?\\",
+                      "on the web page, Settings"):
+                self.assertIn(x, stop)
+            runs = len(seen.read_text().splitlines())
+            # the worker
+            tid = self.desk.new_task("Add more.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "failed", m)
+            self.assertIn(stop, m["error"])
+            # the verifier
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "verify", done])
+            vid = self.desk.meta(done)["verify"]
+            v = self.settle(Dispatcher(self.desk), vid)
+            self.assertEqual(v["state"], "failed", v)
+            self.assertIn(stop, v["error"])
+            self.assertEqual(len(seen.read_text().splitlines()), runs)  # no Claude Code started
+            # the design session: refused before tmux is asked, and its command refuses too
+            did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+            with unittest.mock.patch.object(run, "tmux_bin", lambda: "/nonexistent/tmux"):
+                with self.assertRaises(RuntimeError) as e:
+                    run.start_design(self.desk, did, "a")
+            self.assertIn(stop, str(e.exception))
+            self.assertFalse((self.desk.worktrees_dir / "a-design").exists())
+            self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
+                             session_id="sid-d", model_asked="sonnet")
+            with self.assertRaises(RuntimeError) as e:
+                run.design_command(self.desk, did)
+            self.assertIn(stop, str(e.exception))
+            self.desk.update(did, state="cancelled")
+            # the coordinator
+            r = self.echo_coordinator()
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(stop, r.stderr)
+            self.assertNotIn("--disallowedTools", r.stdout)
+            # hansa status and the page say it each time
+            self.assertIn(f"STOPPED: {stop}", views.status_text(views.status(self.desk)))
+            self.assertEqual(public_settings(self.desk)["deny_skipped"], [])
+            for x in ("NO_READ_STOP = r.no_read_stop", "section(T.noReadStop", "st.no_read_stop"):
+                self.assertIn(x, (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+
+    def test_an_entry_left_out_for_a_lanes_repository_is_said_in_status_and_on_the_page(self):
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [str(self.repo.resolve())]
+        write_json(self.desk.settings_path, s)
+        st = views.status(self.desk)
+        self.assertEqual(st["no_read_stop"], "")
+        self.assertEqual(len(st["no_read_left_out"]), 1)
+        text = views.status_text(st)
+        for x in (f"what workers may not read, entry left out: {self.repo.resolve()}: it is {self.repo.resolve()}, "
+                  "lane a's repository", "that folder is open to the runs of that lane"):
+            self.assertIn(x, text)
+        self.assertEqual(views.status_text(views.status(self.desk)), text)  # every time, not once
+        shown = public_settings(self.desk)
+        self.assertEqual((shown["deny_stops"], shown["no_read_stop"]), ([], ""))
+        self.assertEqual(len(shown["deny_skipped"]), 1)
+        self.assertIn("that folder is open to the runs of that lane", shown["deny_skipped"][0])
+        self.assertIn(str(self.repo.resolve()), shown["deny_skipped"][0])
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn("st.no_read_left_out", ui)
+        # a run still starts
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import account, alert, build, cost, installed, installed_text, notify, release
-from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (LINUX_TRY_NOTE, output_hints, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
@@ -500,6 +500,7 @@ def status(desk: Desk) -> dict:
     server = server_state(desk)
     day = time.time() - 86400  # the last 24 h, each thing by when it happened: not reset at midnight
     rows = cost.worker_rows(desk, day)  # by when the run ended
+    no_read = no_read_parts(s, desk.root)
     return {
         "desk": str(desk.root),
         "build": build(),
@@ -520,6 +521,8 @@ def status(desk: Desk) -> dict:
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
+        # entries of what workers may not read that stop every run, and those left out of runs (desk.no_read_parts)
+        "no_read_stop": stop_text(no_read[2]), "no_read_left_out": no_read[1],
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -587,6 +590,9 @@ def status_text(st: dict) -> str:
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
+    out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
+    out += [f"what workers may not read, entry left out: {x.removeprefix(DENY_AT)}"
+            for x in st.get("no_read_left_out") or []]
     out += [page_text(st["page"])] if st.get("page") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
@@ -1361,7 +1367,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
-    kept, left = kept_from_workers(s, desk.root)
+    kept, left, stops = no_read_parts(s, desk.root)
     mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
            if sys.platform == "darwin" else "")
     built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
@@ -1377,7 +1383,8 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
             "    folders and files the principal keeps from workers (set on the web page, Settings; you cannot set"
             " it: hansa ask; Read is denied there to you, workers, verifiers and design sessions as well; no"
             " lane's repository or write list may be one, inside one or above one): " + (", ".join(kept) or "none"),
-            *(f"      not applied: {x.removeprefix('workers cannot be kept from reading ')}" for x in left)]
+            *(f"      not applied, and no run starts: {x.removeprefix(DENY_AT)}" for x in stops),
+            *(f"      not applied: {x.removeprefix(DENY_AT)}" for x in left)]
 
 
 def read_lines(desk: Desk, s: dict) -> list:
