@@ -520,7 +520,8 @@ here; work that needs code changed or a browser goes to a worker.
 - On macOS `mktemp -d`, `mktemp -t PREFIX` and a bare `mktemp` ignore TMPDIR and fail in a lane
   (`mkdtemp failed on /var/folders/...: Operation not permitted`): use `mktemp -d
   "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p "$TMPDIR"`. hansa adds a line saying so, and one for
-  Maven's 407, to a failed check, merge check or try step whose output shows it.
+  Maven's 407 (`407` and `proxy authentication` on a line with Maven's own words), to a failed check, merge
+  check or try step whose output shows it.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or

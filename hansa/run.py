@@ -2454,25 +2454,46 @@ def read_bounded(path: Path, head: int, tail: int) -> str:
 
 # What a failed step's output says about the machine or the build script rather than the change: (the pattern,
 # the line hansa adds). Matched line by line, so the words must be on one line.
-MKTEMP_REFUSED = re.compile(r"mkdtemp failed on|mktemp:.*Operation not permitted")
-MAVEN_407 = re.compile(r"407 Proxy Authentication Required")
-MAVEN_WORDS = re.compile(r"\[ERROR\]|Could not (transfer|resolve)|Failed to (execute|read artifact|collect)|maven", re.I)
+# mktemp refused where it may not write: macOS's (mkdtemp failed on /var/folders/...) or Linux's (failed to create
+# ...), only for Operation not permitted, not for a full disk or other errors.
+MKTEMP_REFUSED = re.compile(r"(mkdtemp failed on|mktemp:).*Operation not permitted")
+# Maven's own words for a download that failed, on the line that says 407: Maven 3.9's Apache binary prints
+# "status code: 407, reason phrase: Proxy Authentication Required (407)", a distribution's "proxy authentication
+# failed for ..., status: 407 Proxy Authentication Required". A 407 or the words inside a path do not count.
+MAVEN_407 = re.compile(r"(?<![\w/.-])407(?![\w/.-])")
+PROXY_AUTH = re.compile(r"(?<![\w/.-])proxy\s+authentication(?![\w/-])", re.I)
+MAVEN_WORDS = re.compile(r"Could not transfer artifact|Could not resolve|Failed to read artifact descriptor"
+                         r"|Plugin \S+ .*could not be resolved")
+NOT_MAVEN = re.compile(r"npm ERR!|npm error|^\s*curl:|Received status code|Could not (GET|HEAD) '")  # npm, curl, Gradle
 MKTEMP_HINT = ("mktemp was refused: macOS's mktemp -d, mktemp -t PREFIX and a bare mktemp ignore TMPDIR and write "
                "under /var/folders, which a lane may not write; give it a template in TMPDIR instead: "
                "mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\"")
+MKTEMP_OUTSIDE_HINT = ("mktemp was refused: the folder it writes in is outside what the lane may write; give it a "
+                       "template in TMPDIR: mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\"")
 MAVEN_407_HINT = ("Maven got 407 Proxy Authentication Required: hansa gives Maven the sandbox's proxy through "
                   "MAVEN_ARGS (-gs <file>), and a build script that sets MAVEN_ARGS itself drops it (in bash "
                   "MAVEN_ARGS=(-B) makes an array, which is not exported); keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-})")
 
 
-def output_hints(text: str) -> list:
+def maven_407(line: str) -> bool:
+    """Whether the line is Maven saying a download got 407 from the proxy."""
+    return bool(MAVEN_407.search(line) and PROXY_AUTH.search(line) and MAVEN_WORDS.search(line)
+                and not NOT_MAVEN.search(line))
+
+
+def output_hints(text: str, platform: str = "") -> list:
     """The lines hansa adds to a failed check's, merge check's or try step's report when its output shows a
-    known cause that is not the change itself: macOS's mktemp refused, or Maven without the sandbox's proxy."""
+    known cause that is not the change itself: mktemp refused (macOS's, on macOS or under /var/folders), or Maven
+    without the sandbox's proxy. platform: sys.platform's word for the machine the step ran on."""
     lines = text.splitlines()
+    mac = (platform or sys.platform) == "darwin"
     out = []
-    if any(MKTEMP_REFUSED.search(x) for x in lines):
+    refused = [x for x in lines if MKTEMP_REFUSED.search(x)]
+    if any(mac or "/var/folders/" in x for x in refused):
         out.append(MKTEMP_HINT)
-    if any(MAVEN_407.search(x) for x in lines) and any(MAVEN_WORDS.search(x) for x in lines):
+    elif refused:
+        out.append(MKTEMP_OUTSIDE_HINT)
+    if any(maven_407(x) for x in lines):
         out.append(MAVEN_407_HINT)
     return out
 
@@ -4542,7 +4563,7 @@ def lane_holder(desk: Desk, lane_name: str):
 
 
 def end_try(desk: Desk, lane_name: str, result: dict) -> dict:
-    t = {**read_try(desk, lane_name), "phase": "done", "at": now(), **result}
+    t = {**read_try(desk, lane_name), "phase": "done", "ended": now(), **result}  # at: the commit --at asked for
     for k in ("pid", "pid_start", "tmp", "launch"):
         t.pop(k, None)
     write_try(desk, lane_name, t)

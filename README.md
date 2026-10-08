@@ -606,7 +606,8 @@ skips what it cannot do instead of failing the run.
   everything, nothing shows). In bash, `MAVEN_ARGS=(-B)` makes it an array,
   which is not exported, and `mvn "${MAVEN_ARGS[@]}"` passes only `-B`. Keep
   hansa's: `MAVEN_ARGS=(-B ${MAVEN_ARGS:-})`. A failed step whose output holds
-  Maven's 407 gets a line saying so.
+  Maven's 407 (a line with `407` and `proxy authentication` along with Maven's
+  own words, such as `Could not transfer artifact`) gets a line saying so.
 - On macOS, `mktemp -d`, `mktemp -t PREFIX` and a bare `mktemp` ignore `TMPDIR`:
   they write to the account's own temporary folder under `/var/folders`, which
   a lane may not write (other programs of the account, `hansa serve` among
@@ -614,7 +615,9 @@ skips what it cannot do instead of failing the run.
   /var/folders/...: Operation not permitted`. Give mktemp a template in
   `TMPDIR`: `mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p
   "$TMPDIR"`. Linux's mktemp reads `TMPDIR`. A failed step whose output holds
-  that refusal gets a line saying so. This holds for any lane, not only Java's.
+  that refusal (`Operation not permitted`, on macOS or under `/var/folders`)
+  gets a line saying so; Linux's mktemp refused gets a plainer one, that its
+  folder is outside what the lane may write. This holds for any lane, not only Java's.
 
 **What a project should do.** Mockito's inline mock maker attaches itself to the
 running JVM, and cannot in the sandbox: the JVM's attach files and socket live in

@@ -3280,7 +3280,9 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"lane a tried at {tip[:10]}: ok", said)
         [check] = self.srt_calls()  # it ran its own check, at the tip
         self.assertEqual(self.ran(check), "echo checked here")
-        self.assertEqual(run.read_try(self.desk, "a")["onto"], tip)
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["onto"], t["at"]), (tip, tip))  # the commit asked for is kept after the try ends
+        self.assertIsInstance(t["ended"], float)
         self.assertEqual(self.events("lane_try_queued")[-1]["at"], tip)
 
     def test_lane_try_at_exits_0_only_when_the_try_at_that_commit_passed(self):
@@ -3345,13 +3347,44 @@ class DeskTest(unittest.TestCase):
         lines = views.failed_check_lines(f"running\n{refused}\n", [], "t1")
         self.assertIn("  " + run.MKTEMP_HINT, lines)
         self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX"', run.MKTEMP_HINT)
-        maven = ("[ERROR] Failed to execute goal on project demo: Could not resolve dependencies: status code: 407, "
-                 "reason phrase: Proxy Authentication Required (407)\n[ERROR] 407 Proxy Authentication Required")
-        lines = views.failed_check_lines(maven, [], "t1")
-        self.assertIn("  " + run.MAVEN_407_HINT, lines)
-        self.assertNotIn("  " + run.MKTEMP_HINT, lines)
+        self.assertEqual(run.output_hints(refused, "linux"), [run.MKTEMP_HINT])  # /var/folders: macOS's
+        # only for Operation not permitted
+        full = "mktemp: mkdtemp failed on /var/folders/ab/xyz/T/tmp.Q1w2: No space left on device"
+        self.assertEqual(run.output_hints(full, "darwin"), [])
+        # Linux's mktemp gets no macOS hint
+        linux = "mktemp: failed to create directory via template '/srv/x.XXXXXX': Operation not permitted"
+        self.assertEqual(run.output_hints(linux, "linux"), [run.MKTEMP_OUTSIDE_HINT])
+        self.assertNotIn("macOS", run.MKTEMP_OUTSIDE_HINT)
+        # what Maven prints: 3.9's Apache binary, and a distribution's package
+        for maven in ("[ERROR] Failed to execute goal on project demo: Could not resolve dependencies for project "
+                      "org.example:demo:jar:1.0: Failed to collect dependencies at junit:junit:jar:4.13.2: Failed to "
+                      "read artifact descriptor for junit:junit:jar:4.13.2: The following artifacts could not be "
+                      "resolved: junit:junit:pom:4.13.2 (absent): Could not transfer artifact junit:junit:pom:4.13.2 "
+                      "from/to central (https://repo.maven.apache.org/maven2): status code: 407, reason phrase: Proxy "
+                      "Authentication Required (407) -> [Help 1]",
+                      "[ERROR] Plugin org.apache.maven.plugins:maven-resources-plugin:3.3.1 or one of its dependencies "
+                      "could not be resolved: Could not transfer artifact org.apache.maven.plugins:maven-resources-"
+                      "plugin:pom:3.3.1 from/to central (https://repo.maven.apache.org/maven2): proxy authentication "
+                      "failed for https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-resources-plugin/"
+                      "3.3.1/maven-resources-plugin-3.3.1.pom, status: 407 Proxy Authentication Required -> [Help 1]"):
+            lines = views.failed_check_lines(f"[INFO] Scanning for projects...\n{maven}\n", [], "t1")
+            self.assertIn("  " + run.MAVEN_407_HINT, lines)
+            self.assertNotIn("  " + run.MKTEMP_HINT, lines)
         self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", run.MAVEN_407_HINT)
-        self.assertEqual(run.output_hints("curl: (56) 407 Proxy Authentication Required"), [])
+        # npm, curl, pip and Gradle stay quiet, and so does a 407 inside a path
+        for other in ("npm ERR! code E407\nnpm ERR! 407 Proxy Authentication Required - GET "
+                      "https://registry.npmjs.org/left-pad\n[ERROR] Could not resolve dependencies",
+                      "curl: (56) CONNECT tunnel failed, response 407\ncurl: (56) Received HTTP code 407 from proxy "
+                      "after CONNECT: Proxy Authentication Required",
+                      "curl: (22) The requested URL returned error: 407 Proxy Authentication Required while "
+                      "downloading .mvn/wrapper/maven-wrapper.jar; Could not transfer artifact",
+                      "ERROR: Could not install packages due to an OSError: HTTPSConnectionPool: Max retries exceeded "
+                      "(Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection failed: 407 "
+                      "Proxy Authentication Required')))",
+                      "> Could not resolve com.google.guava:guava:33.0-jre.\n   > Could not GET 'https://repo.maven."
+                      "apache.org/maven2/guava.pom'. Received status code 407 from server: Proxy Authentication Required",
+                      "[ERROR] Could not resolve dependencies: cannot read /cache/proxy authentication/407/x.pom"):
+            self.assertEqual(run.output_hints(other), [], other)
         self.assertEqual(run.output_hints("FAIL: test_one\nAssertionError"), [])
         # a task's check, as hansa show reports it
         self.hansa("lane", "set", "a", "check", f"echo '{refused}' >&2; exit 1")
