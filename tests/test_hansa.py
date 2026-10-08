@@ -392,7 +392,9 @@ with open(LOG, "a") as f:
                         "env": dict(os.environ),
                         "stdout": "pipe" if stat.S_ISFIFO(mode) else "file" if stat.S_ISREG(mode) else "other"}) + "\n")
 EXTRA_DENY = []
-if args[cut + 1:cut + 2] == ["/bin/sh"] and args[-1].endswith("/hansa-git-open-try.sh"):
+RUN_TRY = False  # hansa's try's script run for real, outside any sandbox: what is refused is what the files' modes refuse
+LINUX_TRY = False  # the try told as srt on Linux would: every deny pattern dropped, only paths there when it starts kept
+if args[cut + 1:cut + 2] == ["/bin/sh"] and args[-1].endswith("/hansa-git-open-try.sh") and not RUN_TRY:
     # hansa's try of a run's sandbox writing what git needs open and what must be kept (run.git_open_try): told
     # as the sandbox would answer, its deny patterns read as macOS reads them, and nothing written
     import shlex
@@ -403,6 +405,9 @@ if args[cut + 1:cut + 2] == ["/bin/sh"] and args[-1].endswith("/hansa-git-open-t
         under = lambda x: p == x or p.startswith(x.rstrip("/") + "/")
         if not any(under(x) or under(os.path.realpath(x)) for x in fs.get("allowWrite", [])):
             return True
+        if LINUX_TRY:
+            return any((under(x) or under(os.path.realpath(x))) and os.path.exists(x)
+                       for x in fs["denyWrite"] + EXTRA_DENY if not any(c in x for c in "*?["))
         return any(re.match(macos_rx(x), p, re.IGNORECASE) if any(c in x for c in "*?[") else under(x)
                    for x in fs["denyWrite"] + EXTRA_DENY)
     for line in open(args[-1]):
@@ -8712,6 +8717,106 @@ class DeskTest(unittest.TestCase):
                           heads / ".hansa-try-kept"])
         self.assertEqual(run.git_needs_kept(self.repo), [])  # a main checkout: no patterns to try
 
+    def stand_in_srt(self, line: str) -> None:
+        """The stand-in srt with one of its settings (FAKE_SRT) set: RUN_TRY or LINUX_TRY."""
+        srt = self.tmp / "bin" / "srt"
+        srt.write_text(srt.read_text().replace(f"{line} = False", f"{line} = True", 1))
+
+    def try_box(self):
+        """A worker's worktree, with another worktree beside it, and the sandbox its worker gets."""
+        from hansa import run
+        sh("git", "worktree", "add", "-q", "-b", "task/t090", str(self.tmp / "other"), cwd=self.repo)
+        s = self.desk.settings()
+        lane = s["lanes"]["a"]
+        wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
+        return wt, run.sandbox_settings(self.desk, lane, "claude", s["providers"][lane["providers"][0]], wt)["sandbox"]
+
+    def unwritable(self, *paths) -> None:
+        """Make each of `paths` read-only until the test ends, standing for what a sandbox refuses; skip where
+        that refuses nothing (run as root)."""
+        for x in paths:
+            mode = x.stat().st_mode
+            x.chmod(0o555 if x.is_dir() else 0o444)
+            self.addCleanup(x.chmod, mode)
+        probe = paths[0] / ".probe" if paths[0].is_dir() else paths[0]
+        try:
+            with open(probe, "a"):
+                pass
+        except OSError:
+            return
+        if probe != paths[0]:
+            probe.unlink()
+        self.skipTest("a read-only file or folder can be written here (as root?)")
+
+    def test_the_sandbox_try_runs_its_script_and_passes_when_its_last_line_is_a_kept_path_that_is_kept(self):
+        # the stand-in srt runs the try's script for real: the common git folder and worktrees/ read-only stand
+        # for the deny patterns, and the script's last line is a new name next to the worktree's own folder
+        from hansa import account, run
+        self.stand_in_srt("RUN_TRY")
+        wt, box = self.try_box()
+        common, own = run.git_folders(wt)
+        with unittest.mock.patch.object(account, "LINUX", False):
+            kept = run.git_needs_kept(wt)
+            self.assertEqual(kept[-1], common / "worktrees" / f"{own.name}x")
+            self.unwritable(common, common / "worktrees")
+            run.SANDBOX_TRIES.clear()
+            self.assertEqual(run.try_sandbox(box, wt), {"ok": True})
+            self.assertTrue(self.srt_calls(sandbox=True)[-1]["argv"][-1].endswith("/" + run.GIT_OPEN_TRY))
+            (common / "worktrees").chmod(0o755)  # a kept path written: named, and removed
+            run.SANDBOX_TRIES.clear()
+            r = run.try_sandbox(box, wt)
+            self.assertEqual((r["ok"], r["part"]), (False, f"the deny-write patterns do not keep {kept[-1]}"))
+            self.assertFalse(kept[-1].exists())
+            (common / "worktrees").chmod(0o555)
+            own.chmod(0o555)  # what git needs open refused
+            try:
+                run.SANDBOX_TRIES.clear()
+                r = run.try_sandbox(box, wt)
+            finally:
+                own.chmod(0o755)
+            self.assertEqual((r["ok"], r["part"]), (False, f"the deny-write patterns keep what git needs open: {own}/.hansa-try"))
+        with unittest.mock.patch.object(account, "LINUX", True):  # what is there, opened to append and kept
+            kept = run.git_needs_kept(wt)
+            self.assertIn(common / "config", kept)
+            config = (common / "config").read_bytes()
+            self.unwritable(*kept)
+            run.SANDBOX_TRIES.clear()
+            self.assertEqual(run.try_sandbox(box, wt), {"ok": True})
+            self.assertEqual((common / "config").read_bytes(), config)
+
+    def test_the_try_writes_what_each_systems_sandbox_can_keep(self):
+        from hansa import account, run
+        wt, _ = self.try_box()
+        common, own = run.git_folders(wt)
+        others = sorted(n for n in os.listdir(common / "worktrees") if n != own.name)
+        self.assertIn("other", others)
+        with unittest.mock.patch.object(account, "LINUX", False):
+            self.assertEqual(run.git_needs_open(wt), [own / "index", own / ".hansa-try"])
+            self.assertEqual(run.git_needs_kept(wt), [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x"])
+        with unittest.mock.patch.object(account, "LINUX", True):  # no new names: only what exact entries keep
+            self.assertEqual(run.git_needs_open(wt, "task/t0001"), [own / "index", own / ".hansa-try"])
+            self.assertEqual(run.git_needs_kept(wt, "task/t0001"),
+                             [common / "config", *(common / "worktrees" / n / "HEAD" for n in others)])
+            self.assertEqual(run.git_needs_kept(self.repo), [])
+
+    def test_a_linux_try_with_the_patterns_dropped_passes_and_a_macos_one_fails_closed(self):
+        from hansa import account, run
+        self.stand_in_srt("LINUX_TRY")
+        wt, box = self.try_box()
+        common, own = run.git_folders(wt)
+        with unittest.mock.patch.object(account, "LINUX", True):
+            run.SANDBOX_TRIES.clear()
+            self.assertEqual(run.try_sandbox(box, wt), {"ok": True})
+            self.assertIn(run.LINUX_TRY_NOTE, views.status_text(views.status(self.desk)))
+            self.assertEqual(self.hansa("explain", "server").count("left to hansa's checks before it runs git"), 1)
+        script = Path(self.srt_calls(sandbox=True)[-1]["argv"][-1]).name
+        self.assertEqual(script, run.GIT_OPEN_TRY)
+        with unittest.mock.patch.object(account, "LINUX", False):
+            run.SANDBOX_TRIES.clear()
+            r = run.try_sandbox(box, wt)
+            self.assertEqual((r["ok"], r["part"]), (False, f"the deny-write patterns do not keep {common / '.hansa-try-kept'}"))
+            self.assertNotIn(run.LINUX_TRY_NOTE, views.status_text(views.status(self.desk)))
+
     def test_the_sandbox_try_is_kept_by_its_settings_and_a_held_task_starts_once_one_passes(self):
         from hansa import run
         flag = self.tmp / "refuse"
@@ -8842,7 +8947,7 @@ class DeskTest(unittest.TestCase):
             kept += [Path(x) for x in run.git_needs_kept(w, branch)]
             script.write_text(run.git_open_try(opened, kept))
             r = in_srt(settings, "/bin/sh", str(script))
-            self.assertEqual(r.returncode, 0, f"{name}: {r.stderr}")
+            self.assertEqual(r.returncode, 0, f"{name}: the try's script exits 0 once it has run: {r.stderr}")
             said = r.stdout.splitlines()
             self.assertEqual([x for x in said if x.startswith("refused: ")], [], f"{name}: kept what git needs open")
             self.assertEqual([x for x in said if x.startswith("not kept: ")], [], f"{name}: left open what it keeps")
@@ -13632,6 +13737,62 @@ class DeskTest(unittest.TestCase):
         self.assertIn(".m2/settings-security.xml", home_secrets())
         for kept in (".m2/settings.xml", ".m2", ".gradle/gradle.properties", ".gradle"):  # mirrors, proxies a build needs
             self.assertNotIn(kept, home_secrets())
+
+class GitOpenTryTest(unittest.TestCase):
+    """The sandbox try's script (run.git_open_try) run by the real /bin/sh outside any sandbox: a read-only folder
+    and file stand for what a sandbox refuses."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.open, self.shut = self.tmp / "open", self.tmp / "shut"
+        self.open.mkdir()
+        self.shut.mkdir()
+        (self.open / "index").write_text("index as git left it\n")
+        (self.shut / "config").write_text("[core]\n")
+        (self.shut / "config").chmod(0o444)
+        self.shut.chmod(0o555)
+        self.addCleanup(self.shut.chmod, 0o755)
+        try:
+            (self.shut / "probe").write_text("")
+        except OSError:
+            return
+        self.skipTest("a read-only folder can be written here (as root?)")
+
+    def run_try(self, paths, kept=()) -> tuple:
+        from hansa import run
+        f = self.tmp / "try.sh"
+        f.write_text(run.git_open_try(paths, kept))
+        r = subprocess.run(["/bin/sh", str(f)], capture_output=True, text=True, timeout=30)
+        return r.returncode, r.stdout.splitlines()
+
+    def unchanged(self):
+        """The files that were there: appended to, nothing written, and nothing left made."""
+        self.assertEqual((self.open / "index").read_text(), "index as git left it\n")
+        self.assertEqual((self.shut / "config").stat().st_size, len("[core]\n"))
+        self.assertEqual(sorted(os.listdir(self.open)), ["index"])
+        self.assertEqual(sorted(os.listdir(self.shut)), ["config"])
+
+    def test_all_open_and_kept_as_they_should_be_prints_nothing_and_exits_0(self):
+        self.assertEqual(self.run_try([self.open / "index", self.open / "new"], [self.shut / "new", self.shut / "config"]),
+                         (0, []))
+        self.unchanged()
+
+    def test_an_open_path_refused_is_named_and_the_script_exits_0(self):
+        self.assertEqual(self.run_try([self.shut / "new", self.open / "index", self.shut / "config"], [self.shut / "x"]),
+                         (0, [f"refused: {self.shut / 'new'}", f"refused: {self.shut / 'config'}"]))
+        self.unchanged()
+
+    def test_a_kept_path_written_is_named_removed_and_the_script_exits_0(self):
+        self.assertEqual(self.run_try([self.open / "index"], [self.open / "new", self.open / "index", self.shut / "new"]),
+                         (0, [f"not kept: {self.open / 'new'}", f"not kept: {self.open / 'index'}"]))
+        self.unchanged()
+
+    def test_a_last_line_of_a_kept_path_that_is_kept_exits_0(self):
+        self.assertEqual(self.run_try([self.open / "index"], [self.shut / "config", self.shut / "new"]), (0, []))
+        self.assertEqual(self.run_try([], [self.shut / "config"]), (0, []))
+        self.unchanged()
+
 
 class JavaPreludeTest(unittest.TestCase):
     """run.JAVA_PRELUDE, the sh hansa runs in the sandbox before a lane's commands and a worker's: Maven's proxy

@@ -542,6 +542,12 @@ SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x
                  ("the deny-read list", lambda fs, net: {"denyRead": fs["denyRead"]}),
                  ("the write list", lambda fs, net: {"allowWrite": fs["allowWrite"]}),
                  ("the network", lambda fs, net: {"network": net}))
+# What a try leaves out on Linux, said once in hansa status and hansa explain server: srt there drops every deny entry
+# holding * ? [ and keeps only paths there when a command starts, so new names in git's shared folder are not kept
+LINUX_TRY_NOTE = ("on Linux, new names in git's shared folder are left to hansa's checks before it runs git (its "
+                  ".git file, the main checkout, no merge or rebase under way, commondir and config.worktree): srt "
+                  "there keeps only paths that are there when a command starts, so the sandbox try checks only what "
+                  "stays open for git and the paths there it must keep (the shared config, other worktrees' HEAD)")
 # The name of the script a try runs in srt to write what git needs open and what it must keep (_srt_writes)
 GIT_OPEN_TRY = "hansa-git-open-try.sh"
 # What a Bash result begins with when the sandbox could not start: macOS's sandbox-exec, Linux's bubblewrap
@@ -579,23 +585,31 @@ def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
 def git_needs_open(wt: Path, branch: str = "") -> list:
     """What a run's commands must be able to write in git's folders, for git add and git status: the worktree's
     own index and a new file in its own git folder; for a design session, committing to `branch`, that branch's
-    ref's .lock in its ref folder and a new file in objects/."""
+    ref's .lock in its ref folder and a new file in objects/ (not on Linux, where no design session runs)."""
     common, own = git_folders(wt)
     out = [own / "index", own / ".hansa-try"]
-    if branch:
+    if branch and not account.LINUX:
         ref = common / "refs" / "heads" / branch
         out += [ref.parent / f"{ref.name}.lock", common / "objects" / ".hansa-try"]
     return out
 
 
 def git_needs_kept(wt: Path, branch: str = "") -> list:
-    """What a run's sandbox must keep in git's folders, new names only a pattern keeps, to see that its patterns
-    match: a new file at the top of the common folder and, next to the worktree's own folder under worktrees/,
-    its name with an x after it; for a design session committing to `branch`, also that branch's ref's name with
-    an x after it and a new file in refs/heads/. None in a main checkout: there the patterns keep nothing."""
+    """What a run's sandbox must keep in git's folders, to see that its deny list keeps it. On macOS, new names
+    only a pattern keeps, to see that its patterns match: a new file at the top of the common folder and, next to
+    the worktree's own folder under worktrees/, its name with an x after it; for a design session committing to
+    `branch`, also that branch's ref's name with an x after it and a new file in refs/heads/. On Linux, where srt
+    drops every pattern and keeps only paths there when a command starts (LINUX_TRY_NOTE), what is there: the
+    shared config and each other worktree's HEAD. None in a main checkout: there the patterns keep nothing."""
     common, own = git_folders(wt)
     if own.resolve() == common.resolve():
         return []
+    if account.LINUX:
+        try:
+            others = sorted(n for n in os.listdir(common / "worktrees") if n != own.name)
+        except OSError:
+            others = []
+        return [x for x in [common / "config", *(common / "worktrees" / n / "HEAD" for n in others)] if x.is_file()]
     out = [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x"]
     if branch:
         ref = common / "refs" / "heads" / branch
@@ -606,15 +620,17 @@ def git_needs_kept(wt: Path, branch: str = "") -> list:
 def git_open_try(paths, kept=()) -> str:
     """A shell script writing each of `paths`, then of `kept`, as git would: one that is there opened to append,
     writing nothing; one that is not made and removed again. It prints "refused: <path>" for each of `paths` it
-    could not write, and "not kept: <path>" for each of `kept` it could (and removes what it made)."""
+    could not write, and "not kept: <path>" for each of `kept` it could (and removes what it made). It exits 0
+    once it has run to its end, whatever it found: another exit is srt's or the sandbox's failure."""
     return ('needs_open() { if [ -e "$1" ]; then ( : >> "$1" ) 2>/dev/null\n'
             '  else ( : > "$1" ) 2>/dev/null && rm -f "$1" 2>/dev/null\n'
-            '  fi || echo "refused: $1"; }\n'
-            'needs_kept() { if [ -e "$1" ]; then ( : >> "$1" ) 2>/dev/null\n'
-            '  else ( : > "$1" ) 2>/dev/null && { rm -f "$1" 2>/dev/null; true; }\n'
-            '  fi && echo "not kept: $1"; }\n'
+            '  fi || echo "refused: $1"; return 0; }\n'
+            'needs_kept() { if [ -e "$1" ]; then ( : >> "$1" ) 2>/dev/null && echo "not kept: $1"\n'
+            '  elif ( : > "$1" ) 2>/dev/null; then rm -f "$1" 2>/dev/null; echo "not kept: $1"\n'
+            '  fi; return 0; }\n'
             + "".join(f"needs_open {shlex.quote(str(x))}\n" for x in paths)
-            + "".join(f"needs_kept {shlex.quote(str(x))}\n" for x in kept))
+            + "".join(f"needs_kept {shlex.quote(str(x))}\n" for x in kept)
+            + "exit 0\n")
 
 
 def _srt_writes(path: str, settings: dict, tmp: str, cwd, paths, kept=()) -> tuple:
@@ -664,6 +680,9 @@ def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
         full = sandbox_try_settings(box, wt, tmp)
         needs = [str(x) for x in git_needs_open(wt, branch)]
         kept = [str(x) for x in git_needs_kept(wt, branch)]
+        if account.LINUX:  # only what an exact entry of the deny list keeps: srt there drops the patterns
+            exact = [Path(x).resolve() for x in full["filesystem"]["denyWrite"] if not _glob(x)]
+            kept = [x for x in kept if any(e == Path(x).resolve() or e in Path(x).resolve().parents for e in exact)]
         key = hashlib.sha256(json.dumps([path, full, needs, kept], sort_keys=True).replace(tmp, "\0tmp").encode()).hexdigest()
         if key in SANDBOX_TRIES:
             return SANDBOX_TRIES[key]

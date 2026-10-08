@@ -221,7 +221,11 @@ page gives.
   the shared git folder (`.hansa-try-kept`), a name next to the worktree's
   own folder under `worktrees/`, and for a design session a name next to its
   branch's ref and a new file in `refs/heads/` (what such a write makes is
-  removed again). It does so once for each set of
+  removed again). On Linux, where srt drops every deny pattern and keeps only
+  paths there when a command starts, it writes only the worktree's own
+  `index` and git folder, and as what must be kept the shared `config` and
+  other worktrees' `HEAD` (opened to append); new names in the shared git
+  folder are left to hansa's checks before it runs git. It does so once for each set of
   settings while it runs (a lane's tasks do not each pay for it; a restart
   tries again). When srt refuses them, the run does not start: its task is held,
   not failed and without using a try, and `hansa status` shows the lane as
