@@ -54,9 +54,9 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L [--all] \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from; alone, also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
-| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
-| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below) |
+| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--allow RULE ...] [--release-files "PATH ..."]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
+| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, release_files, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below), `release_files` (paths or globs, separated by spaces, whose changes merge only once verified: see Releasing) |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
@@ -160,6 +160,10 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   desk, or when that lane is busy and another lane on the same repository is not.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and
   also have the `reviewer` helper read the change.
+- Tests the lane's sandbox refuses (ones that bind local ports, say) skip or
+  fail there: they belong to the repository's own CI. Never run them, or the
+  check, outside the sandbox from your session, in a clean clone or anywhere
+  else: that runs the workers' code with nothing around it, before a release too.
 
 ## Merging
 - When the lane's base has not moved since the task was made and the lane has
@@ -211,7 +215,20 @@ to a public repository, a deploy to production) waits for the principal:
   for CI (`gh run watch --exit-status ...`) and a deploy script. The change is
   recorded; tell the principal what it runs and why. A command that holds one
   of the desk's keys is refused (it is stored and shown as written): have it
-  read the key from where the tool keeps it.
+  read the key from where the tool keeps it. A command that holds a word the
+  principal keeps from going out is kept, and hansa says the word and where at
+  once (on `lane set ... release`, `lane target` and `lane add --like`); every
+  release with it is refused until the command or the words change.
+- A release builds and starts what is on the base branch outside the sandbox,
+  so a change to the build files (a Maven pom's plugins, a build script, the
+  release script itself) is worker-written code a release runs unsandboxed.
+  List them on the lane: `hansa lane set L release_files "pom.xml **/pom.xml
+  build.sh tools/release.sh"` (paths or globs relative to the repository, `**/`
+  for any folders; `lane add --release-files`, copied by `--like`). `hansa
+  merge` refuses a change touching one of them until a verification of that
+  change holds (`hansa verify <id>`), and says which files; `--despite-check`
+  does not let it through, nor does anything else. `hansa explain lane L`
+  shows the list, and advises one for a lane with release targets and none.
 - A lane whose base branch goes out in more than one way names its release
   targets instead: `hansa lane target L push "git push origin main"`, `hansa
   lane target L test "./install.sh test" --minutes 600`, `hansa lane target L
