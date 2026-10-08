@@ -33,7 +33,10 @@ its own port (`hansa serve --port 8766`), and that desk's `hansa web` finds it
 (tunnel that port instead); `hansa status` and `hansa explain` say the address and
 port the page is served on, and whether `hansa serve` serves it now. A repository
 for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one
-without, in one line. On the page: add providers (a Claude Code login, or any
+without, in one line. They also refuse a desk or repository whose path holds a
+`)` followed later by a space or a comma (`Work (2024) x/desk`): Claude Code
+would split the rules hansa writes for it, and a rule meant to close a folder
+would leave it open. No run starts while such a rule would come out. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
@@ -49,8 +52,15 @@ search queries out of the machine. `WebFetch` takes public site names only: an
 IP address in any form, `localhost` and the names meant for local or private
 networks (`.local`, `.internal`, `.lan`, `.home.arpa`, `.test` and the like)
 are refused, and so is a wildcard over a suffix others share (`*.co.uk`,
-`*.github.io`), as a wildcard opens every name under it. Each rule is one value:
-one that Claude Code would split into several (`Bash(x),WebFetch`) is refused.
+`*.github.io`), as a wildcard opens every name under it. So are names with no
+dot (`metadata`, which a resolver may complete) and the well-known names that
+come back as an address written in them or as this machine (`nip.io`,
+`sslip.io`, `lvh.me`, `localtest.me` and the like, with every name under them).
+Any listed name can still be pointed at any address, this machine included:
+list only sites you know; the principal sees every change. Each rule is one
+value, checked as Claude Code splits the list (on commas and spaces outside
+parentheses, where every `)` closes them): one it would split into several,
+such as `Bash(x),WebFetch` or `Bash(a(b),WebFetch,c)`, is refused.
 MCP tools are refused on the list (a task gets a browser with
 `hansa add --browser`). A change of the list is recorded, and
 `hansa explain lane L` shows the web tools and their sites beside the network

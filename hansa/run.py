@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, HANSA_IDENTITY, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   one_rule, refused_rule, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
 
@@ -2209,6 +2209,17 @@ def desk_private(desk: Desk) -> list:
     return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md"]
 
 
+def paths_problem(desk: Desk, wt) -> str:
+    """path_rule_problem for the folders hansa writes rules for when it starts a worker, verifier or design
+    session: the desk's private ones (desk_private), the worktree, what the principal keeps from workers; '' for
+    none. One that would split is never dropped: nothing starts until it moves."""
+    for x in full_paths([*desk_private(desk), wt, *no_read(desk)[0]]):
+        why = path_rule_problem(x)
+        if why:
+            return why
+    return ""
+
+
 def desk_read_rules(desk: Desk) -> list:
     """desk_private as rules that deny Claude Code's Read tool: each folder with all under it, the card itself."""
     return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
@@ -3402,6 +3413,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
+    unsplit = argv_rules_problem(argv)
+    if unsplit:  # a deny rule Claude Code would split leaves its folder open: no worker starts with one
+        raise RuntimeError(f"hansa started no {'verifier' if verifying else 'worker'}: {unsplit}")
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
     # no key in it: keys are in env only. Without the preview around it: a resume starts its own (resume)
@@ -3570,6 +3584,9 @@ def design_command(desk: Desk, tid: str):
              "--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
+    unsplit = argv_rules_problem(argv)
+    if unsplit:  # as for workers (start)
+        raise RuntimeError(f"hansa started no design session: {unsplit}")
     env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane, DESIGN_GIT_CONFIG),
            **git_config_env(sandbox_env(desk, lane), DESIGN_GIT_CONFIG), "HANSA_TASK": tid,
            "CLAUDE_CODE_TMPDIR": tmp,
@@ -3612,6 +3629,9 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         check_git_file(desk, wt)  # design_sandbox asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    unsplit = paths_problem(desk, wt)
+    if unsplit:  # found before the session starts, as design_command would find it too late (in tmux)
+        raise RuntimeError(f"hansa started no design session: {unsplit}")
     sandbox_guard(desk, lane_name, "design session", design_sandbox(desk, lane, pname, p, wt, f"task/{tid}")["sandbox"], wt,
                   f"task/{tid}")
     if cancelled_before_start(desk, tid):

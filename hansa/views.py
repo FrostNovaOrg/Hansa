@@ -1089,7 +1089,8 @@ def web_lines(allow: list) -> list:
     return ["  web tools (Claude Code's own, outside the sandbox's network list; workers, verifiers and design"
             " sessions alike):",
             *(["    WebFetch reaches only: " + ", ".join(sites) + " (unlike the network list, it runs in Claude"
-               " Code's own process, outside the sandbox; a *. wildcard opens every name under it)"] if sites else []),
+               " Code's own process, outside the sandbox; a *. wildcard opens every name under it; any listed name can be pointed at any address, this"
+               " machine included: list only sites you know, and the principal sees every change)"] if sites else []),
             *(["    WebSearch: sends search queries out of the machine"] if search else [])]
 
 

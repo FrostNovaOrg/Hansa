@@ -7042,8 +7042,8 @@ class DeskTest(unittest.TestCase):
     def test_a_rule_on_a_lanes_allow_list_is_exactly_one_rule(self):
         from hansa.run import lane_allow
         s = self.desk.settings()
-        for bad in ("Bash(x),WebFetch", "Bash(x) Read(y)", "Bash(x),WebFetch,Read(y)", "Bash(x)(y)", "Bash((x)",
-                    "Bash(x)) WebFetch (y)", "Bash()"):
+        for bad in ("Bash(x),WebFetch", "Bash(x) Read(y)", "Bash(x),WebFetch,Read(y)", "Bash(x)) WebFetch (y)",
+                    "Bash()", "Bash(x)y"):
             s["lanes"]["a"]["allow"] = [bad]
             [p] = validate(s)
             self.assertIn("would reach Claude Code as more than one rule", p, bad)
@@ -7064,6 +7064,107 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.settings()["lanes"]["a"]["allow"], ["WebSearch", "Bash(pnpm test:*)"])
         self.hansa("lane", "add", "c", "--like", "a", "--allow", "WebSearch", "WebSearch")
         self.assertEqual(self.desk.settings()["lanes"]["c"]["allow"], ["WebSearch"])
+
+    def test_rules_are_checked_as_claude_code_splits_them(self):
+        from hansa import run
+        from hansa.desk import one_rule, split_rules
+        # Claude Code's splitter: commas and spaces outside parentheses, and every ) ends them, not a depth
+        self.assertEqual(split_rules("Bash(echo $(true) WebFetch ok)"), ["Bash(echo $(true)", "WebFetch", "ok)"])
+        self.assertEqual(split_rules("Bash(a(b),WebFetch,c)"), ["Bash(a(b)", "WebFetch", "c)"])
+        split = ("Bash(echo $(true) WebFetch ok)", "Bash(a(b),WebFetch,c)", "Bash(x (y) WebFetch)")
+        whole = ("Bash(npm run test:*)", "Bash(echo $(date):*)", "Read(//Users/x/Library/Application Support/y/**)")
+        for r in split:
+            self.assertFalse(one_rule(r), r)
+        for r in whole:
+            self.assertTrue(one_rule(r), r)
+        s = self.desk.settings()
+        for bad in split:
+            s["lanes"]["a"]["allow"] = [bad]
+            [p] = validate(s)
+            self.assertIn("would reach Claude Code as more than one rule", p, bad)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", bad])
+            self.assertIn("more than one rule", str(e.exception.code), bad)
+        # saved before: never reaches a run; nor does a check whose rule would split, for a design session
+        s["lanes"]["a"].update(allow=[*split, "Bash(npm run test:*)"], check="pytest $(git ls-files tests) -q")
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual([r for r in run.lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(npm run test:*)"])
+        tid = self.desk.new_task("Design it", kind="design")
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        for r in [*self.denied_by(argv), *self.allowed_by(argv)]:
+            self.assertEqual(split_rules(r), [r])
+        self.assertFalse([r for r in self.allowed_by(argv) if "WebFetch" in r or "pytest" in r])
+
+    def test_a_folder_whose_deny_rule_would_split_is_refused_and_never_dropped(self):
+        from hansa import run
+        out = io.StringIO()
+        for bad in (self.tmp / "Work (2024) x" / "desk", self.tmp / "Work (a),b" / "desk"):
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                main(["init", str(bad)])
+            self.assertIn(f"the path {os.path.realpath(bad)} would make rules", str(e.exception.code))
+            self.assertIn("move it to a path", str(e.exception.code))
+            self.assertFalse(bad.exists())
+        ok = self.tmp / "Library" / "Application Support" / "desk"
+        with contextlib.redirect_stdout(out):
+            main(["init", str(ok)])
+        self.assertTrue((ok / "settings.json").is_file())
+        repo = self.tmp / "Work (2024) x" / "repo"
+        shutil.copytree(self.repo, repo)
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(repo)])
+        self.assertIn("move it to a path", str(e.exception.code))
+        self.assertNotIn("b", self.desk.settings()["lanes"])
+        # a desk moved to such a path since: no worker, verifier or design session starts, and nothing is dropped
+        moved = self.tmp / "Work (2024) x" / "desk"
+        shutil.move(str(self.desk.root), str(moved))
+        self.desk = Desk(moved)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("hansa started no worker", m["error"])
+        self.assertIn(f"the path {os.path.realpath(moved)}", m["error"])
+        self.assertIn("move it to a path", m["error"])
+        did = self.desk.new_task("Design it", kind="design")
+        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
+                         model_asked="sonnet")
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, did)
+        with self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)
+        self.assertIn("hansa started no design session", str(e.exception))
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(moved),
+                            "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout, "")  # Claude Code never started
+        self.assertIn("the coordinator's session was not started", r.stderr)
+        self.assertIn("move it to a path", r.stderr)
+        self.assertIn("move it to a path", run.paths_problem(self.desk, self.repo))
+
+    def test_webfetch_refuses_names_that_come_back_as_this_machine(self):
+        s = self.desk.settings()
+        for host, why in (("metadata", "no dot"), ("router", "no dot"), ("instance-data", "no dot"),
+                          ("127.0.0.1.nip.io", "under nip.io"), ("*.nip.io", "under nip.io"),
+                          ("10-0-0-1.sslip.io", "under sslip.io"), ("a.xip.io", "under xip.io"),
+                          ("x.traefik.me", "under traefik.me"), ("localtest.me", "under localtest.me"),
+                          ("lvh.me", "under lvh.me"), ("*.lvh.me", "under lvh.me"), ("app.vcap.me", "under vcap.me"),
+                          ("Lacolhost.com", "under lacolhost.com")):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            [p] = validate(s)
+            self.assertIn(why, p, host)
+            self.assertIn("WebFetch(domain:docs.python.org)", p, host)
+        for host in ("docs.python.org", "*.python.org"):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            self.assertEqual(validate(s), [], host)
+        self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)")
+        explained = " ".join(views.explain_text(self.desk, "lane", "a").split())
+        self.assertIn("any listed name can be pointed at any address, this machine included: list only sites you "
+                      "know, and the principal sees every change", explained)
 
     def test_workers_and_verifiers_are_told_the_lanes_setup_and_check_as_hansa_runs_them(self):
         from hansa import run

@@ -112,7 +112,9 @@ outside the sandbox: `WebFetch(domain:HOST)` for each site (HOST a public
 site's name as the network list writes it, `*.` in front allowed and opening
 every name under it; a bare `WebFetch`, an IP address, `localhost`, a local or
 private name such as `.internal`, or a wildcard over a shared suffix such as
-`*.co.uk` is refused; give each rule as its own value), and
+`*.co.uk` is refused, as are names with no dot and names such as `nip.io` or
+`lvh.me` that come back as this machine; any listed name can still be pointed at
+any address, so list only sites you know; give each rule as its own value), and
 `WebSearch`, which sends search queries out of the machine. MCP tools are
 refused there. A change of `allow` is recorded: tell the principal what you
 changed and why. What a check needs from outside it is a host on the

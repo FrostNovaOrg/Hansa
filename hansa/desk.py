@@ -1708,6 +1708,9 @@ WEB_FETCH_HOW = ("list each site as WebFetch(domain:HOST), with HOST a public si
 # Names meant for this machine or a local or private network: WebFetch, outside the sandbox, would reach them
 LOCAL_SUFFIXES = ("localhost", "local", "internal", "lan", "home.arpa", "arpa", "test", "invalid", "example",
                   "localdomain")
+# Well-known names that come back as an address written in them (127.0.0.1.nip.io) or as this machine (lvh.me),
+# with every name under them
+LOOPBACK_NAMES = ("nip.io", "sslip.io", "xip.io", "traefik.me", "localtest.me", "lvh.me", "vcap.me", "lacolhost.com")
 # Common suffixes under which every name belongs to someone else: a wildcard over one opens all of them
 SHARED_SUFFIXES = frozenset((
     "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au", "co.jp", "ne.jp", "or.jp",
@@ -1719,28 +1722,84 @@ SHARED_SUFFIXES = frozenset((
     "s3.amazonaws.com", "r2.dev", "surge.sh", "readthedocs.io"))
 
 
+def split_rules(text: str) -> list:
+    """The rules Claude Code reads out of one value of --allowedTools or --disallowedTools, split as it splits
+    them: on commas and spaces outside parentheses, where being inside is an on/off flag that every ( turns on and
+    every ) turns off, not a depth. So Bash(echo $(true) WebFetch ok) reaches it as Bash(echo $(true), WebFetch
+    and ok); Bash(echo $(date):*) and Read(//x/Application Support/**) as themselves."""
+    out, cur, inside = [], "", False
+    for c in text:
+        if c in "()":
+            inside, cur = c == "(", cur + c
+        elif c in ", " and inside:
+            cur += c
+        elif c == ",":
+            out, cur = out + [cur.strip()] if cur.strip() else out, ""
+        elif c == " ":
+            if cur.strip():
+                out, cur = out + [cur.strip()], ""
+        elif cur or c.strip():
+            cur += c
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
 def one_rule(rule) -> bool:
-    """Whether a rule reaches Claude Code as one rule, which reads --allowedTools and --disallowedTools as a list
-    split on commas and spaces outside parentheses: a tool name, then at most one parenthesised part that closes
-    only at the rule's last character (Bash(echo $(date):*) is one)."""
-    m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", rule) if isinstance(rule, str) else None
+    """Whether a rule reaches Claude Code as itself and nothing else (split_rules): a tool name, then at most one
+    parenthesised part that closes at the rule's last character, and no control characters."""
+    if not isinstance(rule, str) or _has_control(rule):
+        return False
+    m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", rule)
     rest = rule[m.end():] if m else None
-    if rest is None or _has_control(rule):
+    if rest is None or rest and (len(rest) < 3 or rest[0] != "(" or rest[-1] != ")"):
         return False
-    if not rest:
-        return True
-    if len(rest) < 3 or rest[0] != "(":
-        return False
-    depth = 0
-    for i, c in enumerate(rest):
-        depth += (c == "(") - (c == ")")
-        if depth == 0:
-            return i == len(rest) - 1
-    return False
+    return split_rules(rule) == [rule]
 
 
-ONE_RULE_WHY = ("would reach Claude Code as more than one rule, as it splits the list on commas and spaces: give "
-                "each rule as its own value, a tool name with at most one (...) part that closes at the end")
+def path_rule_problem(path) -> str:
+    """Why a folder cannot be closed or opened to Claude Code's tools by a rule hansa writes for it
+    (Read(//PATH/**), Read(//PATH)): the rule would reach Claude Code as several (split_rules), and a deny rule
+    split so leaves the folder open; '' for a path that makes one rule. Such a path must move: hansa never drops
+    the rule and runs on."""
+    p = str(path)
+    if all(one_rule(f"Read(//{p.lstrip('/')}{end})") for end in ("", "/**")):
+        return ""
+    return (f"the path {p} would make rules for Claude Code's tools (such as Read(//{p.lstrip('/')}/**)) that it "
+            f"reads as more than one, as after a ')' it splits them on commas and spaces, so a rule closing that "
+            f"folder would not close it: move it to a path with no ')' followed later by a space or a comma")
+
+
+def rules_problem(rules) -> str:
+    """Why hansa may not start Claude Code with these rules: one would reach it as several (one_rule), named with
+    the path it was made for (path_rule_problem); '' when each reaches it as itself."""
+    for r in rules:
+        if one_rule(r):
+            continue
+        m = re.match(r"^[A-Za-z_]+\(//(.*?)(/\*\*)?\)$", r) if isinstance(r, str) else None
+        if m and path_rule_problem("/" + m.group(1)):
+            return path_rule_problem("/" + m.group(1))
+        return f"the rule {r} would reach Claude Code as more than one rule, as it splits them on commas and spaces"
+    return ""
+
+
+def argv_rules_problem(argv) -> str:
+    """rules_problem for the rules of a Claude Code command line: the values after --allowedTools and
+    --disallowedTools, up to the next option."""
+    rules, on = [], False
+    for x in argv:
+        if x in ("--allowedTools", "--disallowedTools"):
+            on = True
+        elif x.startswith("--"):
+            on = False
+        elif on:
+            rules.append(x)
+    return rules_problem(rules)
+
+
+ONE_RULE_WHY = ("would reach Claude Code as more than one rule, as it splits the list on commas and spaces outside "
+                "parentheses, and every ')' closes them: give each rule as its own value, a tool name with at most "
+                "one (...) part that closes at the end, with no ')' before a later space or comma")
 
 
 def web_host_problem(host: str) -> str:
@@ -1763,6 +1822,13 @@ def web_host_problem(host: str) -> str:
     if local:
         return (f"is a name under .{local}, meant for a local or private network, which WebFetch would reach from "
                 f"Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
+    back = next((x for x in LOOPBACK_NAMES if bare == x or bare.endswith("." + x)), "")
+    if back:
+        return (f"is a name under {back}, which comes back as the address written in it or as this machine, which "
+                f"WebFetch would reach from Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
+    if not wild and "." not in bare:
+        return ("is a name with no dot, which a resolver may complete to one on a local or private network, which "
+                "WebFetch would reach from Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
     if wild and ("." not in bare or bare in SHARED_SUFFIXES):
         return (f"is a wildcard over the shared suffix .{bare}: every name under it belongs to someone else; "
                 + WEB_FETCH_HOW)
