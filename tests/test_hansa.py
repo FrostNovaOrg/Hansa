@@ -8516,6 +8516,37 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(on_linux, worker["network"])
 
     @design_as_on_mac
+    def test_a_design_sessions_own_commits_and_its_end_commit_carry_the_lanes_identity(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+        wt = Path(self.design_worktree(tid))
+        base = self.git_out("rev-parse", "main")
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(wt), session_id="sid-d", model_asked="sonnet",
+                         branch=f"task/{tid}", base=base)
+        _, env, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        ada = "Ada Lane <ada@example.org>"
+        self.assertEqual({k: env[k] for k in env if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))},
+                         {"GIT_AUTHOR_NAME": "Ada Lane", "GIT_AUTHOR_EMAIL": "ada@example.org",
+                          "GIT_COMMITTER_NAME": "Ada Lane", "GIT_COMMITTER_EMAIL": "ada@example.org"})
+        # the session's own commit, as git in it writes one with what it is given; then hansa's at its end
+        (wt / "own.txt").write_text("the session's own commit\n")
+        sh("git", "add", "own.txt", cwd=wt)
+        subprocess.run(["git", "commit", "-q", "-m", "own"], cwd=wt, check=True, capture_output=True,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                            **{k: v for k, v in env.items() if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}})
+        (wt / "left.txt").write_text("left uncommitted\n")
+        self.desk.update(tid, state="running")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["commits"], 2, m)
+        self.assertEqual(self.git_out("log", "--format=%an <%ae>|%cn <%ce>", f"main..{m['head']}").splitlines(),
+                         [f"{ada}|{ada}"] * 2)
+
+    @design_as_on_mac
     def test_a_design_session_may_write_in_git_only_what_its_own_commits_and_merges_take(self):
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))  # lane a's worktree
@@ -9309,12 +9340,18 @@ class DeskTest(unittest.TestCase):
         ref = self.repo / ".git" / "refs" / "heads" / "task" / tid
         tip = ref.read_text().strip()
         (wt / "left.txt").write_text("left uncommitted\n")
-        order, wgit = [], run.wgit
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
+        self.assertEqual(self.desk.save_settings(s), [])
+        order, wgit, written = [], run.wgit, []
 
-        def linked_in_the_window(desk, w, *args):  # the link is made after the check, before the ref is moved
+        def linked_in_the_window(desk, w, *args, **kw):  # the link is made after the check, before the ref is moved
             if args[:1] == ("write-tree",):
                 ref.write_text("ref: refs/heads/main\n")
-            return wgit(desk, w, *args)
+            out = wgit(desk, w, *args, **kw)
+            if args[:1] == ("commit-tree",):
+                written.append(wgit(desk, w, "log", "-1", "--format=%an <%ae>|%cn <%ce>", out))
+            return out
         sweep, commit_work = run.sweep, run.commit_work
         with unittest.mock.patch.object(run, "wgit", linked_in_the_window), \
                 unittest.mock.patch.object(run, "sweep", lambda d, t: order.append("sweep") or sweep(d, t)), \
@@ -9330,6 +9367,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.*")).read_text(),
                          "ref: refs/heads/main\n")
         self.assertEqual(order[:2], ["sweep", "commit"])  # what the session left running is stopped first
+        self.assertEqual(written, ["Ada Lane <ada@example.org>|Ada Lane <ada@example.org>"])  # the lane's identity
 
     def test_the_commit_hansa_made_is_the_tasks_work_whatever_its_branch_ref_says_after(self):
         # a leftover the sweep cannot find (on macOS a /bin/sh loop: hansa cannot read a system program's environment)
@@ -9339,6 +9377,9 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual(first["state"], "done", first)
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
+        self.assertEqual(self.desk.save_settings(s), [])
         lane = self.desk.settings()["lanes"]["a"]
         for when in ("next git", "last step"):
             tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
@@ -9357,10 +9398,10 @@ class DeskTest(unittest.TestCase):
                 if not ref.read_text().startswith("ref:"):
                     ref.write_text("ref: refs/heads/main\n")
 
-            def after_the_commit(desk, w, *args):  # the first git hansa runs once its commit is checked and made
+            def after_the_commit(desk, w, *args, **kw):  # the first git hansa runs once its commit is checked and made
                 if made and when == "next git":
                     link()
-                return wgit(desk, w, *args)
+                return wgit(desk, w, *args, **kw)
 
             def committed(*a, **k):
                 out = commit_work(*a, **k)
@@ -9382,6 +9423,8 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(m["commits"], 2, when)  # the session's own commit and hansa's
             self.assertEqual(ref.read_text(), m["head"] + "\n", when)  # put back to it: the work is kept
             self.assertEqual(self.git_out("rev-list", "--count", f"main..task/{tid}"), "2", when)
+            self.assertEqual(self.git_out("log", "-1", "--format=%an <%ae>|%cn <%ce>", made[0]),
+                             "Ada Lane <ada@example.org>|Ada Lane <ada@example.org>", when)  # the lane's identity
             self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.*")).read_text(),
                              "ref: refs/heads/main\n")
         # a finished task's branch that no longer holds the recorded commit: verify, merge (and its merge check),
