@@ -306,15 +306,20 @@ DESIGN_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.e
 DESIGN_ON_LINUX = ("design sessions do not run on Linux: there the sandbox cannot keep a session that commits from "
                    "making or moving other branches in git's shared folder (the base among them), so hansa does not "
                    "start one; work on the lane with tasks, or open the design session on a Mac")
-# The characters a deny pattern keeps in a [...] class (others_than, as ranges: name_class), with -: those of the names hansa and
+# The characters a deny pattern keeps in a [...] class (others_than, as ranges: name_classes), with -: those of the names hansa and
 # git give branches, worktrees' folders and git's own files. A name made later with another character is not
 # kept by the patterns (one there when the run starts is, by name), and hansa never uses one. macOS's sandbox
-# matches paths without regard to case, so a letter is left out of a class in both cases, and it reads a - just
-# before ] as a range up to the end of the character set, so - goes first (name_class). hansa's own names are
-# small letters, digits, . _ and -: on a case-insensitive volume a capital is the same name, and on a
-# case-sensitive one a name with a capital is kept only when it is there as a run starts, as one with another
-# character is.
+# matches paths without regard to case, so a letter is left out of a class in both cases, it reads a - just
+# before ] as a range up to the end of the character set, so - goes first, and it drops a class of more than
+# CLASS_MAX elements, so a long one is split (name_classes). hansa's own names are small letters, digits, . _
+# and -: on a case-insensitive volume a capital is the same name, and on a case-sensitive one a name with a
+# capital is kept only when it is there as a run starts, as one with another character is.
 NAME_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
+# The most elements (a character, \. among them, a leading - too, or a range) a [...] class may hold in macOS's
+# sandbox, as measured with srt: with 15 a class keeps each of its characters wherever it stands; with 16 the
+# whole class matches nothing, silently, and the profile still applies ([c + 15 more]* kept neither cx nor 0x).
+# name_classes splits a longer class into patterns of at most this many, which act together.
+CLASS_MAX = 15
 # What a worker's sandbox on Linux (bubblewrap, in Claude Code and srt alike) mounts an empty file over at the top
 # of the worktree when it is missing, so it cannot be made: its fixed list of files a program may run or obey
 # (.gitconfig to .mcp.json) and the folders .vscode and .idea. It removes them once no sandbox of its run is
@@ -523,7 +528,8 @@ def try_srt_at_start(desk: Desk) -> dict:
 # Before hansa starts a worker, a verifier or a design session it tries the run's sandbox: srt with the same
 # filesystem and network settings Claude Code is given, on /usr/bin/true, then a write of what git needs open
 # there (git_needs_open), since a sandbox that starts may still keep it, as patterns read otherwise than meant
-# would (name_class); sandbox_guard. Claude Code carries its
+# would (name_classes), and of what it must keep (git_needs_kept), since a pattern may as silently match nothing;
+# sandbox_guard. Claude Code carries its
 # own copy of the sandbox library, which may differ from the srt installed, so a try that passes is a guard, not
 # proof: hansa also watches the run's first Bash calls (sandbox_start_failure). A try that fails holds the task
 # (not failed, no try used) and the lane: hansa status says why. Kept by a fingerprint of the settings in this
@@ -536,7 +542,7 @@ SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x
                  ("the deny-read list", lambda fs, net: {"denyRead": fs["denyRead"]}),
                  ("the write list", lambda fs, net: {"allowWrite": fs["allowWrite"]}),
                  ("the network", lambda fs, net: {"network": net}))
-# The name of the script a try runs in srt to write what git needs open (_srt_writes)
+# The name of the script a try runs in srt to write what git needs open and what it must keep (_srt_writes)
 GIT_OPEN_TRY = "hansa-git-open-try.sh"
 # What a Bash result begins with when the sandbox could not start: macOS's sandbox-exec, Linux's bubblewrap
 SANDBOX_START_FAILED = ("sandbox-exec: ", "bwrap: ")
@@ -582,23 +588,45 @@ def git_needs_open(wt: Path, branch: str = "") -> list:
     return out
 
 
-def git_open_try(paths) -> str:
-    """A shell script writing each of `paths` as git would: one that is there opened to append, writing nothing;
-    one that is not made and removed again. It prints "refused: <path>" for each it could not write."""
-    return "".join(f"p={shlex.quote(str(x))}\n"
-                   'if [ -e "$p" ]; then ( : >> "$p" ) 2>/dev/null\n'
-                   'else ( : > "$p" ) 2>/dev/null && rm -f "$p" 2>/dev/null\n'
-                   'fi || echo "refused: $p"\n' for x in paths)
+def git_needs_kept(wt: Path, branch: str = "") -> list:
+    """What a run's sandbox must keep in git's folders, new names only a pattern keeps, to see that its patterns
+    match: a new file at the top of the common folder and, next to the worktree's own folder under worktrees/,
+    its name with an x after it; for a design session committing to `branch`, also that branch's ref's name with
+    an x after it and a new file in refs/heads/. None in a main checkout: there the patterns keep nothing."""
+    common, own = git_folders(wt)
+    if own.resolve() == common.resolve():
+        return []
+    out = [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x"]
+    if branch:
+        ref = common / "refs" / "heads" / branch
+        out += [ref.parent / f"{ref.name}x", common / "refs" / "heads" / ".hansa-try-kept"]
+    return out
 
 
-def _srt_writes(path: str, settings: dict, tmp: str, cwd, paths) -> tuple:
-    """srt with these settings writing `paths` (git_open_try): (the first path refused, or "", srt's first line
-    when it failed otherwise)."""
+def git_open_try(paths, kept=()) -> str:
+    """A shell script writing each of `paths`, then of `kept`, as git would: one that is there opened to append,
+    writing nothing; one that is not made and removed again. It prints "refused: <path>" for each of `paths` it
+    could not write, and "not kept: <path>" for each of `kept` it could (and removes what it made)."""
+    return ('needs_open() { if [ -e "$1" ]; then ( : >> "$1" ) 2>/dev/null\n'
+            '  else ( : > "$1" ) 2>/dev/null && rm -f "$1" 2>/dev/null\n'
+            '  fi || echo "refused: $1"; }\n'
+            'needs_kept() { if [ -e "$1" ]; then ( : >> "$1" ) 2>/dev/null\n'
+            '  else ( : > "$1" ) 2>/dev/null && { rm -f "$1" 2>/dev/null; true; }\n'
+            '  fi && echo "not kept: $1"; }\n'
+            + "".join(f"needs_open {shlex.quote(str(x))}\n" for x in paths)
+            + "".join(f"needs_kept {shlex.quote(str(x))}\n" for x in kept))
+
+
+def _srt_writes(path: str, settings: dict, tmp: str, cwd, paths, kept=()) -> tuple:
+    """srt with these settings writing `paths` and `kept` (git_open_try): (the first of `paths` refused, or "",
+    the first of `kept` written, or "", srt's first line when it failed otherwise)."""
     f = Path(tmp) / GIT_OPEN_TRY
-    f.write_text(git_open_try(paths))
+    f.write_text(git_open_try(paths, kept))
     ran, said, out = _srt_true(path, settings, tmp, cwd, ["/bin/sh", str(f)])
-    refused = [x.removeprefix("refused: ") for x in out.splitlines() if x.startswith("refused: ")]
-    return (refused[0] if refused else "", "" if ran or refused else said)
+    lines = out.splitlines()
+    refused = [x.removeprefix("refused: ") for x in lines if x.startswith("refused: ")]
+    written = [x.removeprefix("not kept: ") for x in lines if x.startswith("not kept: ")]
+    return (refused[0] if refused else "", written[0] if written else "", "" if ran or refused or written else said)
 
 
 def _srt_true(path: str, settings: dict, tmp: str, cwd, argv=("/usr/bin/true",)) -> tuple:
@@ -625,8 +653,9 @@ def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
     process: {"ok": True}; {"ok": False, "said": srt's first line, "part": what of the settings it refuses, found
     by trying each part alone (SANDBOX_PARTS)}; or {"ok": None, "said": why} when srt is not there or does not run
     even with nothing in its settings: then Claude Code's own sandbox (failIfUnavailable) is all there is. A
-    sandbox that starts then writes what git needs open there (git_needs_open; `branch`, a design session's):
-    one it keeps is refused too, with "why"."""
+    sandbox that starts then writes what git needs open there (git_needs_open; `branch`, a design session's) and
+    what it must keep (git_needs_kept): one that keeps the first or lets the second through is refused too, with
+    "why". This fails closed: a sandbox whose patterns do not keep what they should runs no one."""
     path = shutil.which("srt")
     if not path:
         return {"ok": None, "said": SRT_MISSING}
@@ -634,19 +663,22 @@ def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
     try:
         full = sandbox_try_settings(box, wt, tmp)
         needs = [str(x) for x in git_needs_open(wt, branch)]
-        key = hashlib.sha256(json.dumps([path, full, needs], sort_keys=True).replace(tmp, "\0tmp").encode()).hexdigest()
+        kept = [str(x) for x in git_needs_kept(wt, branch)]
+        key = hashlib.sha256(json.dumps([path, full, needs, kept], sort_keys=True).replace(tmp, "\0tmp").encode()).hexdigest()
         if key in SANDBOX_TRIES:
             return SANDBOX_TRIES[key]
         ran, said, _ = _srt_true(path, full, tmp, wt)
         bare = {"network": {"allowedDomains": [], "deniedDomains": []},
                 "filesystem": {"allowWrite": full_paths([tmp]), "denyRead": [], "denyWrite": []}}
         if ran:
-            refused, said = _srt_writes(path, full, tmp, wt, needs)
+            refused, written, said = _srt_writes(path, full, tmp, wt, needs, kept)
             out = {"ok": True}
-            if refused or said:
+            if refused or written or said:
                 part = (f"the deny-write patterns keep what git needs open: {refused}" if refused
+                        else f"the deny-write patterns do not keep {written}" if written
                         else "the write of what git needs open failed")
-                out = {"ok": False, "said": said or f"git cannot write {refused}", "part": part,
+                out = {"ok": False, "part": part,
+                       "said": said or (f"git cannot write {refused}" if refused else f"a command could write {written}"),
                        "why": f"the sandbox starts, but {part}" + (f": {said}" if said else "")}
         elif not _srt_true(path, bare, tmp, wt)[0]:
             out = {"ok": None, "said": said}  # srt does not run at all: not these settings' doing
@@ -1310,7 +1342,7 @@ def others_than(folder: Path, names) -> list:
 
     def walk(start, rest):
         nexts = sorted({s[0] for s in rest if s})
-        out.append(f"{folder}/{start}[{name_class(nexts)}]*")
+        out.extend(f"{folder}/{start}[{c}]*" for c in name_classes(nexts))
         if start and "" not in rest:
             out.append(f"{folder}/{start}")
         for c in nexts:
@@ -1319,19 +1351,21 @@ def others_than(folder: Path, names) -> list:
     return out
 
 
-def name_class(left_out) -> str:
+def name_classes(left_out) -> list:
     """What goes between [ and ] for the characters of NAME_CHARS and - but `left_out`, as macOS's sandbox reads
-    a class: - first when kept, then digits, capitals and small letters each as runs (0-9A-Za-np-z), then . and _.
-    Two facts of that reading shape it. It matches paths without regard to case, so [A] holds a and [B-Z] holds c:
-    a letter left out is left out in both cases (for ("a",): -0-9B-Zb-z._). And a - just before ] is a range up
-    to the end of the character set ([_-] holds every small letter), while a - first is a plain -. macOS also
-    refuses a sandbox whose profile holds two or more classes listing some sixty characters one by one; ranges it
-    takes. A negated class cannot stand in: srt escapes ^ (so [^w] holds ^ and w), and [!w] holds ! and w."""
+    a class: - first when kept, then digits, capitals and small letters each as runs (0-9A-Za-np-z), then . and _;
+    one class, or several of at most CLASS_MAX elements each, which together hold them all: then the small letters
+    go in one of their own (for o, r, l and w: -0-9A-KMNPQS-VX-Z._ and a-kmnpqs-vx-z), each its own pattern.
+    Three facts of that reading shape it. It matches paths without regard to case, so [A] holds a and [B-Z] holds
+    c: a letter left out is left out in both cases (for ("a",): -0-9B-Zb-z._). A - just before ] is a range up
+    to the end of the character set ([_-] holds every small letter), while a - first is a plain -. And a class
+    of more than CLASS_MAX elements matches nothing. macOS also refuses a sandbox whose profile holds two or more
+    classes listing some sixty characters one by one; ranges it takes. A negated class cannot stand in: srt
+    escapes ^ (so [^w] holds ^ and w), and [!w] holds ! and w."""
     gone = {c.lower() for c in left_out} | {c.upper() for c in left_out}
-    out = "" if "-" in gone else "-"
-    for group in ("0123456789", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"):
-        kept = [c in NAME_CHARS and c not in gone for c in group]
-        i = 0
+
+    def runs(group):  # the elements of a class for the characters of `group` it keeps
+        kept, out, i = [c in NAME_CHARS + "-" and c not in gone for c in group], [], 0
         while i < len(group):
             if not kept[i]:
                 i += 1
@@ -1339,9 +1373,17 @@ def name_class(left_out) -> str:
             j = i
             while j + 1 < len(group) and kept[j + 1]:
                 j += 1
-            out += group[i] if i == j else f"{group[i]}{group[j]}" if j == i + 1 else f"{group[i]}-{group[j]}"
+            out += [group[i]] if i == j else [group[i], group[j]] if j == i + 1 else [f"{group[i]}-{group[j]}"]
             i = j + 1
-    return out + "".join(c for c in "._" if c in NAME_CHARS and c not in gone)
+        return out
+    dash, digits, capitals, small = runs("-"), runs("0123456789"), runs("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), runs("abcdefghijklmnopqrstuvwxyz")
+    rest = [c for c in "._" if c in NAME_CHARS and c not in gone]
+    if len(dash + digits + capitals + small + rest) <= CLASS_MAX:
+        return ["".join(dash + digits + capitals + small + rest)] if dash + digits + capitals + small + rest else []
+    out = []
+    for group in (dash + digits + capitals + rest, small):
+        out += ["".join(group[i:i + CLASS_MAX]) for i in range(0, len(group), CLASS_MAX)]
+    return [x for x in out if x]
 
 
 def _git_patterns(wt: Path, committing: str = "") -> list:

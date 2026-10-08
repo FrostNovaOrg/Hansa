@@ -4,8 +4,9 @@
 # On macOS the real srt is installed too, and one test runs it with the sandbox settings hansa gives a worker,
 # a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip without it): that the
 # sandbox starts, leaves open what git needs (the worktree's own folder, a design session's branch ref and
-# objects/) and keeps the rest (other worktrees' folders, the shared settings and hooks, other refs, and names
-# next to the open ones). The stand-in cannot show how the operating system reads them. Not on Linux: bubblewrap needs unprivileged
+# objects/) and keeps the rest (other worktrees' folders, the shared settings and hooks, new files atop the
+# common folder such as commondir, other refs, and names next to the open ones), and that hansa's own try of
+# each sandbox passes. The stand-in cannot show how the operating system reads them. Not on Linux: bubblewrap needs unprivileged
 # user namespaces, which GitHub's Ubuntu machines restrict (AppArmor) unless the machine's settings are changed.
 name: tests
 
