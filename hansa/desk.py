@@ -57,10 +57,11 @@ MAX_DENY = 50
 MAX_WORDS = 200  # the words no release may send out (release_forbidden)
 # The project's own rules, the coordinator's and the principal's to keep: the card imports it (@notes/PROJECT.md),
 # so Claude Code loads it with the card at every start, after /clear and after compaction. hansa makes it once, at
-# hansa init, and never writes it again. A missing one loads nothing and stops nothing.
+# hansa init, and rewrites it only when asked (hansa notes archive). A missing one loads nothing and stops nothing.
 PROJECT_FILE = "notes/PROJECT.md"
 PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it builds, what may never go out, who "
-                 "decides what. Loaded with the card at every start; hansa never changes this file. Keep it short. -->\n")
+                 "decides what. Loaded with the card at every start; hansa changes this file only for hansa notes archive. "
+                 "Keep it short. -->\n")
 # Past this, hansa status says the file is long: it is part of the conversation's first message, so every turn
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024

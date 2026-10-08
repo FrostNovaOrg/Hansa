@@ -32,9 +32,9 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 ## Commands
 | command | what it does |
 |---|---|
-| `hansa status` | lanes, running, queued (and why it waits), waiting for review, failed, providers, usage in the last 24 h |
+| `hansa status` | whether `hansa serve` runs and the web page's address and port, lanes, running, queued (and why it waits), waiting for review, failed, providers, usage in the last 24 h |
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
-| `hansa show <id> [--full \| --report]` | the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report) |
+| `hansa show <id> [--full \| --report \| --check]` | the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; for a check or merge check that failed, the failing tests (names and tracebacks, by the markers of unittest, pytest, JUnit/Surefire, go test, jest and Gradle) or the errors that kept them from running (Maven's compile errors, go's build errors) lifted out of its output, then always its last 15 lines; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report); `--check`: the whole output of its last check and merge check, keys removed |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
 | `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
@@ -46,10 +46,10 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa notify [on \| off]` | list the sessions hansa posts to; `on` / `off`: start or stop posting to this session (see Hearing from hansa) |
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background only when hansa does not post to your session |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
-| `hansa explain [lane L \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from |
+| `hansa explain [lane L [--all] \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from; alone, also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
-| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, network, write, env, limits, standing instructions), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
+| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
 | `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below) |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
@@ -71,7 +71,9 @@ Run one plain `hansa` command per call. Loops, variables, `$(...)`, pipes into
 make Claude Code ask the principal. hansa's own options make them unneeded:
 `hansa git L show REV:A REV:B` shows several files in one call,
 `hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once, and
-`hansa show ID --report` and `hansa diff ID --stat` keep the output short.
+`hansa show ID --report` and `hansa diff ID --stat` keep the output short, and
+`hansa show ID --check` gives a check's whole output when its lines in `hansa
+show` are not enough.
 The principal can let you read folders outside the desk without asking (`hansa
 explain` lists them); ask with `hansa ask` when you keep needing one.
 
@@ -101,7 +103,8 @@ registries' credentials, proxy clients' settings, password stores and the like;
 on macOS the keychains, cookies, mail and apps' data of that kind under
 `~/Library` too), or
 what the principal lists on the web page as not for workers to read
-(`hansa explain lane L` lists it all); it reaches
+(`hansa explain lane L` lists the principal's entries and counts the built-in
+ones; `--all` names those too); it reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
 worker and its check after it, both in the lane's sandbox too (run by `srt`,
@@ -250,8 +253,11 @@ to a public repository, a deploy to production) waits for the principal:
   its own; a tick for one never covers another). That list holds each target
   as it was when the principal saved it: the lane's repository and base
   branch, the target's command and the target it must follow (`--after`, or
-  none), and whether it is `--fixed`. A change to any of these unticks it: it waits for the yes until the
-  principal saves the list again. Dropping or changing `--after` unticks it
+  none), and whether it is `--fixed`. A change to any of these unticks it: it
+  waits for the yes until the principal takes it back in on the page, with the
+  button that takes changed entries back in as they are now or by unticking and
+  ticking it again, then Save; a plain Save keeps the old entry, still unticked.
+  Dropping or changing `--after` unticks it
   too; a change of `--minutes` alone does not, and a target taken out and set
   again with the same command and `--after` keeps its tick, since it is what
   the principal saw. While the desk is paused, only a
@@ -580,8 +586,9 @@ here; work that needs code changed or a browser goes to a worker.
 `notes/PROJECT.md` holds this project's own rules: how it builds, what may never
 go out, who decides what. Claude Code loads it with this card at every start,
 after /clear and after compaction (the line below imports it). hansa makes it
-once and never changes it; this card it replaces. It is yours and the
-principal's to keep: write there what you would otherwise have to be told again,
+once and changes it only when you ask: `hansa notes archive PROJECT.md HEADING`
+rewrites it without the section it moves out. This card, by contrast, hansa
+replaces. The file is yours and the principal's to keep: write there what you would otherwise have to be told again,
 without asking. Keep it short, since you reread it at every turn; `hansa status`
 says its size and when it is long. Plans and findings go in other files under
 `notes/`. Workers do not see it, and no worker, verifier or design session may read `notes/` or

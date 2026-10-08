@@ -39,29 +39,43 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
-    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
-        d.mkdir(parents=True, exist_ok=True)
-    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
-    s = default_settings()
-    if repo:
+    if repo:  # looked at before anything is made, so a refusal leaves no half-made desk
         if not resolved(repo):
             raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
         repo = resolved(repo)
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
-        base = base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+        base = lane_base(repo, base, "no desk was made")
+    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
+    s = default_settings()
+    if repo:
         s["lanes"][lane] = default_lane(repo, base)
         (desk.lanes_dir / lane).mkdir(exist_ok=True)
         (desk.lanes_dir / lane / "brief.md").write_text("", encoding="utf-8")
     write_json(desk.settings_path, s)
     (desk.root / "CLAUDE.md").write_text(CARD.read_text(encoding="utf-8"), encoding="utf-8")
-    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; never written again
+    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
         desk.project_path.write_text(PROJECT_INTRO, encoding="utf-8")
     (desk.root / ".claude").mkdir(exist_ok=True)
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
     return desk
+
+
+def lane_base(repo: str, base: str, nothing: str) -> str:
+    """A new lane's base: base, or else the branch the checkout is on; refused in one line when it is not a git
+    checkout or has no commit yet (a lane's tasks start from a commit). nothing: what was not done, said after."""
+    try:
+        if git("rev-parse", "--is-inside-work-tree", cwd=repo) and not subprocess.run(
+                ["git", "rev-parse", "-q", "--verify", "HEAD^{commit}"], cwd=repo, capture_output=True).stdout.strip():
+            raise SystemExit(f"hansa: {repo} has no commit yet; make a first commit there (git commit), then run "
+                             f"this again; {nothing}")
+        return base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); {nothing}")
 
 
 def permissions(desk: Desk) -> dict:
@@ -220,7 +234,8 @@ def cmd_status(a):
 
 def cmd_show(a):
     desk = Desk.find(a.desk)
-    print(views.report_text(desk, a.id) if a.report else views.show_text(desk, a.id, full=a.full))
+    print(views.report_text(desk, a.id) if a.report else views.check_output_text(desk, a.id) if a.check
+          else views.show_text(desk, a.id, full=a.full))
 
 
 def cmd_diff(a):
@@ -825,7 +840,10 @@ def cmd_notify_feed(a):
 
 
 def cmd_explain(a):
-    print(views.explain_text(Desk.find(a.desk), a.what or "", a.name or ""))
+    if a.all and a.what != "lane":
+        raise SystemExit("hansa: --all is for hansa explain lane NAME: the whole built-in list of what its workers "
+                         "may not read")
+    print(views.explain_text(Desk.find(a.desk), a.what or "", a.name or "", a.all))
 
 
 def _since(text: str) -> float:
@@ -904,6 +922,7 @@ def cmd_serve(a):
         raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
                          f"server on a free port with hansa serve --port N (hansa web then finds it)")
     (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
+    (desk.state_dir / "web-host").write_text(a.host, encoding="utf-8")  # with it, where hansa status says the page is
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
@@ -929,10 +948,7 @@ def cmd_serve(a):
 
 def web_port(desk: Desk) -> int:
     """The port this desk's hansa serve last served the page on: another desk's server may hold the default."""
-    try:
-        return int((desk.state_dir / "web-port").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 8765
+    return views.web_address(desk)[1]
 
 
 def cmd_web(a):
@@ -1352,10 +1368,7 @@ def cmd_lane(a):
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
             if not a.like:
-                try:
-                    base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-                except (RuntimeError, OSError) as e:
-                    raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
+                base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
                 ln.update({k: v for k, v in given.items() if v})
             new["lanes"][a.name] = ln
@@ -1656,7 +1669,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
               + (f": its command runs in a checkout of the release's commit made for it, so it names that commit as "
                  f"$HANSA_RELEASE_COMMIT (or HEAD), never the base branch, which may have moved by then; "
                  f"$HANSA_RELEASE_REPO is the lane's repository" if t.get("fixed") else "")
-              + ". A tick for going out without asking stops counting until the principal saves the list again; "
+              + ". A tick for going out without asking stops counting until the principal takes it back in on "
+                "the page (its button for that, or unticking and ticking it again, then Save; a plain Save keeps "
+                "the old entry); "
                 "tell the principal, in the conversation, what you changed and why.")
 
 
@@ -1900,6 +1915,8 @@ def main(argv=None):
     g.add_argument("--full", action="store_true", help="the whole text and the whole report")
     g.add_argument("--report", action="store_true", help="the report alone, whole (for a verification, its verdict "
                                                          "and its report)")
+    g.add_argument("--check", action="store_true", help="the whole output of the task's last check and of its last "
+                                                        "merge check, keys removed")
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
@@ -1998,6 +2015,8 @@ def main(argv=None):
             "| notify")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server", "notify"])
     p.add_argument("name", nargs="?")
+    p.add_argument("--all", action="store_true", help="with lane NAME: the whole built-in list of what its workers "
+                   "may not read, name by name (without it, how many names it has)")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
     lane = p.add_subparsers(dest="action", metavar="add | set | target | brief | remove | try")
     q = lane.add_parser("add", help="a new lane on a git checkout", description=(
@@ -2016,7 +2035,9 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
-                   "providers, setup, check, network, folders it may write, env, limits) and standing instructions; "
+                   "providers, setup, check, merge_check, preview, network, folders it may write, env, allow, limits "
+                   "with merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note) "
+                   "and standing instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Not with --repo")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")

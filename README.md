@@ -30,7 +30,10 @@ ssh -L 8765:127.0.0.1:8765 HOST /path/to/bin/hansa --desk /path/to/desk web
 It prints an address with a token; open it in the browser and keep the
 terminal open. More than one desk on a machine: each desk's `hansa serve` needs
 its own port (`hansa serve --port 8766`), and that desk's `hansa web` finds it
-(tunnel that port instead). On the page: add providers (a Claude Code login, or any
+(tunnel that port instead); `hansa status` and `hansa explain` say the address and
+port the page is served on, and whether `hansa serve` serves it now. A repository
+for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one
+without, in one line. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
@@ -278,7 +281,9 @@ page gives.
   target's command, the target it must follow (its `--after`, or none) and
   whether it is `--fixed` are what they were when the list was saved, and while the desk is not paused: a
   change to any of them, `--after` dropped or changed included, unticks it
-  until the principal saves the list again; `--minutes` alone does not, and a
+  until the principal takes it back in (the page's button that takes changed
+  entries back in as they are now, or unticking and ticking it again, then
+  Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
   target taken out and set again with the same command and `--after` keeps its
   tick. hansa serve runs the
   command only then, and only while the base branch and the command are still
@@ -441,7 +446,8 @@ go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
 loads it with the card at every start, after `/clear` and after compaction, and the
 import survives every card refresh. `hansa init` makes the file once, holding only
 an HTML comment that says what it is for (Claude Code drops such comments, so it
-costs nothing until something is written there); hansa never writes it again. A
+costs nothing until something is written there); after that hansa rewrites it
+only when the coordinator asks, with `hansa notes archive PROJECT.md HEADING`. A
 missing file loads nothing and stops nothing. The coordinator and you keep it; the
 coordinator edits it without asking, as anything under `notes/`. Workers do not
 see it: rules for a lane's workers go in its brief. `hansa status` shows its size,

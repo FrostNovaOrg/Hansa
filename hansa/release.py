@@ -913,7 +913,8 @@ def unlisted(s: dict, name: str, target: str = "") -> str:
     why = next((listed_mismatch(s, x) for x in s.get("releases_without_asking") or []
                 if listed_key(x) == (name, target)), "")
     return (f": it is on the principal's list of releases without asking, but {why}, so its releases wait for the "
-            "yes until the principal saves the list again") if why else ""
+            "yes until the principal takes it back in on the page (its button for that, or unticking and ticking "
+            "it again, then Save; a plain Save keeps the old entry)") if why else ""
 
 
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:
