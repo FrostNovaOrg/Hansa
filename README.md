@@ -38,8 +38,17 @@ endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
 `hansa concurrency`. A worker runs any command inside its sandbox, writing
-only its worktree, its own temporary folder and the lane's write list; a
-lane's allowed commands matter only to design sessions.
+only its worktree, its own temporary folder and the lane's write list. A
+lane's allowed commands go to its workers, verifiers and design sessions alike:
+workers need no command rule, design sessions do. The list is also where a lane
+gives Claude Code's web tools, which reach the network from Claude Code's own
+process, outside the sandbox's network list: `WebFetch` only site by site, as
+`WebFetch(domain:docs.python.org)` or `WebFetch(domain:*.python.org)` (a bare
+`WebFetch`, or one for every site, is refused), and `WebSearch`, which sends
+search queries out of the machine. MCP tools are refused on the list (a task
+gets a browser with `hansa add --browser`). A change of the list is recorded,
+and `hansa explain lane L` shows the web tools and their sites beside the
+network list.
 
 hansa tells the coordinator's session when a task ends or you answer a request,
 through the session's inbox (`hansa notify` shows which sessions it posts to).
@@ -82,7 +91,7 @@ page gives.
   alert command (below). The page also shows what goes on, and asks the
   principal about each release (below).
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
-  provider order, allowed commands (for design sessions), network and write lists, environment,
+  provider order, allowed commands (for workers, verifiers and design sessions), network and write lists, environment,
   check, preview and setup commands, limits, and the merge check's own command and limit,
   `merge_check` and `merge_timeout_min`, for a heavier command run only before a merge: unset, the
   merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`:

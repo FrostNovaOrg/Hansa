@@ -105,7 +105,14 @@ look at). Keep one task to one goal, say what done looks like and what to report
 and size it so one worker can finish it in one go; split anything bigger. Ask
 only for what the goal needs: each extra demand (a close-up screenshot of every
 finding, say) costs turns. A worker needs no allowed commands: it may run any
-command inside its sandbox. What a check needs from outside it is a host on the
+command inside its sandbox. A lane's allowed commands still go to its workers
+and verifiers as to its design sessions, and that list is where a lane gives
+Claude Code's web tools, which reach the network from Claude Code's own process,
+outside the sandbox: `WebFetch(domain:HOST)` for each site (HOST as the network
+list writes it, `*.` in front allowed; a bare `WebFetch` is refused), and
+`WebSearch`, which sends search queries out of the machine. MCP tools are
+refused there. A change of `allow` is recorded: tell the principal what you
+changed and why. What a check needs from outside it is a host on the
 lane's network list or a folder on its write list (`hansa explain lane L` shows both).
 If a task has to look at web pages, add `--browser`: that task's worker, and no
 other, gets a browser with no saved logins. It reads page text directly; charts,
@@ -144,7 +151,8 @@ files, commits, the lane's check result, calls the worker had no permission for
 (with the reason Claude Code gave, when it is known), tokens. Such a call means the
 worker could not do something: git history is hansa's, and the desk's keys and
 state stay closed; decide whether the task should be rewritten. A lane's allowed
-commands do not change what a worker may do; they matter only to design sessions.
+commands add no command a worker could not run anyway; what they add for workers
+and verifiers is the web tools they list.
 A command the worker says was refused, or a network call that failed, is usually
 the sandbox doing its job: fix it in the task (ask for less, or leave the
 download to the setup) or in the lane, never by switching the sandbox off. A failed check shows its last
@@ -457,8 +465,8 @@ here; work that needs code changed or a browser goes to a worker.
   one simple command at a time, never by telling git to trust them. In
   `manual` mode a command other than `hansa` waits for the principal's approval.
 - Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
-  (which lanes there are, each one's provider order, allowed commands (for
-  design sessions only), environment, check, the command that starts the app for design sessions
+  (which lanes there are, each one's provider order, allowed commands (given
+  to its workers, verifiers and design sessions), environment, check, the command that starts the app for design sessions
   (preview), the one that installs dependencies before each task (setup), the
   one that sends its base branch out (release), and its limits of turns and
   minutes) and how many tasks run at once. hansa checks

@@ -204,9 +204,9 @@ CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_
              "COURSIER_CACHE")
 XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
-# Bash commands a lane's design sessions may run without asking, for every lane: none. A lane's
-# allowed commands matter only to its design sessions, which run outside the sandbox: workers run
-# any command inside their sandbox and need none. A lane lists only its own, such as its tests.
+# Rules every lane's workers, verifiers and design sessions are given without asking: none. A lane's allowed
+# commands go to all three; workers run any command inside their sandbox and need no Bash rule, so a lane lists
+# what its design sessions run (its tests, say) and the web tools its runs may use (web_rule_problem).
 DEFAULT_ALLOW: list = []
 
 
@@ -397,6 +397,8 @@ def validate(s: dict, root=None) -> list:
         elif any(is_git_rule(r) for r in allow):
             p.append(f"{at}: git is handled by hansa (workers can already look at status, diffs and history, "
                      "and hansa commits for them); remove the rules that run git")
+        if isinstance(allow, list):
+            p += [f"{at}: allow {r} {web_rule_problem(r)}" for r in allow if isinstance(r, str) and web_rule_problem(r)]
         hosts = ln.get("network", [])
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
@@ -1698,6 +1700,42 @@ def kept_from_workers(s: dict, root=None) -> tuple:
     """deny_split for a desk's settings: (what the principal keeps workers from reading, a line for each entry
     of the list that is not applied)."""
     return deny_split(s.get("workers_may_not_read", []), root, s.get("lanes"))
+
+
+# Claude Code's own tools that reach the network from its own process, outside the sandbox's network list:
+# WebFetch only as WebFetch(domain:HOST), WebSearch as it is. The MCP tools reach servers that run outside the
+# sandbox too, and no rule holds them to listed sites: no lane lists them (hansa gives a task its browser itself).
+MCP_TOOLS = ("ListMcpResourcesTool", "ReadMcpResourceTool")
+WEB_FETCH_HOW = ("list each site as WebFetch(domain:HOST), with HOST as the network list writes it, such as "
+                 "WebFetch(domain:docs.python.org) or WebFetch(domain:*.python.org)")
+
+
+def web_rule_problem(rule: str) -> str:
+    """Why an allowed-command rule cannot be on a lane's list, as it reaches the network outside the sandbox
+    without being held to listed sites; '' for one that may."""
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$", rule.strip())
+    tool, arg = (m.group(1), m.group(2)) if m else ("", None)
+    if tool == "WebFetch":
+        host = arg[len("domain:"):] if arg and arg.startswith("domain:") else None
+        if host is None or not is_host(host) or ":" in host:
+            return ("lets a worker fetch any site from Claude Code's own process, outside the sandbox's network "
+                    "list; " + WEB_FETCH_HOW + " (no port)")
+        if host.lower() in ("localhost", "127.0.0.1"):
+            return "would reach this machine's own loopback from outside the sandbox; " + WEB_FETCH_HOW
+        if host.startswith("*.") and "." not in host[2:]:
+            return f"covers every site under .{host[2:]}; " + WEB_FETCH_HOW
+    if tool.startswith("mcp__") or tool in MCP_TOOLS:
+        return ("reaches an MCP server, which runs outside the sandbox and is not held to listed sites; a task that "
+                "needs a browser gets one with hansa add --browser")
+    return ""
+
+
+def web_sites(allow: list) -> tuple:
+    """What a lane's allowed commands give of Claude Code's web tools: (the sites WebFetch reaches, whether
+    WebSearch is given). Rules web_rule_problem refuses give nothing."""
+    sites = [r.strip()[len("WebFetch(domain:"):-1] for r in allow
+             if r.strip().startswith("WebFetch(domain:") and not web_rule_problem(r)]
+    return sites, any(re.match(r"^WebSearch(\(.*\))?$", r.strip()) for r in allow)
 
 
 def is_git_rule(rule: str) -> bool:

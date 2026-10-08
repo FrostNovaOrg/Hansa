@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, HANSA_IDENTITY, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   is_git_rule, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   is_git_rule, web_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
 
@@ -2345,10 +2345,11 @@ def commands_tmp(tmp: str) -> str:
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
-    """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
-    are left out: hansa does the committing, and read-only git needs no rule."""
+    """The worktree's files plus the lane's own commands, for its workers, verifiers and design sessions alike.
+    Git rules a lane still lists from before are left out: hansa does the committing, and read-only git needs
+    no rule. So are web rules saved before they were refused (web_rule_problem), such as a bare WebFetch."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
-    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not is_git_rule(r)]
+    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not is_git_rule(r) and not web_rule_problem(r)]
 
 
 def command_rules(command: str) -> list:

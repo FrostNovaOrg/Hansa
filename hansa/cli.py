@@ -1520,6 +1520,11 @@ def cmd_lane(a):
                 warning = _loopback_warning(a.name, ln["network"])
                 if warning:
                     print(desk.redact(warning))
+            if ln.get("allow"):
+                desk.event("lane_allow_changed", lane=a.name, old=[], new=ln["allow"])
+                print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, are "
+                      f"recorded: {_shown(ln['allow'])}. Tell the principal, in the conversation, what you listed "
+                      f"and why.")
             if ln.get("setup") or ln.get("check") or ln.get("merge_check"):
                 print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
                       "in the conversation, what they run and why.")
@@ -1594,6 +1599,11 @@ def cmd_lane(a):
         warning = _loopback_warning(a.name, value)
         if warning:
             print(desk.redact(warning))
+    if a.field == "allow" and set(old) != set(value):
+        desk.event("lane_allow_changed", lane=a.name, old=old, new=value)
+        print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, changed: "
+              f"{_shown(old)} -> {_shown(value)}, so this change is recorded. Tell the principal, in the "
+              f"conversation, what you changed and why.")
     if a.field == "write" and set(old) != set(value):
         desk.event("lane_write_changed", lane=a.name, old=old, new=value)
         print(f"The folders the lane's workers may write besides the worktree changed: {_shown(old)} -> "
@@ -2195,15 +2205,22 @@ def main(argv=None):
                    "(default: none)")
     q.add_argument("--identity", metavar='"NAME <EMAIL>"', help="the author and committer of every commit hansa "
                    "makes for the lane (default: the repository's own user.name and user.email, else hansa's)")
-    q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
-                   "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
+    q.add_argument("--allow", nargs="+", metavar="RULE", help="rules the lane's workers, verifiers and design "
+                   "sessions are given without asking: commands such as 'Bash(pnpm test:*)' (workers run any command "
+                   "in their sandbox and need none; design sessions do), and web tools: "
+                   "'WebFetch(domain:docs.python.org)' or 'WebFetch(domain:*.python.org)' for each site (a bare "
+                   "WebFetch is refused), WebSearch (it sends search queries out of the machine)")
     q.add_argument("--release-files", nargs="+", metavar="PATH", help="the files the lane's releases build and run "
                    "outside the sandbox, as paths or globs relative to the repository, separated by spaces (\"pom.xml "
                    "**/pom.xml build.sh tools/release.sh\"): hansa merge refuses a change touching one of them until "
                    "a verification of it holds (hansa verify ID), and no flag overrides that")
     q = lane.add_parser("set", help="change one field of a lane", description=(
-        "allow is the commands a design session may run without asking (workers run any command in their "
-        "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "allow is the rules the lane's workers, verifiers and design sessions are given without asking: commands "
+        "such as Bash(pnpm test:*) (workers run any command in their sandbox and need none; design sessions do), "
+        "and Claude Code's web tools, which reach the network from its own process, outside the sandbox's network "
+        "list: WebFetch only as WebFetch(domain:HOST) for each site, HOST as the network list writes it (*. in front "
+        "allowed; a bare WebFetch, or one for every site, is refused), and WebSearch, which sends search queries out "
+        "of the machine; MCP tools are refused. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
         "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
