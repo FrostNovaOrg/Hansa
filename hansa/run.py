@@ -2160,7 +2160,7 @@ unset hansa_t hansa_p hansa_r hansa_c hansa_u hansa_w hansa_h hansa_o hansa_f ha
 SANDBOX_TMPFS = "hansa-tmpfs"
 # What runs in the sandbox on Linux before JAVA_PRELUDE (sandbox_prelude). First, the command's TMPDIR moves to
 # the run folder's SANDBOX_TMPFS when srt mounted a tmpfs there (another device than the folder's, and writable);
-# otherwise it stays the run's folder. Then git there is given an excludes file in $TMPDIR, hansa-git-excludes: the
+# otherwise it stays the run's folder. Then git there is given an excludes file in $TMPDIR, hansa-git-excludes-*: the
 # excludes git would read with no repository and no command's settings (core.excludesFile from the system's and the
 # account's config, else $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore), then each of SANDBOX_PLACEHOLDERS
 # anchored at the top, so git status there does not list the empty files the sandbox mounts (a build script that
@@ -2168,51 +2168,64 @@ SANDBOX_TMPFS = "hansa-tmpfs"
 # is still listed, and git outside the sandbox (what hansa commits, the main checkout) reads none of it. Not the
 # repository's info/exclude, which every worktree and the main checkout share, and which is git's own folder, kept
 # from workers. Not on macOS, whose sandbox mounts no such files.
-# How git is told: with git 2.32 or later, GIT_CONFIG_GLOBAL names hansa-gitconfig in $TMPDIR, which includes the
+# How git is told: with git 2.32 or later, GIT_CONFIG_GLOBAL names hansa-gitconfig-* in $TMPDIR, which includes the
 # account's own global config ($GIT_CONFIG_GLOBAL if set, else $XDG_CONFIG_HOME/git/config or ~/.config/git/config,
 # then ~/.gitconfig, as git reads them; one there that cannot be read is left out, as git leaves it, since an
 # include of it would stop git) and then sets core.excludesFile. So everything there still applies, a
 # command's own GIT_CONFIG_COUNT does not remove it, and a repository's own core.excludesFile, or one a lane's env
 # or a command sets (git -c, GIT_CONFIG_KEY_n), wins as git means it to: the placeholders show there again. What
-# `git config --global` writes there goes to that file, not the account's. An older git gets core.excludesFile as
-# GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n after those set already, which a command setting its
-# own replaces. Each file is written whole, then moved in place, since commands may run side by side in one
-# TMPDIR. Nothing is added twice (HANSA_GIT_EXCLUDES), what cannot be done is skipped, and nothing is printed;
-# POSIX sh, as JAVA_PRELUDE.
+# `git config --global` writes there goes to that file, not the account's, and a `--global` read follows no
+# include. An older git gets core.excludesFile as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n after
+# those set already, which a command setting its own replaces. Commands may run side by side in one TMPDIR, with the
+# same $$ (srt gives each a PID namespace of its own), and with other HOME, XDG_CONFIG_HOME or GIT_CONFIG_GLOBAL: so
+# each file is written under a mktemp name of its own, then moved to a name ending in a checksum of what it holds
+# (hansa_mv). No command reads a file half written or made for other settings; one pair per set of settings stays
+# until TMPDIR goes. Nothing is added twice (HANSA_GIT_EXCLUDES, in this TMPDIR), what cannot be done is skipped, and
+# nothing is printed; POSIX sh, as JAVA_PRELUDE.
 LINUX_PRELUDE = r"""hansa_t=${TMPDIR:-}
 if [ -n "$hansa_t" ] && [ -d "$hansa_t/""" + SANDBOX_TMPFS + r"""" ] && [ -w "$hansa_t/""" + SANDBOX_TMPFS + r"""" ] \
    && [ "$(stat -c %d "$hansa_t/""" + SANDBOX_TMPFS + r"""" 2>/dev/null)" != "$(stat -c %d "$hansa_t" 2>/dev/null)" ]; then
   TMPDIR=${hansa_t%/}/""" + SANDBOX_TMPFS + r"""; export TMPDIR
 fi
 hansa_t=${TMPDIR:-}
-hansa_e=${hansa_t%/}/hansa-git-excludes
-if [ -n "$hansa_t" ] && [ -d "$hansa_t" ] && [ "${HANSA_GIT_EXCLUDES:-}" != "$hansa_e" ]; then
+case ${HANSA_GIT_EXCLUDES:-} in "${hansa_t%/}"/hansa-git-excludes-*) hansa_t= ;; esac
+hansa_mv() {
+  hansa_k=$(cksum <"$1" | tr -cs 0-9 -) && hansa_k=${hansa_k%-} && [ -n "$hansa_k" ] &&
+    mv -f -- "$1" "$2-$hansa_k" && printf '%s' "$2-$hansa_k" || { rm -f -- "$1"; return 1; }
+}
+if [ -n "$hansa_t" ] && [ -d "$hansa_t" ]; then
   hansa_g=$( (unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE; cd / &&
               git config --includes --path --get core.excludesFile) 2>/dev/null) || hansa_g=
   [ -n "$hansa_g" ] || hansa_g=${XDG_CONFIG_HOME:-${HOME:-}/.config}/git/ignore
-  if [ "$hansa_g" != "$hansa_e" ] && (umask 077
-      { cat -- "$hansa_g" 2>/dev/null; printf '\n'; printf '/%s\n' """ + " ".join(SANDBOX_PLACEHOLDERS) + r"""; } >"$hansa_e.$$" &&
-      mv -f -- "$hansa_e.$$" "$hansa_e") 2>/dev/null; then
+  hansa_e=
+  hansa_w=$(mktemp "${hansa_t%/}/hansa-part.XXXXXXXX" 2>/dev/null) &&
+    { { cat -- "$hansa_g" 2>/dev/null; printf '\n'; printf '/%s\n' """ + " ".join(SANDBOX_PLACEHOLDERS) + r"""; } \
+        >"$hansa_w" 2>/dev/null ||
+      { rm -f -- "$hansa_w"; false; }; } &&
+    hansa_e=$(hansa_mv "$hansa_w" "${hansa_t%/}/hansa-git-excludes" 2>/dev/null) || hansa_e=
+  if [ -n "$hansa_e" ]; then
     hansa_v=$(git version 2>/dev/null) || hansa_v=
     hansa_v=${hansa_v#git version }
     hansa_m=${hansa_v%%.*} hansa_v=${hansa_v#*.}
     hansa_v=${hansa_v%%[!0-9]*}
     case $hansa_m in ''|*[!0-9]*) hansa_m=0 ;; esac
-    hansa_c=${hansa_t%/}/hansa-gitconfig
-    if { [ "$hansa_m" -gt 2 ] || { [ "$hansa_m" -eq 2 ] && [ "${hansa_v:-0}" -ge 32 ]; }; } && (umask 077
-        rm -f -- "$hansa_c.$$"
-        if [ -n "${GIT_CONFIG_GLOBAL:-}" ]; then hansa_x=$GIT_CONFIG_GLOBAL hansa_y=
-        elif [ -n "${HOME:-}" ] || [ -n "${XDG_CONFIG_HOME:-}" ]; then
-          hansa_x=${XDG_CONFIG_HOME:-$HOME/.config}/git/config hansa_y=${HOME:+$HOME/.gitconfig}
-        else hansa_x= hansa_y=; fi
-        for hansa_f in "$hansa_x" "$hansa_y"; do
-          [ -z "$hansa_f" ] || { [ -e "$hansa_f" ] && [ ! -r "$hansa_f" ]; } ||
-            git config -f "$hansa_c.$$" --add include.path "$hansa_f" || exit 1
-        done
-        git config -f "$hansa_c.$$" core.excludesFile "$hansa_e" && mv -f -- "$hansa_c.$$" "$hansa_c") 2>/dev/null; then
+    hansa_c=
+    if [ "$hansa_m" -gt 2 ] || { [ "$hansa_m" -eq 2 ] && [ "${hansa_v:-0}" -ge 32 ]; }; then
+      hansa_w=$(mktemp "${hansa_t%/}/hansa-part.XXXXXXXX" 2>/dev/null) &&
+        { (if [ -n "${GIT_CONFIG_GLOBAL:-}" ]; then hansa_x=$GIT_CONFIG_GLOBAL hansa_y=
+           elif [ -n "${HOME:-}" ] || [ -n "${XDG_CONFIG_HOME:-}" ]; then
+             hansa_x=${XDG_CONFIG_HOME:-$HOME/.config}/git/config hansa_y=${HOME:+$HOME/.gitconfig}
+           else hansa_x= hansa_y=; fi
+           for hansa_f in "$hansa_x" "$hansa_y"; do
+             [ -z "$hansa_f" ] || { [ -e "$hansa_f" ] && [ ! -r "$hansa_f" ]; } ||
+               git config -f "$hansa_w" --add include.path "$hansa_f" || exit 1
+           done
+           git config -f "$hansa_w" core.excludesFile "$hansa_e") 2>/dev/null || { rm -f -- "$hansa_w"; false; }; } &&
+        hansa_c=$(hansa_mv "$hansa_w" "${hansa_t%/}/hansa-gitconfig" 2>/dev/null) || hansa_c=
+    fi
+    if [ -n "$hansa_c" ]; then
       GIT_CONFIG_GLOBAL=$hansa_c HANSA_GIT_EXCLUDES=$hansa_e; export GIT_CONFIG_GLOBAL HANSA_GIT_EXCLUDES
     else
-      rm -f -- "$hansa_c.$$" 2>/dev/null
       hansa_n=${GIT_CONFIG_COUNT:-0}
       case $hansa_n in ''|*[!0-9]*) hansa_n=0 ;; esac
       eval "GIT_CONFIG_KEY_$hansa_n=core.excludesFile GIT_CONFIG_VALUE_$hansa_n=\$hansa_e"
@@ -2221,7 +2234,7 @@ if [ -n "$hansa_t" ] && [ -d "$hansa_t" ] && [ "${HANSA_GIT_EXCLUDES:-}" != "$ha
     fi
   fi
 fi
-unset hansa_t hansa_e hansa_g hansa_n hansa_v hansa_m hansa_c hansa_x hansa_y hansa_f
+unset hansa_t hansa_e hansa_g hansa_n hansa_v hansa_m hansa_c hansa_x hansa_y hansa_f hansa_w hansa_k; unset -f hansa_mv
 """
 
 

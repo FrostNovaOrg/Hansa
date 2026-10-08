@@ -107,7 +107,10 @@ Two things a lane's commands meet in the sandbox there (bubblewrap), which
   `GIT_CONFIG_GLOBAL`, a config file there that includes the account's own
   (`~/.gitconfig` and `~/.config/git/config`, or the file `GIT_CONFIG_GLOBAL`
   named) and then sets `core.excludesFile`, so every setting there still
-  applies and a command that sets its own `GIT_CONFIG_COUNT` keeps it; an older
+  applies and a command that sets its own `GIT_CONFIG_COUNT` keeps it. A read
+  with `git config --global <key>` follows no include, so it prints nothing for
+  the account's `user.name`: use `git config <key>`, or
+  `git config --global --includes <key>`. An older
   git gets it as `GIT_CONFIG_COUNT`, which such a command replaces. A tracked
   file of such a name is still listed; git outside the sandbox (what hansa
   commits, the main checkout) reads none of it. Not the repository's
@@ -118,6 +121,17 @@ Two things a lane's commands meet in the sandbox there (bubblewrap), which
   names, anchored (`/.bashrc`, `/.vscode` and the rest), to the file it names,
   or drop the setting. What `git config --global` writes in the sandbox goes to
   that file in TMPDIR, not the account's.
+  Both files are named by a checksum of what they hold
+  (`hansa-git-excludes-<sum>`, `hansa-gitconfig-<sum>`), each written under a
+  name of its own (`mktemp`) and then moved in place, so commands side by side
+  in one TMPDIR, even with the same process id, as srt's process namespaces
+  give them, never read a half-written file or one written for another
+  account's settings (`HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`); a test
+  starts a dozen of them at once with the same `$$`. One pair stays in TMPDIR
+  per distinct set of settings, until the temporary folder goes at the end of
+  the run (a lane command's tmpfs, at its own end). A command that empties
+  TMPDIR while it runs (a cleanup) takes them with it: it and the commands
+  sharing that TMPDIR list the placeholders until their next start.
   The empty files the sandbox puts under `.claude/` are still listed there, and
   hansa never commits them.
 
