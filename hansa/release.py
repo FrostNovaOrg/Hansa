@@ -17,9 +17,17 @@ release in the lane's repository, as the desk's account, outside the sandbox, wi
 the lane's env) and the target's time limit (else the lane's timeout_min), and only while the base branch and the
 command line are still what the principal saw, and the target it must follow sent out that commit: otherwise the
 request is void, says why, and the coordinator asks again. Its output is kept,
-keys removed, in .hansa/releases/<id>.log. One release runs at a time per repository, and none while a merge
-check runs there (nor a merge while a release runs): a release holds the lane's repository for as long as it
-runs, so a long install keeps that repository's merges waiting.
+keys removed, in .hansa/releases/<id>.log. One release runs at a time per repository. A release runs in the
+lane's repository and holds it for as long as it runs: none starts while a merge check runs there, nor a merge
+while it runs. A target set --fixed (`hansa lane target L NAME --fixed`) runs instead in a detached checkout of
+the release's commit made for it under .hansa/release-checkouts/ (removed when it ends, however it ends, and
+swept after a restart), with HANSA_RELEASE_COMMIT, HANSA_RELEASE_TARGET and HANSA_RELEASE_REPO in its
+environment; it holds nothing, so a long install leaves that repository's merges and checks going on.
+
+The forbidden-word scan reads each outgoing commit's own change once (a merge's: what it adds beyond its
+parents) and runs without the desk lock; the request is recorded under the lock only if what was scanned is still
+what goes out (scan_key), and hansa serve scans again at the start only when something the scan depends on
+changed since.
 
 A release's state: waiting (for the principal) -> approved -> starting -> running -> done | failed; or refused
 (the principal said no), void (what the principal saw changed, or the lane is gone), forbidden (a word that
@@ -27,8 +35,11 @@ must not go out).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -43,10 +54,13 @@ OPEN = ("waiting", "approved", "starting", "running")
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
 MOST_FILES = 500
 MOST_HITS = 20
+SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the time it is recorded
 TAIL = 15
 # $0 is the launch word, which finds the run again after hansa serve restarts; the exit code goes in a file
 SCRIPT = '/bin/sh -c "$1"; echo $? > "$2"'
-HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+# a hunk of a patch, or of a merge's combined diff (one more @ and one more -range per parent)
+HUNK = re.compile(r"^(@@+) ((?:-\d+(?:,\d+)? )+\+\d+(?:,\d+)?) @@")
+RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
 
 
 def releases_file(desk: Desk) -> Path:
@@ -145,10 +159,17 @@ def before_it(desk: Desk, s: dict, lane: str, target: str, repo, base: str, comm
             + f": release {after} first (hansa release {lane} {after})")
 
 
+def holds_repo(r: dict) -> bool:
+    """Whether a release holds its repository while it starts or runs: it runs there, unless its target runs from
+    a fixed checkout of the commit (then merges and merge checks there go on meanwhile)."""
+    return r.get("state") in ("starting", "running") and not r.get("fixed")
+
+
 def running_on(desk: Desk, repo) -> dict | None:
-    """The release starting or running on this repository, if any: no merge goes in there meanwhile."""
+    """The release starting or running in this repository and holding it, if any: no merge goes in there
+    meanwhile."""
     key = repo_key(repo)
-    return next((r for r in releases(desk) if r.get("state") in ("starting", "running") and r.get("repo") == key), None)
+    return next((r for r in releases(desk) if holds_repo(r) and r.get("repo") == key), None)
 
 
 def running_text(r: dict) -> str:
@@ -205,23 +226,28 @@ def outgoing(repo, since: str, commit: str) -> tuple:
     rng = _range(since, commit)
     rows = _git_bytes(repo, "log", "--format=%H%x1f%s", *rng)
     commits = [dict(zip(("sha", "subject"), x.split("\x1f", 1))) for x in rows.splitlines() if "\x1f" in x]
-    names = _git_bytes(repo, "log", "-m", "--format=", "--name-only", "--no-renames", *rng)
+    names = _git_bytes(repo, "log", "--cc", "--format=", "--name-only", "--no-renames", *rng)
     return commits, sorted({x for x in names.splitlines() if x})
 
 
 def _added(lines):
-    """(commit, file, line) for each line the patches of `git log -p --format=%x00%H -U0` add."""
+    """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
+    commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
+    conflict's resolution; a line that came from a parent is that parent's commit's)."""
     sha = path = None
-    old = new = 0
+    old, new, n = [], 0, 1  # lines left in the hunk on each parent's side and on the result's; parents
     for line in lines:
-        if old > 0 or new > 0:  # inside a hunk: counted, so an added line that reads like a header is still one
-            if line.startswith("+"):
-                new -= 1
-                yield sha, path, line[1:]
-            elif line.startswith("-"):
-                old -= 1
-            elif not line.startswith("\\"):
-                old, new = old - 1, new - 1
+        if new > 0 or any(x > 0 for x in old):  # inside a hunk: counted, so an added line that reads like a
+            marks, text = line[:n], line[n:]   # header is still one
+            if line.startswith("\\"):
+                continue
+            if "-" in marks:  # in some parent, not in the result
+                old = [x - (m == "-") for x, m in zip(old, marks)]
+                continue
+            new -= 1
+            old = [x - (m == " ") for x, m in zip(old, marks)]
+            if marks == "+" * n:
+                yield sha, path, text
             continue
         if line.startswith("\0"):
             sha, path = line[1:].strip(), None
@@ -231,15 +257,20 @@ def _added(lines):
         else:
             m = HUNK.match(line)
             if m:
-                old = int(m[1]) if m[1] is not None else 1
-                new = int(m[2]) if m[2] is not None else 1
+                n = len(m[1]) - 1
+                sides = [int(c) if c else 1 for c in RANGE.findall(m[2])]
+                if len(sides) == n + 1:
+                    old, new = sides[:n], sides[n]
 
 
 def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") -> tuple:
     """Where what goes out holds one of the principal's forbidden words (any case, within one line, in text read as
     UTF-8): the release command line, and every outgoing commit's message, the names of the files it adds or
-    changes (a renamed one by its new name) and the lines it adds. ([{word, commit, where, line}], each place
-    once, at most MOST_HITS; how many commits were checked)."""
+    changes (a renamed one by its new name) and the lines it adds. Each commit's own change is read once: a merge's
+    is what it adds beyond all its parents (git's dense combined diff, --cc), not its diff against each parent, so
+    what a merge brings in from a branch is read in that branch's commits when they go out, and not at all when
+    they are on a remote-tracking branch, already out. ([{word, commit, where, line}], each place once, at most
+    MOST_HITS; how many commits were checked)."""
     words = [w for w in words if isinstance(w, str) and w.strip()]
     folded = [(w, w.casefold()) for w in words]
     rng = _range(since, commit)
@@ -263,12 +294,12 @@ def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") 
             look(sha, "commit message", line)
     if not folded:
         return [], checked
-    for line in _git_lines(repo, "log", "-m", "--format=%x00%H", "--name-only", "--no-renames", "--diff-filter=d", *rng):
+    for line in _git_lines(repo, "log", "--cc", "--format=%x00%H", "--name-only", "--no-renames", "--diff-filter=d", *rng):
         if line.startswith("\0"):
             sha = line[1:].strip()
         elif line:
             look(sha, "file name", line)
-    patch = _git_lines(repo, "log", "-p", "-m", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
+    patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--unified=0", "--no-renames", "--format=%x00%H", *rng)
     for sha, path, line in _added(patch):
         look(sha, path or "?", line)
@@ -304,80 +335,123 @@ def _has_commit(repo, sha: str) -> bool:
 
 
 # -- asking ------------------------------------------------------------------------------------------------------
+def scan_key(repo, since: str, commit: str, words: list, command: str) -> str:
+    """What a forbidden-word scan depends on, in one string: the commit, the starting point (the target's last
+    release and the repository's remote-tracking branches), the principal's words and the command line. A scan
+    made with the same key finds the same."""
+    remotes = _git_bytes(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes")
+    words = sorted(w for w in words if isinstance(w, str) and w.strip())
+    return hashlib.sha256(json.dumps([repo_key(repo), commit, since, remotes, words, command]).encode()).hexdigest()
+
+
+def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
+    """Under the desk lock: what a request for the lane's target would be now ({target, command, repo, base,
+    commit, prev, since, fixed}); raises SystemExit, saying why, when it cannot be asked."""
+    ln = s["lanes"].get(lane)
+    if not ln:
+        raise SystemExit(f"hansa: there is no lane {lane}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}. "
+                         "Nothing was asked")
+    targets = lane_targets(ln)
+    if not targets:
+        raise SystemExit(f"hansa: lane {lane} has no release command; set it first: hansa lane set {lane} release "
+                         "\"<the command that sends the base branch out>\", or name targets with hansa lane target "
+                         f"{lane} NAME \"<command>\" (and tell the principal). Nothing was asked")
+    if target is None:
+        if len(targets) > 1:
+            raise SystemExit(f"hansa: lane {lane} has {len(targets)} release targets ({', '.join(sorted(targets))}); "
+                             f"say which: hansa release {lane} TARGET [note]. Nothing was asked")
+        target = next(iter(targets))
+    if target not in targets:
+        raise SystemExit(f"hansa: lane {lane} has no release target {target}; its targets: "
+                         f"{', '.join(sorted(x or '(unnamed)' for x in targets))}. Nothing was asked")
+    command = targets[target].get("command") or ""
+    repo, base = ln["repo"], ln.get("base") or "main"
+    try:
+        commit = git("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}", cwd=repo)
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: lane {lane}'s base branch {base} cannot be read in {repo} ({e}). Nothing was asked")
+    first = before_it(desk, s, lane, target, repo, base, commit)
+    if first:
+        raise SystemExit(f"hansa: {first}. Nothing was asked")
+    busy = [r for r in releases(desk) if r.get("lane") == lane and (r.get("target") or "") == target
+            and r.get("state") in ("approved", "starting", "running")]
+    if busy:
+        r = busy[0]
+        raise SystemExit(f"hansa: release #{r['id']} of {what({'lane': lane, 'target': target})} is already "
+                         f"{r['state']}; one at a time. hansa release shows how it goes; hansa tells you when it "
+                         "ends. Nothing was asked")
+    prev = last_out(desk, lane, repo, base, target)
+    since = prev["commit"] if prev and _has_commit(repo, prev["commit"]) else ""
+    return {"target": target, "command": command, "repo": repo, "base": base, "commit": commit, "prev": prev,
+            "since": since, "fixed": bool(targets[target].get("fixed"))}
+
+
 def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, target: str | None = None) -> dict:
     """Record a request for a release of the lane's base branch as it is now, by one of its release targets (None:
     its only one). Returns it; raises SystemExit, with nothing recorded, when it cannot be asked, and with the
-    request recorded as forbidden on a forbidden word."""
-    with desk.lock():
-        s = desk.settings()
-        ln = s["lanes"].get(lane)
-        if not ln:
-            raise SystemExit(f"hansa: there is no lane {lane}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}. "
-                             "Nothing was asked")
-        targets = lane_targets(ln)
-        if not targets:
-            raise SystemExit(f"hansa: lane {lane} has no release command; set it first: hansa lane set {lane} release "
-                             "\"<the command that sends the base branch out>\", or name targets with hansa lane target "
-                             f"{lane} NAME \"<command>\" (and tell the principal). Nothing was asked")
-        if target is None:
-            if len(targets) > 1:
-                raise SystemExit(f"hansa: lane {lane} has {len(targets)} release targets ({', '.join(sorted(targets))}); "
-                                 f"say which: hansa release {lane} TARGET [note]. Nothing was asked")
-            target = next(iter(targets))
-        if target not in targets:
-            raise SystemExit(f"hansa: lane {lane} has no release target {target}; its targets: "
-                             f"{', '.join(sorted(x or '(unnamed)' for x in targets))}. Nothing was asked")
-        command = targets[target].get("command") or ""
-        who = what({"lane": lane, "target": target})
-        repo, base = ln["repo"], ln.get("base") or "main"
-        try:
-            commit = git("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}", cwd=repo)
-        except (RuntimeError, OSError) as e:
-            raise SystemExit(f"hansa: lane {lane}'s base branch {base} cannot be read in {repo} ({e}). Nothing was asked")
-        first = before_it(desk, s, lane, target, repo, base, commit)
-        if first:
-            raise SystemExit(f"hansa: {first}. Nothing was asked")
-        rs = releases(desk)
-        busy = [r for r in rs if r.get("lane") == lane and (r.get("target") or "") == target
-                and r.get("state") in ("approved", "starting", "running")]
-        if busy:
-            r = busy[0]
-            raise SystemExit(f"hansa: release #{r['id']} of {who} is already {r['state']}; one at a time. "
-                             f"hansa release shows how it goes; hansa tells you when it ends. Nothing was asked")
-        prev = last_out(desk, lane, repo, base, target)
-        since = prev["commit"] if prev and _has_commit(repo, prev["commit"]) else ""
-        try:
-            commits, files = outgoing(repo, since, commit)
-            hits, checked = forbidden_in(repo, since, commit, s.get("release_forbidden") or [], command)
+    request recorded as forbidden on a forbidden word. What goes out is read and scanned without the desk lock
+    (it can take long on a long history), then recorded under it only if it is still what goes out: otherwise it
+    is read again."""
+    scanned = None
+    for _ in range(SCAN_TRIES):
+        with desk.lock():
+            s = desk.settings()
+            a = _askable(desk, s, lane, target)
+            words = s.get("release_forbidden") or []
+            try:
+                key = scan_key(a["repo"], a["since"], a["commit"], words, a["command"])
+            except RuntimeError as e:
+                raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). "
+                                 "Nothing was asked")
+            if scanned and scanned[0] == (key, a["target"]):
+                r = _record(desk, s, lane, a, key, scanned[1:], note, by, session)
+                break
+        try:  # without the lock: the server's round, the page and other commands go on meanwhile
+            commits, files = outgoing(a["repo"], a["since"], a["commit"])
+            hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"])
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
-        listed = lane_listed(s, lane, target)
-        r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
-             "repo": repo_key(repo),
-             "base": base, "commit": commit, "command": command, "note": desk.redact(note.strip()), "asked": now(),
-             "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
-             "count": len(commits), "checked": checked, "commits": commits[:MOST_COMMITS], "files": files[:MOST_FILES],
-             "files_count": len(files), "named": named_files(command, files[:MOST_FILES]),
-             "state": "forbidden" if hits else "approved" if listed else "waiting",
-             **({"hits": hits} if hits else {}), **({"without_asking": True, "answered": now()} if listed and not hits
-                                                   else {}), **({"session": session} if session else {})}
-        replaced = []
-        if not hits:  # a newer request for the same target replaces one still waiting for the principal
-            for x in rs:
-                if x.get("lane") == lane and (x.get("target") or "") == target and x.get("state") == "waiting":
-                    x.update(state="void", void=f"replaced by release #{r['id']}", void_zh=f"被发布 #{r['id']} 取代",
-                             ended=now())
-                    replaced.append(x["id"])
-        rs.append(r)
-        _write(desk, rs)
+        scanned = ((key, a["target"]), commits, files, hits, checked)
+    else:
+        raise SystemExit(f"hansa: what goes out from lane {lane} kept changing while it was read (its base branch "
+                         "moving, say); ask again in a moment. Nothing was asked")
+    target, commit, hits = r["target"], r["commit"], r.get("hits")
     desk.event("release_asked", id=r["id"], lane=lane, target=target, commit=commit, state=r["state"], by=by,
-               **({"replaced": replaced} if replaced else {}))
-    for n in replaced:
+               **({"replaced": r["_replaced"]} if r.get("_replaced") else {}))
+    for n in r.pop("_replaced", []):
         desk.event("release_void", id=n, lane=lane, target=target, why=f"replaced by release #{r['id']}", quiet=True)
     if hits:
         desk.event("release_forbidden", id=r["id"], lane=lane, target=target, commit=commit, found=len(hits),
                    quiet=True)
     return r
+
+
+def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, note: str, by: str,
+            session) -> dict:
+    """Under the desk lock: write the request, from what was read and scanned with this key."""
+    commits, files, hits, checked = scanned
+    target, command, prev, since = a["target"], a["command"], a["prev"], a["since"]
+    rs = releases(desk)
+    listed = lane_listed(s, lane, target)
+    r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
+         "repo": repo_key(a["repo"]), "base": a["base"], "commit": a["commit"], "command": command,
+         **({"fixed": True} if a["fixed"] else {}), "note": desk.redact(note.strip()), "asked": now(),
+         "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
+         "count": len(commits), "checked": checked, "scanned": key, "commits": commits[:MOST_COMMITS],
+         "files": files[:MOST_FILES], "files_count": len(files), "named": named_files(command, files[:MOST_FILES]),
+         "state": "forbidden" if hits else "approved" if listed else "waiting",
+         **({"hits": hits} if hits else {}), **({"without_asking": True, "answered": now()} if listed and not hits
+                                               else {}), **({"session": session} if session else {})}
+    replaced = []
+    if not hits:  # a newer request for the same target replaces one still waiting for the principal
+        for x in rs:
+            if x.get("lane") == lane and (x.get("target") or "") == target and x.get("state") == "waiting":
+                x.update(state="void", void=f"replaced by release #{r['id']}", void_zh=f"被发布 #{r['id']} 取代",
+                         ended=now())
+                replaced.append(x["id"])
+    rs.append(r)
+    _write(desk, rs)
+    return {**r, "_replaced": replaced}
 
 
 # -- the principal's answer ----------------------------------------------------------------------------------------
@@ -396,6 +470,9 @@ def stale(desk: Desk, s: dict, r: dict, zh: bool = False) -> str:
         now_as, then = (t or {}).get("command") or ("（无）" if zh else "(none)"), r.get("command")
         return (f"{what_zh(r)} 的发布命令在请求之后改了：现在是 {now_as!r}，不是 {then!r}" if zh else
                 f"{what(r)}'s release command changed since it was asked: it is now {now_as!r}, not {then!r}")
+    if bool((t or {}).get("fixed")) != bool(r.get("fixed")):
+        return (f"{what_zh(r)} 的运行方式（--fixed，固定检出）在请求之后改了" if zh else
+                f"how {what(r)} runs (--fixed: from a fixed checkout, or in the repository) changed since it was asked")
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了" if zh else
                 f"lane {r['lane']}'s repository or base branch changed since it was asked")
@@ -449,74 +526,151 @@ def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", comma
 
 
 # -- running -------------------------------------------------------------------------------------------------------
+def checkout_dir(desk: Desk, rid) -> Path:
+    """Where a release of a fixed target runs: a detached worktree of the release's commit, made for it."""
+    return desk.state_dir / "release-checkouts" / str(rid)
+
+
+def drop_checkout(desk: Desk, rid, repo) -> None:
+    """Remove a release's own checkout (and git's record of it), whatever is in it."""
+    path = checkout_dir(desk, rid)
+    if repo:
+        try:
+            git("worktree", "remove", "--force", "--force", str(path), cwd=repo)
+        except (RuntimeError, OSError):
+            pass
+    if os.path.lexists(path):
+        shutil.rmtree(path, ignore_errors=True)
+    if repo:
+        try:
+            git("worktree", "prune", cwd=repo)
+        except (RuntimeError, OSError):
+            pass
+
+
+def sweep_checkouts(desk: Desk) -> None:
+    """Remove the checkouts of releases that no longer run: left by a server that stopped, or a start that
+    failed."""
+    d = desk.state_dir / "release-checkouts"
+    if not d.is_dir():
+        return
+    rs = {str(r.get("id")): r for r in releases(desk)}
+    for x in d.iterdir():
+        r = rs.get(x.name) or {}
+        if r.get("state") not in ("starting", "running"):
+            drop_checkout(desk, x.name, r.get("repo"))
+
+
+def _not_ready(desk: Desk, s: dict, r: dict) -> tuple | None:
+    """Under the desk lock: None when an approved release may start now as far as what the principal saw goes;
+    else (why, why_zh) to void it, or () when it only waits (sent back to the principal, or the desk is paused)."""
+    rid, target = r["id"], r.get("target") or ""
+    if r.get("without_asking") and not lane_listed(s, r["lane"], target):  # off the list, or changed
+        change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
+        desk.event("release_waits", id=rid, lane=r["lane"], target=target,
+                   why="the target is no longer on the principal's list of releases without asking, or no longer "
+                       "what the list recorded")
+        return ()
+    if r.get("without_asking") and desk.paused():  # while paused, only a release the principal said yes to
+        return ()
+    why, why_zh = stale(desk, s, r), stale(desk, s, r, zh=True)
+    if not why:  # the order, again: the target it must follow sent out this commit
+        why = before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"])
+        why_zh = why and before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"], zh=True)
+    if not why and not r.get("fixed"):  # it runs in the repository: on the base branch, as committed
+        try:
+            current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=r["repo"])
+            dirty = git("status", "--porcelain", "--untracked-files=no", cwd=r["repo"])
+        except (RuntimeError, OSError) as e:
+            current, dirty = r["base"], ""
+            why = desk.redact(f"the checkout at {r['repo']} cannot be read ({e})")
+            why_zh = desk.redact(f"{r['repo']} 的检出读不出来（{e}）")
+        if not why and current != r["base"]:
+            why = (f"the checkout at {r['repo']} is on {current}, not {r['base']}, so the command would not run at "
+                   f"the commit the principal saw; the principal needs to switch it back")
+            why_zh = (f"{r['repo']} 的检出在 {current} 上，不在 {r['base']} 上，命令不会在你看到的那个提交上运行；"
+                      f"需要你把它切回去")
+        elif not why and dirty:
+            why = (f"the checkout at {r['repo']} has uncommitted changes, so the command would not run on exactly "
+                   f"the commit the principal saw")
+            why_zh = f"{r['repo']} 的检出有没提交的改动，命令不会正好在你看到的那个提交上运行"
+    return (why, why_zh) if why else None
+
+
 def start(desk: Desk, rid) -> subprocess.Popen | None:
     """Start an approved release, when everything the principal saw still holds; None when it did not start
-    (void, forbidden, back to waiting)."""
-    with desk.lock():  # no merge lands, and no answer or request comes, between this look and the start
-        r = get(desk, rid)
-        if not r or r.get("state") != "approved":
-            return None
-        s = desk.settings()
-        target = r.get("target") or ""
-        if r.get("without_asking") and not lane_listed(s, r["lane"], target):  # off the list, or changed
-            change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
-            desk.event("release_waits", id=rid, lane=r["lane"], target=target,
-                       why="the target is no longer on the principal's list of releases without asking, or no longer "
-                           "what the list recorded")
-            return None
-        if r.get("without_asking") and desk.paused():  # while paused, only a release the principal said yes to
-            return None
-        why, why_zh = stale(desk, s, r), stale(desk, s, r, zh=True)
-        if not why:  # the order, again: the target it must follow sent out this commit
-            why = before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"])
-            why_zh = why and before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"], zh=True)
-        if not why:
+    (void, forbidden, back to waiting). Its forbidden-word scan is the request's when nothing it depends on
+    changed since (scan_key); else it is scanned again, without the desk lock, and started only if what was
+    scanned is still what goes out."""
+    scanned = None
+    for _ in range(SCAN_TRIES):
+        with desk.lock():  # no merge lands, and no answer or request comes, between this look and the start
+            r = get(desk, rid)
+            if not r or r.get("state") != "approved":
+                return None
+            s = desk.settings()
+            target = r.get("target") or ""
+            why = _not_ready(desk, s, r)
+            if why is not None:
+                if why:
+                    void(desk, rid, why[0], ("approved",), why[1])
+                return None
+            words = s.get("release_forbidden") or []
             try:
-                current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=r["repo"])
-                dirty = git("status", "--porcelain", "--untracked-files=no", cwd=r["repo"])
-            except (RuntimeError, OSError) as e:
-                current, dirty = r["base"], ""
-                why = desk.redact(f"the checkout at {r['repo']} cannot be read ({e})")
-                why_zh = desk.redact(f"{r['repo']} 的检出读不出来（{e}）")
-            if not why and current != r["base"]:
-                why = (f"the checkout at {r['repo']} is on {current}, not {r['base']}, so the command would not run at "
-                       f"the commit the principal saw; the principal needs to switch it back")
-                why_zh = (f"{r['repo']} 的检出在 {current} 上，不在 {r['base']} 上，命令不会在你看到的那个提交上运行；"
-                          f"需要你把它切回去")
-            elif not why and dirty:
-                why = (f"the checkout at {r['repo']} has uncommitted changes, so the command would not run on exactly "
-                       f"the commit the principal saw")
-                why_zh = f"{r['repo']} 的检出有没提交的改动，命令不会正好在你看到的那个提交上运行"
-        if why:
-            void(desk, rid, why, ("approved",), why_zh)
-            return None
-        try:
-            hits, checked = forbidden_in(r["repo"], r.get("since") or "", r["commit"], s.get("release_forbidden") or [],
-                                         r["command"])
+                key = scan_key(r["repo"], r.get("since") or "", r["commit"], words, r["command"])
+            except RuntimeError as e:
+                void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
+                     desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
+                return None
+            found = (([], r.get("checked")) if key == r.get("scanned") else
+                     scanned[1:] if scanned and scanned[0] == key else None)
+            if found is not None:
+                hits, checked = found
+                if hits:  # a word the principal added since it was asked
+                    change(desk, rid, lambda x: {"state": "forbidden", "hits": hits, "checked": checked,
+                                                 "ended": now()})
+                    desk.event("release_forbidden", id=rid, lane=r["lane"], target=target, commit=r["commit"],
+                               found=len(hits))
+                    return None
+                token = f"hansa-release-{rid}-{uuid.uuid4().hex[:8]}"
+                change(desk, rid, lambda x: {"state": "starting", "launch": token, "started": now(),
+                                             "checked": checked, "scanned": key})
+                if not r.get("fixed"):  # it holds the repository: launched before any merge can land
+                    proc = _launch(desk, r, token, r["repo"])
+                break
+        try:  # without the lock: the server's round goes on meanwhile
+            scanned = (key, *forbidden_in(r["repo"], r.get("since") or "", r["commit"], words, r["command"]))
         except RuntimeError as e:
             void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
                  desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
             return None
-        if hits:  # a word the principal added since it was asked
-            change(desk, rid, lambda x: {"state": "forbidden", "hits": hits, "checked": checked, "ended": now()})
-            desk.event("release_forbidden", id=rid, lane=r["lane"], target=target, commit=r["commit"],
-                       found=len(hits))
-            return None
-        d = log_dir(desk)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{rid}.exit").unlink(missing_ok=True)
-        token = f"hansa-release-{rid}-{uuid.uuid4().hex[:8]}"
-        env = {**os.environ, "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"],
-               "HANSA_RELEASE_TARGET": target}
-        for k in ("HANSA_TASK", "HANSA_MERGING"):
-            env.pop(k, None)
-        change(desk, rid, lambda x: {"state": "starting", "launch": token, "started": now(), "checked": checked})
-        with open(d / f"{rid}.log", "wb") as out:
-            proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["command"], str(d / f"{rid}.exit")],
-                                    cwd=r["repo"], env=env, stdin=subprocess.DEVNULL, stdout=out,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
-        change(desk, rid, lambda x: {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+    else:
+        return None  # what goes out kept changing while it was scanned: the next round tries again
+    if r.get("fixed"):  # its own checkout of the commit, made without the lock: nothing waits for it
+        path = checkout_dir(desk, rid)
+        drop_checkout(desk, rid, r["repo"])  # one a crash left half made
+        path.parent.mkdir(parents=True, exist_ok=True)
+        git("worktree", "add", "--detach", str(path), r["commit"], cwd=r["repo"])
+        proc = _launch(desk, r, token, path)
     desk.event("release_started", id=rid, lane=r["lane"], target=target, commit=r["commit"])
+    return proc
+
+
+def _launch(desk: Desk, r: dict, token: str, cwd) -> subprocess.Popen:
+    """Run a release's command in cwd, its output to its log, and record it as running."""
+    rid = r["id"]
+    d = log_dir(desk)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{rid}.exit").unlink(missing_ok=True)
+    env = {**os.environ, "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"],
+           "HANSA_RELEASE_TARGET": r.get("target") or "", "HANSA_RELEASE_REPO": r["repo"]}
+    for k in ("HANSA_TASK", "HANSA_MERGING"):
+        env.pop(k, None)
+    with open(d / f"{rid}.log", "wb") as out:
+        proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["command"], str(d / f"{rid}.exit")],
+                                cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    change(desk, rid, lambda x: {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
     return proc
 
 
@@ -525,6 +679,8 @@ def finish(desk: Desk, rid) -> dict | None:
     r = get(desk, rid)
     if not r or r.get("state") not in ("starting", "running"):
         return None
+    if r.get("fixed"):  # its command ended: its own checkout goes, whatever the ending
+        drop_checkout(desk, rid, r.get("repo"))
     d = log_dir(desk)
     try:
         code = int((d / f"{rid}.exit").read_text().strip())
@@ -594,10 +750,12 @@ def tick(desk: Desk, s: dict, procs: dict) -> None:
         if time.time() - (r.get("started") or time.time()) > 60 * limit:
             change(desk, r["id"], lambda x: {"timed_out": True, "limit_min": limit, "limit_of": whose})
             stop(r.get("pid"), r.get("pid_start", ""), procs.get(r["id"]))
+    sweep_checkouts(desk)
     tasks = desk.tasks()
+    # one at a time per repository, fixed or not: two releases of one repository may send to the same place
     held = {r.get("repo") for r in releases(desk) if r.get("state") in ("starting", "running")}
     for r in sorted((r for r in releases(desk) if r.get("state") == "approved"), key=lambda r: r["id"]):
-        if r.get("repo") in held or merging_on(desk, s, r.get("repo"), tasks):
+        if r.get("repo") in held or (not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)):
             continue
         try:
             proc = start(desk, r["id"])
@@ -630,7 +788,7 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
     if other:
         return (f"等同一仓库上{what_zh(other)}的发布 #{other['id']} 结束" if zh else
                 f"waits for release #{other['id']} of {what(other)} on the same repository")
-    m = merging_on(desk, s, r.get("repo"), tasks)
+    m = not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)
     if m:
         return (f"等同一仓库上工作线 {m.get('lane')} 的 {m['id']} 合并验收结束" if zh else
                 f"waits for {m['id']}'s merge check on lane {m.get('lane')}, on the same repository")
@@ -685,6 +843,14 @@ def checked_text(r: dict) -> str:
     return (f"{n} outgoing commit(s) checked for forbidden words" + (f" (the first {shown} shown)" if shown < n else ""))
 
 
+def runs_text(t: dict, zh: bool = False) -> str:
+    """Which way a target (or a release of it) runs, in words."""
+    if t.get("fixed"):
+        return ("在为它做的提交固定检出里运行，不占仓库" if zh else
+                "runs from a fixed checkout of the commit, holding nothing")
+    return "在仓库里运行，运行时占着仓库" if zh else "runs in the repository, holding it while it runs"
+
+
 def line(desk: Desk, r: dict, s: dict | None = None) -> str:
     return (f"#{r['id']} {what(r)} at {r.get('commit', '')[:10]} ({r.get('base')}): "
             f"{state_text(desk, r, s)}")
@@ -705,7 +871,7 @@ def list_text(desk: Desk) -> str:
         out.append(f"{title}:")
         for r in group:
             out.append("  " + line(desk, r, s))
-            out.append(f"      command: {r.get('command')}" + (f" · note: {r['note']}" if r.get("note") else ""))
+            out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
             out.append(f"      {checked_text(r)}")
             if r.get("state") in ("done", "failed") and r.get("tail"):
                 out += [f"      | {x}" for x in r["tail"][-5:]]
@@ -719,9 +885,12 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
     """For hansa explain lane: the release targets and the last release of each."""
     s = desk.settings()
     targets = lane_targets(ln)
-    how = (f"it runs in {ln['repo']} at the base branch's commit, as the desk's account, outside the sandbox, with "
-           "hansa's environment (not the lane's env), holding the repository (merges there wait for it), only after "
-           "the principal says yes on the page")
+    how = {False: f"it runs in {ln['repo']} at the base branch's commit, as the desk's account, outside the sandbox, "
+                  "with hansa's environment (not the lane's env), holding the repository (merges there wait for it), "
+                  "only after the principal says yes on the page",
+           True: "it runs from a checkout of the base branch's commit made for it (removed when it ends), as the "
+                 "desk's account, outside the sandbox, with hansa's environment (not the lane's env), holding nothing "
+                 f"(merges in {ln['repo']} go on meanwhile), only after the principal says yes on the page"}
     if not targets:
         return [f"  release: none (set one with hansa lane set {name} release \"<command>\", or name targets with "
                 f"hansa lane target {name} NAME \"<command>\")", "  last release: none"]
@@ -731,7 +900,7 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
         limit = t.get("timeout_min") or ln.get("timeout_min", 240)
         head = f"  release target {target}" if target else "  release"
         out += [f"{head}: {t.get('command')} (hansa release {name}{' ' + target if target else ''} asks for it; "
-                f"{how}; {limit} min as its limit"
+                f"{how[bool(t.get('fixed'))]}; {limit} min as its limit"
                 + (f"; only for a commit target {t['after']} already sent out" if t.get("after") else "")
                 + (": the principal lets it go out without asking" if lane_listed(s, name, target)
                    else unlisted(s, name, target)) + ")",
@@ -759,7 +928,8 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         row = {k: r.get(k) for k in ("id", "lane", "target", "base", "commit", "command", "note", "state", "asked",
                                      "answered",
                                      "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
-                                     "named", "hits", "ended", "without_asking", "since_release")}
+                                     "named", "hits", "ended", "without_asking", "since_release", "fixed")}
+        row["runs"], row["runs_zh"] = runs_text(r), runs_text(r, zh=True)
         row["checked"] = r.get("checked", r.get("count"))
         row["what"], row["what_zh"] = state_text(desk, r, s), state_text(desk, r, s, zh=True)
         row["tail"] = (r.get("tail") or [])[-TAIL:]
