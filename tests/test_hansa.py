@@ -12706,6 +12706,50 @@ class DeskTest(unittest.TestCase):
         self.assertIn("set by the coordinator with hansa lane add or hansa lane set",
                       views.explain_text(self.desk, "lane", "b").splitlines()[0])
 
+    def test_explain_lane_names_the_locale_its_commands_get_and_where_from(self):
+        import hansa.run as run
+
+        def line():
+            return next(x for x in views.explain_text(self.desk, "lane", "a").splitlines() if "  locale of" in x)
+        gone = {"state": "gone", "pid": None, "quiet": None, "answers": False}
+        with unittest.mock.patch.dict(os.environ, {"LANG": "zh_CN.UTF-8"}), \
+                unittest.mock.patch.object(run, "server_state", lambda desk: gone):
+            os.environ.pop("LC_ALL", None)
+            self.assertIn("LANG=zh_CN.UTF-8, from this shell's environment", line())
+            self.assertIn("hansa serve does not run, and nothing runs without it", line())
+            self.assertNotIn("lane try", line())  # a try refuses without serve: it runs nothing here
+            self.assertIn("hansa lane set a env ... LC_ALL=C.UTF-8", line())
+            self.hansa("lane", "set", "a", "env", "LC_ALL=")  # empty: as if not set
+            self.assertIn("LANG=zh_CN.UTF-8, from this shell's environment", line())
+            self.assertIn("hansa lane set a env ... LC_ALL=C.UTF-8", line())
+            self.hansa("lane", "set", "a", "env", "LC_ALL=C.UTF-8")
+            self.assertIn("LC_ALL=C.UTF-8, from the lane's env", line())
+            self.assertNotIn("hansa lane set a env", line())
+        up = {"state": "up", "pid": os.getpid(), "quiet": 0, "answers": True}
+        self.hansa("lane", "set", "a", "env")
+        with unittest.mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8"}):
+            os.environ.pop("LC_ALL", None)
+            run.record_serve_locale(self.desk)  # as hansa serve starts
+        with unittest.mock.patch.dict(os.environ, {"LANG": "zh_CN.UTF-8"}), \
+                unittest.mock.patch.object(run, "server_state", lambda desk: up):
+            self.assertIn("LANG=en_US.UTF-8, from hansa serve's environment", line())  # not this shell's
+
+    def test_add_says_when_a_title_put_in_commits_was_cut(self):
+        long = "Make the release notes say which version of the tool each change first shipped in, by tag"
+        self.assertGreater(len(long), 80)
+        out = self.hansa("add", long, "--lane", "a")
+        self.assertNotIn("cut at 80", out)  # the lane's messages are hansa's own
+        self.hansa("lane", "set", "a", "commit_message", "{title}")
+        out = self.hansa("add", long, "--lane", "a")
+        self.assertIn("note: lane a's commit_message puts the task's title in its commits", out)
+        self.assertIn(f"cut at 80 characters: {json.dumps(long[:80])}", out)
+        self.assertIn("--title", out)
+        zh = "让发布说明写明每项改动最早出现在工具的哪个版本里，并按标签列出" * 3  # over 80 characters
+        self.assertGreater(len(zh), 80)
+        self.assertIn(f'cut at 80 characters: "{zh[:80]}"', self.hansa("add", zh, "--lane", "a"))  # as it is
+        self.assertNotIn("cut at 80", self.hansa("add", long, "--lane", "a", "--title", "Version in release notes"))
+        self.assertNotIn("cut at 80", self.hansa("add", "A short one", "--lane", "a"))
+
     def test_a_refused_lane_change_changes_nothing(self):
         before = self.desk.settings_path.read_text()
         saved = len(self.events("settings_saved"))

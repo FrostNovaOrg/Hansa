@@ -214,7 +214,10 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   (`hansa lane set L merge_message "Merge: {title}"`). Unset, they are
   `t0001: <title>` and `Merge t0001: <title>`. A lane whose release goes to a
   public repository usually leaves `{task}` out; the release's word check reads
-  every outgoing commit message all the same.
+  every outgoing commit message all the same. With no `--title`, a task's
+  title is the first line of its text cut at 80 characters, perhaps within a
+  word; when a lane's form holds `{title}`, `hansa add` says so for a title it
+  cut, with the title that will be used: give one with `--title`.
   Every commit hansa makes for a lane (a task's commit, its merge into the
   base, the merge check's merge included, the merge of the base into a task's
   branch on `retry --update`, and a design session's commits) carries one
@@ -514,6 +517,14 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   would stop every command of the lane's workers), no `PATH` entry that is empty
   or not a full path, and no place inside the desk. The file hansa writes it to
   for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
+  The locale (`LANG`, `LC_ALL`) of a lane's setup, check, merge check, preview
+  and workers is that of whoever started hansa: `hansa serve`'s environment
+  (one started over ssh takes the client's), since nothing runs without it;
+  `hansa explain lane L` says which locale they get and where from (when serve
+  does not run, the locale of this shell, which a serve started here would give). A lane whose results must not depend on who started
+  hansa sets its own (`hansa lane set L env ... LC_ALL=C.UTF-8`): tools such as
+  `sort` and `comm` order and compare by the locale, and some `sort -u` keep
+  only one of `acme-core` and `acmecore` under `en_US.UTF-8`.
 - A task or verification with a browser (`hansa add --browser`, `hansa verify
   --browser`) on a lane with a `preview` (the command that starts the app, such
   as `npm run dev`) gets the app started for it. On macOS hansa starts the

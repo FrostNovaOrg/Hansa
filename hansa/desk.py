@@ -1152,6 +1152,13 @@ def _message(ln, field: str, tid: str, title: str, lane: str) -> str | None:
     return form.format(task=tid, title=title or "work", lane=lane or "")
 
 
+def title_forms(ln) -> list:
+    """The lane's commit_message and merge_message that put a task's title in what they make."""
+    return [f for f in MESSAGE_FIELDS if isinstance((ln or {}).get(f), str) and (ln or {})[f]
+            and not message_problem(ln[f])
+            and any(n == "title" for _, n, _, _ in string.Formatter().parse(ln[f]))]
+
+
 def message_fallback(ln, lane: str, field: str) -> str:
     """When a lane's commit_message or merge_message is set but cannot be used (written by hand in the settings
     file; hansa lane set refuses it), the line saying so: hansa uses its own message, task number included."""

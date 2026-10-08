@@ -5453,6 +5453,60 @@ def record_serve_code(desk: Desk) -> None:
     write_json(desk.state_dir / "serve-code", {"pid": os.getpid(), "build": build(), "installed": installed()})
 
 
+LOCALE_ENV = ("LANG", "LC_ALL")  # the locale variables of BASE_ENV: what of hansa's own locale its runs get
+
+
+def is_locale_var(k: str) -> bool:
+    return k in LOCALE_ENV or k.startswith("LC_")
+
+
+def record_serve_locale(desk: Desk) -> None:
+    """hansa serve, as it starts: the locale its lanes' commands and workers get from it (base_env), which
+    hansa explain lane reads from here rather than from the shell it is run in."""
+    write_json(desk.state_dir / "serve-locale", {"pid": os.getpid(),
+                                                 "env": {k: os.environ[k] for k in LOCALE_ENV if k in os.environ}})
+
+
+def lane_locale(desk: Desk, lane: dict, st: dict = None) -> str:
+    """The locale a lane's setup, check, merge check, preview and workers get, and where it comes from, in a
+    line: the lane's env when it sets one, else hansa serve's environment (as it recorded it when it started),
+    else, when serve does not run, this shell's (which a serve started here would give them). hansa passes on
+    only LANG and LC_ALL of its own; a lane's env may set any LC_ variable, and LC_ALL, when set and not
+    empty, wins over the rest (an empty one counts as not set)."""
+    own = {k: v for k, v in lane_env(desk, lane)[0].items() if is_locale_var(k)}
+    emptied = {k for k, v in own.items() if not v}  # set empty by the lane: as if not set
+    own = {k: v for k, v in own.items() if v}
+    st = st or server_state(desk)
+    if st["state"] != "gone":
+        rec = read_json(desk.state_dir / "serve-locale", {})
+        if isinstance(rec, dict) and rec.get("pid") == st["pid"] and isinstance(rec.get("env"), dict):
+            outer, whose = {k: v for k, v in rec["env"].items() if k in LOCALE_ENV and isinstance(v, str)}, \
+                "hansa serve's environment"
+        else:
+            outer, whose = None, "hansa serve's environment (it did not record it: restart it to see it here)"
+    else:
+        outer, whose = ({k: os.environ[k] for k in LOCALE_ENV if k in os.environ},
+                        "this shell's environment (hansa serve does not run, and nothing runs without it: the"
+                        " commands will take the locale of the environment hansa serve is started from, this"
+                        " shell's if started here)")
+    if "LC_ALL" in own:
+        return f"LC_ALL={own['LC_ALL']}, from the lane's env"
+    got = {k: v for k, v in (outer or {}).items() if k not in emptied and v}
+    got.update(own)
+    if "LC_ALL" in got and own:
+        got = {"LC_ALL": got["LC_ALL"]}  # it wins over what the lane sets
+        own = {}
+    said = ", ".join(f"{k}={v}" for k, v in sorted(got.items()))
+    if own and outer:
+        return (f"{said}: {', '.join(sorted(own))} from the lane's env, "
+                f"{', '.join(sorted(k for k in got if k not in own)) or 'nothing'} from {whose}")
+    if own:
+        return f"{said}, from the lane's env" + ("" if outer is not None else f" (and whatever {whose} adds)")
+    if outer is None:
+        return f"whatever is in {whose}"
+    return f"{said or 'none set (the C locale)'}, from {whose}"
+
+
 def serve_code(desk: Desk, st: dict = None) -> str:
     """'' unless hansa serve runs other code than is installed now (installed since, but not restarted); then
     what to do about it, in a line. A server that did not record its code (started on a hansa before this
