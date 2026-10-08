@@ -12,7 +12,7 @@ from pathlib import Path
 from . import alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
+from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of, provider_problem,
                   rest_minutes, rest_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -893,6 +893,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                        f"{where}")
         else:
             out.append(f"preview (started by hansa for the browser): running now: {pv.get('command', '')}")
+        if (d / PREVIEW_FIRST_LOG).exists():
+            out.append(f"preview of the run before hansa resumed it, stopped then; its output: {d / PREVIEW_FIRST_LOG}")
     chk = m.get("check")
     if chk and chk.get("could_not_run"):
         out.append(f"check (run by hansa, not the worker): {chk['note']}: {chk['command']}")

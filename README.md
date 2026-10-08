@@ -157,6 +157,37 @@ page gives.
   `srt`): the lane's network and write lists hold for them too, so a setup that
   downloads needs its registry on the network list. Design sessions, which the
   principal works in directly, and the coordinator run outside it.
+- One Bash call of a task or verification worker may run as long as the lane's
+  check may, plus 5 minutes, but never past the worker's own limit: hansa sets
+  Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most
+  10 minutes). The check's limit is the lane's `merge_timeout_min`, else its
+  `timeout_min`; the worker's is `timeout_min`. A call that asks for no timeout
+  still stops after 10 minutes (`BASH_DEFAULT_TIMEOUT_MS`; less when the most is
+  less), so a command that hangs does not hold it for the whole limit. Workers
+  are told these limits in minutes, to give the Bash tool's timeout (in
+  milliseconds, up to the most) for a long build or suite, and to run it in the
+  foreground, in one Bash call, never in the background while they end their
+  turn. A worker that does end its turn while
+  background work it started still runs is resumed once, in the same session,
+  with a short message: that work was stopped with it, so it runs it again in the
+  foreground, waits for it, then reports. A second time it is not resumed; `hansa
+  show` then says what was still running. The time limit counts from the task's
+  start, across both runs. When the task is queued again for a new try (after a
+  dropped connection, say), that try starts with nothing of the earlier try's
+  resume: it may be resumed once in its own right, and the earlier try's turns
+  and tokens stay in its attempt record. For a browser task whose lane has a
+  preview, the first run's preview is stopped when that run ends, before hansa
+  decides on the resume, and the resumed run gets one started again from the same
+  worktree: never two at once. The first one's output is kept beside the second's
+  (`preview-before-resume.log`, which `hansa show` names).
+- A run that ended on a dropped connection is tried once more by itself. hansa
+  reads only Claude Code's own error lines for this: one that begins `API Error`
+  (a 5xx, a connection error or reset, a request that timed out, an overloaded
+  provider, unable to connect, but not a certificate error), one that begins
+  with a connection reset, refused or closed, a socket hang up, a fetch that failed or "Connection lost while your
+  computer was asleep", one that ends `(ENETUNREACH)`, and the API's
+  `overloaded_error`. A test that
+  timed out, or a log line saying "overloaded", is the task's own failure.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a
