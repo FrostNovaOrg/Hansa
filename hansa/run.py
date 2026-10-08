@@ -223,8 +223,19 @@ GIT_DENY = [f"Bash(git {c}:*)" for c in ("commit", "push", "merge", "rebase", "r
 GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", "info", "logs", "config.worktree")
 # config.worktree: with extensions.worktreeConfig on (git sparse-checkout sets it), git takes settings from it,
 # core.fsmonitor among them, which runs a command at the next git status there, hansa's own outside the sandbox
-GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir", "config.worktree")
+# What says a merge, cherry-pick, revert or rebase is under way in a worktree's own folder: git commit takes a
+# MERGE_HEAD there as a second parent, so one a worker wrote would put a commit nobody reviewed into the history
+# of hansa's commit. Workers and verifiers never merge (hansa does), so they may not write them; a design session
+# may. hansa makes none of them when missing (an empty MERGE_HEAD says a merge is under way), so on Linux, where
+# the sandbox keeps only what is there when a command starts, the check before hansa commits (check_no_operation)
+# is what holds.
+GIT_OPS = ("MERGE_HEAD", "MERGE_MODE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer")
+GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir", "config.worktree", *GIT_OPS)
 GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
+# What hansa clears from a worktree's own folder once it has committed there: what was left of a merge it made the
+# commit of, or of a merge a design session left under way (hansa's commit is a plain one, commit_work)
+GIT_MERGE_LEFT = ("MERGE_HEAD", "MERGE_MODE", "MERGE_MSG", "AUTO_MERGE")
+OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 # A design session commits and merges into its own branch, so its sandbox lets it write just what that takes
 # (design_git_write): its worktree's own folder, git's objects, and its branch's ref and log, each with the
 # .lock git takes on it. Not packed-refs, another ref or tag (the base among them), another worktree's
@@ -792,9 +803,10 @@ def _git_folder_deny(wt: Path, committing: str = "") -> list:
     common, own = git_folders(wt)
     linked = own.resolve() != common.resolve()
     in_common, in_own = (DESIGN_GIT_COMMON_DENY, DESIGN_GIT_OWN_DENY) if committing else (GIT_COMMON_DENY, GIT_OWN_DENY)
-    # a design session in a main checkout may move its HEAD: that HEAD is its own
+    # a design session in a main checkout may move its HEAD: that HEAD is its own. GIT_OPS on Linux only when there:
+    # the sandbox there would put a device where one is missing, and git would take that for a merge under way
     return [*(common / f for f in in_common if linked or not committing or f != "HEAD"),
-            *(own / f for f in in_own if linked)]
+            *(own / f for f in in_own if linked and not (account.LINUX and f in GIT_OPS and not os.path.lexists(own / f)))]
 
 
 def _git_open(wt: Path, committing: str = "") -> list:
@@ -869,7 +881,7 @@ def make_git_write_deny(wt: Path, committing: str = "") -> None:
     as none. A path that exists is left as it is. For a design session, also the folders that hold its
     branch's ref and log: git could not make them there."""
     for f in _git_folder_deny(wt, committing):
-        if os.path.lexists(f):
+        if os.path.lexists(f) or f.name in GIT_OPS:  # an empty MERGE_HEAD would say a merge is under way
             continue
         try:
             if f.name in GIT_DENY_DIRS:
@@ -903,10 +915,12 @@ class GitFileChanged(RuntimeError):
 class GitFolderChanged(GitFileChanged):
     """What the worktree's .git file leads to is not what git made: its git folder's commondir or gitdir (the
     folder of the repository's settings and hooks, and the worktree's own .git), or a commondir in the common
-    folder. str(): what the principal is told. `right`: what the file held, None where there was none."""
+    folder. str(): what the principal is told. `right`: what the file held, None where there was none. `aside`:
+    what was found may be moved aside (and `right` written there) whatever its name: a branch's ref, a merge
+    under way (git_file_changed)."""
 
-    def __init__(self, wt: Path, path: Path, found: str, right) -> None:
-        self.wt, self.path, self.found, self.right = Path(wt), Path(path), found, right
+    def __init__(self, wt: Path, path: Path, found: str, right, aside: bool = False) -> None:
+        self.wt, self.path, self.found, self.right, self.aside = Path(wt), Path(path), found, right, aside
         self.expected = f"{path}: {'none' if right is None else right}"
         RuntimeError.__init__(self, f"the worktree's git folder was changed: {path} {found}; "
                                     f"hansa ran no git in {wt}")
@@ -1002,13 +1016,93 @@ def check_head(desk: Desk, wt: Path, branch: str) -> None:
     commits and merges on whatever HEAD names, so a HEAD pointed at the base would move the base. Read as a
     plain file from the worktree's own git folder, after check_git_file."""
     check_git_file(desk, wt)
-    line = expected_git_line(desk, Path(wt))
-    admin = Path(line[len("gitdir:"):].strip())
-    head = (admin if admin.is_absolute() else Path(wt) / admin) / "HEAD"
+    head = own_git_folder(desk, wt) / "HEAD"
     right = f"ref: refs/heads/{branch}"
     text, what = _plain_text(head)
     if text != right:
         raise GitFolderChanged(wt, head, what or f"now holds {text[:200]!r}, not the task's branch {branch}", right)
+
+
+def own_git_folder(desk: Desk, wt: Path) -> Path:
+    """The worktree's own git folder, as the .git line hansa remembers for it names it (after check_git_file)."""
+    admin = Path(expected_git_line(desk, Path(wt))[len("gitdir:"):].strip())
+    return admin if admin.is_absolute() else Path(wt) / admin
+
+
+def check_branch_ref(desk: Desk, wt: Path, branch: str) -> None:
+    """Raise GitFolderChanged unless `branch`'s ref is a plain commit id, or there is none and packed-refs (which
+    nothing sandboxed may write) holds it: a ref holding 'ref: refs/heads/main' would lead git, which follows it,
+    from the run's branch onto the base, while HEAD still names the run's branch (check_head). A design session may
+    write its branch's ref. Read as a plain file, after check_git_file. Put right (git_file_changed) to the last id
+    the branch's log names, where it names one."""
+    check_git_file(desk, wt)
+    common = own_git_folder(desk, wt).resolve().parent.parent
+    ref = common / "refs" / "heads" / branch
+    if os.path.lexists(ref):
+        text, what = _plain_text(ref)
+        if text is not None and OID.fullmatch(text):
+            return
+        raise GitFolderChanged(wt, ref, what or f"now holds {text[:200]!r}, not a commit id",
+                               _last_logged(common, branch), aside=True)
+    if not _packed(common, f"refs/heads/{branch}"):
+        raise GitFolderChanged(wt, ref, "is gone, and packed-refs does not hold it either",
+                               _last_logged(common, branch), aside=True)
+
+
+def _packed(common: Path, ref: str) -> str:
+    """The id packed-refs holds for `ref`, or ''."""
+    try:
+        if not stat.S_ISREG(os.lstat(common / "packed-refs").st_mode):
+            return ""
+        text = (common / "packed-refs").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        oid, _, name = line.partition(" ")
+        if name == ref and OID.fullmatch(oid):
+            return oid
+    return ""
+
+
+def _last_logged(common: Path, branch: str):
+    """The id the branch's log last moved it to, or None."""
+    log = common / "logs" / "refs" / "heads" / branch
+    try:
+        if not stat.S_ISREG(os.lstat(log).st_mode):
+            return None
+        with os.fdopen(os.open(log, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as fh:
+            fh.seek(max(0, os.fstat(fh.fileno()).st_size - 65536))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    new = lines[-1].split(" ")[1] if lines and len(lines[-1].split(" ")) > 1 else ""
+    return new if OID.fullmatch(new) else None
+
+
+def check_no_operation(desk: Desk, wt: Path, merging: str = "") -> str:
+    """Raise GitFolderChanged when the worktree's own folder says a merge, cherry-pick, revert or rebase is under
+    way (GIT_OPS): hansa starts none in a worker's or a verification's worktree but the one below, and git commit
+    would take a MERGE_HEAD a worker wrote for a second parent. `merging`: the base's tip a `retry --update` run's
+    merge left there (UPDATE_SCRIPT): that MERGE_HEAD, and its MERGE_MODE, are hansa's. Returns `merging` when that
+    merge is under way, else ''. What was found is moved aside (git_file_changed). After check_git_file."""
+    check_git_file(desk, wt)
+    own, merged = own_git_folder(desk, wt), ""
+    for name in GIT_OPS:
+        p = own / name
+        if not os.path.lexists(p):
+            continue
+        text, what = _plain_text(p)
+        if merging and name == "MERGE_HEAD" and text == merging:
+            merged = merging
+            continue
+        if merging and name == "MERGE_MODE" and text is not None:
+            continue
+        raise GitFolderChanged(wt, p, f"was made ({what or 'it holds ' + repr(text[:200])}): it says a merge, "
+                                      f"cherry-pick, revert or rebase is under way, which hansa did not start "
+                                      f"there", None, aside=True)
+    if not merged and os.path.lexists(own / "MERGE_MODE"):  # a MERGE_MODE kept for a MERGE_HEAD that is not there
+        raise GitFolderChanged(wt, own / "MERGE_MODE", "was made without hansa's merge", None, aside=True)
+    return merged
 
 
 def check_main_checkout(repo: Path) -> None:
@@ -1133,8 +1227,9 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
                     shutil.copy2(target / name, keep / name)
             except OSError:
                 pass
-        fixable = (e.path.name in ("commondir", "gitdir", "config.worktree", "HEAD") and e.path.parent.is_dir()
-                   and not os.path.isdir(e.path))
+        fixable = e.path.parent.is_dir() and (
+            e.aside and (os.path.lexists(e.path) or e.right is not None)
+            or e.path.name in ("commondir", "gitdir", "config.worktree", "HEAD") and not os.path.isdir(e.path))
         if fixable:
             if os.path.lexists(e.path):
                 shutil.move(str(e.path), str(keep / f"found.{e.path.name}"))
@@ -1182,14 +1277,28 @@ def sandbox_leftovers(desk: Desk, wt: Path) -> list:
                  and (wt / f).stat().st_size == 0)]
 
 
-def commit_work(desk: Desk, wt: Path, message: str) -> None:
-    """Commit everything changed in the worktree but what a sandbox left there; nothing when that is all."""
+def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> None:
+    """Commit everything changed in the worktree but what a sandbox left there on `branch`, the one hansa made for
+    the run; nothing when that is all and nothing is `merged`. The commit is made from the index with the branch's
+    tip (and `merged`, a merge hansa made there) for parents, never with a MERGE_HEAD git would take from the
+    worktree's folder, and exactly that branch is moved, from that tip to it, with update-ref's check of the old id
+    and without following a link (check_branch_ref runs first). What a merge left there is cleared then."""
+    check_branch_ref(desk, wt, branch)
     left = sandbox_leftovers(desk, wt)  # untracked until the add
     wgit(desk, wt, "add", "-A")
     if left:
         wgit(desk, wt, "rm", "-q", "--cached", "--", *left)
-    if wgit(desk, wt, "diff", "--cached", "--name-only"):
-        wgit(desk, wt, "commit", "-q", "--no-verify", "-m", message)
+    if not wgit(desk, wt, "diff", "--cached", "--name-only") and not merged:
+        return
+    ref = f"refs/heads/{branch}"
+    old = wgit(desk, wt, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
+    new = wgit(desk, wt, "commit-tree", wgit(desk, wt, "write-tree"), "-p", old,
+               *(a for m in merged for a in ("-p", m)), "-m", message.strip())
+    wgit(desk, wt, "update-ref", "--no-deref", "-m", f"commit: {(message.strip().splitlines() or [''])[0]}", ref, new, old)
+    own = own_git_folder(desk, wt)
+    for name in GIT_MERGE_LEFT:
+        if os.path.isfile(own / name) and not os.path.islink(own / name):
+            (own / name).unlink()
 
 
 def is_local(host: str) -> bool:
@@ -2038,6 +2147,8 @@ def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: 
     lane's setup (UPDATE_SCRIPT). Returns the files that conflict."""
     try:
         check_head(desk, wt, f"task/{tid}")
+        check_branch_ref(desk, wt, f"task/{tid}")
+        check_no_operation(desk, wt)
         wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", message or f"Merge {name} into task/{tid}", tip)
         return []
     except GitFileChanged:
@@ -2516,13 +2627,19 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
         check_git_file(desk, wt, desk.settings()["lanes"].get(meta.get("lane"), {}).get("repo"))
-        check_head(desk, wt, meta.get("branch") or f"task/{tid}")  # what hansa commits or stashes on is the task's
+        branch = meta.get("branch") or f"task/{tid}"
+        check_head(desk, wt, branch)  # what hansa commits or stashes on is the task's
+        check_branch_ref(desk, wt, branch)  # and that branch's ref leads nowhere else
+        # a design session may merge: hansa's commit at its end is a plain one on its branch all the same
+        # (commit_work); a worker's or a verification's run may hold only the merge hansa made (retry --update)
+        merged = "" if designing else check_no_operation(
+            desk, wt, meta.get("base", "") if meta.get("update") and meta.get("update_conflicts") else "")
         if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
                 commit_work(desk, wt, task_message(desk.settings()["lanes"].get(meta.get("lane")), meta.get("lane") or "",
-                                                  tid, meta.get("title") or ""))
+                                                  tid, meta.get("title") or ""), branch, [merged] if merged else [])
         head = wgit(desk, wt, "rev-parse", "HEAD")
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
                       files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),

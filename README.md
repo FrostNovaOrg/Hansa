@@ -168,14 +168,19 @@ page gives.
   starts, takes no name patterns and cannot open a branch's folder beneath a
   `refs/heads` it keeps, so a session that commits could make or move other
   branches, the base among them. The coordinator runs outside the sandbox.
-  What each may write in git's folders: a worker only its own worktree's folder
-  under `.git/worktrees/`, not its `HEAD`, logs, `commondir`, `gitdir` or
-  `config.worktree`. A design session (macOS) may write in git exactly what
+  What each may write in git's folders: a worker (and a verifier) only its own
+  worktree's folder under `.git/worktrees/` (its `index`, say), not its `HEAD`,
+  logs, `commondir`, `gitdir` or `config.worktree`, nor what says a merge,
+  cherry-pick, revert or rebase is under way there (`MERGE_HEAD`, `MERGE_MODE`,
+  `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge/`, `rebase-apply/`,
+  `sequencer/`): workers never merge, hansa does. A design session (macOS) may write in git exactly what
   committing and merging into its own branch (`task/<id>`) takes: its own
   worktree's folder under `.git/worktrees/` but its `HEAD`, `commondir`, `gitdir`
   and `config.worktree` (git commits and merges on a branch without writing
   `HEAD`), git's objects, and its branch's ref and reflog, each with git's
-  `.lock` beside it. It cannot move the base, another branch or a tag, or write
+  `.lock` beside it; its own merges' files (`MERGE_HEAD` and the like) among
+  them. Its branch's ref it may write, but only as a commit id: hansa refuses
+  one that leads to another ref (below). It cannot move the base, another branch or a tag, or write
   `packed-refs`, another worktree's folder, git's settings, hooks or `info/`, or
   the worktree's `.git` file; this holds for branches and worktrees made while
   it runs too (named with letters, digits, `.`, `_` and `-`, as hansa names
@@ -188,9 +193,12 @@ page gives.
   whole `refs/`, `logs/`, `objects/`, `hooks/` and `info/`, git's settings,
   `packed-refs`, the worktree's `HEAD`, `commondir`, `gitdir` and
   `config.worktree`, other worktrees' folders), not for the patterns that keep
-  what is made later in the shared folder and under `.git/worktrees/`. What it
+  what is made later in the shared folder and under `.git/worktrees/`, nor for
+  a `MERGE_HEAD` or the like that is not there when it starts (the sandbox would
+  put an empty file there, which git takes for a merge under way). What it
   could make there reaches nothing outside the sandbox: git obeys a new
-  `commondir` or a worktree's folder only through the checks below.
+  `commondir` or a worktree's folder only through the checks below, and hansa
+  commits nothing while a merge or the like it did not start is under way.
   Before hansa runs git in a worktree, it checks the worktree's `.git` file;
   that the git folder it leads to still points back to the repository
   (`commondir`) and to the worktree (`gitdir`) as git wrote them; that its
@@ -199,9 +207,20 @@ page gives.
   git obey those files, is not on where hansa first saw it off. When one was
   changed, hansa runs no git there and keeps what it found; a `.git` file, a
   `commondir`, `gitdir` or `config.worktree` it puts back as it was. Before it
-  commits or merges in a worktree, it also checks that the worktree's `HEAD`
-  names the branch it made for that run, and puts it back when not; the task
-  fails either way. In the lane's own checkout, a `commondir` in its `.git`
+  commits, stashes or merges in a worktree, it also checks that the worktree's
+  `HEAD` names the branch it made for that run, that this branch's ref is a
+  plain commit id (or packed and not loose), never a link to another ref, and,
+  in a worker's or a verifier's worktree, that no merge, cherry-pick, revert or
+  rebase is under way but the merge of the base hansa itself made for `hansa
+  retry --update`; it puts back what it found or sets it aside, and the task
+  fails either way. hansa's commit at the end of a run is made from the index
+  with the branch's tip (and, after that merge, the base's tip it merged) for
+  parents, never from a `MERGE_HEAD` git would find there, and moves exactly
+  the run's branch from the old id to the new one (`git update-ref` with the
+  old id, without following a link). At the end of a design session that
+  commit is always a plain one on its branch: a merge the session left under
+  way is committed as the changes it made, without the merged commit as a
+  parent (the session's own merge commits stay as they are). In the lane's own checkout, a `commondir` in its `.git`
   stops every hansa git command there until it is removed by hand; hansa does
   not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
   hooks from an empty folder and commit and tag signing off, whatever a

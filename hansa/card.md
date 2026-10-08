@@ -318,7 +318,9 @@ all new is designed elsewhere and comes to you as a finished design.
   only what committing and merging into its own branch takes (its worktree's
   git folder but its HEAD, git's objects, its branch's ref and reflog): it
   cannot move the base, another branch or a tag, or touch another worktree's
-  git folder. There are no design sessions on Linux: `hansa design` refuses
+  git folder; a branch ref it points at another ref is refused when it ends,
+  and hansa's commit then is a plain one on its branch. Workers may write
+  only their worktree's index and the like there, no merge state. There are no design sessions on Linux: `hansa design` refuses
   there, because that sandbox cannot keep a session that commits from moving
   other branches. On a Linux desk, shape a feature with the principal through
   small tasks instead.

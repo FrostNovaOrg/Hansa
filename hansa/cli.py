@@ -1554,7 +1554,7 @@ def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool) -> s
     if keep and (st["changes"] or st["commits"]):
         kept = f"hansa-kept/{wt.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wgit(desk, wt, "checkout", "-q", "-b", kept)
-        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed")
+        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed", kept)
     # --force: what a worker's sandbox left there is nobody's work, and git would refuse for it
     git("worktree", "remove", "--force", str(wt), cwd=st["repo"])
     _remember_git_file(desk, wt, None)
