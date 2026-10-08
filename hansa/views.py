@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import account, alert, build, cost, installed, installed_text, notify, release
-from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (LINUX_TRY_NOTE, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
@@ -1091,6 +1091,20 @@ def preview_text(mac: bool, ln: dict) -> list:
             " told so"]
 
 
+def web_lines(allow: list) -> list:
+    """What a lane's allowed commands give of Claude Code's web tools, which reach the network from its own
+    process, outside the sandbox's network list."""
+    sites, search = web_sites(allow)
+    if not sites and not search:
+        return ["  web tools (Claude Code's own, outside the sandbox's network list): none"]
+    return ["  web tools (Claude Code's own, outside the sandbox's network list; workers, verifiers and design"
+            " sessions alike):",
+            *(["    WebFetch reaches only: " + ", ".join(sites) + " (unlike the network list, it runs in Claude"
+               " Code's own process, outside the sandbox; a *. wildcard opens every name under it; any listed name can be pointed at any address, this"
+               " machine included: list only sites you know, and the principal sees every change)"] if sites else []),
+            *(["    WebSearch: sends search queries out of the machine"] if search else [])]
+
+
 def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False) -> str:
     """hansa explain. whole (--all): for a lane, the built-in list of what workers may not read, name by name."""
     s = desk.settings()
@@ -1158,14 +1172,17 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *no_read_lines(desk, s, name, whole),
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
+            *web_lines(ln.get("allow", [])),
             "  folders a worker may also write (a build or test tool's cache): "
             + (", ".join(may_write) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in left_out],
-            "  allowed commands (for design sessions only, which run outside the sandbox and may run these plus"
-            " their own git add, commit and merge; workers run any command in theirs):"
-            + ("" if ln.get("allow") else " none"),
-            *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
-              for r in ln.get("allow", [])],
+            "  allowed commands (given to the lane's workers, verifiers and design sessions; workers run any command"
+            " in their sandbox and need no Bash rule, design sessions run outside it and may run these plus their"
+            " own git add, commit and merge):" + ("" if ln.get("allow") else " none"),
+            *["    " + (r if isinstance(r, str) else json.dumps(r))
+              + (f" (ignored: it {refused_rule(r)})" if refused_rule(r) else "") for r in ln.get("allow", [])],
+            *(["    runs leave the ignored ones out; the coordinator removes them with: "
+               + allow_fix(name, ln.get("allow", []))] if any(map(refused_rule, ln.get("allow", []))) else []),
             *release.lane_lines(desk, name, ln),
             *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"
               for f, what in (("commit_message", "message of the commit of a task's work, and of the merge of the base"

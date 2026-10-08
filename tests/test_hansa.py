@@ -6904,6 +6904,268 @@ class DeskTest(unittest.TestCase):
     def allowed_by(argv):
         return argv[argv.index("--allowedTools") + 1:]
 
+    def test_a_lanes_allow_list_holds_web_tools_to_listed_sites(self):
+        s = self.desk.settings()
+        for bad in ("WebFetch", "WebFetch(*)", "WebFetch(domain:*)", "WebFetch(domain:*.com)", "WebFetch(example.com)",
+                    "WebFetch(domain:localhost)", "WebFetch(domain:docs.python.org:443)", "mcp__fetch__fetch",
+                    "mcp__fetch", "ReadMcpResourceTool"):
+            s["lanes"]["a"]["allow"] = [bad]
+            self.assertTrue(any(f"allow {bad} " in p for p in validate(s)), bad)
+        for good in ("WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)", "WebSearch",
+                     "Bash(pnpm test:*)"):
+            s["lanes"]["a"]["allow"] = [good]
+            self.assertEqual(validate(s), [], good)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "WebFetch"])
+        self.assertIn("WebFetch(domain:docs.python.org)", str(e.exception.code))  # how to list a site
+        self.assertIn("nothing was changed", str(e.exception.code))
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("allow", []), [])
+        out = self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)")
+        self.assertIn('-> ["WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)"]', out)
+
+    def test_a_change_of_allow_is_recorded_and_told_to_the_principal(self):
+        out = self.hansa("lane", "set", "a", "allow", "WebSearch", "Bash(pnpm test:*)")
+        self.assertIn("Tell the principal, in the conversation, what you changed and why", out)
+        self.assertIn("workers, verifiers and design sessions", out)
+        self.assertEqual([(e["lane"], e["old"], e["new"]) for e in self.events("lane_allow_changed")],
+                         [("a", [], ["WebSearch", "Bash(pnpm test:*)"])])
+        out = self.hansa("lane", "set", "a", "allow", "Bash(pnpm test:*)", "WebSearch")  # the same rules: no change
+        self.assertNotIn("Tell the principal", out)
+        self.assertEqual(len(self.events("lane_allow_changed")), 1)
+        out = self.hansa("lane", "add", "c", "--like", "a")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["allow"], ["Bash(pnpm test:*)", "WebSearch"])
+        self.assertIn("Tell the principal, in the conversation, what you listed and why", out)
+        self.assertEqual([(e["lane"], e["old"], e["new"]) for e in self.events("lane_allow_changed")][-1],
+                         ("c", [], ["Bash(pnpm test:*)", "WebSearch"]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        self.assertIn("workers, verifiers and design sessions", " ".join(out.getvalue().split()))
+
+    def test_explain_lane_names_who_gets_the_allow_list_and_the_web_tools_sites(self):
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("web tools (Claude Code's own, outside the sandbox's network list): none", explained)
+        self.assertNotIn("design sessions only", explained)
+        s = self.desk.settings()
+        s["lanes"]["a"]["network"] = ["registry.npmjs.org"]
+        s["lanes"]["a"]["allow"] = ["WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)", "WebSearch"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("given to the lane's workers, verifiers and design sessions", explained)
+        self.assertIn("network during a task: registry.npmjs.org", explained)
+        self.assertIn("WebFetch reaches only: docs.python.org, *.python.org", explained)
+        self.assertIn("WebSearch: sends search queries out of the machine", explained)
+        s["lanes"]["a"]["allow"] = ["WebFetch"]  # saved before it was refused: shown as ignored
+        self.desk.settings_path.write_text(json.dumps(s))
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("WebFetch (ignored: it lets a worker fetch any site", explained)
+        self.assertIn("web tools (Claude Code's own, outside the sandbox's network list): none", explained)
+
+    def test_workers_and_verifiers_are_given_the_lanes_allow_list(self):
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        worker = self.allowed_by(json.loads(seen.read_text().splitlines()[-1]))
+        s["lanes"]["a"]["allow"].append("WebFetch")  # saved before it was refused: left out of the run
+        self.desk.settings_path.write_text(json.dumps(s))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
+        verifier = self.allowed_by(argv)
+        for allowed in (worker, verifier):
+            for r in ("Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"):
+                self.assertIn(r, allowed)
+        self.assertNotIn("WebFetch", verifier)
+
+    def test_a_refused_rule_saved_earlier_does_not_lock_the_page(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch", "Bash(git commit:*)", "Bash(x),WebFetch"]
+        self.desk.settings_path.write_text(json.dumps(s))  # saved before they were refused
+        fix = "hansa lane set a allow 'Bash(pnpm test:*)'"
+        self.assertEqual(public_settings(self.desk)["problems"], [])  # the page has nothing of its own to fix
+        r = self.page_save(lambda s: s.update(release_forbidden=["Project Falcon"]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.desk.settings()["release_forbidden"], ["Project Falcon"])
+        [warning] = r["lane_warnings"]
+        for x in ("allow WebFetch lets a worker fetch any site", "allow Bash(git commit:*) runs git",
+                  "allow Bash(x),WebFetch would reach Claude Code as more than one rule", fix):
+            self.assertIn(x, warning)
+        self.assertEqual(public_settings(self.desk)["lane_warnings"], [warning])
+        self.assertIn("LANE_WARNINGS", (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+        for args in (("lane", "set", "a", "network", "pypi.org"), ("lane", "add", "d", "--like", "a")):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), *args])
+            self.assertIn("WebFetch", str(e.exception.code), args)
+            self.assertIn(fix, str(e.exception.code), args)
+        self.assertNotIn("d", self.desk.settings()["lanes"])
+        self.assertIn(fix, views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "allow", "Bash(pnpm test:*)")  # the command named
+        self.assertNotIn("lane_warnings", self.page_save(lambda s: s.update(release_forbidden=[])))
+
+    def test_webfetch_reaches_only_named_public_sites(self):
+        s = self.desk.settings()
+        refused = {
+            "an address": ("127.0.0.1", "127.0.0.2", "127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "0x7f000001",
+                           "0.0.0.0", "10.0.0.1", "192.168.1.1", "169.254.169.254", "::1", "[::1]", "[fe80::1]",
+                           "*.0.0.1", "127.0.0.1:80"),
+            "names this machine": ("localhost", "LOCALHOST", "foo.localhost", "*.localhost"),
+            "meant for a local or private network": (
+                "host.docker.internal", "*.internal", "my-mac.local", "nas.lan", "router.home.arpa",
+                "1.0.0.127.in-addr.arpa", "a.test", "a.invalid", "a.example", "box.localdomain"),
+            "a wildcard over the shared suffix": (
+                "*.com", "*.co.uk", "*.com.au", "*.co.jp", "*.com.cn", "*.github.io", "*.gitlab.io", "*.pages.dev",
+                "*.workers.dev", "*.vercel.app", "*.netlify.app", "*.herokuapp.com", "*.appspot.com", "*.web.app",
+                "*.firebaseapp.com", "*.blogspot.com", "*.cloudfront.net", "*.amazonaws.com",
+                "*.azurewebsites.net", "*.ngrok.io")}
+        for why, hosts in refused.items():
+            for host in hosts:
+                s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+                [p] = validate(s)
+                self.assertIn(why, p, host)
+                self.assertIn("WebFetch(domain:docs.python.org)", p, host)  # how to list a site
+        for host in ("docs.python.org", "*.python.org", "octocat.github.io", "example.com"):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            self.assertEqual(validate(s), [], host)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "WebFetch(domain:169.254.169.254)"])
+        self.assertIn("is an address", str(e.exception.code))
+        self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)")
+        explained = " ".join(views.explain_text(self.desk, "lane", "a").split())
+        self.assertIn("unlike the network list, it runs in Claude Code's own process, outside the sandbox", explained)
+
+    def test_a_rule_on_a_lanes_allow_list_is_exactly_one_rule(self):
+        from hansa.run import lane_allow
+        s = self.desk.settings()
+        for bad in ("Bash(x),WebFetch", "Bash(x) Read(y)", "Bash(x),WebFetch,Read(y)", "Bash(x)) WebFetch (y)",
+                    "Bash()", "Bash(x)y"):
+            s["lanes"]["a"]["allow"] = [bad]
+            [p] = validate(s)
+            self.assertIn("would reach Claude Code as more than one rule", p, bad)
+        s["lanes"]["a"]["allow"] = ["Bash(echo $(date):*)", "Bash(pnpm test:*)"]
+        self.assertEqual(validate(s), [])
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "Bash(x),WebFetch"])
+        self.assertIn("more than one rule", str(e.exception.code))
+        s["lanes"]["a"]["allow"] = ["Bash(x),WebFetch", "Bash(pnpm test:*)"]  # saved before: left out of runs
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(pnpm test:*)"])
+        self.assertIn("Bash(x),WebFetch (ignored: it would reach Claude Code as more than one rule",
+                      views.explain_text(self.desk, "lane", "a"))
+
+    def test_allow_with_a_rule_twice_keeps_it_once(self):
+        self.hansa("lane", "set", "a", "allow", "WebSearch", "Bash(pnpm test:*)", "WebSearch")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["allow"], ["WebSearch", "Bash(pnpm test:*)"])
+        self.hansa("lane", "add", "c", "--like", "a", "--allow", "WebSearch", "WebSearch")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["allow"], ["WebSearch"])
+
+    def test_rules_are_checked_as_claude_code_splits_them(self):
+        from hansa import run
+        from hansa.desk import one_rule, split_rules
+        # Claude Code's splitter: commas and spaces outside parentheses, and every ) ends them, not a depth
+        self.assertEqual(split_rules("Bash(echo $(true) WebFetch ok)"), ["Bash(echo $(true)", "WebFetch", "ok)"])
+        self.assertEqual(split_rules("Bash(a(b),WebFetch,c)"), ["Bash(a(b)", "WebFetch", "c)"])
+        split = ("Bash(echo $(true) WebFetch ok)", "Bash(a(b),WebFetch,c)", "Bash(x (y) WebFetch)")
+        whole = ("Bash(npm run test:*)", "Bash(echo $(date):*)", "Read(//Users/x/Library/Application Support/y/**)")
+        for r in split:
+            self.assertFalse(one_rule(r), r)
+        for r in whole:
+            self.assertTrue(one_rule(r), r)
+        s = self.desk.settings()
+        for bad in split:
+            s["lanes"]["a"]["allow"] = [bad]
+            [p] = validate(s)
+            self.assertIn("would reach Claude Code as more than one rule", p, bad)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", bad])
+            self.assertIn("more than one rule", str(e.exception.code), bad)
+        # saved before: never reaches a run; nor does a check whose rule would split, for a design session
+        s["lanes"]["a"].update(allow=[*split, "Bash(npm run test:*)"], check="pytest $(git ls-files tests) -q")
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual([r for r in run.lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(npm run test:*)"])
+        tid = self.desk.new_task("Design it", kind="design")
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        for r in [*self.denied_by(argv), *self.allowed_by(argv)]:
+            self.assertEqual(split_rules(r), [r])
+        self.assertFalse([r for r in self.allowed_by(argv) if "WebFetch" in r or "pytest" in r])
+
+    def test_a_folder_whose_deny_rule_would_split_is_refused_and_never_dropped(self):
+        from hansa import run
+        out = io.StringIO()
+        for bad in (self.tmp / "Work (2024) x" / "desk", self.tmp / "Work (a),b" / "desk"):
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                main(["init", str(bad)])
+            self.assertIn(f"the path {os.path.realpath(bad)} would make rules", str(e.exception.code))
+            self.assertIn("move it to a path", str(e.exception.code))
+            self.assertFalse(bad.exists())
+        ok = self.tmp / "Library" / "Application Support" / "desk"
+        with contextlib.redirect_stdout(out):
+            main(["init", str(ok)])
+        self.assertTrue((ok / "settings.json").is_file())
+        repo = self.tmp / "Work (2024) x" / "repo"
+        shutil.copytree(self.repo, repo)
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(repo)])
+        self.assertIn("move it to a path", str(e.exception.code))
+        self.assertNotIn("b", self.desk.settings()["lanes"])
+        # a desk moved to such a path since: no worker, verifier or design session starts, and nothing is dropped
+        moved = self.tmp / "Work (2024) x" / "desk"
+        shutil.move(str(self.desk.root), str(moved))
+        self.desk = Desk(moved)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("hansa started no worker", m["error"])
+        self.assertIn(f"the path {os.path.realpath(moved)}", m["error"])
+        self.assertIn("move it to a path", m["error"])
+        did = self.desk.new_task("Design it", kind="design")
+        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
+                         model_asked="sonnet")
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, did)
+        with self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)
+        self.assertIn("hansa started no design session", str(e.exception))
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(moved),
+                            "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout, "")  # Claude Code never started
+        self.assertIn("the coordinator's session was not started", r.stderr)
+        self.assertIn("move it to a path", r.stderr)
+        self.assertIn("move it to a path", run.paths_problem(self.desk, self.repo))
+
+    def test_webfetch_refuses_names_that_come_back_as_this_machine(self):
+        s = self.desk.settings()
+        for host, why in (("metadata", "no dot"), ("router", "no dot"), ("instance-data", "no dot"),
+                          ("127.0.0.1.nip.io", "under nip.io"), ("*.nip.io", "under nip.io"),
+                          ("10-0-0-1.sslip.io", "under sslip.io"), ("a.xip.io", "under xip.io"),
+                          ("x.traefik.me", "under traefik.me"), ("localtest.me", "under localtest.me"),
+                          ("lvh.me", "under lvh.me"), ("*.lvh.me", "under lvh.me"), ("app.vcap.me", "under vcap.me"),
+                          ("Lacolhost.com", "under lacolhost.com")):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            [p] = validate(s)
+            self.assertIn(why, p, host)
+            self.assertIn("WebFetch(domain:docs.python.org)", p, host)
+        for host in ("docs.python.org", "*.python.org"):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            self.assertEqual(validate(s), [], host)
+        self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)")
+        explained = " ".join(views.explain_text(self.desk, "lane", "a").split())
+        self.assertIn("any listed name can be pointed at any address, this machine included: list only sites you "
+                      "know, and the principal sees every change", explained)
+
     def test_workers_and_verifiers_are_told_the_lanes_setup_and_check_as_hansa_runs_them(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
