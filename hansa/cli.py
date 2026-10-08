@@ -18,7 +18,7 @@ from . import account, alert, build, cost, installed_text, notes, notify, releas
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
                    kept_from_workers, lane_targets, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
-from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
+from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
@@ -220,6 +220,8 @@ def cmd_add(a):
 
 
 def cmd_design(a):
+    if account.LINUX:
+        raise SystemExit(f"hansa: {DESIGN_ON_LINUX}")
     desk = Desk.find(a.desk)
     s = desk.settings()
     lane = a.lane or (next(iter(s["lanes"])) if len(s["lanes"]) == 1 else "")
@@ -506,6 +508,10 @@ def _mergeable(desk: Desk, a):
     if not lane:
         raise SystemExit(f"hansa: lane {m['lane']} is no longer in settings")
     repo, base = lane["repo"], lane.get("base", "main")
+    held = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
+    if held:
+        raise SystemExit(f"hansa: {held}; nothing was merged. hansa show {a.id} says what it holds; hansa retry "
+                         f"{a.id} \"...\" continues from the recorded commit")
     leaked = keys_in_change(desk, repo, m["base"], m["head"]) or m.get("leaked")  # a key saved since counts too
     if leaked:
         if leaked != m.get("leaked"):
@@ -569,6 +575,12 @@ def _retry(desk: Desk, a) -> None:
     if a.update and not m.get("head"):
         raise SystemExit(f"hansa: {a.id} has no branch to bring up to date; start over with hansa retry {a.id} --fresh "
                          f"\"...\". Nothing was queued")
+    if not a.fresh and m.get("head") and m.get("kind") != "verify":  # it continues from the recorded commit
+        own = desk.settings()["lanes"].get(m.get("lane"))
+        held = branch_holds(own["repo"], m) if own else ""
+        if held:
+            raise SystemExit(f"hansa: {held}; nothing was queued. Start over from the base: hansa retry {a.id} "
+                             f"--fresh \"...\"")
     if m["state"] == "replaced":
         raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     if a.file and a.note:
@@ -675,6 +687,9 @@ def _verify(desk: Desk, a) -> None:
     if (a.lane and a.lane != lane) or own is None or moved:
         _lane_reaches(desk, a.lane or lane, m)
         lane = a.lane or lane
+    held = branch_holds(desk.settings()["lanes"][lane]["repo"], m)  # what is verified is the recorded commit
+    if held:
+        raise SystemExit(f"hansa: {held}; nothing was queued. hansa show {a.id} says what it holds")
     d = desk.tasks_dir / a.id
     task = (d / "task.md").read_text(encoding="utf-8").strip()
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
@@ -719,11 +734,7 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
         raise SystemExit(f"hansa: there is no lane {name}; lanes: {', '.join(sorted(lanes)) or 'none'}{nothing}")
     if own is None:  # the task's branch, still at the change, is what shows the lane is on its repository
         branch = m.get("branch") or f"task/{m['id']}"
-        try:
-            tip = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}", cwd=lanes[name]["repo"])
-        except (RuntimeError, OSError):
-            tip = ""
-        if tip != m["head"]:
+        if branch_holds(lanes[name]["repo"], m):  # read as a plain file, never through a link
             raise SystemExit(f"hansa: {m['id']}'s lane {m.get('lane') or '(none)'} is no longer on the desk, and lane "
                              f"{name}'s repository {lanes[name]['repo']} has no branch {branch} at {m['id']}'s change "
                              f"({m['head'][:12]}), so lane {name} cannot be shown to reach it. Verify it on a lane on "
@@ -1626,7 +1637,7 @@ def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool) -> s
     if keep and (st["changes"] or st["commits"]):
         kept = f"hansa-kept/{wt.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wgit(desk, wt, "checkout", "-q", "-b", kept)
-        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed")
+        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed", kept)
     # --force: what a worker's sandbox left there is nobody's work, and git would refuse for it
     git("worktree", "remove", "--force", str(wt), cwd=st["repo"])
     _remember_git_file(desk, wt, None)

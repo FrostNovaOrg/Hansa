@@ -12,9 +12,9 @@ from pathlib import Path
 from . import alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, is_local, join_command, lane_occupied, last_round, markers_in_change,
-                  markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of, provider_problem,
-                  rest_minutes, rest_text, serve_code, server_state,
+from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+                  markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
+                  provider_problem, rest_minutes, rest_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
@@ -686,6 +686,16 @@ def markers_of(desk: Desk, m: dict) -> dict:
         return {}
 
 
+def branch_moved(desk: Desk, m: dict) -> str:
+    """For hansa show: the line saying that a finished task's branch no longer holds the commit recorded as its
+    work (run.branch_holds), or ''."""
+    ln = desk.settings()["lanes"].get(m.get("lane"))
+    repo = m.get("repo") or (ln or {}).get("repo")  # the repository the task ran in, where its branch is
+    if m.get("state") not in ("done", "merging") or not m.get("head") or not repo or not Path(repo).is_dir():
+        return ""
+    return branch_holds(repo, m)
+
+
 def background_note(m: dict) -> str:
     """The line for a worker that ended while background work it started still ran; empty otherwise."""
     if not m.get("background_left"):
@@ -843,9 +853,14 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"replaced by: {m['replaced_by']}")
     if m.get("files") is not None and m.get("state") != "queued":
         out.append(f"changes: {m.get('stat') or 'none'}; {m.get('commits', 0)} commit(s) on {m.get('branch')}"
+                   + (f" up to {m['head'][:12]}" if m.get("head") else "")
                    + ("; nothing to merge, so the lane's check was not run" if m.get("state") == "done"
                       and not m.get("commits") else ""))
         out += ["  " + f for f in m.get("files", [])[:30]]
+        held = branch_moved(desk, m)
+        if held:
+            out.append(f"BRANCH CHANGED: {held}. hansa verifies, merges and continues only from that commit, and "
+                       f"refuses to while the branch does not hold it")
     if m.get("leaked"):
         out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so hansa will not merge it")
     if m.get("markers"):

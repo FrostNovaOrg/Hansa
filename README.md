@@ -164,8 +164,95 @@ page gives.
   own branch, and merges only what the coordinator merges. The lane's setup,
   before the worker, and its check, after it, run in the same sandbox (with
   `srt`): the lane's network and write lists hold for them too, so a setup that
-  downloads needs its registry on the network list. Design sessions, which the
-  principal works in directly, and the coordinator run outside it.
+  downloads needs its registry on the network list. A design session's commands
+  run in the sandbox of its lane's workers too (the same network list, write
+  list, what may not be read and keys kept from the environment), with two
+  differences: it may write in git what committing and merging into its own
+  branch (`task/<id>`) takes, and on macOS it may bind local ports, so a preview it starts
+  serves the principal's browser (that also lets its commands reach every
+  service on the Mac's loopback). It runs only its allowed commands, as
+  before, and a command the sandbox refuses does not run outside it: the
+  sandbox's `allowUnsandboxedCommands` is off, so Claude Code ignores
+  `dangerouslyDisableSandbox`. There are no design sessions on Linux: `hansa
+  design` refuses there with one line, and one queued before does not start.
+  Claude Code opens a worktree's whole shared git folder for writing, and on
+  Linux the sandbox (bubblewrap) keeps only paths that are there when a command
+  starts, takes no name patterns and cannot open a branch's folder beneath a
+  `refs/heads` it keeps, so a session that commits could make or move other
+  branches, the base among them. The coordinator runs outside the sandbox.
+  What each may write in git's folders: a worker (and a verifier) only its own
+  worktree's folder under `.git/worktrees/` (its `index`, say), not its `HEAD`,
+  logs, `commondir`, `gitdir` or `config.worktree`, nor what says a merge,
+  cherry-pick, revert or rebase is under way there (`MERGE_HEAD`, `MERGE_MODE`,
+  `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge/`, `rebase-apply/`,
+  `sequencer/`): workers never merge, hansa does. A design session (macOS) may write in git exactly what
+  committing and merging into its own branch (`task/<id>`) takes: its own
+  worktree's folder under `.git/worktrees/` but its `HEAD`, `commondir`, `gitdir`
+  and `config.worktree` (git commits and merges on a branch without writing
+  `HEAD`), git's objects, and its branch's ref and reflog, each with git's
+  `.lock` beside it; its own merges' files (`MERGE_HEAD` and the like) among
+  them. Its branch's ref it may write, but only as a commit id: hansa refuses
+  one that leads to another ref (below). It cannot move the base, another branch or a tag, or write
+  `packed-refs`, another worktree's folder, git's settings, hooks or `info/`, or
+  the worktree's `.git` file; this holds for branches and worktrees made while
+  it runs too (named with letters, digits, `.`, `_` and `-`, as hansa names
+  them). Its commands run git with automatic gc, maintenance and rerere off
+  (through the environment, after any git settings it already holds), since
+  those write what it may not; git still tries to lock `packed-refs` on each
+  commit and merge, prints that it could not, and goes on. The lane's setup and
+  check may write nothing of git's folders.
+  On Linux a worker's git denials hold for the names there when it starts (the
+  whole `refs/`, `logs/`, `objects/`, `hooks/` and `info/`, git's settings,
+  `packed-refs`, the worktree's `HEAD`, `commondir`, `gitdir` and
+  `config.worktree`, other worktrees' folders), not for the patterns that keep
+  what is made later in the shared folder and under `.git/worktrees/`, nor for
+  a `MERGE_HEAD` or the like that is not there when it starts (the sandbox would
+  put an empty file there, which git takes for a merge under way). What it
+  could make there reaches nothing outside the sandbox: git obeys a new
+  `commondir` or a worktree's folder only through the checks below, and hansa
+  commits nothing while a merge or the like it did not start is under way.
+  Before hansa runs git in a worktree, it checks the worktree's `.git` file;
+  that the git folder it leads to still points back to the repository
+  (`commondir`) and to the worktree (`gitdir`) as git wrote them; that its
+  `config.worktree` is empty, as hansa makes it, and the shared folder's is as
+  hansa first saw it or empty; and that `extensions.worktreeConfig`, which makes
+  git obey those files, is not on where hansa first saw it off. When one was
+  changed, hansa runs no git there and keeps what it found; a `.git` file, a
+  `commondir`, `gitdir` or `config.worktree` it puts back as it was. Before it
+  commits, stashes or merges in a worktree, it also checks that the worktree's
+  `HEAD` names the branch it made for that run, that this branch's ref is a
+  plain commit id (or packed and not loose), never a link to another ref, and,
+  in a worker's or a verifier's worktree, that no merge, cherry-pick, revert or
+  rebase is under way but the merge of the base hansa itself made for `hansa
+  retry --update`; it puts back what it found or sets it aside, and the task
+  fails either way. hansa's commit at the end of a run is made from the index
+  with the branch's tip (and, after that merge, the base's tip it merged) for
+  parents, never from a `MERGE_HEAD` git would find there, and moves exactly
+  the run's branch from the old id to the new one (`git update-ref` with the
+  old id, without following a link). The old id is what the branch's ref file
+  (or `packed-refs`) holds, read as a plain file, and what the run left running
+  is stopped before hansa commits (and before the lane's check), so what hansa
+  finds can no longer change the ref; a leftover it cannot find (one that
+  cleared its environment, or on macOS a system program such as `/bin/sh`)
+  still could. So if the ref changed all the same (a link made, another id), or
+  the branch does not end on the new commit with the old id as its parent, the
+  task fails, the ref is put back to the old id and the work is left staged.
+  hansa records the commit it made (or the tip it read) as the task's work, by
+  its id, and never reads the branch again through a link: it reads the ref
+  once more as a plain file when it has recorded it, and if it then holds
+  anything else the task fails ("changed after hansa committed"), the ref is put
+  back to the recorded commit and the work is kept. From then on `hansa
+  verify`, `hansa merge` (and its merge check), `hansa retry` and `hansa show`
+  use exactly that commit, never what the branch's name leads to: while the
+  branch does not hold it, merge, verify and retry refuse with a line saying
+  what it holds instead, and `hansa show` says so. At the end of a design session that
+  commit is always a plain one on its branch: a merge the session left under
+  way is committed as the changes it made, without the merged commit as a
+  parent (the session's own merge commits stay as they are). In the lane's own checkout, a `commondir` in its `.git`
+  stops every hansa git command there until it is removed by hand; hansa does
+  not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
+  hooks from an empty folder and commit and tag signing off, whatever a
+  setting there says; in the lane's own checkout its hooks run as before.
 - One Bash call of a task or verification worker may run as long as the lane's
   check may, plus 5 minutes, but never past the worker's own limit: hansa sets
   Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most
@@ -529,11 +616,13 @@ looks like an empty box: it may send the guess as if you wrote it.
 
 ## Current limits
 - Alpha: settings, commands and files may still change between versions.
-- A worker's commands, and the lane's setup and check commands, run in the
-  operating system's sandbox, and so does the preview hansa starts for a task
-  with a browser (on macOS only, with local binding: it can reach every service
-  on the machine's loopback while it runs); the preview a design session starts,
-  design sessions and the coordinator do not, and run as the desk's user. Run a desk as a user, or on a machine, whose files you
+- A worker's and a design session's commands (the lane's preview among them),
+  and the lane's setup and check commands, run in the operating system's
+  sandbox, and so does the preview hansa starts for a task with a browser (on
+  macOS only, with local binding: it can reach every service on the machine's
+  loopback while it runs, as a design session's commands can); the coordinator
+  does not, and runs as the desk's user. There are no design sessions on Linux
+  (above). Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the
