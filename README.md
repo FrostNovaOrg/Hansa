@@ -432,9 +432,9 @@ page gives.
   for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
   The locale (`LANG`, `LC_ALL`) of a lane's setup, check, merge check, preview
   and workers is that of whoever started hansa: `hansa serve`'s environment
-  (one started over ssh takes the client's), or, when no serve takes a try,
-  the shell that ran `hansa lane try`; `hansa explain lane L` says which locale
-  they get and where from. A lane whose results must not depend on who started
+  (one started over ssh takes the client's), since nothing runs without it;
+  `hansa explain lane L` says which locale they get and where from (when serve
+  does not run, the locale of this shell, which a serve started here would give). A lane whose results must not depend on who started
   hansa sets its own (`hansa lane set L env ... LC_ALL=C.UTF-8`): tools such as
   `sort` and `comm` order and compare by the locale, and some `sort -u` keep
   only one of `acme-core` and `acmecore` under `en_US.UTF-8`.

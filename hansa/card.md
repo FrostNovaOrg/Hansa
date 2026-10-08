@@ -573,8 +573,8 @@ here; work that needs code changed or a browser goes to a worker.
   environment or hansa's browser settings, not a lane's env.
   The locale (`LANG`, `LC_ALL`) of the lane's setup, check, merge check,
   preview and workers is that of whoever started hansa (`hansa serve`'s
-  environment, the client's over ssh, or the shell running `hansa lane try`
-  when no serve takes it); `hansa explain lane L` says which and where from.
+  environment, the client's over ssh: nothing runs without serve);
+  `hansa explain lane L` says which and where from.
   A lane whose results must not depend on who started hansa sets its own
   (`hansa lane set L env ... LC_ALL=C.UTF-8`): `sort` and `comm` order and
   compare by the locale, and some `sort -u` keep only one of `acme-core` and

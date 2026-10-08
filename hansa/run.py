@@ -5256,9 +5256,12 @@ def record_serve_locale(desk: Desk) -> None:
 def lane_locale(desk: Desk, lane: dict, st: dict = None) -> str:
     """The locale a lane's setup, check, merge check, preview and workers get, and where it comes from, in a
     line: the lane's env when it sets one, else hansa serve's environment (as it recorded it when it started),
-    else this shell's (as hansa lane try run here would give it). hansa passes on only LANG and LC_ALL of its
-    own; a lane's env may set any LC_ variable, and LC_ALL, when set, wins over the rest."""
+    else, when serve does not run, this shell's (which a serve started here would give them). hansa passes on
+    only LANG and LC_ALL of its own; a lane's env may set any LC_ variable, and LC_ALL, when set and not
+    empty, wins over the rest (an empty one counts as not set)."""
     own = {k: v for k, v in lane_env(desk, lane)[0].items() if is_locale_var(k)}
+    emptied = {k for k, v in own.items() if not v}  # set empty by the lane: as if not set
+    own = {k: v for k, v in own.items() if v}
     st = st or server_state(desk)
     if st["state"] != "gone":
         rec = read_json(desk.state_dir / "serve-locale", {})
@@ -5269,17 +5272,20 @@ def lane_locale(desk: Desk, lane: dict, st: dict = None) -> str:
             outer, whose = None, "hansa serve's environment (it did not record it: restart it to see it here)"
     else:
         outer, whose = ({k: os.environ[k] for k in LOCALE_ENV if k in os.environ},
-                        "this shell's environment (hansa serve does not run; hansa lane try run here gives it)")
+                        "this shell's environment (hansa serve does not run, and nothing runs without it: the"
+                        " commands will take the locale of the environment hansa serve is started from, this"
+                        " shell's if started here)")
     if "LC_ALL" in own:
         return f"LC_ALL={own['LC_ALL']}, from the lane's env"
-    got = {**(outer or {}), **own}
+    got = {k: v for k, v in (outer or {}).items() if k not in emptied and v}
+    got.update(own)
     if "LC_ALL" in got and own:
         got = {"LC_ALL": got["LC_ALL"]}  # it wins over what the lane sets
         own = {}
     said = ", ".join(f"{k}={v}" for k, v in sorted(got.items()))
     if own and outer:
         return (f"{said}: {', '.join(sorted(own))} from the lane's env, "
-                f"{', '.join(sorted(k for k in outer if k not in own)) or 'nothing'} from {whose}")
+                f"{', '.join(sorted(k for k in got if k not in own)) or 'nothing'} from {whose}")
     if own:
         return f"{said}, from the lane's env" + ("" if outer is not None else f" (and whatever {whose} adds)")
     if outer is None:

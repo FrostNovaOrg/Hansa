@@ -245,8 +245,8 @@ def cmd_add(a):
     first = (desk.tasks_dir / tid / "task.md").read_text(encoding="utf-8").splitlines()[0]
     forms = title_forms(s["lanes"].get(a.lane)) if not a.title and len(first) > 80 else []
     if forms:  # the title a form puts in commits, which a public repository shows
-        print(f"note: lane {a.lane}'s {' and '.join(forms)} put the task's title in its commits; with no --title it"
-              f" is the first line of the text, here cut at 80 characters: {json.dumps(desk.meta(tid)['title'])}."
+        print(f"note: lane {a.lane}'s {' and '.join(forms)} {'put' if len(forms) > 1 else 'puts'} the task's title in its commits; with no --title it"
+              f" is the first line of the text, here cut at 80 characters: {json.dumps(desk.meta(tid)['title'], ensure_ascii=False)}."
               f" To give one, cancel it (hansa cancel {tid}) and add it again with"
               f" --title \"...\"")
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "")

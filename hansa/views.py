@@ -1158,7 +1158,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             f"  locale of the lane's commands and workers: {lane_locale(desk, ln)}"
-            + ("" if "LC_ALL" in env else f"; a lane whose results must not depend on who started hansa sets"
+            + ("" if env.get("LC_ALL") else f"; a lane whose results must not depend on who started hansa sets"
                f" its own: hansa lane set {name} env ... LC_ALL=C.UTF-8"),
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",

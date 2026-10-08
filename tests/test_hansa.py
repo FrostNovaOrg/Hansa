@@ -12271,6 +12271,11 @@ class DeskTest(unittest.TestCase):
                 unittest.mock.patch.object(run, "server_state", lambda desk: gone):
             os.environ.pop("LC_ALL", None)
             self.assertIn("LANG=zh_CN.UTF-8, from this shell's environment", line())
+            self.assertIn("hansa serve does not run, and nothing runs without it", line())
+            self.assertNotIn("lane try", line())  # a try refuses without serve: it runs nothing here
+            self.assertIn("hansa lane set a env ... LC_ALL=C.UTF-8", line())
+            self.hansa("lane", "set", "a", "env", "LC_ALL=")  # empty: as if not set
+            self.assertIn("LANG=zh_CN.UTF-8, from this shell's environment", line())
             self.assertIn("hansa lane set a env ... LC_ALL=C.UTF-8", line())
             self.hansa("lane", "set", "a", "env", "LC_ALL=C.UTF-8")
             self.assertIn("LC_ALL=C.UTF-8, from the lane's env", line())
@@ -12291,9 +12296,12 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("cut at 80", out)  # the lane's messages are hansa's own
         self.hansa("lane", "set", "a", "commit_message", "{title}")
         out = self.hansa("add", long, "--lane", "a")
-        self.assertIn("note: lane a's commit_message put the task's title in its commits", out)
+        self.assertIn("note: lane a's commit_message puts the task's title in its commits", out)
         self.assertIn(f"cut at 80 characters: {json.dumps(long[:80])}", out)
         self.assertIn("--title", out)
+        zh = "让发布说明写明每项改动最早出现在工具的哪个版本里，并按标签列出" * 3  # over 80 characters
+        self.assertGreater(len(zh), 80)
+        self.assertIn(f'cut at 80 characters: "{zh[:80]}"', self.hansa("add", zh, "--lane", "a"))  # as it is
         self.assertNotIn("cut at 80", self.hansa("add", long, "--lane", "a", "--title", "Version in release notes"))
         self.assertNotIn("cut at 80", self.hansa("add", "A short one", "--lane", "a"))
 
