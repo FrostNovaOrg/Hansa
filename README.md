@@ -343,6 +343,23 @@ page gives.
   the words or the command changed. The coordinator hears when the principal answers
   and when the release ends. `hansa release` lists them; `hansa explain lane L`
   shows each target's command and its last release.
+- A release can be stopped: the coordinator with `hansa release --stop ID
+  [reason]`, the principal with Stop on the page. One that has not started yet
+  (waiting for the principal's answer, or approved and waiting its turn) is
+  closed as stopped and never runs. A running one gets TERM to its command's
+  whole process group, then KILL 30 seconds later to what still runs; it is
+  recorded as stopped, with who stopped it and why, and its output so far is
+  kept (a fixed target's checkout is removed as at any other end). A stopped
+  release went out for no `--after`: a target that must follow it is not let
+  through. A stopped install may leave the server half-switched, so a release
+  command for which that matters should handle TERM: finish or undo the step it
+  is in. A stop that comes after the command has already ended is not a stop:
+  the release is recorded done or failed, as its exit says, with a note that the
+  stop came after it ended. What a release's command starts is recorded while
+  it runs, also what leaves its process group, and what of it still runs is
+  stopped at any end (a stop, the time limit, a failure, done). The principal's
+  alert command is told when the coordinator stops one (`release_stopped`); the
+  coordinator hears when the principal does.
 - Alerts reach the principal away from the page. The principal may set one
   alert command line on the page (Settings, Alerts), such as a script that
   sends a phone message; the page records that it saved it, and when. Only the
@@ -350,12 +367,12 @@ page gives.
   set` has nothing like it. `hansa serve` runs it when a release starts waiting
   for the principal's yes (also when a ticked target's tick no longer holds and
   its release goes back to waiting), when a release ends (done, failed, void or
-  forbidden), when a request to the principal is filed (`hansa ask`), and when
+  forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), and when
   its own rounds have stopped for 15 minutes; not for ordinary task events,
   which go to the coordinator. It runs as the desk's account, outside the
   sandbox, in the desk's folder, with hansa's own environment (not a lane's),
   the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
-  `ask`, `server_stuck`, `test`; comma-separated when several go out together)
+  `release_stopped`, `ask`, `server_stuck`, `test`; comma-separated when several go out together)
   and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
   characters; a release's text names its lane and target. It has 30 seconds; its own exit ends the run, even if it leaves a
   child running, and only at the limit is its process group killed. Alerts
@@ -456,6 +473,12 @@ lane, or waits for one.
   limit again right after each rest cannot hold a task forever. Any other failure counts as before.
   `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
   when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
+- **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
+  dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on its
+  attempt record; a run an earlier `hansa serve` started and lost track of is read from its session record
+  as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
+  the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
+  and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
 
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live

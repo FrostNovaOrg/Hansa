@@ -68,7 +68,8 @@ PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
 # The events that may call for an alert to the principal (alert.from_event)
-ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "ask")
+ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
+           "ask")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
 # it: {lane, target, repo, base, command, after, fixed?} (after: the target it must follow, "" for none; fixed: "yes"
 # for a target that runs from a fixed checkout, left out for one that runs in the repository); a target goes out without asking only while it still has

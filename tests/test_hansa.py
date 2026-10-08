@@ -114,6 +114,16 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
                           "result": "API Error: Connection error."}))
         sys.exit(1)
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    counted = {"usage": {"input_tokens": 10, "output_tokens": 5}} if os.environ.get("FAKE_RECORD_USAGE") else {}
+    limit = os.environ.get("FAKE_RESUME_LIMIT")  # a file: the first resumed run ends on the provider's usage limit
+    if limit and not os.path.exists(limit):
+        open(limit, "w").write("limit\n")
+        with open(rec, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"id": "r0", "model": "mimo-x", "content": [], **counted}}) + "\n")
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "num_turns": 1,
+                          "session_id": sid, "result": "API Error: 429 rate_limit_error",
+                          "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}))
+        sys.exit(1)
     rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}}]
     kind = os.environ.get("FAKE_TRANSCRIPT", "")
     if kind.endswith("-again"):  # and again ends with background work running
@@ -127,11 +137,14 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
                      {"type": "tool_result", "tool_use_id": "u9", "content": [{"type": "text", "text": said}]}]},
                   "toolUseResult": result}]
     report = "Report after the resume: the suite passes."
-    rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}]}})
+    rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}],
+                                                  **counted}})
     with open(rec, "a") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
+    totals = {} if os.environ.get("FAKE_RESUME_NO_TOTALS") else {  # as for a run stopped before it wrote them
+        "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
-                      "result": report, "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}))
+                      "result": report, **totals}))
     sys.exit(0)
 compat =bool(os.environ.get("ANTHROPIC_BASE_URL"))
 if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
@@ -165,7 +178,9 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
                 "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
                           "api_error_status": 429 if what in ("quota", "limit") else status,
-                          "result": text, "session_id": "s-net", "num_turns": 3}))
+                          "result": text, "session_id": "s-net", "num_turns": 3,
+                          **({"modelUsage": {"claude-x": {"inputTokens": 40, "outputTokens": 2}}}
+                             if os.environ.get("FAKE_NET_USAGE") else {})}))
         sys.exit(1)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
     t = os.environ.get("CLAUDE_CODE_TMPDIR", "")
@@ -203,8 +218,9 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     os.makedirs(os.path.dirname(rec), exist_ok=True)
     notice = lambda n: {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
         "role": "user", "content": "<task-notification> <task-id>" + n + "</task-id> timed out"}}
+    counted = {"usage": {"input_tokens": 100, "output_tokens": 20}} if os.environ.get("FAKE_RECORD_USAGE") else {}
     say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "model": "mimo-x", "content": [
-        {"type": "text", "text": t}]}}
+        {"type": "text", "text": t}], **counted}}
     report = "Report: fixed the badge; the tests pass." + (" Key: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "")
     rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}},
             say("a1", "Starting a watch."),
@@ -232,7 +248,8 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     with open(rec, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 5, "session_id": sid,
-                      "result": rows[-1]["message"]["content"][0]["text"]}))
+                      "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
+                      **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
     sys.exit(0)
 if os.environ.get("FAKE_STOP_AT_TURNS"):
     sid = sys.argv[sys.argv.index("--session-id") + 1]
@@ -11597,6 +11614,350 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((release.lane_listed(s, "a", "test"), release.lane_listed(s, "a", "prod")), (True, False))
         self.assertEqual([u["target"] for u in public_settings(self.desk)["release_unmatched"]], ["prod"])
 
+
+    # -- stopping a release (hansa release --stop; Stop on the page) ----------------------------------------------
+    def test_a_release_not_started_yet_is_stopped_at_once_and_never_runs(self):
+        from hansa import release
+        ran, go = self.tmp / "quick-ran", self.tmp / "go"
+        os.environ["HANSA_ROLE"] = "coordinator"
+        self.with_targets(slow=f"while [ ! -f {go} ]; do sleep 0.1; done", quick=f"touch {ran}")
+        self.hansa("release", "a", "quick")  # waits for the principal's yes
+        told = self.hansa("release", "--stop", "1", "wrong", "commit")
+        self.assertIn("release #1 of lane a target quick is stopped; nothing was run", told)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "coordinator", "wrong commit"))
+        [ev] = self.events("release_stopped")
+        self.assertEqual((ev["id"], ev["by"], ev["reason"], ev["ran"]), (1, "coordinator", "wrong commit", False))
+        self.assertIn("already ended: it is stopped", self.refused("release", "--stop", "1"))
+        self.assertIn("there is no release #9", self.refused("release", "--stop", "9"))
+        # approved and waiting its turn behind another release of the same repository
+        self.tick_targets("slow", "quick")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "slow")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "running")
+        self.hansa("release", "a", "quick")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 3)["state"], "approved")
+        self.assertIn("is stopped; nothing was run", self.hansa("release", "--stop", "#3", "server", "must", "stay"))
+        go.write_text("")
+        self.assertEqual(self.settle_release(d, 2)["state"], "done")
+        for _ in range(3):
+            d.tick()
+        r = release.get(self.desk, 3)
+        self.assertEqual((r["state"], r["stop_reason"], r.get("started")), ("stopped", "server must stay", None))
+        self.assertFalse(ran.exists())
+        self.assertIn("stopped by the coordinator", release.state_text(self.desk, r))
+        self.assertIn("nothing was run", release.state_text(self.desk, r))
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):
+            self.assertIn("only the coordinator stops a release", self.refused("release", "--stop", "2"))
+        with contextlib.redirect_stdout(out := io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "release", "--help"])
+        help_text = " ".join(out.getvalue().split())
+        self.assertIn("then KILL 30 seconds later", help_text)
+        self.assertIn("should handle TERM (finish or undo the step it is in)", help_text)
+
+    def test_a_running_release_that_traps_term_is_stopped_its_output_kept_and_its_checkout_gone(self):
+        from hansa import alert, release
+        out, mark = self.alert_fake(), self.tmp / "undone"
+        os.environ["HANSA_ROLE"] = "coordinator"
+        self.fixed_target("install", f"trap 'echo undoing; echo undone > {mark}; exit 5' TERM; echo switching; "
+                                     "while :; do sleep 0.1; done")
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual((release.get(self.desk, 1)["state"], self.checkouts()), ("running", ["1"]))
+        self.soon(lambda: "switching" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        told = self.hansa("release", "--stop", "1", "a", "problem", "found")
+        self.assertIn("is being stopped", told)
+        self.assertIn("its checkout removed", told)
+        self.assertIn("being stopped by the coordinator", self.hansa("release"))
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "coordinator", "a problem found"), r)
+        self.assertTrue(r.get("termed"))
+        self.assertFalse(r.get("killed"))
+        self.assertEqual(mark.read_text().strip(), "undone")  # it had its TERM, and undid its step
+        self.assertIn("switching", r["tail"])
+        self.assertIn("undoing", (self.desk.state_dir / "releases" / "1.log").read_text())
+        self.assertEqual(self.checkouts(), [])
+        self.assertNotIn("release-checkouts", self.git_out("worktree", "list"))
+        [ev] = self.events("release_stopped")
+        self.assertEqual((ev["by"], ev["reason"], ev["ran"]), ("coordinator", "a problem found", True))
+        self.assertEqual(self.events("release_ended"), [])
+        self.assertIn("half-switched", release.state_text(self.desk, r))
+        alert.send_due(self.desk, gather=0)
+        self.assertIn("release_stopped", self.alerted(out)[-1]["kind"])
+        self.assertIn("stopped by the coordinator", self.alerted(out)[-1]["text"])
+        self.assertIn("a problem found", self.alerted(out)[-1]["text"])
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_stopped"), {"key": "k", "session": None})]
+        self.assertTrue(any("was stopped by coordinator: a problem found" in x for x in heard), heard)
+
+    def test_a_running_release_that_ignores_term_is_killed_after_the_grace(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.fixed_target("install", "trap '' TERM; echo started; sleep 60")
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        pid = release.get(self.desk, 1)["pid"]
+        self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        self.assertEqual(release.stop_release(self.desk, 1, "not tonight", by="page"), {"ok": True, "state": "stopping"})
+        self.assertFalse(release.stop_release(self.desk, 1, "again", by="page")["ok"])  # once
+        with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
+            d.tick()
+            time.sleep(0.5)
+            d.tick()  # within the grace: what ignores TERM still runs
+            self.assertEqual(release.get(self.desk, 1)["state"], "running")
+            r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "page", "not tonight"), r)
+        self.assertTrue(r.get("killed"))
+        from hansa.run import group_running
+        self.assertFalse(group_running(pid))
+        self.assertEqual(self.checkouts(), [])
+        self.assertIn("stopped by the principal", release.state_text(self.desk, r))
+        [row] = views.status(self.desk)["releases"]
+        self.assertEqual((row["state"], row["stopped_by"], row["stop_reason"]), ("stopped", "page", "not tonight"))
+        alert.send_due(self.desk, gather=0)  # the principal's own Stop: no alert for it
+        self.assertFalse(any("release_stopped" in a["kind"] for a in self.alerted(out)))
+
+    def test_a_target_after_a_stopped_release_is_not_let_through(self):
+        from hansa import release
+        go = self.tmp / "go"
+        self.with_targets(test=f"while [ ! -f {go} ]; do sleep 0.1; done", prod=("true", {"after": "test"}))
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.hansa("release", "--stop", "1")
+        self.assertEqual(self.settle_release(d, 1)["state"], "stopped")
+        said = self.refused("release", "a", "prod")
+        self.assertIn("goes out only after target test sent out the same commit", said)
+        self.assertIn("no release of test went out", said)
+        self.assertIsNone(release.last_out(self.desk, "a", self.repo, "main", "test"))
+        self.assertEqual(len(release.releases(self.desk)), 1)
+
+    def test_a_stop_that_comes_after_the_command_ended_records_its_real_end(self):
+        from hansa import release
+        os.environ["HANSA_ROLE"] = "coordinator"
+        self.with_targets(test="echo installed; exit 0", prod=("true", {"after": "test"}))
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.soon(lambda: (self.desk.state_dir / "releases" / "1.exit").exists())  # ended, not yet finished
+        self.assertEqual(release.stop_release(self.desk, 1, "too late", by="coordinator")["ok"], True)
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["exit"], r.get("termed")), ("done", 0, None), r)
+        self.assertTrue(r["stop_late"])
+        self.assertIn("came after its command had ended", release.state_text(self.desk, r))
+        self.assertEqual(self.events("release_stopped"), [])
+        [ev] = self.events("release_ended")
+        self.assertEqual((ev["ok"], ev["stop_late"]), (True, True))
+        heard = [x["line"] for x in notify.items_for(self.desk, [ev], {"key": "k", "session": None})]
+        self.assertTrue(any("the stop came after its command had ended" in x and "got TERM" not in x for x in heard), heard)
+        self.assertIsNotNone(release.last_out(self.desk, "a", self.repo, "main", "test"))  # it went out: --after holds
+        self.assertIn("prod", self.hansa("release", "a", "prod"))
+
+    def test_what_a_release_started_outside_its_group_is_stopped_at_its_end(self):
+        from hansa import release
+        script = self.tmp / "away.py"
+        script.write_text("import os, signal, sys, time\nos.setsid()\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                          "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(120)\n")
+
+        def away(n):
+            pidf = self.tmp / f"away{n}.pid"
+            return pidf, (f"{shlex.quote(sys.executable)} {script} {pidf} & while [ ! -f {pidf} ]; do sleep 0.1; done; "
+                          "echo started; sleep 1")
+
+        def gone(pidf):
+            from hansa.run import _state, alive, proc_start
+            pid = int(pidf.read_text())
+            start = proc_start(pid)
+            self.addCleanup(lambda: alive(pid, start) and os.kill(pid, signal.SIGKILL))
+            return lambda: not alive(pid, start) or _state(pid) == "Z"
+        # stopped: TERM, then KILL after the grace, to what left the group too
+        stopped, cmd = away(1)
+        self.fixed_target("install", cmd.replace("sleep 1", "sleep 60"))
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.soon(lambda: stopped.exists())
+        ended = gone(stopped)
+        d.tick()  # its round records what the command started
+        self.assertTrue(release.get(self.desk, 1).get("started_procs"))
+        release.stop_release(self.desk, 1, "not tonight", by="page")
+        with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
+            r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], bool(r.get("killed"))), ("stopped", True), r)
+        self.soon(ended, timeout=5)
+        # done: what it left running is stopped as it ends
+        done, cmd = away(2)
+        self.fixed_target("install", cmd)
+        self.hansa("release", "a", "install")
+        with unittest.mock.patch("hansa.release.SWEEP_GRACE", 1):
+            self.soon(lambda: d.tick() or done.exists())
+            ended = gone(done)
+            r = self.settle_release(d, 2)
+        self.assertEqual(r["state"], "done", r)
+        self.soon(ended, timeout=5)
+        self.assertTrue(self.events("release_left_running_stopped"))
+
+    def test_a_stop_while_the_fixed_checkout_is_made_records_that_nothing_ran(self):
+        from hansa import release
+        ran = self.tmp / "ran"
+        self.fixed_target("install", f"touch {ran}")
+        self.hansa("release", "a", "install")
+        real = release.git
+
+        def git(*args, **kw):
+            out = real(*args, **kw)
+            if args[:2] == ("worktree", "add"):
+                self.assertEqual(release.stop_release(self.desk, 1, "midway", by="coordinator")["state"], "stopping")
+            return out
+        with unittest.mock.patch.object(release, "git", git):
+            Dispatcher(self.desk).tick()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["ran"]), ("stopped", False), r)
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.checkouts(), [])
+        [ev] = self.events("release_stopped")
+        self.assertFalse(ev["ran"])
+        self.assertIn("nothing was run", release.state_text(self.desk, r))
+        self.assertNotIn("had run", release.state_text(self.desk, r))
+        heard = [x["line"] for x in notify.items_for(self.desk, [ev], {"key": "k", "session": None})]
+        self.assertTrue(any("nothing was run" in x for x in heard), heard)
+
+    def test_the_pages_stop_button(self):
+        from hansa import release
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("releaseStop:", "releaseStopReason:", "releaseStopNote:"):
+            self.assertEqual(ui.count(x), 2, x)
+        self.assertIn('"/api/release/stop"', ui)
+        self.assertIn("should handle TERM", ui)
+        skip_unless_ports(self)
+        self.with_release("true")
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base, tok = f"http://127.0.0.1:{httpd.server_address[1]}", self.desk.web_token()
+
+        def post(body):
+            req = urllib.request.Request(f"{base}/api/release/stop?t={tok}", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json", "X-Hansa": "1",
+                                                  "Cookie": f"hansa_t={tok}"})
+            with urllib.request.urlopen(req) as resp:
+                return json.load(resp)
+        try:
+            self.assertEqual(post({"id": 1, "reason": "wrong night"}), {"ok": True, "state": "stopped"})
+            self.assertFalse(post({"id": 1})["ok"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "page", "wrong night"))
+
+    # -- cost across tries ---------------------------------------------------------------------------------------
+    def test_cost_counts_every_try_of_a_task_and_the_run_before_a_resume_once(self):
+        conf = self.tmp / "conf"
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.desk.save_settings(s)
+        self.net_lane("econnreset", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_NET_USAGE"] = "1"  # the dropped try used tokens: 42
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        # an earlier hansa serve started its worker and stopped before it recorded it: the run before the resume
+        rec = conf / "projects" / "-work" / "lost-sid.jsonl"
+        rec.parent.mkdir(parents=True)
+        rec.write_text(json.dumps({"type": "assistant", "message": {"id": "m1", "model": "claude-x",
+                                   "usage": {"input_tokens": 500, "output_tokens": 50}}}) + "\n")
+        self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", launch="lost-sid",
+                         session_id="lost-sid", started=time.time(), model_asked="claude-x")
+        d = Dispatcher(self.desk)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual([r["usage"]["claude-x"]["in"] for r in m["earlier_runs"]], [500])
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["usage"]["claude-x"]["in"], a["turns"]), ("network", 40, 3))
+        self.assertEqual(list(m["usage"]), ["claude-haiku-4-5-20251001"])  # the last run's own: not the earlier ones
+        rep = cost.report(self.desk, 1)
+        total = 550 + 42 + 6300
+        self.assertEqual(rep["total"]["tokens"], total)
+        task = rep["by"]["task"][tid]
+        self.assertEqual((task["tokens"], task["runs"], task["turns"]), (total, 3, 6))
+        for key in ("day", "seat", "lane", "task", "model", "provider"):
+            self.assertEqual(sum(v["tokens"] for v in rep["by"][key].values()), total, key)
+        self.assertEqual(views.status(self.desk)["last_24h"]["worker_tokens"], total)
+        out = self.hansa("cost", "--days", "1", "--by", "task")
+        self.assertIn(f"{total:,}", out)
+        self.assertIn("3 run(s), 6 turn(s)", out)
+        # looked at again (another restart, another round): nothing is counted twice
+        from hansa import run
+        self.assertEqual(run.keep_lost_run(self.desk, self.desk.meta(tid)), {})
+        self.desk.update(tid, launch="lost-sid", session_id="lost-sid")
+        self.assertEqual(run.keep_lost_run(self.desk, self.desk.meta(tid)), {})
+        d.tick()
+        self.assertEqual(cost.report(self.desk, 1)["total"]["tokens"], total)
+
+    def resumed_tries(self, **env) -> dict:
+        """A task on mimo whose first run leaves background work, so hansa resumes it; its session record counts
+        tokens (100 in, 20 out a reply, 300 in, 60 out in all; 10 in, 5 out for the resumed run's reply). Settled with
+        the provider's rest after a usage limit cut short. Its meta."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RECORD_USAGE": "1", **env}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        tid = self.desk.new_task("Fix the badge")
+        d, end = Dispatcher(self.desk), time.time() + 30
+        while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
+            d.tick()
+            if (self.desk.provider_state().get("mimo") or {}).get("cool_until", 0) > time.time():
+                self.desk.set_provider_state("mimo", cool_until=time.time() - 1)
+            time.sleep(0.1)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        return m
+
+    def counted(self, m: dict) -> tuple:
+        """(input tokens hansa cost counts for the task, the input tokens hansa show gives for mimo-x)."""
+        rep = cost.report(self.desk, 1)
+        shown = re.search(r"usage mimo-x[^:]*: in ([\d,]+)", views.show_text(self.desk, m["id"]))
+        return sum(r["in"] for r in rep["rows"] if r["task"] == m["id"]), int(shown.group(1).replace(",", ""))
+
+    def test_cost_counts_a_resumed_run_and_the_tries_around_it_once(self):
+        from hansa import run
+        # resumed, and the resumed run ends without its totals: its part of the session record, after the resume
+        m = self.resumed_tries(FAKE_RESUME_NO_TOTALS="1")
+        self.assertTrue(m["resumed"])
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (300 + 10, 60 + 5))
+        self.assertEqual(self.counted(m), (310, 310))
+        # resumed, the resumed run drops its connection: queued again, a new session, resumed in its turn
+        m = self.resumed_tries(FAKE_RESUMED=str(self.tmp / "r1.jsonl"), FAKE_RESUME_DROP=str(self.tmp / "dropped"))
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["usage"]["mimo-x"]["in"]), ("network", 300))  # the dropped run counted nothing
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 310)
+        self.assertEqual(self.counted(m), (610, 610))
+        self.assertIn("(2 runs, every try)", views.show_text(self.desk, m["id"]))
+        # resumed, the resumed run hits the provider's usage limit: queued again without a try, resumed in its turn
+        m = self.resumed_tries(FAKE_RESUME_LIMIT=str(self.tmp / "limited"))
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["usage"]["mimo-x"]["in"], a["turns"]), ("limit", 310, 5 + 1))
+        self.assertEqual(self.counted(m), (620, 620))
+        self.assertEqual(cost.report(self.desk, 1)["by"]["task"][m["id"]]["runs"], 2)
+        # a run lost as it started is kept by its launch: a kept try of the same session but another launch is not it
+        sid = "s-same"
+        m = {**m, "state": "running", "phase": "starting", "launch": sid, "session_id": sid, "resumed": None,
+             "attempts": [{**a, "session_id": sid, "launch": "s-earlier"}], "earlier_runs": []}
+        with unittest.mock.patch.object(run, "usage_from_record", lambda home, s_, after=0: {"mimo-x": {"in": 1}}):
+            self.assertEqual(run.keep_lost_run(self.desk, m)["earlier_runs"][0]["launch"], sid)
+            m["attempts"][0]["launch"] = sid
+            self.assertEqual(run.keep_lost_run(self.desk, m), {})
 
     # -- the principal's alert command (hansa/alert.py) ------------------------------------------------------------
     ALERT_FAKE = ("import json, os, sys\n"

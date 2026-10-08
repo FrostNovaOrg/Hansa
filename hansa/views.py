@@ -12,7 +12,7 @@ from pathlib import Path
 from . import alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, is_local, join_command, lane_occupied, last_round, markers_in_change,
+from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of, provider_problem,
                   rest_minutes, rest_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -935,9 +935,13 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    + ("" if v["state"] in ("queued", "running") else f"; hansa show {v['task']} says what it ran"))
     if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
         out.append(f"verdict: {m.get('verdict') or 'none given'}")
-    for model, u in (m.get("usage") or {}).items():
-        out.append(f"usage {model}: in {u['in']:,} · out {u['out']:,} · cache read {u['cache_read']:,}"
-                   f" · cache write {u['cache_write']:,}")
+    runs, usage = cost.task_runs(m), {}  # every try's, each once, as hansa cost counts them
+    for r in runs:
+        usage = add_usage(usage, r["usage"])
+    for model, u in usage.items():
+        out.append(f"usage {model}" + (f" ({len(runs)} runs, every try)" if len(runs) > 1 else "")
+                   + f": in {u.get('in') or 0:,} · out {u.get('out') or 0:,} · cache read {u.get('cache_read') or 0:,}"
+                   f" · cache write {u.get('cache_write') or 0:,}")
     review = (f"hansa merge {tid}" if v and v["verdict"] == "holds"
               else f"hansa diff {tid} --stat, then hansa verify {tid} (code or tests) or hansa merge {tid} (text only)")
     nxt = {"done": f"hansa retry {tid} \"what to change\" · hansa cancel {tid} to close it" if not m.get("commits")
@@ -1318,6 +1322,8 @@ def cost_text(rep: dict, by: str = "day") -> str:
            f"worth ${rep['total']['usd']:.2f}"]
     for k, v in rows.items():
         extra = f" (+{v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] else ""
+        if by == "task" and v.get("runs"):  # every run of the task: its earlier tries too
+            extra += f"  {v['runs']} run(s), {v.get('turns', 0):,} turn(s)"
         out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")
     if rep["unpriced_models"]:
         out.append("no price yet for: " + ", ".join(rep["unpriced_models"]) + " (the principal sets prices on the page)")

@@ -2424,7 +2424,8 @@ def resume(desk: Desk, tid: str):
                 first.replace(first.with_name(PREVIEW_FIRST_LOG))
             argv = with_preview(desk, tid, argv, lane, pname, p, wt)
         desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
-                                  "rows": len(_rows(home, sid) or []), "usage": usage_of(run),
+                                  "rows": len(_rows(home, sid) or []),
+                                  "usage": usage_of(run) or read_detail(desk, tid, "usage", {}, usage_from_record, home, sid),
                                   "turns": run.get("num_turns")})
         with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
             stdin.write(note.encode("utf-8"))
@@ -2569,12 +2570,21 @@ def usage_of(run: dict) -> dict:
     return out
 
 
-def usage_from_record(home: Path, sid: str) -> dict:
+def usage_from_record(home: Path, sid: str, after: int = 0) -> dict:
     """Token counts from the session record, for a run stopped before Claude Code wrote its totals
     (cancelled, or stopped at the time ceiling). Some providers leave output tokens out of the
-    record, so these can be short."""
+    record, so these can be short. Only the record's rows from `after` on: a resumed run's own (see resume),
+    as the run before the resume has its numbers already."""
+    if after:
+        counts = {}
+        for d in (_rows(home, sid) or [])[after:]:
+            msg = d.get("message") or {} if d.get("type") == "assistant" else {}
+            if msg.get("id") and isinstance(msg.get("usage"), dict):
+                counts[msg["id"]] = (msg.get("model") or "?", msg["usage"])
+    else:
+        counts = _record(home, sid)[3]
     out = {}
-    for model, u in _record(home, sid)[3].values():
+    for model, u in counts.values():
         t = out.setdefault(model, {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
                                    "claude_code_usd": None, "basis": "session record"})
         t["in"] += u.get("input_tokens") or 0
@@ -2688,7 +2698,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     usage = read_detail(desk, tid, "usage", {}, usage_of, run)
     if not usage and p:
         usage = read_detail(desk, tid, "usage", {}, lambda: usage_from_record(
-            config_home(desk, meta["provider"], p), meta.get("session_id", "")))
+            config_home(desk, meta["provider"], p), meta.get("session_id", ""), (meta.get("resumed") or {}).get("rows", 0)))
     resumed = meta.get("resumed") or {}
     if resumed.get("usage"):  # the first run's, before hansa resumed it
         usage = add_usage(resumed["usage"], usage)
@@ -2821,17 +2831,21 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
-    if state == "queued":  # this try's numbers stay in its attempt; the next try is a new session
-        attempts[-1].update(usage=usage, turns=fields["turns"])
 
     def decide(now_meta):
         final, message = ("cancelled", "cancelled") if now_meta.get("cancel") and not changed else (state, error)
         checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                     and meta.get("kind") != "verify")  # a verification is never merged, so never checked
-        # what this try's resume recorded (resume) is keyed to its session: a new try starts without it
+        tries, kept = attempts, {}
+        if final == "queued" and len(attempts) > len(meta.get("attempts", [])):
+            # queued for another try: this run's numbers go with its attempt record, and the task's own fields are
+            # left for the next run, so each try counts once (cost.task_runs). What this try's resume recorded
+            # (resumed) is keyed to its session, and its usage is in this run's: a new try starts without it
+            tries = [*attempts[:-1], {**attempts[-1], **run_numbers(meta, fields)}]
+            kept = {"usage": {}, "turns": None}
         again = {"resumed": None} if final == "queued" else {}
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
-                "error": desk.redact(message), "attempts": attempts, "pid_start": "", **fields, **again}
+                "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
@@ -2839,6 +2853,39 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         sweep(desk, tid)
         meta = desk.meta(tid)
     return meta
+
+
+def run_numbers(meta: dict, fields: dict) -> dict:
+    """What one run of a task used, as kept on its attempt record when the task is queued for another try."""
+    return {"usage": fields.get("usage") or {}, "turns": fields.get("turns"), "session_id": fields.get("session_id", ""),
+            "launch": meta.get("launch", ""), "ran_from": meta.get("started"), "ended": fields.get("finished") or now(),
+            "model": meta.get("model_asked", "")}
+
+
+def keep_lost_run(desk: Desk, m: dict) -> dict:
+    """For a task an earlier server started that goes back to the queue: the numbers of the run it may have started
+    meanwhile, from its session record, to keep in earlier_runs; {} when there is none, or it is already kept.
+    Kept by launch, as each start of a task has its own; of a session resumed (resumed), the part before the resume
+    is in resumed's numbers and only the part after it is read from the record."""
+    sid, launch = m.get("session_id") or "", m.get("launch") or ""
+    if not sid or launch != sid or m.get("kind") == "design":
+        return {}
+    if any(x.get("launch", x.get("session_id")) == launch  # records made before launch was kept: their session
+           for x in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])] if isinstance(x, dict)):
+        return {}
+    p = desk.settings()["providers"].get(m.get("provider") or "")
+    resumed = m.get("resumed") or {}
+    usage = read_detail(desk, m["id"], "usage", {}, lambda: usage_from_record(
+        config_home(desk, m["provider"], p), sid, resumed.get("rows", 0))) if p else {}
+    if resumed.get("usage"):
+        usage = add_usage(resumed["usage"], usage)
+    if not usage:
+        return {}
+    return {"earlier_runs": [*(m.get("earlier_runs") or []), {
+        "provider": m.get("provider", ""), "at": now(), "usage": usage, "turns": resumed.get("turns"),
+        "session_id": sid, "launch": launch,
+        "ran_from": m.get("started"), "ended": now(), "model": m.get("model_asked", ""),
+        "why": "hansa serve stopped while it started this run; the task went back to the queue"}]}
 
 
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
@@ -3599,11 +3646,12 @@ class Dispatcher:
                                capture_output=True, timeout=30)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 pass
+        lost = keep_lost_run(self.desk, m)  # read before the lock: a session record can be long
         if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
                             {"state": "cancelled", "phase": "", "error": "cancelled before it started",
-                             "finished": now()} if x.get("cancel") else
+                             "finished": now(), **lost} if x.get("cancel") else
                             {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
-                             "lookup_failing_since": None}):
+                             "lookup_failing_since": None, **lost}):
             remove_sandbox_tmp(self.desk, m["id"])  # what it made for a worker that never started
 
     def check(self, m: dict, s: dict) -> None:
