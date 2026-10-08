@@ -898,33 +898,44 @@ def git(*args, cwd, env=None) -> str:
 
 
 def repo_identity(repo) -> tuple:
-    """(user.name, user.email) as the repository's own config sets them, '' for each it does not or that git could
-    not write: read from its local config alone (git config --local, nothing it includes, no global or system
-    config), never the account's own identity."""
-    out = []
+    """(user.name, user.email, why not) as the repository's own config sets them: '' for each it does not or that git
+    could not write, and for each of those it sets, why it is not usable. Read from its local config alone (git
+    config --local, nothing it includes, no global or system config), never the account's own identity."""
+    out, bad = [], []
     for key in ("user.name", "user.email"):
         try:
             v = git("config", "--local", "--no-includes", "--get", key, cwd=repo,
                     env={"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
         except (RuntimeError, OSError):
             v = ""
-        out.append(v if v and not identity_problem(f"{v} <x>" if key == "user.name" else f"x <{v}>") else "")
-    return tuple(out)
+        why = identity_problem(f"{v} <x>" if key == "user.name" else f"x <{v}>") if v else ""
+        if why:
+            # the problem of the whole Name <email> form, said of the one part
+            why = why.replace(" inside the name or the email: Name <email>", "").replace(": Name <email>", "")
+            bad.append(f"its {key} {json.dumps(v[:80], ensure_ascii=False)} is not usable: it {why}")
+        out.append("" if why else v)
+    return (*out, "; ".join(bad))
 
 
 def lane_identity(lane) -> tuple:
     """(name, email, where it comes from) of the author and committer of the commits hansa makes for a lane: the
     lane's identity, else the repository's own user.name and user.email (each hansa's own where it sets only the
-    other), else hansa's own."""
+    other, or sets one git could not write), else hansa's own."""
     lane = lane or {}
     own = parse_identity(lane.get("identity"))
     if own:
         return (*own, "the lane's identity")
-    name, email = repo_identity(lane["repo"]) if lane.get("repo") else ("", "")
+    name, email, bad = repo_identity(lane["repo"]) if lane.get("repo") else ("", "", "")
+    bad = f" ({bad})" if bad else ""
     if name or email:
+        missing = "name" if not name else "email" if not email else ""
         return (name or HANSA_IDENTITY[0], email or HANSA_IDENTITY[1],
                 "the repository's own config (git config --local user.name and user.email)"
-                + ("" if name and email else f"; hansa's own {'name' if email else 'email'} for what it leaves out"))
+                + (f"; hansa's own {missing} for what it {'cannot use' if bad else 'leaves out'}{bad}"
+                   if missing else ""))
+    if bad:
+        return (*HANSA_IDENTITY, f"hansa's own: the lane sets none and the repository's config sets none that is "
+                                 f"usable{bad}")
     return (*HANSA_IDENTITY, "hansa's own: neither the lane nor the repository's config sets one")
 
 

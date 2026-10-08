@@ -1640,15 +1640,16 @@ def _held_text(wt: Path, st: dict) -> str:
     return "\n".join(lines)
 
 
-def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool) -> str:
-    """git worktree remove, after putting what it holds on a new branch when keep; the branch's name or ''."""
+def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool, ln: dict | None = None) -> str:
+    """git worktree remove, after putting what it holds on a new branch when keep; the branch's name or ''. ln: the
+    lane's settings as they were before it was removed, whose identity the kept commit carries."""
     from .run import _remember_git_file, commit_work, identity_env, wgit
     kept = ""
     if keep and (st["changes"] or st["commits"]):
         kept = f"hansa-kept/{wt.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wgit(desk, wt, "checkout", "-q", "-b", kept)
         commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed", kept,
-                    ident=identity_env(desk.settings()["lanes"].get(lane) or {"repo": st["repo"]}))
+                    ident=identity_env({**(ln or {}), "repo": st["repo"]}))
     # --force: what a worker's sandbox left there is nobody's work, and git would refuse for it
     git("worktree", "remove", "--force", str(wt), cwd=st["repo"])
     _remember_git_file(desk, wt, None)
@@ -1794,6 +1795,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
             + f"\nTo keep it on a new branch (hansa-kept/{name}-DATE) of its repository and then remove "
               f"{'the lane and ' if known else ''}the worktree: hansa lane remove {name} --keep. To drop it: "
               f"hansa lane remove {name} --discard. Nothing was changed")
+    ln = dict(lanes[name]) if known else None  # its identity, for the commit --keep makes after it is gone
     if known:
         del new["lanes"][name]
         _save(desk, new)
@@ -1804,7 +1806,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
                   f"repository still lists it, git worktree prune there clears that")
             continue
         try:
-            kept = _remove_worktree(desk, name, wt, st, a.keep)
+            kept = _remove_worktree(desk, name, wt, st, a.keep, ln)
         except RuntimeError as e:
             print(f"Its worktree {wt} stays: {e}. hansa lane remove {name} tries again")
             continue

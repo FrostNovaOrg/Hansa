@@ -2124,6 +2124,25 @@ class DeskTest(unittest.TestCase):
         self.assertIn("Repo Person <repo@example.org>, from the repository's own config",
                       self.hansa("explain", "lane", "a"))
 
+    def test_a_repository_identity_git_could_not_write_is_said_to_be_not_usable_and_why(self):
+        from hansa.run import lane_identity
+        globl = self.tmp / "global-gitconfig"
+        globl.write_text("[user]\n\tname = Global Person\n\temail = global@example.org\n")
+        sh("git", "config", "--local", "user.name", "Bad <x> Name", cwd=self.repo)
+        sh("git", "config", "--local", "user.email", "repo@example.org", cwd=self.repo)
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(globl)}):
+            shown = " ".join(self.hansa("explain", "lane", "a").split())
+            self.assertIn('hansa <repo@example.org>, from the repository\'s own config (git config --local user.name '
+                          'and user.email); hansa\'s own name for what it cannot use (its user.name "Bad <x> Name" is '
+                          'not usable: it cannot hold < or >)', shown)
+            self.assertNotIn("leaves out", shown)
+            sh("git", "config", "--local", "user.email", "re>po@example.org", cwd=self.repo)
+            name, email, where = lane_identity(self.desk.settings()["lanes"]["a"])
+        self.assertEqual((name, email), ("hansa", "hansa@localhost"))  # never the global one
+        self.assertIn("the repository's config sets none that is usable", where)
+        self.assertIn('its user.name "Bad <x> Name" is not usable', where)
+        self.assertIn('its user.email "re>po@example.org" is not usable: it cannot hold < or >', where)
+
     def test_hansas_own_name_is_written_only_when_neither_the_lane_nor_the_repository_sets_one(self):
         globl = self.tmp / "global-gitconfig"
         globl.write_text("[user]\n\tname = Global Person\n\temail = global@example.org\n")
@@ -2268,6 +2287,7 @@ class DeskTest(unittest.TestCase):
         s["concurrency"] = 2
         self.assertEqual(self.desk.save_settings(s), [])
         self.hansa("lane", "set", "b", "merge_message", "Merge {task} ({lane}): {title}")
+        self.hansa("lane", "set", "b", "identity", "Bo Lane <bo@example.org>")
         self.move_main()  # so t1 needs a merge check
         self.hansa("merge", t1)
         d.tick()
@@ -2278,6 +2298,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m1["state"], m2["state"]), ("merged", "merged"), (m1, m2))
         self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])  # none ran for t2
         self.assertEqual(self.git_out("log", "-1", "--format=%s", m2["merge_commit"]), f"Merge {t2} (b): Add b.txt")
+        self.assertEqual(self.git_out("log", "-1", "--format=%an <%ae>|%cn <%ce>", m2["merge_commit"]),
+                         "Bo Lane <bo@example.org>|Bo Lane <bo@example.org>")  # the lane's identity, plain merge too
         self.assertEqual(self.git_out("log", "-1", "--format=%s", m1["merge_commit"]), f"Merge {t1}: Add a.txt")
         self.assertEqual(self.git_out("rev-parse", "main"), m2["merge_commit"])
 
@@ -2814,9 +2836,13 @@ class DeskTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "lane", "remove", "a", "--keep", "--discard"])
         self.assertIn("choose one", str(e.exception.code))
+        self.hansa("lane", "set", "a", "identity", "Kip Keep <kip@example.org>")
         out = self.hansa("lane", "remove", "a", "--keep")
         self.assertFalse(wt.exists())
         branch = re.search(r"on branch (hansa-kept/a-\S+) there", out).group(1)
+        # the lane is gone from the settings by then, but the kept commit is still made as it
+        self.assertEqual(self.git_out("log", "-1", "--format=%an <%ae>|%cn <%ce>", branch),
+                         "Kip Keep <kip@example.org>|Kip Keep <kip@example.org>")
         files = subprocess.run(["git", "show", "--format=", "--name-only", branch], cwd=self.repo,
                                capture_output=True, text=True).stdout.split()
         self.assertEqual(sorted(files), ["README.md", "new.txt"])
