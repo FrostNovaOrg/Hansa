@@ -211,6 +211,50 @@ page gives.
   could make there reaches nothing outside the sandbox: git obeys a new
   `commondir` or a worktree's folder only through the checks below, and hansa
   commits nothing while a merge or the like it did not start is under way.
+  Before it starts a worker, a verifier or a design session, hansa serve tries
+  that run's sandbox: `srt` with the same filesystem and network settings
+  Claude Code is given, on `/usr/bin/true`, then a write of what git needs
+  open there: the worktree's own `index` (opened to append, nothing written)
+  and a new file in its own git folder, and for a design session its branch's
+  ref's `.lock` and a new file in `objects/`; and a write of what must be
+  kept, to see that the deny patterns match at all: a new file at the top of
+  the shared git folder (`.hansa-try-kept`), a name next to the worktree's
+  own folder under `worktrees/`, and for a design session a name next to its
+  branch's ref and a new file in `refs/heads/` (what such a write makes is
+  removed again). It does so once for each set of
+  settings while it runs (a lane's tasks do not each pay for it; a restart
+  tries again). When srt refuses them, the run does not start: its task is held,
+  not failed and without using a try, and `hansa status` shows the lane as
+  unable to run, with srt's first line and the part of the settings it
+  refuses (the exact deny-write paths, the deny-write patterns, the deny-read
+  list, the write list or the network, each tried alone, or "the deny-write
+  patterns keep what git needs open" or "the deny-write patterns do not
+  keep" with the path; a sandbox that does not keep what it should runs no
+  one); the principal's
+  alert is told once for each reason. Held tasks start by themselves once a
+  try passes: after a fix, restart `hansa serve` (a change of the settings
+  tries again too). Without srt, or with an srt that cannot run at all, the
+  run starts as before, in Claude Code's own sandbox, which is set to fail
+  rather than run a command outside it (`failIfUnavailable`). Claude Code
+  carries its own copy of the sandbox library, which may differ from the srt
+  installed, so the try is a guard, not proof: hansa also reads each run's
+  session record while it runs, and when a Bash result begins with
+  `sandbox-exec: ` (macOS) or `bwrap: ` (Linux) before any Bash call of the
+  run succeeded, it stops the run and holds its task the same way ("the
+  sandbox could not start: ..."), not counting it as a try. The deny patterns
+  write their character classes as ranges, `-` first (`[-0-9B-Zb-z._]` for
+  all but `a`): macOS refuses a sandbox with two or more classes that list
+  some sixty characters one by one, and a negated class cannot stand in,
+  since srt escapes its `^`. macOS's sandbox matches paths without regard to
+  case, so a letter left out of a class is left out in both cases, and it
+  reads a `-` just before `]` as a range up to the end of the character set,
+  so the `-` goes first. And it silently drops a class of more than 15
+  elements (a character or a range): the profile still applies, but the
+  class matches nothing. So a class that would hold more is split into
+  several patterns of at most 15 each (`[-0-9A-KMNPQS-VX-Z._]*` and
+  `[a-kmnpqs-vx-z]*` for all but `objects`, `refs`, `logs` and `worktrees` at
+  the top of a design session's shared git folder). hansa's own names are
+  small letters, digits, `.`, `_` and `-`.
   Before hansa runs git in a worktree, it checks the worktree's `.git` file;
   that the git folder it leads to still points back to the repository
   (`commondir`) and to the worktree (`gitdir`) as git wrote them; that its

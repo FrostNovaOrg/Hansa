@@ -14,7 +14,7 @@ from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, i
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
-                  provider_problem, rest_minutes, rest_text, serve_code, server_state,
+                  provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
@@ -493,6 +493,7 @@ def status(desk: Desk) -> dict:
     merging = [m for m in tasks if m["state"] == "merging"]
     tried = tried_lanes(desk)
     busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried
+    held = sandbox_held(desk)
     last = last_round(desk)
     server = server_state(desk)
     day = time.time() - 86400  # the last 24 h, each thing by when it happened: not reset at midnight
@@ -518,7 +519,8 @@ def status(desk: Desk) -> dict:
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
-                   "trying": n in tried}  # a `hansa lane try` queued or running holds the lane
+                   "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
+                   "held": held.get(n)}  # its runs' sandbox could not start (run.hold)
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": rest_minutes(s, n), "rest_own": own_rest_minutes(s, n) is not None,
@@ -590,7 +592,9 @@ def status_text(st: dict) -> str:
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
     for ln in lanes:
         out.append(f"  {ln['name']:<{wn}}  {' > '.join(ln['providers']):<{wp}}  "
-                   + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else "free")))
+                   + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else
+                                     "UNABLE TO RUN" if ln.get("held") else "free"))
+                   + (f"\n      {sandbox_held_text(ln['held'])}" if ln.get("held") else ""))
     if st["running"]:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
@@ -1202,7 +1206,24 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime`, or fix the "
             "server's PATH, then restart hansa serve. Then, for a task whose "
             "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the lane's check "
-            "again and merges if it passes; a task whose setup could not run: hansa retry ID."])
+            "again and merges if it passes; a task whose setup could not run: hansa retry ID.",
+            "Before it starts a worker, a verifier or a design session, it tries that run's sandbox the same way: "
+            "srt with the settings Claude Code is given, on /usr/bin/true, then a write of what git needs open "
+            "there (the worktree's own index and git folder; for a design session, its branch's ref's .lock and "
+            "objects/), and of what it must keep, to see that the deny patterns match (a new file atop the "
+            "shared git folder, a name next to the worktree's own folder; for a design session, next to its "
+            "branch's ref and in refs/heads/; what such a write makes is removed), once for each set of settings "
+            "while it runs. When srt refuses them, keeps what git needs or lets through what it must keep (a "
+            "sandbox that does not keep what it should runs no one), the run does not start: its task is held (queued, no try used) and its "
+            "lane shows as unable to run in hansa status, with srt's first line and the part of the settings it "
+            "refuses (found by trying each part alone, or the path written); the principal's alert is told once for each reason. Held "
+            "tasks start by themselves once a try passes: after a fix, restart hansa serve, which tries again (so "
+            "does a change of the settings). Without srt the run starts as before, in Claude Code's own sandbox, "
+            "which never runs a command outside it. Claude Code carries its own copy of the sandbox library, which "
+            "may differ from the srt installed, so the try is a guard, not proof: when a run's first Bash calls "
+            "say the sandbox could not start (sandbox-exec: or bwrap: before any call succeeded), hansa stops the "
+            "run and holds its task the same way.",
+            *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, h in sorted(sandbox_held(desk).items())]])
     if what == "notify":
         who = notify.names(desk)
         return "\n".join([

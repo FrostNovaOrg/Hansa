@@ -257,6 +257,25 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
                       "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
                       **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
     sys.exit(0)
+if os.environ.get("FAKE_SANDBOX_START"):  # "first", "after-ok": a Bash call whose sandbox could not start
+    sid = sys.argv[sys.argv.index("--session-id") + 1]
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    os.makedirs(os.path.dirname(rec), exist_ok=True)
+    def call(i, cmd, said, err, result):
+        return [{"type": "assistant", "message": {"id": "s" + i, "content": [
+                    {"type": "tool_use", "id": "toolu_s" + i, "name": "Bash", "input": {"command": cmd}}]}},
+                {"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_s" + i, "is_error": err, "content": said}]},
+                 "toolUseResult": result}]
+    rows = []
+    if os.environ["FAKE_SANDBOX_START"] == "after-ok":  # a command whose own output names the words succeeded first
+        rows += call("0", "cat notes.txt", "sandbox-exec: noted in a file", False,
+                     {"stdout": "sandbox-exec: noted in a file", "stderr": "", "interrupted": False})
+    failed = "sandbox-exec: sandbox_apply: Invalid argument"
+    rows += call("1", "git status", "Exit code 71\n" + failed, True, "Error: Exit code 71\n" + failed)
+    with open(rec, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    time.sleep(float(os.environ.get("FAKE_SANDBOX_WAIT", "0")))
 if os.environ.get("FAKE_STOP_AT_TURNS"):
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -336,8 +355,32 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "nu
 
 # A stand-in for srt: records how it was called, with the settings file's content, then runs the command.
 # Like the real one, it ignores the TMPDIR it is given: inside, TMPDIR is CLAUDE_CODE_TMPDIR, else /tmp/claude.
+# How macOS's sandbox reads a deny pattern, as measured with srt: srt's globToRegex (* and ? within a name, [...] as
+# written, and all beneath what it names), then without regard to case, a - just before ] read as a range up to the
+# end of the character set (a - first is a plain -), and a class of more than 15 elements (a character, \. or a
+# range) matching nothing. Shared by the tests (macos_match) and the stand-in srt (FAKE_SRT).
+MACOS_GLOB = r'''
+import re
+
+
+def macos_rx(pattern):
+    rx = re.sub(r"[.^$+{}()|\\]", lambda m: "\\" + m.group(0), pattern)
+
+    def cls(m):
+        body, n, i = m.group(1), 0, 0
+        while i < len(body):
+            i += 2 if body[i] == "\\" else 3 if i + 2 < len(body) and body[i + 1] == "-" else 1
+            n += 1
+        return "(?!)" if n > 15 else "[" + body + ("\U0010ffff]" if body.endswith("-") else "]")
+    rx = re.sub(r"\[([^\]]*)\]", cls, rx)
+    rx = rx.replace("**/", "\0").replace("**", "\1").replace("*", "[^/]*").replace("?", "[^/]")
+    return "^" + rx.replace("\0", "(.*/)?").replace("\1", ".*") + "(/.*)?$"
+'''
+exec(MACOS_GLOB)
+
 FAKE_SRT = r'''#!/usr/bin/env python3
 import json, os, stat, sys
+''' + MACOS_GLOB + r'''
 os.environ["TMPDIR"] = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp/claude"
 args = sys.argv[1:]
 cut = args.index("--")
@@ -348,6 +391,27 @@ with open(LOG, "a") as f:
                         "tmp_there": os.path.isdir(os.environ.get("TMPDIR", "")), "cwd": os.getcwd(),
                         "env": dict(os.environ),
                         "stdout": "pipe" if stat.S_ISFIFO(mode) else "file" if stat.S_ISREG(mode) else "other"}) + "\n")
+EXTRA_DENY = []
+if args[cut + 1:cut + 2] == ["/bin/sh"] and args[-1].endswith("/hansa-git-open-try.sh"):
+    # hansa's try of a run's sandbox writing what git needs open and what must be kept (run.git_open_try): told
+    # as the sandbox would answer, its deny patterns read as macOS reads them, and nothing written
+    import shlex
+    fs = settings["filesystem"]
+
+    def kept(p):
+        p = os.path.realpath(p)
+        under = lambda x: p == x or p.startswith(x.rstrip("/") + "/")
+        if not any(under(x) or under(os.path.realpath(x)) for x in fs.get("allowWrite", [])):
+            return True
+        return any(re.match(macos_rx(x), p, re.IGNORECASE) if any(c in x for c in "*?[") else under(x)
+                   for x in fs["denyWrite"] + EXTRA_DENY)
+    for line in open(args[-1]):
+        how, _, rest = line.partition(" ")
+        if how == "needs_open" and kept(shlex.split(rest)[0]):
+            print("refused: " + shlex.split(rest)[0])
+        if how == "needs_kept" and not kept(shlex.split(rest)[0]):
+            print("not kept: " + shlex.split(rest)[0])
+    sys.exit(0)
 os.execvp(args[cut + 1], args[cut + 1:])
 '''
 
@@ -399,6 +463,11 @@ def sandbox_glob(pattern: str) -> str:
     rx = re.sub(r"[.^$+{}()|\\]", lambda m: "\\" + m.group(0), pattern)
     rx = rx.replace("**/", "\0").replace("**", "\1").replace("*", "[^/]*").replace("?", "[^/]")
     return "^" + rx.replace("\0", "(.*/)?").replace("\1", ".*") + "(/.*)?$"
+
+
+def macos_match(pattern: str, path: str):
+    """Whether macOS's sandbox keeps `path` by this deny pattern, as measured (MACOS_GLOB)."""
+    return re.match(macos_rx(pattern), path, re.IGNORECASE)
 
 
 def may_write(box: dict, path, rules=None) -> bool:
@@ -481,9 +550,15 @@ class DeskTest(unittest.TestCase):
             root.start()
             self.addCleanup(root.stop)
 
-    def srt_calls(self, tries=False) -> list:
-        """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts."""
+    def srt_calls(self, tries=False, sandbox=False) -> list:
+        """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts; sandbox: only its
+        tries of a worker's, a verifier's or a design session's sandbox, on /usr/bin/true and writing what git needs
+        open (run.try_sandbox)."""
         calls = [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
+        tried = lambda c: c["argv"][-2:] == ["--", "/usr/bin/true"] or c["argv"][-1].endswith("/hansa-git-open-try.sh")
+        if sandbox:
+            return [c for c in calls if tried(c)]
+        calls = [c for c in calls if not tried(c)]
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
 
     @staticmethod
@@ -8459,6 +8534,323 @@ class DeskTest(unittest.TestCase):
         # what git wrote outside the session's own folder: objects, the branch's ref and log
         self.assertEqual({str(Path(p).relative_to(common)).split("/")[0] for p in changed
                           if not Path(p).is_relative_to(Path(rules[0][0]).resolve())}, {"objects", "refs", "logs"})
+
+    def test_the_git_deny_patterns_keep_the_same_names_as_macos_reads_their_classes(self):
+        from hansa import run
+
+        def listed(folder, names):  # others_than as it was: each class listing every character it keeps
+            out = []
+
+            def walk(start, rest):
+                nexts = sorted({s[0] for s in rest if s})
+                out.append(f"{folder}/{start}[{''.join(c for c in run.NAME_CHARS if c not in nexts)}"
+                           f"{'' if '-' in nexts else '-'}]*")
+                if start and "" not in rest:
+                    out.append(f"{folder}/{start}")
+                for c in nexts:
+                    walk(start + c, [s[1:] for s in rest if s and s[0] == c])
+            walk("", list(names))
+            return out
+        for i, name in enumerate(("o0", "a-x", "ab")):  # other worktrees, two whose names start as the lane's does
+            sh("git", "worktree", "add", "-q", "-b", f"task/t09{i}", str(self.tmp / name), cwd=self.repo)
+        lane = self.desk.settings()["lanes"]["a"]
+        wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
+        cases = [*run._git_open(wt), *run._git_open(dwt, "task/t0002")]
+        common = run.git_folders(wt)[0]
+        self.assertIn((common, ("worktrees",)), cases)  # the common folder with worktrees open
+        self.assertIn((common / "worktrees", (wt.name,)), cases)  # the worktree's folder among the others
+        self.assertIn((common / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)  # the session's branch
+        self.assertIn((common / "logs" / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)
+        chars = run.NAME_CHARS + "-" + "^!/ ~@é`{"  # and a few outside them, ~ ` { after the small letters
+
+        def elements(cls):  # as macOS counts them: a character (\. too, a leading - too) or a range
+            return len(re.findall(r"\\.|.-.|.", cls))
+        for folder, names in cases:
+            old, new = listed(folder, names), run.others_than(folder, names)
+            self.assertEqual([a for a in old if "[" not in a], [b for b in new if "[" not in b], folder)
+            held = {}  # each start: what its classes hold together
+            for b in new:
+                if "[" not in b:
+                    continue
+                cls = b[b.rindex("[") + 1:b.rindex("]")]
+                held.setdefault(b[:b.rindex("[")], set()).update(x for x in run.NAME_CHARS if re.fullmatch(f"[{cls}]", x))
+                self.assertNotRegex(cls, "012|ABC|abc|xyz", b)  # runs, not every character one by one
+                self.assertTrue(re.fullmatch(r"-?([0-9A-Za-z](-[0-9A-Za-z])?)*\.?_?", cls), b)  # - first, ranges, . _
+                self.assertLessEqual(elements(cls), run.CLASS_MAX, b)  # more, and macOS drops the class
+            for start, chars_held in held.items():  # a letter is left out in both cases
+                self.assertEqual({x.lower() for x in chars_held if x.isalpha()},
+                                 {x for x in chars_held if x.islower()}, start)
+            starts = {n[:k] for n in names for k in range(len(n) + 1)}
+            for start in starts:
+                for c in chars:
+                    for name in (start + c, start + c + "x"):
+                        p = f"{folder}/{name}"
+                        # what macOS keeps by the new is what the old kept of the name in small letters
+                        self.assertEqual(any(re.match(sandbox_glob(a), f"{folder}/{name.lower()}") for a in old),
+                                         any(macos_match(b, p) for b in new), (folder, name))
+        self.assertEqual(run.CLASS_MAX, 15)
+        self.assertIn("[-0-9A-SU-Za-su-z._]*", " ".join(run.others_than(common / "refs" / "heads", ("task",))))
+        # as measured with macOS's sandbox: for ("a",), what stays open and what is kept
+        rules = run.others_than(Path("/W"), ("a",))
+        self.assertEqual(rules[:2], ["/W/[-0-9B-Zb-z._]*", "/W/a[-0-9A-Za-z._]*"])
+        kept = lambda n: any(macos_match(r, f"/W/{n}") for r in rules)
+        for n in ("a/x", "a", "A/x"):
+            self.assertFalse(kept(n), n)
+        for n in ("b", "-x", ".x", "_x", "0x", "Zx", "Bx", "ab", "a-", "a.", "a_", "aB", "a9"):
+            self.assertTrue(kept(n), n)
+        # a design session's common folder, with objects, refs, logs and worktrees open: one class of 18 elements
+        # would match nothing, and leave any new file at its top open; two patterns keep them
+        rules = run.others_than(Path("/C"), run.DESIGN_GIT_COMMON_OPEN)
+        self.assertEqual(rules[:2], ["/C/[-0-9A-KMNPQS-VX-Z._]*", "/C/[a-kmnpqs-vx-z]*"])
+        self.assertFalse(macos_match("/C/[-0-9A-KMNPQS-VX-Za-kmnpqs-vx-z._]*", "/C/commondir"))
+        kept = lambda n: any(macos_match(r, f"/C/{n}") for r in rules)
+        for n in ("objects/x", "logs/x", "refs/x", "worktrees/x"):
+            self.assertFalse(kept(n), n)
+        for n in ("commondir", "zz", "-x", "_x", ".x", "9x", "config", "objectsx", "Refs_"):
+            self.assertTrue(kept(n), n)
+
+    def refusing_srt(self, rule: str) -> None:
+        """The stand-in srt, refusing a try of a run's sandbox (on /usr/bin/true) whose `settings` hold for this
+        rule, as macOS refused one: with sandbox-exec's line and exit 71."""
+        srt = self.tmp / "bin" / "srt"
+        srt.write_text(srt.read_text().replace("os.execvp(", (
+            f"if args[-1] == '/usr/bin/true' and ({rule}):\n"
+            "    sys.stderr.write('sandbox-exec: sandbox_apply: Invalid argument\\n')\n"
+            "    sys.exit(71)\nos.execvp("), 1))
+
+    def test_a_worker_whose_sandbox_srt_refuses_does_not_start_and_its_task_is_held(self):
+        from hansa import alert, run
+        self.refusing_srt("settings['filesystem']['denyRead']")
+        with unittest.mock.patch("hansa.alert.command", lambda s: "true"):
+            tid = self.desk.new_task("Add hello.txt")
+            d = Dispatcher(self.desk)
+            d.tick()
+            m = self.desk.meta(tid)
+            self.assertEqual(m["state"], "queued", m)  # held, not failed
+            self.assertEqual(m["held"]["part"], "the deny-read list")
+            self.assertIn("sandbox-exec: sandbox_apply: Invalid argument (exit 71)", m["held"]["why"])
+            self.assertEqual(m.get("attempts", []), [])
+            self.assertFalse(m.get("launch"))
+            self.assertFalse((self.desk.worktrees_dir / "a" / "hello.txt").exists())  # the worker never ran
+            self.assertEqual(self.events("task_started"), [])
+            shown = views.status_text(views.status(self.desk))
+            self.assertIn("UNABLE TO RUN", shown)
+            self.assertIn("the deny-read list", shown)
+            self.assertIn("HELD: lane a cannot run", waiting_reason(self.desk, self.desk.settings(), m, set()))
+            self.assertIn("the deny-read list", self.hansa("explain", "server"))
+            tried = len(self.srt_calls(sandbox=True))
+            d.tick()  # the same settings: not tried again, and the task waits
+            self.assertEqual(len(self.srt_calls(sandbox=True)), tried)
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            run.SANDBOX_TRIES.clear()  # as a restart: tried again, held again, and not alerted again
+            Dispatcher(self.desk).tick()
+            self.assertGreater(len(self.srt_calls(sandbox=True)), tried)
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            said = [x["text"] for x in alert.queued(self.desk) if x["kind"] == "sandbox"]
+            self.assertEqual(len(said), 1, said)
+            self.assertIn("lane a cannot run", said[0])
+            self.assertIn("the deny-read list", said[0])
+
+    def test_a_sandbox_refused_for_its_patterns_names_the_deny_write_patterns(self):
+        self.refusing_srt("any('[' in x for x in settings['filesystem']['denyWrite'])")
+        tid = self.desk.new_task("Add hello.txt")
+        Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["held"]["part"]), ("queued", "the deny-write patterns"), m)
+
+    def test_a_sandbox_that_keeps_what_git_needs_open_holds_the_task_and_names_the_path(self):
+        # the stand-in srt answers the write check with one more deny, of a new file in the worktree's own git
+        # folder, as a deny pattern read otherwise than meant would keep it: the sandbox starts, and git add would fail
+        from hansa import run
+        srt = self.tmp / "bin" / "srt"
+        srt.write_text(srt.read_text().replace("EXTRA_DENY = []", "EXTRA_DENY = ['**/worktrees/a/.hansa-try']", 1))
+        tid = self.desk.new_task("Add hello.txt")
+        Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=self.desk.worktrees_dir / "a"))
+        self.assertEqual(m["state"], "queued", m)  # held, not failed
+        self.assertEqual(m["held"]["part"], f"the deny-write patterns keep what git needs open: {own}/.hansa-try")
+        self.assertEqual(m.get("attempts", []), [])
+        self.assertEqual(self.events("task_started"), [])
+        self.assertFalse((own / ".hansa-try").exists())
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("UNABLE TO RUN", shown)
+        self.assertIn("sandbox starts, but the deny-write patterns keep what git needs open", shown)
+        # a design session's try writes its branch's ref's .lock and a new file in objects/ too
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
+        common = run.git_folders(dwt)[0]
+        self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:],
+                         [common / "refs" / "heads" / "task" / "t0002.lock", common / "objects" / ".hansa-try"])
+
+    def test_a_sandbox_whose_patterns_do_not_keep_a_new_name_holds_the_task_and_names_the_path(self):
+        # the stand-in srt reads the deny patterns as macOS does: here one that matches nothing, as a class of more
+        # than 15 elements does, stands in for those that keep new names next to the worktree's own folder
+        from hansa import run
+        real = run.others_than
+        unkept = lambda folder, names: [p if Path(folder).name != "worktrees" or "[" not in p
+                                        else p[:p.rindex("[")] + "[" + "0123456789abcdefg" + "]*" for p in real(folder, names)]
+        with unittest.mock.patch("hansa.run.others_than", unkept):
+            tid = self.desk.new_task("Add hello.txt")
+            Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        common, own = run.git_folders(self.desk.worktrees_dir / "a")
+        self.assertEqual(m["state"], "queued", m)  # held, not failed
+        self.assertEqual(m["held"]["part"], f"the deny-write patterns do not keep {common / 'worktrees' / 'ax'}")
+        self.assertEqual(m.get("attempts", []), [])
+        self.assertEqual(self.events("task_started"), [])
+        self.assertIn("sandbox starts, but the deny-write patterns do not keep", views.status_text(views.status(self.desk)))
+        # with the patterns hansa makes, the same try passes and the task runs
+        run.SANDBOX_TRIES.clear()
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        # what a try writes that must be kept: a new file atop the common folder, and the names next to the open
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
+        common, own = run.git_folders(dwt)
+        heads = common / "refs" / "heads"
+        self.assertEqual(run.git_needs_kept(dwt, "task/t0002"),
+                         [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x", heads / "task" / "t0002x",
+                          heads / ".hansa-try-kept"])
+        self.assertEqual(run.git_needs_kept(self.repo), [])  # a main checkout: no patterns to try
+
+    def test_the_sandbox_try_is_kept_by_its_settings_and_a_held_task_starts_once_one_passes(self):
+        from hansa import run
+        flag = self.tmp / "refuse"
+        flag.write_text("")
+        self.refusing_srt(f"os.path.exists({str(flag)!r}) and settings['filesystem']['denyRead']")
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        tried = len(self.srt_calls(sandbox=True))
+        self.assertGreater(tried, 0)
+        d.tick()
+        self.assertEqual(len(self.srt_calls(sandbox=True)), tried)  # the same settings: not tried again
+        s = self.desk.settings()
+        s["lanes"]["a"]["network"] = ["example.org"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        d.tick()  # changed: tried again
+        self.assertGreater(len(self.srt_calls(sandbox=True)), tried)
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        flag.unlink()  # fixed; then a restart tries again, and the held task starts by itself
+        run.SANDBOX_TRIES.clear()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(run.sandbox_held(self.desk), {})
+        self.assertIn("free", views.status_text(views.status(self.desk)))
+        tried = len(self.srt_calls(sandbox=True))
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt again"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(len(self.srt_calls(sandbox=True)), tried)  # the lane's next task: the same settings
+
+    def sandbox_start_run(self, how: str, wait: str):
+        """A worker on mimo whose session record shows a Bash call whose sandbox could not start (FAKE_SANDBOX_START)."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_SANDBOX_START": how, "FAKE_SANDBOX_WAIT": wait}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        return self.desk.new_task("Add hello.txt")
+
+    def test_a_run_whose_sandbox_cannot_start_is_stopped_and_its_task_held_without_a_try(self):
+        from hansa import alert, run
+        with unittest.mock.patch("hansa.alert.command", lambda s: "true"):
+            tid = self.sandbox_start_run("first", "30")
+            d = Dispatcher(self.desk)
+            end = time.time() + 20
+            while time.time() < end:
+                d.tick()
+                m = self.desk.meta(tid)
+                if m["state"] == "queued" and m.get("held"):
+                    break
+                time.sleep(0.1)
+            self.assertEqual(m["state"], "queued", m)
+            self.assertEqual(m["held"]["why"], "the sandbox could not start: sandbox-exec: sandbox_apply: Invalid argument")
+            self.assertEqual(m.get("attempts", []), [])  # not counted as a try
+            self.assertEqual(len(m.get("earlier_runs") or []), 1)  # but what it used still counts
+            self.assertFalse(run.alive(m.get("pid")))
+            self.assertIn("a", run.sandbox_held(self.desk))
+            d.tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not started again while held
+            self.assertEqual(len([x for x in alert.queued(self.desk) if x["kind"] == "sandbox"]), 1)
+
+    def test_a_run_whose_sandbox_fails_after_a_call_that_succeeded_is_left_running(self):
+        tid = self.sandbox_start_run("after-ok", "1.5")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(m.get("held"))
+
+    def test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should(self):
+        # srt itself (installed on GitHub's macOS machines, with HANSA_TESTS_NEED_SRT=1); elsewhere it skips
+        from hansa import run
+        need = os.environ.get("HANSA_TESTS_NEED_SRT") == "1"
+
+        def skip(why):
+            if need:
+                self.fail(f"{why}, and HANSA_TESTS_NEED_SRT=1 says the real sandbox must be tried")
+            self.skipTest(why)
+        path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
+                               if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
+        srt = shutil.which("srt", path=path)
+        if not srt:
+            skip("srt is not installed")
+
+        def in_srt(make, *argv):  # make: the settings, given the temporary folder of the run
+            t = tempfile.mkdtemp(dir=self.tmp)
+            f = Path(t) / "settings.json"
+            f.write_text(json.dumps(make(t)))
+            return subprocess.run([srt, "--settings", str(f), "--", *argv], cwd=t, capture_output=True, text=True,
+                                  env={**os.environ, "PATH": path, "TMPDIR": t, "CLAUDE_CODE_TMPDIR": t}, timeout=120)
+        r = in_srt(lambda t: {"network": {"allowedDomains": [], "deniedDomains": []},
+                              "filesystem": {"allowWrite": run.full_paths([t]), "denyRead": [], "denyWrite": []}},
+                   "/usr/bin/true")
+        if r.returncode:
+            skip(f"no sandbox can be applied here (inside one already?): srt said {(r.stderr or r.stdout).strip()[:200]}")
+        for i in range(3):  # several linked worktrees
+            sh("git", "worktree", "add", "-q", "-b", f"task/t09{i}", str(self.tmp / f"other{i}"), cwd=self.repo)
+        s = self.desk.settings()
+        lane = s["lanes"]["a"]
+        p = s["providers"][lane["providers"][0]]
+        wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))  # its branch, task/t0002, has a folder
+        worker = run.sandbox_settings(self.desk, lane, "claude", p, wt)["sandbox"]
+        design = run.design_sandbox(self.desk, lane, "claude", p, dwt, "task/t0002", mac=True)["sandbox"]
+        common = run.git_folders(wt)[0].resolve()
+        heads = common / "refs" / "heads"
+        kept_all = [common / "worktrees" / "other0" / "new", common / "config", common / "hooks" / "new",
+                    common / "commondir", common / "zz", common / "-x", common / "9x", heads / "intruder",
+                    common / "worktreesb", common / "Worktrees_"]  # new files atop the common folder, for every role
+
+        def next_to(folder, name):  # the names next to an open one: longer, with a capital, a - or a _
+            return [folder / f"{name}{x}" for x in ("b", "B", "-", "_", "9")] + [folder / f"{name[:-1]}-"]
+        for name, box, w, branch in (("worker", worker, wt, ""), ("verifier", worker, wt, ""),
+                                     ("design session", design, dwt, "task/t0002")):
+            settings = functools.partial(run.sandbox_try_settings, box, w)
+            r = in_srt(settings, "/usr/bin/true")
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stderr or r.stdout}")
+            own = Path(run.git_folders(w)[1]).resolve()
+            opened = [own / "index", own / "new-file", *[Path(x) for x in run.git_needs_open(w, branch)]]
+            kept = [*kept_all, *next_to(common / "worktrees", own.name)]
+            if branch:
+                ref = heads / branch
+                opened += [ref, ref.parent / f"{ref.name}.lock", common / "objects" / "new-file"]
+                kept += [*next_to(ref.parent, ref.name), ref.parent / f"{ref.name}.lockx", heads / "taskb",
+                         heads / "task" / "t0003"]
+            else:
+                kept += [heads / "task" / "new", common / "objects" / "new"]
+            script = Path(tempfile.mkdtemp(dir=self.tmp)) / "writes.sh"
+            kept += [Path(x) for x in run.git_needs_kept(w, branch)]
+            script.write_text(run.git_open_try(opened, kept))
+            r = in_srt(settings, "/bin/sh", str(script))
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stderr}")
+            said = r.stdout.splitlines()
+            self.assertEqual([x for x in said if x.startswith("refused: ")], [], f"{name}: kept what git needs open")
+            self.assertEqual([x for x in said if x.startswith("not kept: ")], [], f"{name}: left open what it keeps")
+            # and hansa's own try of this sandbox passes
+            with unittest.mock.patch.dict(os.environ, {"PATH": path}):
+                self.assertEqual(run.try_sandbox(box, w, branch), {"ok": True}, name)
+            for x in kept:
+                self.assertFalse(x.exists() and x not in (common / "config",), (name, x))
 
     def test_a_workers_sandbox_keeps_the_common_git_folder_and_other_worktrees_folders(self):
         from hansa import run
