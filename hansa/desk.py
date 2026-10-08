@@ -41,6 +41,21 @@ import unicodedata
 from pathlib import Path
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+ANSWER_WORDS = ("yes", "no")  # hansa release yes|no ID CODE is an answer, so no lane takes these names
+
+
+def answer_name(name) -> bool:
+    return isinstance(name, str) and name.strip().lower() in ANSWER_WORDS
+
+
+def answer_names(old: dict, new: dict) -> list:
+    """A lane newly named yes or no (any case): refused; one a desk had before is left for the principal to remove."""
+    had = old.get("lanes") if isinstance(old.get("lanes"), dict) else {}
+    lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
+    return [f"lane {n}: yes and no (in any case) are not lane names, as hansa release yes|no ID CODE answers a "
+            "release" for n in lanes if answer_name(n) and n not in had]
+
+
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # either case: npm_config_cache and http_proxy are ordinary names
 # A host a lane's workers may reach during a task: registry.npmjs.org, *.pypi.org, localhost:3000
 LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -1975,7 +1990,7 @@ class Desk:
             # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
             page = by == "page" and new.get("lanes") == old.get("lanes")
             problems = (validate(new, self.root, page=page) + self.keys_in_release(old, new)
-                        + self.keys_in_alert(old, new))
+                        + self.keys_in_alert(old, new) + answer_names(old, new))
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))

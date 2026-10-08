@@ -60,6 +60,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
 | `hansa release --stop ID ["<reason>"]` | call release ID off: one not started yet is closed as stopped; a running one's command gets TERM, then KILL 30 s later, and is recorded as stopped (the server may be left half-switched) |
 | `hansa release L [TARGET] ["<note>"]` | ask for a release of lane L's base branch as it is now, by one of its release targets (TARGET is needed when the lane has more than one): hansa runs that target's command after the principal's yes on the page (see Releasing). `hansa release` alone lists the open and recent releases |
+| `hansa release yes\|no ID CODE [reason]` | pass on the principal's answer to release ID, said in the conversation with the one-time code of their alert (see Releasing); never guess a code |
 | `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `hansa verify <id> ["what to look at"] [--lane L] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged. It runs on the task's own lane unless `--lane L` puts it on another lane on the same repository |
@@ -323,6 +324,18 @@ to a public repository, a deploy to production) waits for the principal:
   release the principal said yes to runs: a listed lane's waits until it is
   resumed. Tell the principal in the conversation that it waits. A new
   request for the same target replaces one still waiting.
+- The principal answers on the page, or in the conversation with the
+  one-time code their alert carries (6 characters; only when they have an
+  alert command: without one, the page alone answers, and `hansa status` and
+  `hansa explain` say which). When the principal gives you a code, pass it:
+  `hansa release yes ID CODE`, or `hansa release no ID CODE [reason]` to
+  refuse. The code is one word (dashes allowed, no spaces): a yes with a
+  word too many is refused, and nothing is counted. It answers that release only, once; a wrong one is refused and
+  counted, and after 3 the code is void and only the page answers. It lapses
+  when the release is answered, stopped or no longer what was asked, after
+  24 hours, or when a new alert for it brings a new one. Never guess a code,
+  and never ask the principal to send it anywhere else: it travels only in
+  their alert.
 - Only after the yes does `hansa serve` run the command: in the lane's
   repository at that commit, as the desk's account, outside the sandbox, with
   hansa's own environment (not the lane's env), the target's minutes (else the
