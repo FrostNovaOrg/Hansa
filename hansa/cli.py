@@ -805,6 +805,27 @@ def _stop_release(desk: Desk, a) -> None:
         + ". The server may be left half-switched: hansa release shows its last lines"))
 
 
+def _answer_by_code(desk: Desk, a) -> None:
+    """hansa release yes|no ID CODE [reason]: the principal's answer, said in the conversation with the one-time code
+    of their alert, passed on."""
+    rid, rest = int(a.note[0].lstrip("#")), list(a.note[1:])
+    if not rest:
+        raise SystemExit(f"hansa: pass the code the principal said in the conversation: hansa release {a.lane} {rid} "
+                         "CODE. Never guess one; without it, the principal answers on the page. Nothing was changed")
+    yes = a.lane == "yes"
+    out = release.answer_by_code(desk, rid, yes, rest[0], " ".join(rest[1:]))  # by the coordinator, for the principal
+    if not out["ok"]:
+        raise SystemExit("hansa: " + desk.redact("; ".join(out["problems"])) + ".")
+    r = release.get(desk, rid) or {}
+    if not yes:
+        print(desk.redact(f"release #{rid} of {release.what(r)} is refused, as the principal said with the code of "
+                          "their alert; nothing runs. Do not push or deploy it yourself"))
+        return
+    print(desk.redact(f"release #{rid} of {release.what(r)} is approved, as the principal said with the code of their "
+                      f"alert (recorded as given through you); {release.waits_text(desk, desk.settings(), r)}. hansa "
+                      "tells you when it ends"))
+
+
 def cmd_pause(a):
     Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
     print("paused: no new tasks start until `hansa resume`; running tasks finish")
@@ -883,6 +904,10 @@ def cmd_release(a):
     if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
         raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
                          "cannot. Say in your report that it may be ready to go out")
+    if a.lane in ("yes", "no") and a.note and a.note[0].lstrip("#").isdigit() \
+            and a.lane not in desk.settings()["lanes"]:
+        _answer_by_code(desk, a)
+        return
     note, target = list(a.note), None
     if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
         target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
@@ -2130,6 +2155,15 @@ def main(argv=None):
                      "told (release_stopped). A stopped release went out for no --after. A stopped install may leave "
                      "the server half-switched: a release command for which that matters should handle TERM (finish "
                      "or undo the step it is in)")
+    p.epilog = ("hansa release yes ID CODE, hansa release no ID CODE [reason]: the principal's answer to release ID, "
+                "said in the conversation with the one-time code that only the principal's alert carries (6 "
+                "characters, no 0/O or 1/I/l). hansa checks it against release ID only; a right code answers it once, "
+                "recorded as the principal's answer given through the coordinator (channel code); a wrong one is "
+                f"refused and counted, and after {release.CODE_TRIES} the code is void and only the page answers. A "
+                f"code lapses when the release is answered (on the page too), stopped or no longer what was asked, after "
+                f"{release.CODE_LIFE // 3600} hours, and when a new waiting alert for it gives a new one. With no alert "
+                "command there is no code: the principal answers on the page. Never guess a code, nor ask the "
+                "principal to send it anywhere else")
     p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("lane", nargs="?")

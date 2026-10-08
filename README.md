@@ -485,7 +485,20 @@ page gives.
   entries back in as they are now, or unticking and ticking it again, then
   Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
   target taken out and set again with the same command and `--after` keeps its
-  tick. hansa serve runs the
+  tick. The principal answers in one of two ways: on the page, or by saying
+  in the conversation the one-time code that comes with the alert for that
+  release (6 characters, no look-alikes), which the coordinator passes on
+  with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only
+  in the principal's alert: hansa keeps only a keyed hash of it (the key is in
+  the desk's `secrets/`, which no agent may read), takes it out of what it
+  keeps of the alert's run, and never writes it in events, the release's
+  record, `hansa status`, `hansa release` or the page, which says only whether
+  a code went out and when. It answers that release only, once, and is
+  recorded as the principal's answer given through the coordinator (channel
+  `code`); three wrong codes void it, and it lapses when the release is
+  answered, stopped or no longer what was asked, after 24 hours, or when a new
+  alert for the release brings a new one. With no alert command there is no
+  code: the page alone answers. hansa serve runs the
   command only then, and only while the base branch and the command are still
   what the principal saw (else the request is void and the coordinator asks
   again): in the lane's repository at that commit, as the desk's account,

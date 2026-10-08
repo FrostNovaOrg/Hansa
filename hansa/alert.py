@@ -18,7 +18,9 @@ line saying how many were held back. An entry of the queue that cannot be read i
 (event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
 only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
-there is no retry: the next alert tries again. The text is in English: the page has no language setting (it
+there is no retry: the next alert tries again. A
+release_waiting alert carries the release's one-time code (release.new_code), which goes nowhere else: its queue
+entry is gone once sent, and the code is taken out of what is kept of the run. The text is in English: the page has no language setting (it
 follows the browser's language, which hansa does not know when it sends).
 """
 from __future__ import annotations
@@ -98,20 +100,25 @@ def _clean(desk: Desk) -> list:
     return good
 
 
-def add(desk: Desk, kind: str, text: str) -> bool:
-    """Queue an alert for the next run; False (nothing queued) when no alert command is set."""
+def add(desk: Desk, kind: str, text: str, code: str = "", release=None) -> bool:
+    """Queue an alert for the next run; False (nothing queued) when no alert command is set. code: the one-time
+    code of release `release` the text holds (it replaces one queued before for that release, now void); the entry
+    goes once it is sent, and the code is taken out of what is kept of the run."""
     if not command(desk.settings()):
         return False
     with desk.lock():
         q = _clean(desk)
-        q.append({"kind": kind, "text": desk.redact(text), "at": time.time()})
+        if code:
+            q = [x for x in q if not (x.get("code") and x.get("release") == release)]
+        q.append({"kind": kind, "text": desk.redact(text), "at": time.time(),
+                  **({"code": code, "release": release} if code else {})})
         desk.state_dir.mkdir(exist_ok=True)
         write_json(queue_file(desk), q)
     return True
 
 
 # -- what is alerted -------------------------------------------------------------------------------------------------
-def _release_text(desk: Desk, rid, waiting: bool) -> str:
+def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
     from . import release
     r = release.get(desk, rid)
     if not r:
@@ -119,8 +126,11 @@ def _release_text(desk: Desk, rid, waiting: bool) -> str:
     target = r.get("target") or ""  # "": the lane's one unnamed target, its release command
     head = (f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} "
             f"({r.get('base')} at {str(r.get('commit') or '')[:10]})")
-    if waiting:
-        return (f"{head} waits for your yes on the page: {r.get('count', 0)} commit(s), command: {r.get('command')}"
+    if waiting:  # the code first, so that no cut of a long text takes it
+        return (f"{head} waits for your yes on the page"
+                + (f", or say code {code} to the coordinator in the conversation (it answers this release only, once, "
+                   f"for {release.CODE_LIFE // 3600} hours; send it nowhere else)" if code else "")
+                + f": {r.get('count', 0)} commit(s), command: {r.get('command')}"
                 + (f"; note: {r['note']}" if r.get("note") else ""))
     return f"{head}: {release.state_text(desk, r)}"
 
@@ -128,7 +138,12 @@ def _release_text(desk: Desk, rid, waiting: bool) -> str:
 def from_event(desk: Desk, kind: str, fields: dict) -> None:
     """Queue the alert an event calls for, if any (Desk.event calls this)."""
     if kind == "release_asked" and fields.get("state") == "waiting" or kind == "release_waits":
-        add(desk, "release_waiting", _release_text(desk, fields.get("id"), True))
+        from . import release
+        rid = fields.get("id")
+        if not command(desk.settings()):  # no alert command: no code; the page answers
+            return
+        code = release.new_code(desk, rid)  # a new one each time it waits: one made before is void
+        add(desk, "release_waiting", _release_text(desk, rid, True, code), code=code, release=rid)
     elif kind in ("release_ended", "release_void", "release_forbidden"):
         add(desk, "release_ended", _release_text(desk, fields.get("id"), False))
     elif kind == "release_stopped" and fields.get("by") != "page":  # the principal knows of their own Stop
@@ -148,6 +163,7 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
 def text_of(desk: Desk, items: list, held: int = 0) -> str:
     """What the command reads on its standard input: one line per alert, keys removed, cut at MOST_TEXT characters.
     held: how many of them the limit of MOST_RUNS runs an hour held back."""
+    items = sorted(items, key=lambda x: not x.get("code"))  # those holding a code first: no cut takes it
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
     head = f"[hansa] desk {desk.root.name}"
     if held:
@@ -260,16 +276,38 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             q = _clean(desk)
             write_json(queue_file(desk), [])
         cmd = command(desk.settings())
+        codes = [x for x in q if isinstance(x.get("code"), str) and x["code"]]
         if not cmd or not q:  # cleared since they were queued: nothing to send them with
+            _codes_went(desk, codes, "", False)
             return None
         held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
         held = len(q) if held_since else 0
         if held_since:
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
-        result = run(desk, cmd, kinds, text_of(desk, q, held), timeout)
+        text = text_of(desk, q, held)
+        result = run(desk, cmd, kinds, text, timeout)
+        result["tail"] = [_hide(x, codes) for x in result["tail"]]  # what the command wrote back may echo a code
+        _codes_went(desk, codes, text, result["ok"])
         _record(desk, result, len(q), t)
         return result
+
+
+def _hide(line: str, codes: list) -> str:
+    for x in codes:
+        line = line.replace(x["code"], "[code]").replace(x["code"].lower(), "[code]")
+    return line
+
+
+def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
+    """Record on each release whether its code went out; one that did not (no command to send it with, or cut from
+    the text) is void: the page answers that release."""
+    from . import release
+    for x in codes:
+        if x["code"] in text:
+            release.code_sent(desk, x.get("release"), x["code"], ok)
+        else:
+            release.code_unsent(desk, x.get("release"), x["code"])
 
 
 def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
@@ -339,8 +377,11 @@ def explain_line(s: dict) -> str:
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
     if not cmd:
         return ("Alerts: no alert command is set. The principal may set one on the page, which hansa runs when a "
-                "release waits for the principal or ends, or a request is filed; you send no alerts and cannot set it.")
+                "release waits for the principal or ends, or a request is filed; you send no alerts and cannot set it. "
+                "With none, no release gets a one-time code: the principal approves releases on the page only.")
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
             "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, or hansa serve finishes no "
-            "round for a long time. You send no alerts and cannot set it.")
+            "round for a long time. You send no alerts and cannot set it. A release waiting for the principal gets a "
+            "one-time code that only that alert carries: the principal answers on the page, or says the code in the "
+            "conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). Never guess one.")

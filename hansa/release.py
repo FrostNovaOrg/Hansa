@@ -11,7 +11,8 @@ from the commit, on no remote-tracking branch of the repository and not in that 
 out) and the files they change. Before the request waits for the principal, the command line, the lines those commits add,
 the names of the files they add or change, and their messages are checked against the principal's
 release_forbidden words; a hit refuses it. The principal answers on the page (Release, or Refuse with a
-reason); a target on the principal's releases_without_asking list needs no answer while it is what the list
+reason), or says in the conversation the one-time code their alert carried, which the coordinator passes on
+(hansa release yes|no ID CODE: see answer_by_code); a target on the principal's releases_without_asking list needs no answer while it is what the list
 recorded when the page saved it, and while the desk is not paused. hansa serve runs an approved
 release in the lane's repository, as the desk's account, outside the sandbox, with hansa's own environment (not
 the lane's env) and the target's time limit (else the lane's timeout_min), and only while the base branch and the
@@ -40,9 +41,11 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -485,7 +488,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
         for x in rs:
             if x.get("lane") == lane and (x.get("target") or "") == target and x.get("state") == "waiting":
                 x.update(state="void", void=f"replaced by release #{r['id']}", void_zh=f"被发布 #{r['id']} 取代",
-                         ended=now())
+                         ended=now(), **spent(x, f"replaced by release #{r['id']}"))
                 replaced.append(x["id"])
     rs.append(r)
     _write(desk, rs)
@@ -527,7 +530,8 @@ def stale(desk: Desk, s: dict, r: dict, zh: bool = False) -> str:
 
 def void(desk: Desk, rid, why: str, states=("waiting", "approved"), why_zh: str = "") -> dict | None:
     r = change(desk, rid, lambda x: {"state": "void", "void": why, **({"void_zh": why_zh} if why_zh else {}),
-                                     "ended": now()} if x.get("state") in states else None)
+                                     "ended": now(), **spent(x, "the release became void")}
+               if x.get("state") in states else None)
     if r:
         desk.event("release_void", id=rid, lane=r.get("lane"), target=r.get("target") or "", why=why)
     return r
@@ -545,22 +549,177 @@ def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", comma
             return {"ok": False, "problems": [f"release #{rid} is not waiting for an answer: it is {r.get('state')}"]}
         if commit != r.get("commit") or (command is not None and command != r.get("command")):
             return {"ok": False, "problems": [f"release #{rid} is not what this page shows; reload the page"]}
-        reason = desk.redact(str(reason or "").strip())[:2000]
-        if not yes:
-            change(desk, rid, lambda x: {"state": "refused", "reason": reason, "answered": now(), "answered_by": by,
-                                         "ended": now()})
-            desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=False,
-                       reason=reason, by=by)
-            return {"ok": True}
-        why = stale(desk, desk.settings(), r)
-        if why:
-            void(desk, rid, why, ("waiting",), stale(desk, desk.settings(), r, zh=True))
-            return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}. Nothing was run; the "
-                                                           "coordinator is told, and asks again"]}
-        change(desk, rid, lambda x: {"state": "approved", "answered": now(), "answered_by": by,
-                                     **({"reason": reason} if reason else {})})
-        desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=True, by=by)
+        return _answered(desk, r, yes, reason, by)
+
+
+def _answered(desk: Desk, r: dict, yes: bool, reason: str, by: str, channel: str = "") -> dict:
+    """Under the desk lock: record the principal's answer to a waiting release (channel "code": given through the
+    coordinator with the one-time code of the principal's alert); its code lapses either way."""
+    rid = r["id"]
+    reason = desk.redact(str(reason or "").strip())[:2000]
+    said = {"answered": now(), "answered_by": by, **({"channel": channel} if channel else {}),
+            **spent(r, "the release was answered")}
+    how = {"by": by, **({"channel": channel} if channel else {})}
+    if not yes:
+        change(desk, rid, lambda x: {"state": "refused", "reason": reason, **said, "ended": now()})
+        desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=False,
+                   reason=reason, **how)
+        return {"ok": True}
+    why = stale(desk, desk.settings(), r)
+    if why:
+        void(desk, rid, why, ("waiting",), stale(desk, desk.settings(), r, zh=True))
+        return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}. Nothing was run; the "
+                                                       "coordinator is told, and asks again"]}
+    change(desk, rid, lambda x: {"state": "approved", **said, **({"reason": reason} if reason else {})})
+    desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=True, **how)
     return {"ok": True}
+
+
+# -- the one-time code of the principal's alert --------------------------------------------------------------------
+# A release that waits for the principal gets a code, which travels only in the principal's alert (alert.py): the
+# principal may say it in the conversation, and the coordinator passes it on (hansa release yes|no ID CODE). hansa
+# keeps only an HMAC of it (the release's number and the code), keyed with a key in the desk's secrets/, which no
+# agent may read. It answers that release only, once, while it waits as it was asked, for CODE_LIFE seconds; a new
+# waiting alert for the release makes a new one; CODE_TRIES wrong codes void it (then only the page answers).
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no look-alikes: no 0/O, 1/I/l
+CODE_LENGTH = 6
+CODE_LIFE = 24 * 3600
+CODE_TRIES = 3
+
+
+def code_key_file(desk: Desk) -> Path:
+    return desk.secrets_dir / "release-code.hmac"  # not *.key: no provider's key, so never looked for in text
+
+
+def _code_key(desk: Desk) -> bytes:
+    f = code_key_file(desk)
+    if not f.is_file():
+        desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
+        tmp = f.with_name(f.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(secrets.token_hex(32))
+        os.replace(tmp, f)
+    return f.read_text().strip().encode()
+
+
+def _code_hash(desk: Desk, rid, code: str) -> str:
+    return hmac.new(_code_key(desk), f"release {rid}: {code}".encode(), hashlib.sha256).hexdigest()
+
+
+def plain_code(code: str) -> str:
+    """A code as the principal may say it: any case, with spaces or dashes."""
+    return re.sub(r"[\s-]", "", str(code or "")).upper()
+
+
+def new_code(desk: Desk, rid) -> str:
+    """A new one-time code for a release waiting for the principal (one made before is void); '' when it does not
+    wait. Only its HMAC is kept."""
+    while True:  # a code of digits alone could be read in a time or a count
+        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
+        if not code.isdigit():
+            break
+    digest = _code_hash(desk, rid, code)
+    r = change(desk, rid, lambda x: {"code": {"hash": digest, "made": now(), "wrong": 0}}
+               if x.get("state") == "waiting" else None)
+    return code if r else ""
+
+
+def code_sent(desk: Desk, rid, code: str, ok: bool) -> None:
+    """Record that the alert holding a release's code went out (ok: the command exited 0), if it is still its code;
+    a code that did not go out at all (cut from the text) is void."""
+    digest = _code_hash(desk, rid, code)
+
+    def sent(x):
+        c = x.get("code") or {}
+        if not c.get("hash") or not hmac.compare_digest(c["hash"], digest):
+            return None
+        return {"code": {**c, "sent": now(), "sent_ok": bool(ok)}}
+    change(desk, rid, sent)
+
+
+def code_unsent(desk: Desk, rid, code: str) -> None:
+    """A release's code that never went out in an alert is void, if it is still its code."""
+    digest = _code_hash(desk, rid, code)
+    change(desk, rid, lambda x: spent(x, "it did not go out in the alert")
+           if hmac.compare_digest((x.get("code") or {}).get("hash") or "", digest) else None)
+
+
+def spent(r: dict, why: str) -> dict:
+    """The fields that void a release's live code (its hash dropped), with why; {} when it has none."""
+    c = r.get("code") or {}
+    if not c.get("hash"):
+        return {}
+    return {"code": {**{k: v for k, v in c.items() if k != "hash"}, "void": why, "void_at": now()}}
+
+
+def code_live(r: dict) -> bool:
+    c = r.get("code") or {}
+    return (r.get("state") == "waiting" and bool(c.get("hash")) and not c.get("void")
+            and time.time() - (c.get("made") or 0) < CODE_LIFE and (c.get("wrong") or 0) < CODE_TRIES)
+
+
+def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: str = "coordinator") -> dict:
+    """The principal's answer given in the conversation with the one-time code of their alert, passed on by the
+    coordinator: checked against this release's code only. A right code answers it (recorded as given through the
+    coordinator, channel "code") and lapses; a wrong one is counted, and CODE_TRIES of them void the code."""
+    from .alert import command as alert_command
+    with desk.lock():
+        s = desk.settings()
+        r = get(desk, rid)
+        if not r:
+            return {"ok": False, "problems": [f"there is no release #{rid}"]}
+        if r.get("state") != "waiting":
+            return {"ok": False, "problems": [f"release #{rid} is not waiting for an answer: it is {r.get('state')}; "
+                                              "its code, if it had one, has lapsed"]}
+        c = r.get("code") or {}
+        if not alert_command(s) and not c.get("hash"):
+            return {"ok": False, "problems": ["the principal has set no alert command, so no code is sent: approval "
+                                              f"of release #{rid} is on the page only"]}
+        if not c.get("hash"):
+            why = c.get("void") or "no code was sent for it"
+            tries = " (only the page answers it now)" if (c.get("wrong") or 0) >= CODE_TRIES else ""
+            return {"ok": False, "problems": [f"release #{rid} has no live code ({why}){tries}: approval is on the "
+                                              "page"]}
+        if time.time() - (c.get("made") or 0) >= CODE_LIFE:
+            change(desk, rid, lambda x: spent(x, f"older than {CODE_LIFE // 3600} hours"))
+            return {"ok": False, "problems": [f"the code of release #{rid} has lapsed (it is older than "
+                                              f"{CODE_LIFE // 3600} hours): approval is on the page"]}
+        why = stale(desk, s, r)
+        if why:  # no longer what the principal was alerted of
+            void(desk, rid, why, ("waiting",), stale(desk, s, r, zh=True))
+            return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}; its code has lapsed. "
+                                                           "Nothing was run; ask again"]}
+        if not hmac.compare_digest(c["hash"], _code_hash(desk, rid, plain_code(code))):
+            wrong = (c.get("wrong") or 0) + 1
+            gone = wrong >= CODE_TRIES
+            change(desk, rid, lambda x: {"code": {**(x.get("code") or {}), "wrong": wrong}}
+                   if not gone else {"code": {**spent(x, f"{CODE_TRIES} wrong codes")["code"], "wrong": wrong}})
+            desk.event("release_code_wrong", id=rid, lane=r.get("lane"), target=r.get("target") or "", wrong=wrong,
+                       void=gone)
+            return {"ok": False, "problems": [
+                f"that is not the code of release #{rid}; after {CODE_TRIES} wrong codes it is void, so only the page "
+                "answers it now" if gone else
+                f"that is not the code of release #{rid} ({wrong} of {CODE_TRIES} wrong; at {CODE_TRIES} it is void "
+                "and only the page answers it)"]}
+        return _answered(desk, r, yes, reason, by, channel="code")
+
+
+def code_text(r: dict, zh: bool = False) -> str:
+    """For the page and hansa status: whether a waiting release's code went out in the principal's alert, and when;
+    never the code itself."""
+    c = r.get("code") or {}
+    if not c:
+        return ""
+    if not code_live(r):
+        why = c.get("void") or (f"超过 {CODE_LIFE // 3600} 小时" if zh else f"older than {CODE_LIFE // 3600} hours")
+        return f"一次性码已作废（{why}）：只能在网页上回答" if zh else f"its one-time code is void ({why}): answer it on the page"
+    if c.get("sent"):
+        ok = c.get("sent_ok")
+        return (f"一次性码在 {when(c['sent'])} 随提醒发出" + ("" if ok else "（提醒命令报了失败）") if zh else
+                f"a one-time code went out in the principal's alert {when(c['sent'])}"
+                + ("" if ok else " (the alert command reported a failure)"))
+    return "一次性码在等提醒发出" if zh else "a one-time code waits to go out in the principal's alert"
 
 
 def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
@@ -582,7 +741,8 @@ def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
                                               f"{STOP_GRACE} seconds of its TERM"]}
         asked = {"stop_asked": now(), "stopped_by": by, "stop_reason": reason}
         ended = st in ("waiting", "approved")
-        change(desk, rid, lambda x: {**asked, "state": "stopped", "ended": now()} if ended else asked)
+        change(desk, rid, lambda x: {**asked, "state": "stopped", "ended": now(), **spent(x, "the release was stopped")}
+               if ended else asked)
     if ended:
         desk.event("release_stopped", id=rid, lane=r.get("lane"), target=r.get("target") or "", by=by, reason=reason,
                    ran=False)
@@ -970,15 +1130,23 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
 def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> str:
     """A release's state in words (zh: in Chinese, for the page)."""
     st = r.get("state")
+    coded = r.get("channel") == "code"
     if st == "waiting":
-        return "等你在网页上点头" if zh else "waiting for the principal's yes on the page"
+        code = code_text(r, zh)
+        if zh:
+            return "等你在网页上点头" + (f"，或在对话里把提醒里的一次性码告诉协调者（{code}）" if code_live(r) else
+                                       f"（{code}）" if code else "")
+        return "waiting for the principal's yes on the page" + (
+            f", or the one-time code of their alert said in the conversation ({code})" if code_live(r) else
+            f" ({code})" if code else "")
     if st == "approved":
         if zh:
             how = ("不用问你就发布（这个发布目标在你的清单上）" if r.get("without_asking")
-                   else f"你在 {when(r.get('answered'))} 点了头")
+                   else f"你在 {when(r.get('answered'))} 点了头" + ("（在对话里用提醒里的一次性码，经协调者）" if coded else ""))
             return f"{how}；{waits_text(desk, s or desk.settings(), r, zh=True)}"
         how = "released without asking (it is on the principal's list)" if r.get("without_asking") \
-            else f"the principal said yes {when(r.get('answered'))}"
+            else f"the principal said yes {when(r.get('answered'))}" + (
+                " (through the coordinator, with the one-time code of their alert)" if coded else "")
         return f"{how}; {waits_text(desk, s or desk.settings(), r)}"
     if st in ("starting", "running"):
         if r.get("stop_asked"):
@@ -1011,8 +1179,11 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
                 + (f": {r['problem']}" if r.get("problem") else "") + late)
     if st == "refused":
         if zh:
-            return f"你在 {when(r.get('answered'))} 拒绝了" + (f"：{r['reason']}" if r.get("reason") else "")
-        return f"refused by the principal {when(r.get('answered'))}" + (f": {r['reason']}" if r.get("reason") else "")
+            return (f"你在 {when(r.get('answered'))} 拒绝了" + ("（在对话里用提醒里的一次性码，经协调者）" if coded else "")
+                    + (f"：{r['reason']}" if r.get("reason") else ""))
+        return (f"refused by the principal {when(r.get('answered'))}"
+                + (" (through the coordinator, with the one-time code of their alert)" if coded else "")
+                + (f": {r['reason']}" if r.get("reason") else ""))
     if st == "void":
         return f"作废：{r.get('void_zh') or r.get('void')}；什么都没运行" if zh else f"void: {r.get('void')}; nothing was run"
     if st == "forbidden":
@@ -1129,7 +1300,11 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
                                      "answered",
                                      "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
                                      "named", "hits", "ended", "without_asking", "since_release", "fixed",
-                                     "stop_asked", "stopped_by", "stop_reason")}
+                                     "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel")}
+        c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash
+        row["code_sent"] = c.get("sent") if code_live(r) else None
+        waits = r.get("state") == "waiting"
+        row["code"], row["code_zh"] = (code_text(r), code_text(r, zh=True)) if waits else ("", "")
         row["runs"], row["runs_zh"] = runs_text(r), runs_text(r, zh=True)
         row["checked"] = r.get("checked", r.get("count"))
         row["what"], row["what_zh"] = state_text(desk, r, s), state_text(desk, r, s, zh=True)

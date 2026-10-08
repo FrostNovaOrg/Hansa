@@ -318,6 +318,7 @@ function releaseBlock(r) {
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
     h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs),
     r.moved ? h("div", {class:"bad"}, T.releaseMoved + ((ZH && r.moved_zh) || r.moved)) : null,
+    r.code ? h("div", {class:"muted"}, (ZH && r.code_zh) || r.code) : null,
     h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
     h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
     h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
