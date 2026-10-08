@@ -364,7 +364,9 @@ page gives.
   `npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
   `YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
   gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
-  `CCACHE_DIR`. A lane's env reaches the lane's commands, in the sandbox
+  `CCACHE_DIR`, uv `UV_CACHE_DIR`, poetry `POETRY_CACHE_DIR`, pipenv
+  `PIPENV_CACHE_DIR`, bun `BUN_INSTALL_CACHE_DIR`, deno `DENO_DIR`, NuGet
+  `NUGET_PACKAGES`, coursier `COURSIER_CACHE`. A lane's env reaches the lane's commands, in the sandbox
   (setup, check, preview, `hansa lane try` and the worker's Bash commands),
   not Claude Code and not hansa's own programs: srt, the scripts around a
   setup or check and Claude Code run with the server's environment, and the

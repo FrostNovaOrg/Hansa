@@ -551,7 +551,9 @@ here; work that needs code changed or a browser goes to a worker.
   `PIP_CACHE_DIR`; npm `npm_config_cache` (env names may be lower case); pnpm's store `npm_config_store_dir`;
   yarn `YARN_CACHE_FOLDER`; cargo `CARGO_HOME`; go `GOMODCACHE` and `GOCACHE`;
   gradle `GRADLE_USER_HOME`; maven `MAVEN_OPTS=-Dmaven.repo.local=...`; ccache
-  `CCACHE_DIR`.
+  `CCACHE_DIR`; uv `UV_CACHE_DIR`; poetry `POETRY_CACHE_DIR`; pipenv
+  `PIPENV_CACHE_DIR`; bun `BUN_INSTALL_CACHE_DIR`; deno `DENO_DIR`; NuGet
+  `NUGET_PACKAGES`; coursier `COURSIER_CACHE`.
   Where programs are installed: the Homebrew prefix (`/opt/homebrew`,
   `/home/linuxbrew/.linuxbrew`, wherever `brew` is), `/opt/local`, `/opt/X11`,
   `/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, and where
