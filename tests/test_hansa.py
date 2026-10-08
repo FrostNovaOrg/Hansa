@@ -331,6 +331,10 @@ def sh(*args, cwd):
     subprocess.run(args, cwd=cwd, check=True, capture_output=True)
 
 
+def sh_out(*args, cwd) -> str:
+    return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 
 @contextlib.contextmanager
 def as_home(home, **env):
@@ -379,8 +383,11 @@ class DeskTest(unittest.TestCase):
         path.start()
         self.addCleanup(path.stop)
         # not the Claude Code session the tests may run in: a stand-in (self.session) plays one where needed,
-        # and what hansa would post to an inbox is caught in a file (self.posts)
-        for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "HANSA_TASK"):
+        # and what hansa would post to an inbox is caught in a file (self.posts). Nor the hansa run they may run
+        # in (the suite run by a worker): its lane's env file, which its sandbox may keep the tests' runs from
+        # reading, and its task and desk, so the tests give inside a worker what they give in the lane's check
+        for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_ENV_FILE",
+                  "HANSA_TASK", "HANSA_DESK", "HANSA_ROLE"):
             os.environ.pop(k, None)
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
                           HANSA_NOTIFY_GATHER="0.5",
@@ -7192,7 +7199,7 @@ class DeskTest(unittest.TestCase):
         (home / ".cache").mkdir()
         (home / ".cache" / "ln").symlink_to(home / ".nvm")
         only = f"it is inside {home}, the home folder, where a write list may hold only plain folders"
-        hidden = [".zsh", ".bun", ".zcompdump", ".gitconfig.local", ".nvm", ".pyenv", ".p10k.zsh", ".m2", ".gradle",
+        hidden = [".zsh", ".bun", ".zcompdump", ".gitconfig.local", ".nvm", ".pyenv", ".p10k.zsh", ".gradle",
                   ".npm", ".local/share/pnpm", ".cargo/bin", ".config/x", ".local/bin", ".bun/install",
                   "work/.hidden", "work/plain/.venv/lib", "work/lz", ".cache/ln", "Applications", "Applications/X.app"]
         # a user's caches: shared with what runs outside the sandbox (an updater, corepack, the user's own builds)
@@ -7220,6 +7227,9 @@ class DeskTest(unittest.TestCase):
                         self.assertTrue(len(told) == 1 and "~/hansa-cache/<lane>/<tool>" in told[0], (system, told))
                         self.assertNotIn("can be listed)", told[0].replace("nothing in it can be listed", ""))
             self.refused_and_left_out(home / "node_modules", "a folder node loads packages from")
+            # ~/.m2 holds Maven's master password, which workers may not read: refused for that first
+            self.refused_and_left_out(home / ".m2", f"it would open {home / '.m2' / 'settings-security.xml'}, a login "
+                                                    "or key that workers may not read")
             self.assertFalse(hasattr(desk, "PACKAGE_CACHES") or hasattr(desk, "HOME_CACHES"))  # no exception by name
             fine = [str(home / n) for n in ("hansa-cache/a/pip", "hansa-cache/a/npm", "work/cache", "gopher",
                                             "work/go/pkg/mod", "build cache")]
@@ -9767,7 +9777,9 @@ class DeskTest(unittest.TestCase):
         (pkg / "agents").mkdir(parents=True)
         (pkg / "__pycache__").mkdir()
         for name, at in (("__init__.py", 1_000_000), ("agents/scout.md", 2_000_000), ("ui.html", 1_500_000),
-                         ("__pycache__/run.cpython-312.pyc", 9_000_000)):  # what Python writes as it runs: not code
+                         ("__pycache__/run.cpython-312.pyc", 9_000_000),  # what Python writes as it runs: not code
+                         (".DS_Store", 9_000_000), ("agents/.DS_Store", 9_000_000),  # left by the file manager
+                         ("run.py~", 9_000_000), ("notes.txt", 9_000_000)):  # nor anything else hansa does not ship
             (pkg / name).write_text("x")
             os.utime(pkg / name, (at, at))
         self.addCleanup(hansa.installed.cache_clear)
@@ -11690,6 +11702,271 @@ class DeskTest(unittest.TestCase):
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
         self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+
+    # -- small fixes from earlier verifications --
+
+    def page_post(self, path: str, body: dict) -> dict:
+        """What the page's server answers to a POST, handled over a socket pair (no port is opened)."""
+        from hansa import web
+        made = {}
+
+        class Server:
+            def __init__(self, address, handler):
+                made["handler"], self.server_address = handler, address
+
+            def serve_forever(self):
+                pass
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer", Server):
+            start_web(self.desk, "127.0.0.1", 0)
+        data = json.dumps(body).encode()
+        ours, theirs = socket.socketpair()
+        with ours, theirs:
+            ours.sendall(f"POST {path}?t={self.desk.web_token()} HTTP/1.0\r\nX-Hansa: 1\r\n"
+                         f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+            made["handler"](theirs, ("127.0.0.1", 0), None)
+            theirs.shutdown(socket.SHUT_WR)
+            answer = b""
+            while chunk := ours.recv(65536):
+                answer += chunk
+        return json.loads(answer.split(b"\r\n\r\n", 1)[1])
+
+    def test_show_full_gives_claude_codes_reason_for_a_refused_call_whole(self):
+        tid = self.desk.new_task("Build it")
+        why = "This command reads outside the folders allowed: " + "x" * 300 + " (the end of the reason)"
+        self.desk.update(tid, state="done", denials=["Bash: make"], denial_reasons=[why])
+        self.assertIn(f"Claude Code said: {why}", views.show_text(self.desk, tid, full=True))
+        self.assertNotIn("(the end of the reason)", views.show_text(self.desk, tid))
+
+    def test_the_page_cannot_answer_a_request_that_was_closed_meanwhile(self):
+        self.desk.add_ask("May the docs lane use the npm registry?")
+        self.desk.close_ask_as_coordinator(1, "done without it")
+        # a page that had not refreshed yet still shows it open
+        said = self.page_post("/api/ask/close", {"id": 1, "answer": "Yes"})
+        self.assertFalse(said["ok"])
+        self.assertEqual(said["problems"], ["request #1 was already closed by the coordinator (done without it); "
+                                            "your answer was not taken"])
+        a = self.desk.asks()[0]
+        self.assertEqual((a["closed_by"], a["reason"], a["answer"]), ("coordinator", "done without it", ""))
+        self.assertEqual(len(self.events("ask_closed")), 1)
+        self.assertEqual(self.desk.close_ask(1, "again"), "request #1 was already closed by the coordinator "
+                                                            "(done without it); your answer was not taken")
+
+    def test_a_merge_check_of_only_spaces_written_by_hand_is_unset(self):
+        from hansa import run
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["a"].update(check="true", merge_check="   ")
+        self.desk.settings_path.write_text(json.dumps(s))
+        ln = self.desk.settings()["lanes"]["a"]
+        self.assertNotIn("merge_check", ln)
+        self.assertEqual(run.merge_command(ln), "true")
+        self.assertFalse(run.own_merge_check(ln))
+
+    def test_lane_add_takes_a_merge_check_and_its_time_limit_and_like_copies_them(self):
+        said = self.hansa("lane", "add", "b", "--repo", str(self.repo), "--check", "make test",
+                          "--merge-check", "make test-all", "--merge-timeout", "30")
+        self.assertIn('merge_check "make test-all"; merge_timeout_min 30', said)
+        lanes = self.desk.settings()["lanes"]
+        self.assertEqual((lanes["b"]["merge_check"], lanes["b"]["merge_timeout_min"]), ("make test-all", 30))
+        self.hansa("lane", "add", "c", "--like", "b")
+        self.assertEqual((self.desk.settings()["lanes"]["c"]["merge_check"],
+                          self.desk.settings()["lanes"]["c"]["merge_timeout_min"]), ("make test-all", 30))
+        self.hansa("lane", "add", "d", "--like", "b", "--merge-check", "none", "--merge-timeout", "none")
+        self.assertNotIn("merge_check", self.desk.settings()["lanes"]["d"])
+        self.assertNotIn("merge_timeout_min", self.desk.settings()["lanes"]["d"])
+        self.hansa("lane", "add", "e", "--repo", str(self.repo), "--merge-check", "  ")
+        self.assertNotIn("merge_check", self.desk.settings()["lanes"]["e"])
+
+    def test_a_message_form_written_by_hand_that_hansa_cannot_use_is_said_where_it_falls_back(self):
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["a"].update(commit_message="{title} {when}", merge_message="Merge {task")
+        self.desk.settings_path.write_text(json.dumps(s))
+        status = views.status_text(views.status(self.desk))
+        self.assertIn("WARNING: lane a's commit_message \"{title} {when}\" has an unknown placeholder {when}", status)
+        self.assertIn("WARNING: lane a's merge_message \"Merge {task\" has a { or }", status)
+        self.assertIn("hansa uses its own message in its place, with the task number (set it right: hansa lane set a "
+                      "merge_message ...)", status)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(sh_out("git", "log", "-1", "--format=%s", m["head"], cwd=self.repo), f"{tid}: Add hello.txt")
+        self.assertIn("message: lane a's commit_message \"{title} {when}\" has an unknown placeholder",
+                      views.show_text(self.desk, tid))
+        said = self.hansa("merge", tid)
+        self.assertIn("note: lane a's merge_message \"Merge {task\" has a { or }", said)
+        self.assertEqual(sh_out("git", "log", "-1", "--format=%s", "main", cwd=self.repo), f"Merge {tid}: Add hello.txt")
+        self.assertIn("message: lane a's merge_message", views.show_text(self.desk, tid))
+        s["lanes"]["a"].pop("commit_message")
+        s["lanes"]["a"].pop("merge_message")
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertNotIn("WARNING", views.status_text(views.status(self.desk)))
+
+    def test_verify_of_a_task_whose_lane_was_made_again_on_another_repository(self):
+        d, t1, t2 = self.two_lanes()
+        self.assertEqual(self.desk.meta(t1)["repo"], str(self.repo.resolve()))  # recorded when it was queued
+        s = self.desk.settings()
+        other = self.tmp / "other"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(other)], check=True)
+        del s["lanes"]["a"]  # removed after t1 ran, then made again by the same name elsewhere
+        self.assertEqual(self.desk.save_settings(s), [])
+        s["lanes"]["a"] = {**json.loads(json.dumps(s["lanes"]["b"])), "repo": str(other)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        before = len(self.desk.tasks())
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "verify", t1])
+        self.assertEqual(str(e.exception), f"hansa: {t1}'s lane a is now on {other}, not on {self.repo.resolve()}, "
+                                           f"where {t1} ran and its branch is (the lane was removed and made again); "
+                                           f"verify it with --lane L, a lane on {self.repo.resolve()}; nothing was "
+                                           f"queued")
+        self.assertEqual(len(self.desk.tasks()), before)
+        out = self.hansa("verify", t1, "--lane", "b")  # b is on the repository where t1's branch is
+        self.assertIn(f"queued on lane b:", out)
+
+    def test_hansa_serve_writes_the_code_it_runs_as_it_starts(self):
+        import errno
+        import hansa
+        from hansa import web
+
+        def taken(*args):
+            raise OSError(errno.EADDRINUSE, "in use")
+        held, real = [], cli.hold_server_lock
+
+        def hold(desk):
+            held.append(real(desk))
+            return held[-1]
+        with unittest.mock.patch.object(web, "start_web", taken), unittest.mock.patch.object(
+                cli, "hold_server_lock", hold), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "serve"])
+        held[0].close()
+        self.assertEqual(json.loads((self.desk.state_dir / "serve-code").read_text()),
+                         {"pid": os.getpid(), "build": hansa.build(), "installed": hansa.installed()})
+
+    def test_only_hansas_own_files_count_as_shipped(self):
+        import hansa
+        here = Path(hansa.__file__).resolve().parent
+        own = subprocess.run(["git", "ls-files", "hansa"], cwd=here.parent, capture_output=True, text=True).stdout
+        for f in own.split():  # every file the repository has under hansa/
+            self.assertTrue(hansa.shipped(Path(f).relative_to("hansa")), f)
+        for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py"):
+            self.assertFalse(hansa.shipped(Path(f)), f)
+
+    def test_the_coordinators_notes_rule_is_given_for_each_spelling_of_the_desk(self):
+        link = self.tmp / "desk-link"
+        link.symlink_to(self.desk.root)
+        allow = cli.permissions(Desk(str(link)))["allow"]
+        for root in (self.desk.root.resolve(), link):
+            self.assertIn(f"Edit(//{str(root).lstrip('/')}/notes/**)", allow)
+        self.assertEqual(cli.permissions(Desk(str(self.desk.root.resolve())))["allow"].count(
+            f"Edit(//{str(self.desk.root.resolve()).lstrip('/')}/notes/**)"), 1)
+        real = Path("/private/tmp/x")  # macOS: /tmp leads to /private/tmp
+        with unittest.mock.patch.object(Desk, "__init__", lambda d, root: None):
+            d = Desk("/private/tmp/x")
+        d.root, d.given = real, real
+        with unittest.mock.patch.object(cli, "resolved", lambda x: str(real) if x == "/tmp/x" else x):
+            self.assertEqual(cli.desk_spellings(d), ["/private/tmp/x", "/tmp/x"])
+        with unittest.mock.patch.object(cli, "resolved", lambda x: x):  # where /tmp is a folder of its own
+            self.assertEqual(cli.desk_spellings(d), ["/private/tmp/x"])
+
+    def test_cost_turns_heads_each_session_once_marks_a_turn_cut_by_since_and_takes_no_by(self):
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        t0 = time.time() - 3600
+
+        def at(n):
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t0 + n * 60))
+
+        def turn(n, mid):
+            usage = {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 100,
+                     "cache_creation_input_tokens": 0}
+            return [{"type": "user", "timestamp": at(n), "origin": {"kind": "human"},
+                     "message": {"role": "user", "content": "hi"}},
+                    {"type": "assistant", "timestamp": at(n), "message": {"id": mid, "model": "claude-opus-5",
+                                                                         "content": [], "usage": usage}}]
+        cut = turn(0, "a0") + [{**turn(10, "a1")[1], "message": {**turn(10, "a1")[1]["message"], "usage": {
+            "input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 0}}}]
+        for name, lines in (("aaaaaaaa-1", cut + turn(20, "a2")), ("bbbbbbbb-1", turn(15, "b1") + turn(25, "b2"))):
+            (proj / f"{name}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = cost.turns(self.desk, 1, since=t0 + 5 * 60)  # the first turn started before, its second step after
+        self.assertEqual([(t["session"][:1], t["before_window"], t["length"]) for t in rep["turns"]],
+                         [("a", True, 5001), ("b", False, 101), ("a", False, 101), ("b", False, 101)])
+        text = views.cost_turns_text(rep)
+        self.assertEqual((text.count("session aaaaaaaa"), text.count("session bbbbbbbb")), (1, 1))
+        lines = text.splitlines()
+        a, b = lines.index("session aaaaaaaa"), lines.index("session bbbbbbbb")
+        self.assertEqual(b - a, 3)  # a's two turns under its heading, then b's
+        self.assertIn("(from before the window: its steps, worth and length from its first step in it)", lines[a + 1])
+        self.assertNotIn("before the window", lines[a + 2])
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "cost", "--turns", "--by", "lane"])
+        self.assertIn("--turns lists the coordinator's turns session by session", str(e.exception))
+
+    def test_a_follower_restarted_before_posting_the_srt_line_posts_it_after_the_restart(self):
+        srt = {"key": ["srt"], "line": "- srt could not run: setups and checks wait"}
+        restarts, delivered = [], []
+
+        class Restarted(Exception):
+            pass
+
+        def run_follower(feeds, marks, gather="60"):
+            def ask(req):
+                if req["op"] == "start":
+                    return {"pos": req.get("resume", 0), "server_up": True}
+                if req["op"] == "feed":
+                    pos, items = feeds.pop(0) if feeds else (req["pos"], [])
+                    return {"pos": pos, "items": items, "server_up": True}
+                return {}
+
+            def restart(state):
+                restarts.append(state)
+                raise Restarted
+
+            def deliver(sock, text, sess, me):
+                delivered.append(text)
+                return True
+            with unittest.mock.patch.object(notify, "source", lambda desk: ask), \
+                    unittest.mock.patch.object(notify, "code_mark", lambda: marks.pop(0) if len(marks) > 1 else marks[0]), \
+                    unittest.mock.patch.object(notify, "CODE_SETTLE", 0), \
+                    unittest.mock.patch.object(notify, "_restart", restart), \
+                    unittest.mock.patch.object(notify, "_deliver", deliver), \
+                    unittest.mock.patch.object(notify, "_say", lambda *a: None), \
+                    unittest.mock.patch.object(notify, "gone", lambda sess: not feeds and restarts), \
+                    unittest.mock.patch.object(notify, "Namer", lambda *a: type("N", (), {"tick": lambda self: ""})()), \
+                    unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_GATHER": gather, "HANSA_NOTIFY_POLL": "0"}):
+                try:
+                    notify.follow(self.desk, "k1", {"pid": os.getpid()}, "sock", "nonce")
+                except Restarted:
+                    pass
+        # the srt line is read, and held to be posted with what follows; the code changes before it goes out
+        run_follower([(100, [srt])], ["old", "old", "new"])
+        self.assertEqual((delivered, restarts[0]["pos"]), ([], 0))
+        self.assertFalse(restarts[0]["told_srt"])  # not told yet: read again after the restart, it is posted
+        os.environ["HANSA_NOTIFY_RESUME"] = json.dumps(restarts[0])
+        self.addCleanup(os.environ.pop, "HANSA_NOTIFY_RESUME", None)
+        run_follower([(100, [srt])], ["new"], gather="0")
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("srt could not run", delivered[0])
+
+    def test_closing_a_task_keeps_the_note_its_closed_verification_already_has(self):
+        d = Dispatcher(self.desk)
+        t1 = self.desk.new_task("Add hello.txt")
+        self.settle(d, t1)
+        self.hansa("verify", t1)
+        vid = self.desk.meta(t1)["verify"]
+        self.assertEqual(self.settle(d, vid)["state"], "done")
+        self.hansa("cancel", vid)  # the verification itself, closed first
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa cancel")
+        self.hansa("cancel", t1)
+        self.assertEqual(self.desk.meta(t1)["state"], "cancelled")
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa cancel")
+
+    def test_workers_may_not_read_mavens_master_password_but_may_read_the_build_settings(self):
+        from hansa.desk import home_secrets
+        self.assertIn(".m2/settings-security.xml", home_secrets())
+        for kept in (".m2/settings.xml", ".m2", ".gradle/gradle.properties", ".gradle"):  # mirrors, proxies a build needs
+            self.assertNotIn(kept, home_secrets())
 
 class JavaPreludeTest(unittest.TestCase):
     """run.JAVA_PRELUDE, the sh hansa runs in the sandbox before a lane's commands and a worker's: Maven's proxy

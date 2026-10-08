@@ -85,7 +85,9 @@ page gives.
   provider order, allowed commands (for design sessions), network and write lists, environment,
   check, preview and setup commands, limits, and the merge check's own command and limit,
   `merge_check` and `merge_timeout_min`, for a heavier command run only before a merge: unset, the
-  merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`);
+  merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`:
+  side by side means lanes on one repository; when they each add to a CHANGELOG, `CHANGELOG.md merge=union`
+  in the repository's `.gitattributes` keeps their merges from conflicting there);
   each lane's standing instructions (`hansa lane brief`, kept in
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) or its named release
@@ -95,9 +97,12 @@ page gives.
   usual publish commands (`npm`, `pnpm`, `yarn`, `uv` and `poetry publish`,
   `twine upload`, `cargo publish`, `gem push`, `docker` and `podman push`,
   `mvn deploy`) from its own shell, whatever its mode, written plainly or with
-  options before the subcommand (`git -C DIR push`); run through another
-  program or shell (`bash -c "git push"`, `xargs`, a script) they are not
-  caught, and in manual mode such a command asks the principal. `hansa release`
+  options before the subcommand (`git -C DIR push`), and after a plain `xargs`
+  or a wrapper such as `env`, `nice` or `timeout`, which Claude Code looks
+  past (`xargs git push` is caught); run through another shell
+  (`bash -c "git push"`), a script, or an `xargs` with options of its own
+  before the command (`xargs -n1 git push`), they are not caught, and in
+  manual mode such a command asks the principal. `hansa release`
   runs the release command itself after the principal's yes.
   Each lane may also set the form of the messages hansa writes into its
   repository: `commit_message` for the commit of a task's work (and the merge
@@ -138,9 +143,13 @@ page gives.
   AI tools and Anthropic's own tool settings in `~/.config/anthropic`, cloud
   tools, git and registry credentials, proxy clients' settings with their
   server passwords or subscription links, password stores and keyrings, the
-  keychains, cookies, mail and messages under `~/Library`), or of
+  keychains, cookies, mail and messages under `~/Library`; Maven's master
+  password, `~/.m2/settings-security.xml`), or of
   the folders and files the principal lists on the page (Settings, "workers may
-  not read": this machine's own folders of keys; Read is denied there to every
+  not read": this machine's own folders of keys, and `~/.m2/settings.xml` or
+  `~/.gradle/gradle.properties` when they hold deploy credentials the project's
+  builds do not need: hansa leaves them readable, as they also hold the mirrors
+  and proxies a build may need; Read is denied there to every
   Claude Code run hansa starts, the coordinator too. An entry that would stop
   every worker is refused on saving, each with its reason: the home folder,
   the desk, a lane's repository, a folder on the `PATH`, the system's programs

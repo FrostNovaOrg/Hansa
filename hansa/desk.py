@@ -111,6 +111,9 @@ HOME_SECRETS = (
     ".gem/credentials", ".config/hub", ".config/glab-cli", ".config/tea", ".composer/auth.json",
     ".config/composer/auth.json", ".pub-cache/credentials.json", ".config/dart/pub-credentials.json",
     ".sbt/.credentials", ".ivy2/.credentials", ".config/pypoetry/auth.toml", ".subversion/auth",
+    # Maven's master password, which unlocks the passwords settings.xml holds encrypted (settings.xml itself and
+    # ~/.gradle/gradle.properties also hold mirrors and proxies a build needs: the principal lists them if not)
+    ".m2/settings-security.xml",
     # proxy clients' settings: they hold the proxy's server passwords or subscription links
     ".config/clash", ".config/clash.meta", ".config/mihomo", ".config/clash-verge",
     ".config/io.github.clash-verge-rev.clash-verge-rev", ".config/sing-box", ".config/v2ray", ".config/xray",
@@ -1046,6 +1049,22 @@ def _message(ln, field: str, tid: str, title: str, lane: str) -> str | None:
     return form.format(task=tid, title=title or "work", lane=lane or "")
 
 
+def message_fallback(ln, lane: str, field: str) -> str:
+    """When a lane's commit_message or merge_message is set but cannot be used (written by hand in the settings
+    file; hansa lane set refuses it), the line saying so: hansa uses its own message, task number included."""
+    form = (ln or {}).get(field)
+    if form is None or form == "" or not message_problem(form):
+        return ""
+    return (f"lane {lane}'s {field} {json.dumps(form, ensure_ascii=False)} {message_problem(form)}; hansa uses its "
+            f"own message in its place, with the task number (set it right: hansa lane set {lane} {field} ...)")
+
+
+def bad_messages(s: dict) -> list:
+    """message_fallback of each lane's message forms, for hansa status while the setting is bad."""
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
+    return [x for n, ln in sorted(lanes.items()) for f in MESSAGE_FIELDS if (x := message_fallback(ln, n, f))]
+
+
 def task_message(ln, lane: str, tid: str, title: str) -> str:
     """The message of the commit hansa makes of a task's work: the lane's commit_message, or t0001: <title>."""
     return (_message(ln, "commit_message", tid, title, lane) or f"{tid}: {title or 'work'}")[:100]
@@ -1590,6 +1609,7 @@ def is_git_rule(rule: str) -> bool:
 class Desk:
     def __init__(self, root) -> None:
         self.root = Path(root).resolve()
+        self.given = Path(os.path.abspath(os.path.expanduser(str(root))))  # as it was spelled, links not followed
         self.settings_path = self.root / "settings.json"
         self.secrets_dir = self.root / "secrets"
         self.tasks_dir = self.root / "tasks"
@@ -1621,6 +1641,10 @@ class Desk:
         loaded = read_json(self.settings_path, {})
         if isinstance(loaded, dict):
             s.update(loaded)
+        for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
+            # a merge_check of only spaces, written by hand, is unset, as hansa lane set makes it: never a command
+            if isinstance(ln, dict) and isinstance(ln.get("merge_check"), str) and not ln["merge_check"].strip():
+                del ln["merge_check"]
         return s
 
     def settings_rev(self) -> str:
@@ -1836,6 +1860,9 @@ class Desk:
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}
             meta.update({k: v for k, v in opts.items() if v not in (None, "")})
+            own = self.settings()["lanes"].get(meta["lane"]) if meta["lane"] else None
+            if isinstance(own, dict) and own.get("repo") and not meta.get("repo"):  # its lane's repository now:
+                meta["repo"] = resolved(own["repo"]) or own["repo"]  # a lane made again elsewhere is not the task's
             write_json(d / "meta.json", meta)
         self.event("task_added", task=tid, lane=meta["lane"], **({"browser": True} if meta.get("browser") else {}))
         return tid
@@ -1909,14 +1936,22 @@ class Desk:
         self.event("ask", id=n, by=by)
         return n
 
-    def close_ask(self, n: int, answer: str = "", by: str = "") -> None:
+    def close_ask(self, n: int, answer: str = "", by: str = "") -> str:
+        """Answers an open request; one no longer open (closed meanwhile by the coordinator, say, while the page
+        still showed it) is left as it was: what was refused is returned, "" when it was answered."""
         with self.lock():
             asks = self.asks()
-            for a in asks:
-                if a["id"] == n:
-                    a["closed"], a["answer"] = now(), self.redact(answer.strip())
+            a = next((a for a in asks if a.get("id") == n), None)
+            if not a:
+                return f"there is no request #{n}; nothing was answered"
+            if a.get("closed"):
+                return (f"request #{n} was already closed"
+                        + (f" by the coordinator ({a['reason']})" if a.get("closed_by") == "coordinator" else "")
+                        + "; your answer was not taken")
+            a["closed"], a["answer"] = now(), self.redact(answer.strip())
             write_json(self.asks_path, asks)
         self.event("ask_closed", id=n, by=by)
+        return ""
 
     def close_ask_as_coordinator(self, n: int, reason: str, by: str = "") -> None:
         """The coordinator closes an open request of this desk itself (hansa ask --close), saying why; the page

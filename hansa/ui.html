@@ -286,7 +286,8 @@ async function loadStatus() {
     st.asks.length || (st.asks_closed || []).length ? section(T.asks, [...st.asks.map(a => {
       const ans = h("input", {placeholder:T.answer, style:"flex:1"});
       return h("div", {class:"row", style:"margin:6px 0"}, h("strong", {}, "#" + a.id), h("span", {}, a.text), a.note ? h("span", {class:"ok"}, a.note) : null, ans,
-        h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value}).then(loadStatus).catch(err)}, T.close));
+        h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
+          .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close));
     }), ...(st.asks_closed || []).map(a => h("div", {class:"row muted", style:"margin:6px 0"}, h("strong", {}, "#" + a.id),
       h("span", {}, a.text), h("span", {}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`)))]) : null,
     section(T.providers, table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [

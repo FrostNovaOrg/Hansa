@@ -634,6 +634,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             told_stuck = float(was.get("told_stuck") or 0)
         else:
             was_up, told_down, told_srt, told_stuck = r.get("server_up"), 0.0, False, 0.0
+        srt_done = told_srt  # told_srt as of done: a restart reads again from there, so it carries this one
         _say(("restarted on hansa's new code; " if resume else "") +
              f"following desk {desk.root} for session {sess['pid']} at {sock}, from byte {pos}")
         if r.get("summary"):
@@ -657,7 +658,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             elif changed and time.time() - changed >= CODE_SETTLE:
                 _say(f"hansa's code changed on disk; restarting on it from byte {done}")
                 _restart({"pos": done, "since": me["since"], "name": me["name"], "last_post": me["last_post"],
-                          "was_up": was_up, "told_down": told_down, "told_srt": told_srt, "told_stuck": told_stuck,
+                          "was_up": was_up, "told_down": told_down, "told_srt": srt_done, "told_stuck": told_stuck,
                           "clear": daily.rec if daily else None})
                 changed = 0.0
             try:
@@ -686,7 +687,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             if pending and (time.time() - last >= gather or time.time() - first >= 20):
                 if not _deliver(sock, message(str(desk.root), pending), sess, me):
                     return 0
-                pending, first, done = [], 0.0, pos
+                pending, first, done, srt_done = [], 0.0, pos, told_srt
             if daily:
                 daily.tick((me["last_post"] or {}).get("at") or 0.0, bool(pending))
             time.sleep(poll)

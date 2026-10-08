@@ -26,8 +26,11 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    `twine upload`, `uv` and `poetry publish`, `cargo publish`, `gem push`,
    `docker` and `podman push`, `mvn deploy`) from your own shell, written plainly
    or with options before the subcommand (`git -C DIR push`, `mvn -B deploy`).
-   Run through another program or shell (`bash -c "git push"`, `xargs`, a
-   script) they are not caught; in manual mode such a command asks the principal.
+   Claude Code also catches them after a plain `xargs` and after wrappers such
+   as `env`, `nice` or `timeout` (`xargs git push` is denied); run through
+   another shell (`bash -c "git push"`), a script, or an `xargs` given options
+   of its own before the command (`xargs -n1 git push`), they are not caught; in
+   manual mode such a command asks the principal.
 
 ## Commands
 | command | what it does |
@@ -48,7 +51,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L [--all] \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from; alone, also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
-| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
+| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--allow RULE ...]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
 | `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
 | `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below) |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
@@ -404,7 +407,9 @@ here; work that needs code changed or a browser goes to a worker.
 - How work spreads over lanes: a lane runs one task at a time, and each lane has
   its own full worktree, so each lane takes the repository's disk space again.
   To run several tasks at once, add lanes on the same repository and base;
-  `hansa concurrency` caps how many run in all. A lane's provider order decides
+  `hansa concurrency` caps how many run in all. Lanes that each add a line to
+  a CHANGELOG conflict there on merge; `CHANGELOG.md merge=union` in the
+  repository's `.gitattributes` keeps both sides' lines instead. A lane's provider order decides
   which provider does its tasks, so to split work among providers, give each
   its own lane.
 - A lane's setup, check and preview run outside the worker: hansa runs them
