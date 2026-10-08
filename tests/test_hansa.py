@@ -12016,6 +12016,96 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.settle_release(d, 2)["state"], "done")
         self.assertEqual(out.read_text(), "x\nx\n")
 
+    def test_a_release_command_set_with_a_forbidden_word_is_said_at_once_and_kept(self):
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["maplebox"])), {"ok": True, "problems": []})
+        out = self.hansa("lane", "set", "a", "release", "scp target/app.jar /Users/MapleBox/deploy/")
+        self.assertIn("Warning: lane a's release command holds \"maplebox\"", out)
+        self.assertIn("scp target/app.jar /Users/MapleBox/deploy/", out)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["release"], "scp target/app.jar /Users/MapleBox/deploy/")
+        self.assertNotIn("Warning", self.hansa("lane", "set", "a", "release", "none"))
+        self.assertNotIn("Warning", self.hansa("lane", "target", "a", "push", "git push origin main"))
+        out = self.hansa("lane", "target", "a", "test", "./install.sh /home/maplebox/test")
+        self.assertIn("Warning: lane a's release target test holds \"maplebox\"", out)
+        self.assertIn("./install.sh /home/maplebox/test", out)
+        self.assertNotIn("target push", out)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["test"]["command"], "./install.sh /home/maplebox/test")
+        out = self.hansa("lane", "target", "a", "test", "--minutes", "30")  # changed otherwise: still said
+        self.assertIn("release target test holds \"maplebox\"", out)
+        out = self.hansa("lane", "add", "b", "--like", "a")
+        self.assertIn("Warning: lane b's release target test holds \"maplebox\"", out)
+        self.assertIn("test", self.desk.settings()["lanes"]["b"]["targets"])
+        said = self.refused("release", "a", "test")  # and refused at release time, as before
+        self.assertIn("release command: ./install.sh /home/maplebox/test", said)
+
+    def test_release_files_globs_match_nested_poms_and_are_kept_relative(self):
+        from hansa.desk import release_files_in, validate
+        files = ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "pom.xml.bak", "core/src/Main.java", "build.sh",
+                 "x/build.sh", "tools/release.sh"]
+        self.assertEqual(release_files_in(files, ["pom.xml", "**/pom.xml", "build.sh", "tools/release.sh"]),
+                         ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "build.sh", "tools/release.sh"])
+        self.assertEqual(release_files_in(files, ["**/pom.xml"]), ["pom.xml", "core/pom.xml", "a/b/c/pom.xml"])
+        self.assertEqual(release_files_in(files, ["core/**"]), ["core/pom.xml", "core/src/Main.java"])
+        self.assertEqual(release_files_in(files, ["*.sh"]), ["build.sh"])
+        s = self.desk.settings()
+        for bad in (["/etc/pom.xml"], ["../pom.xml"], ["a b"], [""], "pom.xml"):
+            s["lanes"]["a"]["release_files"] = bad
+            self.assertTrue(any("release_files" in x for x in validate(s)), bad)
+        s["lanes"]["a"]["release_files"] = ["pom.xml", "**/pom.xml"]
+        self.assertEqual(validate(s), [])
+
+    def test_a_merge_touching_a_release_file_waits_for_a_verification_that_holds(self):
+        d = Dispatcher(self.desk)
+        out = self.hansa("lane", "set", "a", "release_files", "pom.xml **/pom.xml build.sh tools/release.sh")
+        self.assertIn('["pom.xml", "**/pom.xml", "build.sh", "tools/release.sh"]', out)
+
+        def done(name, verdict):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_HELLO": name, "FAKE_VERDICT": verdict}
+            self.assertEqual(self.desk.save_settings(s), [])
+            return self.settle(d, self.desk.new_task("Change a file"))["id"]
+
+        plain = done("src/App.java", "holds")  # touches none of them: merged as before
+        self.assertIn(f"{plain} merged into main", self.hansa("merge", plain))
+        tid = done("core/sub/pom.xml", "does not hold")
+        for extra in ([], ["--despite-check"]):
+            said = self.refused("merge", tid, *extra)
+            self.assertIn("core/sub/pom.xml", said)
+            self.assertIn("release_files", said)
+            self.assertIn("Nothing has verified it", said)
+            self.assertIn(f"hansa verify {tid}", said)
+            self.assertIn("no flag overrides this", said)
+        self.hansa("verify", tid)
+        self.assertEqual(self.settle(d, self.desk.meta(tid)["verify"])["verdict"], "does not hold")
+        for extra in ([], ["--despite-check"]):
+            said = self.refused("merge", tid, *extra)
+            self.assertIn("core/sub/pom.xml", said)
+            self.assertIn("found that it does not hold", said)
+        self.assertEqual(self.desk.meta(tid)["state"], "done")
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_VERDICT"] = "holds"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        self.assertEqual(self.settle(d, self.desk.meta(tid)["verify"])["verdict"], "holds")
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+
+    def test_release_files_are_copied_by_like_and_shown_by_explain_with_advice_when_missing(self):
+        out = self.hansa("lane", "add", "b", "--like", "a", "--release-files", "pom.xml **/pom.xml")
+        self.assertEqual(self.desk.settings()["lanes"]["b"]["release_files"], ["pom.xml", "**/pom.xml"])
+        self.assertIn("release_files", out)
+        self.hansa("lane", "add", "c", "--like", "b")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["release_files"], ["pom.xml", "**/pom.xml"])
+        shown = views.explain_text(self.desk, "lane", "c")
+        self.assertIn("release files (built and run by its releases outside the sandbox", shown)
+        self.assertIn("pom.xml **/pom.xml", shown)
+        self.assertNotIn("advised", views.explain_text(self.desk, "lane", "a"))  # no release targets: no advice
+        self.with_release("./deploy.sh")
+        shown = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("release files: none; advised", shown)
+        self.assertIn('hansa lane set a release_files "pom.xml **/pom.xml build.sh tools/release.sh"', shown)
+        self.hansa("lane", "set", "a", "release_files", "none")
+        self.assertNotIn("release_files", self.desk.settings()["lanes"]["a"].get("release_files", []))
+
     def test_a_forbidden_word_in_a_file_name_or_in_the_command_line_refuses_a_release(self):
         from hansa import release
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["falcon"])), {"ok": True, "problems": []})
