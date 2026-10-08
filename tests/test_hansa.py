@@ -580,7 +580,7 @@ class DeskTest(unittest.TestCase):
         cmd = call["argv"][-1]
 
         def bare(x):
-            head = run.JAVA_PRELUDE + "exec /bin/sh -c "
+            head = run.sandbox_prelude() + "exec /bin/sh -c "
             assert x.startswith(head), x[:200]
             [inner] = shlex.split(x[len(head):])
             return inner
@@ -727,11 +727,12 @@ class DeskTest(unittest.TestCase):
         run.commit_work(self.desk, wt, "a real one", f"task/{m['id']}")
         self.assertEqual(sorted(self.git_out("show", "--name-only", "--format=", "HEAD", cwd=wt).split()),
                          [".gitconfig", "sub/.bashrc"])
-        for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):  # workers are told each name, and to leave them
+        for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):  # workers are told of those under .claude/, and to leave them
             flat = " ".join(text.split())
-            for name in (*run.SANDBOX_PLACEHOLDERS, ".claude/"):
-                self.assertIn(name, flat)
+            self.assertIn(".claude/", flat)
             self.assertIn("hansa never commits them", flat)
+            for name in run.SANDBOX_PLACEHOLDERS:  # git in the sandbox does not list these (LINUX_PRELUDE)
+                self.assertNotIn(name, flat)
 
     def test_workers_are_told_git_stash_is_refused_and_background_work_ends_in_its_command(self):
         from hansa import run
@@ -3196,6 +3197,221 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.srt_calls(tries=True), [])
         self.assertEqual(run.tried_lanes(self.desk), set())
         self.assertNotIn("held by a try", views.status_text(views.status(self.desk)))
+
+    @contextlib.contextmanager
+    def try_server(self, d=None):
+        """hansa serve, running rounds in a thread while the block runs."""
+        d, stop_serving = d or Dispatcher(self.desk), threading.Event()
+
+        def serve():
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        held = cli.hold_server_lock(self.desk)  # as hansa serve holds it: it says the server runs
+        d.tick()
+        server = threading.Thread(target=serve)
+        server.start()
+        try:
+            yield d
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+
+    def lane_try(self, *args) -> tuple:
+        """hansa lane try a ARGS: (its exit code, what it printed)."""
+        said, code = io.StringIO(), 0
+        with contextlib.redirect_stdout(said):
+            try:
+                main(["--desk", str(self.desk.root), "lane", "try", "a", "--every", "0.05", *args])
+            except SystemExit as e:
+                code = e.code
+        return code, said.getvalue()
+
+    def new_tip(self) -> tuple:
+        """A commit on main after the first: (the first, the new tip)."""
+        old = self.git_out("rev-parse", "main")
+        (self.repo / "more.txt").write_text("more\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "more", cwd=self.repo)
+        return old, self.git_out("rev-parse", "main")
+
+    def test_lane_try_at_a_commit_that_is_not_the_tip_refuses_and_runs_nothing(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked")
+        old, tip = self.new_tip()
+        for merge in ([], ["--merge-check"]):
+            code, _ = self.lane_try("--at", old[:8], *merge)
+            self.assertIn(f"main's tip is {tip[:10]}, not {old[:10]}; nothing was run", str(code))
+            self.assertIn(f"--at {tip[:10]}", str(code))
+        code, _ = self.lane_try("--at", "nosuchcommit")
+        self.assertIn("nosuchcommit is no commit of lane a's repository; nothing was run", str(code))
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertFalse(run.try_file(self.desk, "a").exists())
+        self.assertEqual(self.events("lane_try_queued"), [])
+
+    def test_lane_try_at_waits_for_a_try_at_another_commit_and_never_takes_its_result(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked here")
+        old, tip = self.new_tip()
+        d = Dispatcher(self.desk)
+        held = cli.hold_server_lock(self.desk)
+        d.tick()  # a round, so the server is seen to run
+        run.write_try(self.desk, "a", {"id": "t0", "phase": "running", "asked": time.time(), "onto": old,
+                                       "check": "echo checked here", "started": time.time()})
+        stop_serving = threading.Event()
+
+        def serve():  # the try at the older commit passes; only then does the server run rounds again
+            time.sleep(0.4)
+            run.write_try(self.desk, "a", {"id": "t0", "phase": "done", "ok": True, "onto": old, "steps": {}})
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        server = threading.Thread(target=serve)
+        server.start()
+        try:
+            code, said = self.lane_try("--at", tip[:8])
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"a try of lane a is running at {old[:10]}, not the one asked for at {tip[:10]}; waiting for "
+                      f"it to end, then trying at {tip[:10]}", said)
+        self.assertIn(f"lane a tried at {tip[:10]}: ok", said)
+        [check] = self.srt_calls()  # it ran its own check, at the tip
+        self.assertEqual(self.ran(check), "echo checked here")
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["onto"], t["at"]), (tip, tip))  # the commit asked for is kept after the try ends
+        self.assertIsInstance(t["ended"], float)
+        self.assertEqual(self.events("lane_try_queued")[-1]["at"], tip)
+
+    def test_lane_try_at_exits_0_only_when_the_try_at_that_commit_passed(self):
+        from hansa import run
+        _, tip = self.new_tip()
+        self.hansa("lane", "set", "a", "check", "echo failing; exit 3")
+        with self.try_server():
+            code, said = self.lane_try("--at", tip)
+        self.assertEqual(code, 1, said)
+        self.assertIn(f"lane a tried at {tip[:10]}: FAILED", said)
+        self.hansa("lane", "set", "a", "check", "echo passing")
+        with self.try_server():
+            code, said = self.lane_try("--at", tip[:7])
+            self.assertEqual(code, 0, said)
+            code, said = self.lane_try("--at", tip[:7], "--merge-check")  # the check, as the lane's merge check
+        self.assertEqual(code, 0, said)
+        self.assertIn("merge check: echo passing\n  exit 0", said)
+        # the base moved between the ask and the start: nothing runs, and the try did not pass
+        run.write_try(self.desk, "a", {"id": "t9", "phase": "queued", "asked": time.time(), "at": "0" * 40})
+        calls = len(self.srt_calls(tries=True))
+        Dispatcher(self.desk).tick()
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["phase"], t["ok"], t["steps"]), ("done", False, {}), t)
+        self.assertIn(f"main's tip moved from 0000000000 to {tip[:10]} before the try started; nothing was run",
+                      views.try_text("a", t))
+        self.assertEqual(len(self.srt_calls(tries=True)), calls)
+
+    def test_a_failed_trys_whole_output_is_kept_keys_removed_and_a_new_try_replaces_it(self):
+        from hansa import run
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        self.hansa("lane", "set", "a", "check",
+                   f"x=first; echo \"FAIL: test_the_$x\"; echo 'token {key}'; seq 1 400; exit 1")
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 1, said)
+        self.assertNotIn("test_the_first", said)  # its last lines only
+        log = run.try_log(self.desk, "a")
+        self.assertIn(f"each step's whole output, keys removed: {log} (hansa lane try a --log)", said)
+        kept = log.read_text()
+        self.assertIn("FAIL: test_the_first\n", kept)
+        self.assertIn("token [key of registry]", kept)
+        self.assertNotIn(key, kept)
+        self.assertIn("\n400\n", kept)
+        self.assertEqual(run.read_try(self.desk, "a")["log"], str(log))
+        code, printed = self.lane_try("--log")
+        self.assertEqual((code, printed), (0, kept))
+        code, _ = self.lane_try("--log", "--merge-check")  # a merge-check try's output is kept on its own
+        self.assertIn("lane a has no kept output of a merge-check try yet", str(code))
+        self.hansa("lane", "set", "a", "check", "echo the second try")
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 0, said)
+        kept = log.read_text()
+        self.assertIn("the second try", kept)
+        self.assertNotIn("test_the_first", kept)
+
+    def test_a_failed_step_whose_output_shows_macos_mktemp_or_mavens_407_gets_its_hint(self):
+        from hansa import run
+        refused = "mktemp: mkdtemp failed on /var/folders/ab/xyz/T/tmp.Q1w2: Operation not permitted"
+        lines = views.failed_check_lines(f"running\n{refused}\n", [], "t1")
+        self.assertIn("  " + run.MKTEMP_HINT, lines)
+        self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX"', run.MKTEMP_HINT)
+        self.assertEqual(run.output_hints(refused, "linux"), [run.MKTEMP_HINT])  # /var/folders: macOS's
+        # only for Operation not permitted
+        full = "mktemp: mkdtemp failed on /var/folders/ab/xyz/T/tmp.Q1w2: No space left on device"
+        self.assertEqual(run.output_hints(full, "darwin"), [])
+        # Linux's mktemp gets no macOS hint
+        linux = "mktemp: failed to create directory via template '/srv/x.XXXXXX': Operation not permitted"
+        self.assertEqual(run.output_hints(linux, "linux"), [run.MKTEMP_OUTSIDE_HINT])
+        self.assertNotIn("macOS", run.MKTEMP_OUTSIDE_HINT)
+        # what Maven prints: 3.9's Apache binary, and a distribution's package
+        for maven in ("[ERROR] Failed to execute goal on project demo: Could not resolve dependencies for project "
+                      "org.example:demo:jar:1.0: Failed to collect dependencies at junit:junit:jar:4.13.2: Failed to "
+                      "read artifact descriptor for junit:junit:jar:4.13.2: The following artifacts could not be "
+                      "resolved: junit:junit:pom:4.13.2 (absent): Could not transfer artifact junit:junit:pom:4.13.2 "
+                      "from/to central (https://repo.maven.apache.org/maven2): status code: 407, reason phrase: Proxy "
+                      "Authentication Required (407) -> [Help 1]",
+                      "[ERROR] Plugin org.apache.maven.plugins:maven-resources-plugin:3.3.1 or one of its dependencies "
+                      "could not be resolved: Could not transfer artifact org.apache.maven.plugins:maven-resources-"
+                      "plugin:pom:3.3.1 from/to central (https://repo.maven.apache.org/maven2): proxy authentication "
+                      "failed for https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-resources-plugin/"
+                      "3.3.1/maven-resources-plugin-3.3.1.pom, status: 407 Proxy Authentication Required -> [Help 1]"):
+            lines = views.failed_check_lines(f"[INFO] Scanning for projects...\n{maven}\n", [], "t1")
+            self.assertIn("  " + run.MAVEN_407_HINT, lines)
+            self.assertNotIn("  " + run.MKTEMP_HINT, lines)
+        self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", run.MAVEN_407_HINT)
+        # npm, curl, pip and Gradle stay quiet, and so does a 407 inside a path
+        for other in ("npm ERR! code E407\nnpm ERR! 407 Proxy Authentication Required - GET "
+                      "https://registry.npmjs.org/left-pad\n[ERROR] Could not resolve dependencies",
+                      "curl: (56) CONNECT tunnel failed, response 407\ncurl: (56) Received HTTP code 407 from proxy "
+                      "after CONNECT: Proxy Authentication Required",
+                      "curl: (22) The requested URL returned error: 407 Proxy Authentication Required while "
+                      "downloading .mvn/wrapper/maven-wrapper.jar; Could not transfer artifact",
+                      "ERROR: Could not install packages due to an OSError: HTTPSConnectionPool: Max retries exceeded "
+                      "(Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection failed: 407 "
+                      "Proxy Authentication Required')))",
+                      "> Could not resolve com.google.guava:guava:33.0-jre.\n   > Could not GET 'https://repo.maven."
+                      "apache.org/maven2/guava.pom'. Received status code 407 from server: Proxy Authentication Required",
+                      "[ERROR] Could not resolve dependencies: cannot read /cache/proxy authentication/407/x.pom"):
+            self.assertEqual(run.output_hints(other), [], other)
+        self.assertEqual(run.output_hints("FAIL: test_one\nAssertionError"), [])
+        # a task's check, as hansa show reports it
+        self.hansa("lane", "set", "a", "check", f"echo '{refused}' >&2; exit 1")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertFalse(m["check"]["ok"], m)
+        self.assertIn(run.MKTEMP_HINT, views.show_text(self.desk, tid))
+        # and a try's step
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 1, said)
+        self.assertIn("  " + run.MKTEMP_HINT, said)
+
+    def test_explain_lane_says_what_java_and_macos_mktemp_do_in_a_lane(self):
+        out = views.explain_text(self.desk, "lane", "a")
+        self.assertNotIn("Picked up JAVA_TOOL_OPTIONS", out)
+        self.hansa("lane", "set", "a", "env", f"JAVA_HOME={self.tmp}")
+        with unittest.mock.patch.object(views.sys, "platform", "linux"):
+            out = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("every JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr before anything else", out)
+        self.assertIn('look for the line holding `version "`, not the first line', out)
+        self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", out)
+        self.assertNotIn("mkdtemp failed", out)
+        with unittest.mock.patch.object(views.sys, "platform", "darwin"):
+            out = views.explain_text(self.desk, "lane", "a")
+        self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX" or mktemp -d -p "$TMPDIR"', out)
 
     def test_a_merge_check_can_be_cancelled_queued_or_running(self):
         d, t1, t2 = self.two_lanes(check="test -f README.md")
@@ -8170,7 +8386,7 @@ class DeskTest(unittest.TestCase):
         [(path, text)] = files
         self.assertTrue(Path(path).resolve().is_relative_to(self.desk.state_dir.resolve()), path)  # no worker writes there
         self.assertEqual(text, f"export LANE_VAR={shlex.quote(value)}\nexport npm_config_cache=/srv/x/cache\n"
-                               "export FAKE_WRITE='from the file'\n" + run.JAVA_PRELUDE)  # quoted; the temporary folder stays the run's
+                               "export FAKE_WRITE='from the file'\n" + run.sandbox_prelude())  # quoted; the temporary folder stays the run's
         r = subprocess.run(["/bin/sh", "-c", text + 'printf %s "$LANE_VAR"'], capture_output=True, text=True,
                            env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(r.stdout, value)  # as a shell reads it back
@@ -8181,7 +8397,7 @@ class DeskTest(unittest.TestCase):
         patch, envs, files = self.popens()
         with patch:
             self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
-        self.assertEqual([t for _, t in files], [run.JAVA_PRELUDE])
+        self.assertEqual([t for _, t in files], [run.sandbox_prelude()])
 
     def test_the_setup_and_check_hansa_runs_get_the_java_prelude_in_the_sandbox(self):
         password = "s3cr%40t-pass"
@@ -8722,7 +8938,8 @@ class DeskTest(unittest.TestCase):
                 lane = self.desk.settings()["lanes"]["a"]
                 deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
                 srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
-            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            # a setup's and a check's, as a worker's, and on Linux the tmpfs for their TMPDIR (srt_settings)
+            self.assertEqual(deny, [x for x in srt if Path(x).name != run.SANDBOX_TMPFS])
             for f in everywhere:
                 self.assertIn(str(home / f), deny, (system, f))
             for f in mac:
@@ -8764,7 +8981,8 @@ class DeskTest(unittest.TestCase):
                 lane = self.desk.settings()["lanes"]["a"]
                 deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
                 srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
-            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            # a setup's and a check's, as a worker's, and on Linux the tmpfs for their TMPDIR (srt_settings)
+            self.assertEqual(deny, [x for x in srt if Path(x).name != run.SANDBOX_TMPFS])
             for f in everywhere:
                 self.assertIn(str(home / f), deny, (system, f))
             for f in mac:
@@ -8906,44 +9124,150 @@ class DeskTest(unittest.TestCase):
             # inside a PATH folder, the desk or the repository, and one that is not there: accepted
             fine = [str(good), str(tools / "bin" / "sub"), str(self.repo.resolve() / "private"), "/nowhere/at/all"]
             self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
-            # written into settings.json another way: a run leaves each out and says so in the task
+            # written into settings.json another way: one that would close a lane's repository or a folder on the
+            # PATH is left out of a run, which says so in the task; any other stops the run (the next test)
+            left = {p: why for p, why in bad.items() if why in ("lane a's repository", "a folder on the PATH")}
+            self.assertEqual(len(left), 4)
             s = self.desk.settings()
             s["workers_may_not_read"] = [*bad, str(good)]
             write_json(self.desk.settings_path, s)
-            self.assertEqual(len(public_settings(self.desk)["deny_skipped"]), len(bad))  # the page says which
+            shown = public_settings(self.desk)
+            self.assertEqual(len(shown["deny_skipped"]) + len(shown["deny_stops"]), len(bad))  # the page says which
+            self.assertEqual(len(shown["deny_stops"]), len(bad) - len(left))
+            self.assertIn("hansa starts no worker", shown["no_read_stop"])
+            told = self.hansa("explain", "lane", "a")
+            self.assertIn(f"not applied, and no run starts: {home}: it is {home}, the home folder", told)
+            s["workers_may_not_read"] = [*left, str(good)]
+            write_json(self.desk.settings_path, s)
+            self.assertEqual((len(public_settings(self.desk)["deny_skipped"]), public_settings(self.desk)["no_read_stop"]),
+                             (len(left), ""))
             tid = self.desk.new_task("Add hello.txt")
             m = self.settle(Dispatcher(self.desk), tid)
             self.assertEqual(m["state"], "done", m)
             argv = json.loads(seen.read_text().splitlines()[-1])
             deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
             self.assertIn(str(good), deny)
-            self.assertFalse(set(bad) & set(deny), deny)
+            self.assertFalse(set(left) & set(deny), deny)
             self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
                              [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir,
                                                                           self.desk.notes_dir)]
                              + [f"Read(//{str(self.desk.root).lstrip('/')}/CLAUDE.md)"])
-            self.assertEqual(len(m["no_read_left_out"]), len(bad))
+            self.assertEqual(len(m["no_read_left_out"]), len(left))
             shown = views.show_text(self.desk, tid)
-            for path, why in bad.items():
-                lines = [x for x in shown.splitlines() if why in x and x.startswith(tuple(
-                    f"what workers may not read: left out of this run: {p}: " for p in (path, json.dumps(path))))]
+            for path, why in left.items():
+                lines = [x for x in shown.splitlines() if why in x and x.startswith(
+                    f"what workers may not read: left out of this run: {path}: ") and "open to the runs" in x]
                 self.assertEqual(len(lines), 1, (path, shown))
-            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(bad))
+            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(left))
             told = self.hansa("explain", "lane", "a")
-            self.assertIn(f"not applied: {home}: it is {home}, the home folder", told)
+            self.assertIn(f"not applied: {self.repo.resolve()}: it is {self.repo.resolve()}, lane a's repository", told)
             # the coordinator's start leaves them out too, and says so
             r = self.echo_coordinator()
             self.assertEqual(r.returncode, 0, r.stderr)
             denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
             self.assertIn(f"Read(//{str(good).lstrip('/')}/**)", denied)
-            self.assertNotIn(f"Read(//{str(home).lstrip('/')}/**)", denied)
-            self.assertNotIn("Read(///**)", denied)
-            # a folder on the PATH below it, as on many machines (~/.local/bin), is said after this reason
-            said = [x for x in r.stderr.splitlines()
-                    if f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it" in x]
+            self.assertNotIn(f"Read(//{str(self.repo.resolve()).lstrip('/')}/**)", denied)
+            said = [x for x in r.stderr.splitlines() if f"{tools}: it is {tools / 'bin'}, a folder on the PATH" in x]
             self.assertEqual(len(said), 1, r.stderr)
             self.assertIn("; skipped", said[0])
-            self.assertEqual(len(self.events("no_read_skipped")), len(bad))
+            self.assertEqual(len(self.events("no_read_skipped")), len(left))
+
+    @design_as_on_mac
+    def test_an_entry_of_what_workers_may_not_read_that_cannot_be_written_as_a_rule_stops_every_run(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        plain, odd = (self.tmp / "plain").resolve(), (self.tmp / "keys (old)").resolve()
+        plain.mkdir()
+        odd.mkdir()
+        link = self.tmp.resolve() / "keys-link"
+        link.symlink_to(plain)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        # a valid list runs: the link is kept from workers as given and where it leads
+        self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)])), {"ok": True, "problems": []})
+        done = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), done)["state"], "done")
+        deny = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]["denyRead"]
+        self.assertTrue({str(link), str(plain)} <= set(deny), deny)
+        self.assertEqual(views.status(self.desk)["no_read_stop"], "")
+        # a list saved earlier with a parenthesis in a name, and a link changed since to lead to such a place
+        for entries, said in (([str(odd)], str(odd)), ([str(link)], str(link))):
+            if entries == [str(link)]:
+                link.unlink()
+                link.symlink_to(odd)
+            s = self.desk.settings()
+            s["workers_may_not_read"] = entries
+            write_json(self.desk.settings_path, s)
+            stop = public_settings(self.desk)["no_read_stop"]
+            self.assertIn(said, stop)
+            for x in ("hansa starts no worker, verifier, design session or coordinator", "()[]{}*?\\",
+                      "on the web page, Settings"):
+                self.assertIn(x, stop)
+            runs = len(seen.read_text().splitlines())
+            # the worker
+            tid = self.desk.new_task("Add more.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "failed", m)
+            self.assertIn(stop, m["error"])
+            # the verifier
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "verify", done])
+            vid = self.desk.meta(done)["verify"]
+            v = self.settle(Dispatcher(self.desk), vid)
+            self.assertEqual(v["state"], "failed", v)
+            self.assertIn(stop, v["error"])
+            self.assertEqual(len(seen.read_text().splitlines()), runs)  # no Claude Code started
+            # the design session: refused before tmux is asked, and its command refuses too
+            did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+            with unittest.mock.patch.object(run, "tmux_bin", lambda: "/nonexistent/tmux"):
+                with self.assertRaises(RuntimeError) as e:
+                    run.start_design(self.desk, did, "a")
+            self.assertIn(stop, str(e.exception))
+            self.assertFalse((self.desk.worktrees_dir / "a-design").exists())
+            self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
+                             session_id="sid-d", model_asked="sonnet")
+            with self.assertRaises(RuntimeError) as e:
+                run.design_command(self.desk, did)
+            self.assertIn(stop, str(e.exception))
+            self.desk.update(did, state="cancelled")
+            # the coordinator
+            r = self.echo_coordinator()
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(stop, r.stderr)
+            self.assertNotIn("--disallowedTools", r.stdout)
+            # hansa status and the page say it each time
+            self.assertIn(f"STOPPED: {stop}", views.status_text(views.status(self.desk)))
+            self.assertEqual(public_settings(self.desk)["deny_skipped"], [])
+            for x in ("NO_READ_STOP = r.no_read_stop", "section(T.noReadStop", "st.no_read_stop"):
+                self.assertIn(x, (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+
+    def test_an_entry_left_out_for_a_lanes_repository_is_said_in_status_and_on_the_page(self):
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [str(self.repo.resolve())]
+        write_json(self.desk.settings_path, s)
+        st = views.status(self.desk)
+        self.assertEqual(st["no_read_stop"], "")
+        self.assertEqual(len(st["no_read_left_out"]), 1)
+        text = views.status_text(st)
+        for x in (f"what workers may not read, entry left out: {self.repo.resolve()}: it is {self.repo.resolve()}, "
+                  "lane a's repository", "that folder is open to the runs of that lane"):
+            self.assertIn(x, text)
+        def timeless(t):  # the text says the time: the minute may turn between the two calls
+            return re.sub(r"now \d\d:\d\d", "now", t)
+        again = views.status_text(views.status(self.desk))
+        self.assertIn("what workers may not read, entry left out", again)  # every time, not once
+        self.assertEqual(timeless(again), timeless(text))
+        shown = public_settings(self.desk)
+        self.assertEqual((shown["deny_stops"], shown["no_read_stop"]), ([], ""))
+        self.assertEqual(len(shown["deny_skipped"]), 1)
+        self.assertIn("that folder is open to the runs of that lane", shown["deny_skipped"][0])
+        self.assertIn(str(self.repo.resolve()), shown["deny_skipped"][0])
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn("st.no_read_left_out", ui)
+        # a run still starts
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change
@@ -15012,6 +15336,295 @@ class DeskTest(unittest.TestCase):
         self.assertIn(".m2/settings-security.xml", home_secrets())
         for kept in (".m2/settings.xml", ".m2", ".gradle/gradle.properties", ".gradle"):  # mirrors, proxies a build needs
             self.assertNotIn(kept, home_secrets())
+
+    def test_on_linux_srt_mounts_a_tmpfs_of_its_own_for_the_commands_temporary_folder(self):
+        from hansa import run
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        got = {}
+        for linux in (False, True):
+            t = self.tmp / f"run-{linux}"
+            t.mkdir()
+            with unittest.mock.patch.object(account, "LINUX", linux):
+                got[linux] = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(t))["filesystem"]
+                prelude = run.with_prelude("true")
+            self.assertEqual((t / run.SANDBOX_TMPFS).is_dir(), linux)  # srt mounts a tmpfs only over one that is there
+            self.assertEqual(run.LINUX_PRELUDE in prelude, linux)
+            self.assertTrue(prelude.startswith(run.sandbox_prelude(linux)))
+        fs, mac = got[True], got[False]
+        tmpfs = run.full_paths([self.tmp / "run-True" / run.SANDBOX_TMPFS])
+        self.assertEqual(fs["denyRead"][-len(tmpfs):], tmpfs)  # read-denied: srt hides it under an empty tmpfs
+        self.assertEqual(fs["denyRead"][:-len(tmpfs)], mac["denyRead"])
+        self.assertIn(str(self.tmp / "run-True"), fs["allowWrite"])  # the run's folder, srt's sockets in it, as before
+        self.assertFalse([x for x in fs["allowWrite"] + fs["denyWrite"] if run.SANDBOX_TMPFS in x])
+        self.assertFalse([x for x in mac["denyRead"] if run.SANDBOX_TMPFS in x])
+
+    def test_explain_lane_on_linux_says_the_mount_table_can_call_a_writable_folder_read_only(self):
+        for linux in (False, True):
+            with unittest.mock.patch.object(account, "LINUX", linux):
+                text = views.explain_text(self.desk, "lane", "a")
+            for said in ("FileStore.isReadOnly", "findmnt", "trust the error of the write itself",
+                         "TMPDIR of the setup, check, merge check and preview is a tmpfs of its own",
+                         "does not list the empty files the sandbox puts at the top of the worktree"):
+                (self.assertIn if linux else self.assertNotIn)(said, text)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the sandbox mounts placeholders on Linux only")
+    def test_git_status_in_a_linux_lanes_check_lists_none_of_the_sandboxs_placeholders(self):
+        # srt itself, as a lane's check runs in it (in_srt, CHECK_SCRIPT); skipped where it is not installed
+        from hansa import run
+        path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
+                               if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
+        srt = shutil.which("srt", path=path)
+        if not srt:
+            self.skipTest("srt is not installed")
+        (self.repo / ".vscode").mkdir()
+        (self.repo / ".vscode" / "settings.json").write_text("{}\n")
+        sh("git", "add", ".vscode", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "editor", cwd=self.repo)
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        t = tempfile.mkdtemp(dir=self.tmp)
+        f = Path(t) / "settings.json"
+        write_json(f, run.srt_settings(self.desk, lane, "claude", p, self.repo, t))
+        check = ('printf "\\n" >> .vscode/settings.json && echo made > new.txt && git status --porcelain -uall'
+                 ' && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git status --porcelain'
+                 ' && echo "tmp=$TMPDIR" && : > "$TMPDIR/w" && echo wrote')
+        r = subprocess.run([srt, "--settings", str(f), "--", "sh", "-c", run.in_sandbox(self.desk, lane, check)],
+                           cwd=self.repo, capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "PATH": path, "TMPDIR": t, "CLAUDE_CODE_TMPDIR": t})
+        if r.returncode and "tmp=" not in r.stdout:
+            self.skipTest(f"no sandbox can be applied here (inside one already?): srt said {(r.stderr or r.stdout).strip()[:200]}")
+        lines = r.stdout.splitlines()
+        self.assertIn(" M .vscode/settings.json", lines)  # tracked: still listed
+        self.assertIn("?? new.txt", lines)
+        self.assertFalse([x for x in lines if x.startswith("??") and x[3:].split("/")[0] in run.SANDBOX_PLACEHOLDERS], lines)
+        self.assertIn(f"tmp={Path(t) / run.SANDBOX_TMPFS}", lines)  # srt's tmpfs, another device than the folder
+        self.assertIn("wrote", lines)
+        self.assertFalse((Path(t) / run.SANDBOX_TMPFS / "w").exists())  # in memory, not on the host
+
+
+class LinuxPreludeTest(unittest.TestCase):
+    """run.LINUX_PRELUDE, run in the sandbox on Linux before a lane's commands and a worker's: the run's tmpfs as
+    TMPDIR, and git told to leave out the sandbox's placeholders. Run here without a sandbox, as sh reads it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo, self.run_tmp, self.home = self.tmp / "repo", self.tmp / "run", self.tmp / "home"
+        for d in (self.repo, self.run_tmp, self.home / ".config" / "git"):
+            d.mkdir(parents=True)
+        (self.home / ".config" / "git" / "ignore").write_text("*.log\n")  # the account's own excludes
+        sh("git", "init", "-q", "-b", "main", cwd=self.repo)
+        (self.repo / ".vscode").mkdir()
+        (self.repo / ".vscode" / "settings.json").write_text("{}\n")
+        (self.repo / ".bashrc").write_text("# the project's own, tracked\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=self.repo)
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "TMPDIR": str(self.run_tmp)}
+
+    def git_status(self, before="", **env) -> list:
+        from hansa import run
+        r = subprocess.run(["/bin/sh", "-eu", "-c", run.sandbox_prelude(True) + before + "git status --porcelain -uall"],
+                           cwd=self.repo, env={**self.env, **env}, capture_output=True, text=True, check=True)
+        return r.stdout.splitlines()
+
+    def test_git_lists_no_placeholder_but_tracked_files_of_their_names_and_the_accounts_excludes_hold(self):
+        from hansa import run
+        (self.repo / ".bashrc").write_text("changed\n")
+        (self.repo / ".vscode" / "settings.json").write_text("{\"changed\": 1}\n")
+        for n in run.SANDBOX_PLACEHOLDERS:
+            if not (self.repo / n).exists():
+                (self.repo / n).write_text("")  # as the sandbox mounts them
+        (self.repo / "sub").mkdir()
+        for f in ("sub/.zshrc", "new.txt", "build.log"):
+            (self.repo / f).write_text("x\n")
+        bare = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=self.repo, env=self.env,
+                              capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertIn("?? .mcp.json", bare)  # outside the sandbox, as hansa and the main checkout see it: unchanged
+        self.assertEqual(sorted(self.git_status()), [" M .bashrc", " M .vscode/settings.json", "?? new.txt",
+                                                     "?? sub/.zshrc"])  # anchored at the top; *.log kept out
+        excludes = Path(self.git_out("config", "--path", "--get", "core.excludesFile").strip())
+        self.assertEqual(excludes.parent, self.run_tmp)
+        self.assertTrue(excludes.name.startswith("hansa-git-excludes-"), excludes)
+        self.assertTrue(excludes.read_text().startswith("*.log\n"), excludes.read_text())
+        # a command's own GIT_CONFIG_COUNT and key do not remove it: it is in the global config, not the environment
+        self.assertEqual(sorted(self.git_status(before="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath "
+                                                       "GIT_CONFIG_VALUE_0=false ")),
+                         [" M .bashrc", " M .vscode/settings.json", "?? new.txt", "?? sub/.zshrc"])
+        self.assertEqual(sorted(self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.quotePath",
+                                                GIT_CONFIG_VALUE_0="false")),
+                         [" M .bashrc", " M .vscode/settings.json", "?? new.txt", "?? sub/.zshrc"])
+
+    def git_out(self, *args, env=None) -> str:
+        from hansa import run
+        r = subprocess.run(["/bin/sh", "-eu", "-c", run.sandbox_prelude(True) + 'exec git "$@"', "sh", *args],
+                           cwd=self.repo, env={**self.env, **(env or {})}, capture_output=True, text=True, check=True)
+        return r.stdout
+
+    def placeholders(self):
+        from hansa import run
+        for n in run.SANDBOX_PLACEHOLDERS:
+            if not (self.repo / n).exists():
+                (self.repo / n).write_text("")
+
+    def test_the_accounts_global_settings_still_apply_from_both_files_and_from_git_config_global(self):
+        (self.home / ".gitconfig").write_text("[user]\n\tname = Someone Here\n[alias]\n\tst = status --porcelain -uall\n")
+        (self.home / ".config" / "git" / "config").write_text("[user]\n\temail = xdg@example.com\n\tname = Overridden\n")
+        self.placeholders()
+        (self.repo / "new.txt").write_text("x\n")
+        self.assertEqual(self.git_out("config", "user.name").strip(), "Someone Here")  # ~/.gitconfig after the XDG one
+        self.assertEqual(self.git_out("config", "user.email").strip(), "xdg@example.com")
+        self.assertEqual(self.git_out("st").splitlines(), ["?? new.txt"])  # the alias, and no placeholder
+        own = self.tmp / "own config"  # a lane's own GIT_CONFIG_GLOBAL, with a space in its path
+        own.write_text("[user]\n\tname = From Global\n[core]\n\texcludesFile = %s\n" % (self.tmp / "mine"))
+        (self.tmp / "mine").write_text("new.txt\n")
+        self.assertEqual(self.git_out("config", "user.name", env={"GIT_CONFIG_GLOBAL": str(own)}).strip(), "From Global")
+        self.assertEqual(self.git_out("status", "--porcelain", "-uall", env={"GIT_CONFIG_GLOBAL": str(own)}), "")
+        self.assertTrue(any(f.read_text().startswith("new.txt\n") for f in self.run_tmp.glob("hansa-git-excludes-*")))
+        own.chmod(0)  # one git cannot read is left out, as git leaves it, and git still runs
+        self.addCleanup(own.chmod, 0o600)
+        if not os.access(own, os.R_OK):
+            self.assertEqual(self.git_out("status", "--porcelain", "-uall", env={"GIT_CONFIG_GLOBAL": str(own)}),
+                             "?? new.txt\n")
+
+    def test_a_repositorys_own_excludes_file_or_a_commands_wins_as_git_means_it_to(self):
+        self.placeholders()
+        (self.tmp / "mine").write_text("new.txt\n")
+        (self.repo / "new.txt").write_text("x\n")
+        (self.home / ".config" / "git" / "ignore").write_text("new.txt\n")
+        sh("git", "config", "core.excludesFile", str(self.tmp / "mine"), cwd=self.repo)
+        listed = self.git_status()
+        self.assertNotIn("?? new.txt", listed)
+        self.assertIn("?? .mcp.json", listed)  # the placeholders show there again (README)
+        sh("git", "config", "--unset", "core.excludesFile", cwd=self.repo)
+        listed = self.git_out("-c", f"core.excludesFile={self.tmp / 'mine'}", "status", "--porcelain", "-uall")
+        self.assertIn("?? .mcp.json", listed.splitlines())  # git -c, too (README)
+        self.assertNotIn("?? new.txt", listed.splitlines())
+        listed = self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile",
+                                 GIT_CONFIG_VALUE_0=str(self.tmp / "mine"))
+        self.assertIn("?? .mcp.json", listed)  # a lane's env setting its own, too
+        self.assertNotIn("?? new.txt", listed)
+        self.assertNotIn("?? new.txt", self.git_status())  # without them: not listed, a placeholder neither
+        self.assertNotIn("?? .mcp.json", self.git_status())
+
+    def test_an_older_git_gets_the_excludes_as_git_config_count_after_those_set(self):
+        fake = self.tmp / "oldgit"
+        fake.mkdir()
+        real = shutil.which("git")
+        (fake / "git").write_text('#!/bin/sh\n[ "$1" = version ] && { echo "git version 2.31.8"; exit 0; }\n'
+                                  'exec %s "$@"\n' % shlex.quote(real))
+        (fake / "git").chmod(0o755)
+        from hansa import run
+        show = 'echo "${GIT_CONFIG_GLOBAL:-unset} $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_0:-} ${GIT_CONFIG_KEY_1:-}"'
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show],
+                           env={**self.env, "PATH": f"{fake}{os.pathsep}{self.env['PATH']}", "GIT_CONFIG_COUNT": "1",
+                                "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x"},
+                           capture_output=True, text=True, check=True)
+        self.assertEqual(r.stdout.split(), ["unset", "2", "user.name", "core.excludesFile"])
+        self.assertFalse(list(self.run_tmp.glob("hansa-gitconfig*")))
+        self.placeholders()
+        self.assertEqual(self.git_status(PATH=f"{fake}{os.pathsep}{self.env['PATH']}"), [])
+
+    def test_it_adds_its_excludes_once_and_uses_srts_tmpfs_only_when_there(self):
+        from hansa import run
+        show = 'echo "$TMPDIR $GIT_CONFIG_GLOBAL $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_1:-none}"'
+        twice = run.sandbox_prelude(True) + "exec /bin/sh -c " + shlex.quote(run.sandbox_prelude(True) + show)
+        r = subprocess.run(["/bin/sh", "-c", twice], env={**self.env, "GIT_CONFIG_COUNT": "1",
+                                                          "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x"},
+                           capture_output=True, text=True, check=True)
+        tmp, config, count, key = r.stdout.split()
+        self.assertEqual([tmp, Path(config).parent, count, key], [str(self.run_tmp), self.run_tmp, "1", "none"])
+        config = Path(config).read_text()
+        self.assertEqual(config.count("path ="), 2)  # the XDG config and ~/.gitconfig, not hansa's own again
+        self.assertNotIn("hansa-gitconfig", config)
+        self.assertEqual(sorted(re.sub(r"-[0-9]+-[0-9]+$", "", n) for n in os.listdir(self.run_tmp)),
+                         ["hansa-git-excludes", "hansa-gitconfig"])  # one of each, and no part left
+        tmpfs = self.run_tmp / run.SANDBOX_TMPFS
+        tmpfs.mkdir()
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=self.env, capture_output=True,
+                           text=True, check=True)
+        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))  # the same device: srt mounted nothing there
+        fake = self.tmp / "bin"
+        fake.mkdir()
+        (fake / "stat").write_text('#!/bin/sh\ncase $3 in */%s) echo 2 ;; *) echo 1 ;; esac\n' % run.SANDBOX_TMPFS)
+        (fake / "stat").chmod(0o755)
+        env = {**self.env, "PATH": f"{fake}{os.pathsep}{self.env['PATH']}"}  # a device of its own, as srt's tmpfs
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+                           text=True, check=True)
+        self.assertEqual(r.stdout.split()[0], str(tmpfs))
+        self.assertEqual(Path(r.stdout.split()[1]).parent, tmpfs)
+        self.assertEqual(len(list(tmpfs.glob("hansa-git-excludes-*"))), 1)
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + 'echo "$JAVA_TOOL_OPTIONS"'], env=env,
+                           capture_output=True, text=True, check=True)
+        self.assertEqual(r.stdout.strip(), f"-Djava.io.tmpdir={tmpfs}")  # Java's temporary folder too
+        tmpfs.chmod(0o500)  # a tmpfs the command cannot write: the run's folder stays
+        self.addCleanup(tmpfs.chmod, 0o700)
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+                           text=True, check=True)
+        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))
+        # a worker's TMPDIR (Claude Code's own folder) has no such folder, and macOS gets none of it
+        self.assertEqual(run.sandbox_prelude(False), run.JAVA_PRELUDE)
+
+    def test_commands_started_side_by_side_in_one_tmpdir_with_the_same_pid_each_get_their_excludes_and_settings(self):
+        # Under srt on Linux each command has a PID namespace of its own, so commands started at once very likely
+        # have the same $$: here it is made the same, and each command waits for the others before it starts.
+        from hansa import run
+        (self.home / ".gitconfig").write_text("[user]\n\tname = Someone Here\n")
+        self.placeholders()
+        (self.repo / "new.txt").write_text("x\n")
+        go = self.tmp / "go"
+        prelude = run.sandbox_prelude(True).replace("$$", "4242")
+        command = ('until [ -e "$GO" ]; do :; done\n' + prelude +
+                   'git status --porcelain -uall; echo "name=$(git config user.name)"')
+        homes = {}
+        for i in range(12):  # half of them with an account of another name, sharing the TMPDIR
+            home = self.home if i % 2 == 0 else self.tmp / f"home{i}"
+            if home != self.home:
+                home.mkdir()
+                (home / ".gitconfig").write_text(f"[user]\n\tname = Other {i}\n")
+            homes[i] = home
+        for _ in range(3):
+            go.unlink(missing_ok=True)
+            ps = [subprocess.Popen(["/bin/sh", "-c", command], cwd=self.repo, text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, env={**self.env, "HOME": str(homes[i]), "GO": str(go)})
+                  for i in range(12)]
+            try:
+                time.sleep(0.3)
+                go.write_text("")
+                outs = [p.communicate(timeout=60)[0].splitlines() for p in ps]
+            finally:
+                go.write_text("")
+                for p in ps:
+                    p.kill()
+                    p.communicate()
+            for i, out in enumerate(outs):
+                name = "Someone Here" if homes[i] == self.home else f"Other {i}"
+                self.assertEqual(out, ["?? new.txt", f"name={name}"], i)
+        self.assertFalse(list(self.run_tmp.glob("hansa-part.*")))  # nothing half-written left
+
+
+class LinuxSandboxProbeTest(unittest.TestCase):
+    """tests/linux_sandbox_probe.sh, run as a lane's check: hansa lane try prints a log's last 15 lines."""
+
+    def test_its_output_stays_within_15_lines_however_many_files_are_untracked(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        repo, t = tmp / "repo", tmp / "t"
+        repo.mkdir()
+        t.mkdir()
+        sh("git", "init", "-q", cwd=repo)
+        probe = Path(__file__).resolve().parent / "linux_sandbox_probe.sh"
+        env = {**os.environ, "TMPDIR": str(t)}
+        r = subprocess.run(["/bin/sh", str(probe)], cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.splitlines()[-1], "(none)")
+        for i in range(12):
+            (repo / f"u{i:02}").write_text("")
+        r = subprocess.run(["/bin/sh", str(probe)], cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+        lines = (r.stdout + r.stderr).splitlines()
+        self.assertLessEqual(len(lines), 15, lines)
+        self.assertEqual(lines[-4:], ["?? u00", "?? u01", "?? u02", "... and 9 more"])
+        self.assertEqual(sorted(os.listdir(repo)), [".git", *(f"u{i:02}" for i in range(12))])  # nothing left
+        self.assertEqual(os.listdir(t), [])
+
 
 class GitOpenTryTest(unittest.TestCase):
     """The sandbox try's script (run.git_open_try) run by the real /bin/sh outside any sandbox: a read-only folder
