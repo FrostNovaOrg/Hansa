@@ -61,6 +61,12 @@ def skip_unless_ports(test):
         test.skipTest(why)
 
 
+def design_as_on_mac(test):
+    """Run a test about what a design session gets as on a Mac, so it runs on Linux too, where hansa refuses
+    design sessions (test_a_design_session_does_not_start_on_linux is the test of that refusal)."""
+    return unittest.mock.patch.object(account, "LINUX", False)(test)
+
+
 # What Claude Code writes when a worker starts work in the background: the tool result's text and the row's
 # toolUseResult, used to pair background launches with completion notices.
 BG_SHAPES = r'''
@@ -381,7 +387,10 @@ def stop_started_on(desk_root: Path, since: float, wait=10) -> None:
 
 
 def sh(*args, cwd):
-    subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+    """Run a command; when it fails, the error says what it wrote on stderr (git says why it refused there)."""
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    if r.returncode:
+        raise AssertionError(f"{shlex.join(map(str, args))} exited with {r.returncode}: {r.stderr.strip()}")
 
 
 def sandbox_glob(pattern: str) -> str:
@@ -1773,6 +1782,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"pid {pid['script']}: ", shown)
         self.assertIn(f"pid {pid['tmpdir']}: ", shown)
 
+    @design_as_on_mac
     def test_a_verification_and_a_design_session_are_swept_at_their_end_too(self):
         from hansa import run
         tid = self.desk.new_task("Make the badge bigger")
@@ -4029,6 +4039,7 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(run.check_provider(self.desk, "mimo")["ok"])
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
 
+    @design_as_on_mac
     def test_runs_ride_out_a_short_network_drop_and_the_provider_check_answers_at_once(self):
         from hansa import cli, run
         retries, popen = {}, run.subprocess.Popen
@@ -6643,6 +6654,7 @@ class DeskTest(unittest.TestCase):
             self.assertIn("- This lane has no check command: hansa runs nothing here after you end.\n", prompt)
             self.assertNotIn("lane's setup", prompt)
 
+    @design_as_on_mac
     def test_workers_may_run_any_command_in_the_sandbox_and_design_sessions_may_not(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -6683,6 +6695,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("Bash", self.allowed_by(argv))  # in the sandbox, but only the lane's rules and its own git
         self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
 
+    @design_as_on_mac
     def test_workers_verifiers_and_design_sessions_cannot_read_the_desks_notes_or_card(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -6806,7 +6819,9 @@ class DeskTest(unittest.TestCase):
                "/opt/homebrew/Cellar": "Homebrew's programs", "/opt/homebrew/opt": "Homebrew's programs",
                "/usr/local/Cellar": "Homebrew's programs", "/usr/local/opt": "Homebrew's programs",
                "/opt/homebrew": "workers could not run their tools"}
-        with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)):
+        # a PATH of its own: on another machine a folder above one of these may be on it (~/.config/..., Homebrew's opt)
+        with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)), \
+                unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
             for path, why in bad.items():
                 told = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
                 self.assertFalse(told["ok"], path)
@@ -6817,6 +6832,12 @@ class DeskTest(unittest.TestCase):
             fine = [str(home / ".config" / "myproject" / "keys.json"), "/usr/lib/myproject-keys", str(systmp / "keys"),
                     str(self.desk.root / "elsewhere"), "/opt/homebrew/Cellar/myformula/1.0/keys"]
             self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
+        tool = home / ".config" / "mytool" / "bin"
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"/usr/bin:/bin:{tool}"}):  # both reasons are said
+            told = self.page_save(lambda s: s.update(workers_may_not_read=[str(home / ".config")]))
+        self.assertEqual(len(told["problems"]), 1, told)
+        self.assertIn("settings and caches in the home folder", told["problems"][0])
+        self.assertIn(f"it is {tool}, a folder on the PATH hansa runs with", told["problems"][0])
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
         from hansa import run
@@ -8111,6 +8132,7 @@ class DeskTest(unittest.TestCase):
         for f in everywhere:
             self.assertIn(f"~/{f}", told)
 
+    @design_as_on_mac
     def test_what_the_principal_keeps_from_workers_reaches_every_sandbox_and_every_read_tool(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -8266,8 +8288,11 @@ class DeskTest(unittest.TestCase):
             self.assertIn(f"Read(//{str(good).lstrip('/')}/**)", denied)
             self.assertNotIn(f"Read(//{str(home).lstrip('/')}/**)", denied)
             self.assertNotIn("Read(///**)", denied)
-            self.assertIn(f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it; skipped",
-                          r.stderr)
+            # a folder on the PATH below it, as on many machines (~/.local/bin), is said after this reason
+            said = [x for x in r.stderr.splitlines()
+                    if f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it" in x]
+            self.assertEqual(len(said), 1, r.stderr)
+            self.assertIn("; skipped", said[0])
             self.assertEqual(len(self.events("no_read_skipped")), len(bad))
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
@@ -8290,6 +8315,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("folders a worker may also write (a build or test tool's cache): none",
                       views.explain_text(self.desk, "lane", "a"))
 
+    @design_as_on_mac
     def test_a_design_session_runs_in_the_sandbox_of_a_worker_of_its_lane(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -8331,6 +8357,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("allowLocalBinding", on_linux)
         self.assertEqual(on_linux, worker["network"])
 
+    @design_as_on_mac
     def test_a_design_session_may_write_in_git_only_what_its_own_commits_and_merges_take(self):
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))  # lane a's worktree
@@ -8490,6 +8517,7 @@ class DeskTest(unittest.TestCase):
         (self.repo / ".git" / "commondir").unlink()
         self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Once more")))[0], wt)
 
+    @design_as_on_mac
     def test_a_design_session_runs_no_command_outside_the_sandbox(self):
         from hansa import run
         s = self.desk.settings()
@@ -8548,6 +8576,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("To look at the app, start it with `npm run dev`", argv[argv.index("--append-system-prompt") + 1])
         self.desk.update(tid, state="cancelled")
 
+    @design_as_on_mac
     def test_hansa_commits_and_merges_only_on_the_branch_it_made_for_the_run(self):
         # a design session's sandbox keeps its HEAD; and whatever points a worktree's HEAD at the base, hansa's
         # commit at the run's end (outside the sandbox) does not move the base
@@ -8638,6 +8667,7 @@ class DeskTest(unittest.TestCase):
         sh("git", "checkout", "-q", f"task/{m['id']}", cwd=wt)
         self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0], wt)  # put right: it works again
 
+    @design_as_on_mac
     def test_a_branch_ref_that_leads_to_another_ref_does_not_lead_hansas_commit_onto_it(self):
         # a design session may write its branch's ref: 'ref: refs/heads/main' there would have git, which follows it,
         # commit hansa's end-of-session commit onto the base, while HEAD still names the session's branch
@@ -8700,7 +8730,7 @@ class DeskTest(unittest.TestCase):
                          model_asked="sonnet", branch=f"task/{tid}", base=base)
         (wt / "own.txt").write_text("the session's own commit\n")
         sh("git", "add", "own.txt", cwd=wt)
-        sh("git", "commit", "-q", "-m", "own", cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "own", cwd=wt)
         ref = self.repo / ".git" / "refs" / "heads" / "task" / tid
         tip = ref.read_text().strip()
         (wt / "left.txt").write_text("left uncommitted\n")
@@ -8743,7 +8773,7 @@ class DeskTest(unittest.TestCase):
                              model_asked="sonnet", branch=f"task/{tid}", base=base)
             (wt / "own.txt").write_text("the session's own commit\n")
             sh("git", "add", "own.txt", cwd=wt)
-            sh("git", "commit", "-q", "-m", "own", cwd=wt)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "own", cwd=wt)
             ref = self.repo / ".git" / "refs" / "heads" / "task" / tid
             (wt / "left.txt").write_text("left uncommitted\n")
             made, wgit, commit_work, markers = [], run.wgit, run.commit_work, run.markers_in_change
@@ -8840,13 +8870,15 @@ class DeskTest(unittest.TestCase):
         box = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))
         for name in ("MERGE_HEAD", "MERGE_MODE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply",
                      "sequencer"):  # workers and verifiers never merge: hansa does
-            self.assertFalse(may_write(box, own / name), name)
+            # on Linux a missing one is left off the list (the sandbox would put a device there, which git takes
+            # for a merge under way): check_no_operation stops hansa's commit there instead, as below
+            self.assertEqual(may_write(box, own / name), account.LINUX, name)
             self.assertFalse(os.path.lexists(own / name), name)  # and none is made: an empty one says a merge is on
         self.assertTrue(may_write(box, own / "index"))
         sh("git", "checkout", "-q", "-b", "side", "main", cwd=self.repo)
         (self.repo / "side.txt").write_text("nobody reviewed this\n")
         sh("git", "add", "side.txt", cwd=self.repo)
-        sh("git", "commit", "-q", "-m", "side", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "side", cwd=self.repo)
         sh("git", "checkout", "-q", "main", cwd=self.repo)
         side = self.git_out("rev-parse", "side")
         lane = self.desk.settings()["lanes"]["a"]
@@ -8862,7 +8894,8 @@ class DeskTest(unittest.TestCase):
                              **({"kind": "verify"} if kind == "verify" else {}))
             own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt))
             if kind == "design":
-                argv, _, _ = run.design_command(self.desk, tid)
+                with unittest.mock.patch.object(account, "LINUX", False):  # as on a Mac: none runs on Linux
+                    argv, _, _ = run.design_command(self.desk, tid)
                 self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
                 self.assertTrue(may_write(self.sandbox_of(argv), own / "MERGE_HEAD"))  # it may merge
             (own / "MERGE_HEAD").write_text(side + "\n")
@@ -9662,6 +9695,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text(),
                          "Added hello.txt. Checked it exists.\n")
 
+    @design_as_on_mac
     def test_workers_are_not_given_tools_that_need_someone_there(self):
         from hansa import run
         tools = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
@@ -10212,6 +10246,7 @@ class DeskTest(unittest.TestCase):
         tid = self.settle(Dispatcher(self.desk), self.desk.new_task("Add docs/conf.py"))["id"]
         self.assertIn(f"note: nothing verified this change: {tid} changed docs/conf.py", self.hansa("merge", tid))
 
+    @design_as_on_mac
     def test_design_session_opens_for_the_principal_and_comes_back_for_review(self):
         try:
             tmux = tmux_bin()
@@ -10272,6 +10307,7 @@ class DeskTest(unittest.TestCase):
         self.assertTrue((self.repo / "badge.txt").exists())
         self.assertEqual({r["task"]: r["seat"] for r in cost.worker_rows(self.desk, 0)}, {tid: "design", work: "worker"})
 
+    @design_as_on_mac
     def test_a_design_session_tmux_did_not_open_fails_without_asking_the_principal(self):
         fake = self.tmp / "tmux"  # like tmux that cannot make its socket: it says so, exits 0, and opens nothing
         fake.write_text("#!/bin/sh\necho 'error creating /tmp/tmux-501/hansa-x (Operation not permitted)' >&2\nexit 0\n")
@@ -10358,6 +10394,7 @@ class DeskTest(unittest.TestCase):
         why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
         self.assertIn("but `hansa serve` is not running", why)
 
+    @design_as_on_mac
     def test_hansa_design_says_what_the_waiting_lines_say_when_the_server_does_not_look(self):
         from hansa import run
         held = cli.hold_server_lock(self.desk)
