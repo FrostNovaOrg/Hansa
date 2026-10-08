@@ -18,7 +18,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, refused_rule, resolved, stored, write_json,
-                   argv_rules_problem, path_rule_problem,
+                   argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
@@ -53,6 +53,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     for x in dict.fromkeys([str(desk.root), str(desk.given)]):  # every rule for the desk's folders starts with it
         if path_rule_problem(x):
             raise SystemExit(f"hansa: {path_rule_problem(x)}; no desk was made")
+    moved = desk_paths_problem(desk, run_homes())  # a deny rule under it would close another folder
+    if moved:
+        raise SystemExit(f"hansa: {moved}; no desk was made")
     if repo:  # looked at before anything is made, so a refusal leaves no half-made desk
         if not resolved(repo):
             raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
@@ -60,8 +63,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
-        if path_rule_problem(repo):
-            raise SystemExit(f"hansa: {path_rule_problem(repo)}; no desk was made")
+        why = path_rule_problem(repo) or desk_paths_problem(desk, (), [(lane, repo)])
+        if why:
+            raise SystemExit(f"hansa: {why}; no desk was made")
         base = lane_base(repo, base, "no desk was made")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -1065,6 +1069,9 @@ def hold_server_lock(desk: Desk):
 def cmd_serve(a):
     from .web import start_web
     desk = Desk.find(a.desk)
+    moved = desk_paths_problem(desk, run_homes(), lane_repos(desk.settings()))
+    if moved:  # every run it would start would be refused: say it once, here
+        raise SystemExit(f"hansa: hansa serve did not start, as no run may start: {moved}")
     held = hold_server_lock(desk)  # kept open while this server runs
     if not held:
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
@@ -1191,6 +1198,10 @@ def cmd_coordinator(a):
     unsplit = argv_rules_problem(argv)
     if unsplit:  # a deny rule Claude Code would split leaves its folder open: the session never starts with one
         raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
+    moved = desk_paths_problem(desk, [home, *run_homes(env)]) or next(
+        (w for w in (pattern_path_problem(r, "a lane's repository", "git's data in it") for r in repos) if w), "")
+    if moved:  # a deny rule under it would close another folder and leave its own open
+        raise SystemExit(f"hansa: the coordinator's session was not started: {moved}")
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
@@ -1558,8 +1569,9 @@ def cmd_lane(a):
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
             for x in dict.fromkeys([repo, *([a.repo] if a.repo else [])]):  # the coordinator's rules name it
-                if path_rule_problem(x):
-                    raise SystemExit(f"hansa: {path_rule_problem(x)}; nothing was changed")
+                why = path_rule_problem(x) or pattern_path_problem(x, f"lane {a.name}'s repository", "git's data in it")
+                if why:
+                    raise SystemExit(f"hansa: {why}; nothing was changed")
             if not a.like:
                 base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)

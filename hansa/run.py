@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import (DENY_AT, HANSA_IDENTITY, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
@@ -2198,7 +2198,12 @@ def no_read(desk: Desk) -> tuple:
     it: (the paths that pass the checks now, a line for each left out). The list is checked on saving, but a
     lane's repository, a worktree or a folder on the PATH may have come under one since: that one is left out.
     One that cannot be applied for any other reason (a pattern character in a name, or where a link now leads)
-    stops the run: RuntimeError, saying which entry and why (no_read_stop)."""
+    stops the run: RuntimeError, saying which entry and why (no_read_stop); so does a desk or home folder whose
+    path has a pattern character (desk_paths_problem), as the rules for the desk's folders and the logins would
+    close other folders."""
+    moved = desk_paths_problem(desk, run_homes())
+    if moved:  # the deny rules for the desk's own folders and the logins would close other folders
+        raise RuntimeError(f"hansa starts no run (worker, verifier, design session, setup or check): {moved}")
     good, said, stops = no_read_parts(desk.settings(), desk.root)
     if stops:
         raise RuntimeError(stop_text(stops))
@@ -2237,6 +2242,10 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, committi
     git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
     may be written. `committing` (a design session), the branch it commits to: what design_git_write opens in
     git's folders may be written too."""
+    moved = next((w for x, what in ((wt, "the worktree"), (lane.get("repo"), "the lane's repository")) if x
+                  for w in [pattern_path_problem(x, what, "git's data in it")] if w), "")
+    if moved:  # git_write_deny's rules there would close another folder
+        raise RuntimeError(f"hansa starts no run (worker, verifier, design session, setup or check): {moved}")
     make_git_write_deny(wt, committing)  # before anything starts in the sandbox
     home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
     homes = [config_home(desk, pname, p)]
