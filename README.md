@@ -113,6 +113,21 @@ page gives.
   `t0001: <title>` and `Merge t0001: <title>`. A lane whose release goes to a
   public repository usually leaves `{task}` out; the release's word check reads
   every outgoing commit message all the same.
+  Every commit hansa makes for a lane (a task's commit, its merge into the
+  base, the merge check's merge included, the merge of the base into a task's
+  branch on `retry --update`, and a design session's commits) carries one
+  identity as both author and committer: the lane's `identity` (`hansa lane set
+  L identity "Name <email>"`, or `hansa lane add --identity`; copied by
+  `--like`; none: unset), else the repository's own `user.name` and
+  `user.email`, read from its local config alone (`git config --local`), else
+  `hansa <hansa@localhost>`. An account's global or personal identity is never
+  taken up by itself. A lane whose release goes to a public repository should
+  have one set, on the lane or in the repository's config; `hansa explain lane
+  L` shows the identity in use and where it comes from. Workers keep `hansa
+  worker L` as theirs: they commit nothing (hansa does, from the index, with
+  the lane's identity), so it only marks what a worker's git would record
+  without a commit, and a commit a worker made against its rules stands out
+  by it.
   Setup, check, merge check and preview run outside the worker, so each change to them is
   recorded and the coordinator tells the principal about it. It is not a
   worker: it runs on this machine outside any sandbox, and besides `hansa` it
@@ -445,9 +460,11 @@ page gives.
   in that target's last release; the whole history when it has no
   remote-tracking branch) and the files they change, a file the command names
   (such as `./deploy.sh`) marked. A word from the principal's list of words no
-  release may send out, in the command line or in a line, a file name or a
-  message of any outgoing commit (all are checked; matched within one line,
-  in text read as UTF-8), refuses it. A command that holds a known key is
+  release may send out, in the command line or in a line, a file name, a
+  message or the author's or committer's name or email of any outgoing commit
+  (all are checked; matched within one line, in text read as UTF-8), refuses
+  it; each hit names its commit and where it is (`author`, `committer`, a
+  file). A command that holds a known key is
   refused when it is set. A target that must follow another is asked only for
   a commit the other one already sent out, and looked at again before it
   starts. Otherwise the page shows it, with its target, with Release and
