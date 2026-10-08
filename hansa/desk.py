@@ -1553,8 +1553,10 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
     for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
             fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
-    fenced += [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers could "
-                           "not run their tools") for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
+    # said along with any other reason, as which folders are on the PATH differs from machine to machine
+    path_fenced = [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers "
+                                "could not run their tools")
+                   for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]
     fenced += [(d, _above, f"it is {d}, where the system keeps its programs and libraries, or a folder above it: "
                            "workers could not run their tools") for d in SYSTEM_FOLDERS]
     fenced += [(d, _above, f"it is {d}, where Homebrew's programs are, or a folder above it: workers could not run "
@@ -1583,7 +1585,8 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
-        why = next((why for f, hit, why in fenced if hit(x, f)), "")
+        why = "; and ".join(w for w in (next((why for f, hit, why in fence if hit(x, f)), "")
+                                        for fence in (fenced, path_fenced)) if w)
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:
