@@ -2452,6 +2452,31 @@ def read_bounded(path: Path, head: int, tail: int) -> str:
             + last.decode("utf-8", errors="surrogateescape"))
 
 
+# What a failed step's output says about the machine or the build script rather than the change: (the pattern,
+# the line hansa adds). Matched line by line, so the words must be on one line.
+MKTEMP_REFUSED = re.compile(r"mkdtemp failed on|mktemp:.*Operation not permitted")
+MAVEN_407 = re.compile(r"407 Proxy Authentication Required")
+MAVEN_WORDS = re.compile(r"\[ERROR\]|Could not (transfer|resolve)|Failed to (execute|read artifact|collect)|maven", re.I)
+MKTEMP_HINT = ("mktemp was refused: macOS's mktemp -d, mktemp -t PREFIX and a bare mktemp ignore TMPDIR and write "
+               "under /var/folders, which a lane may not write; give it a template in TMPDIR instead: "
+               "mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\"")
+MAVEN_407_HINT = ("Maven got 407 Proxy Authentication Required: hansa gives Maven the sandbox's proxy through "
+                  "MAVEN_ARGS (-gs <file>), and a build script that sets MAVEN_ARGS itself drops it (in bash "
+                  "MAVEN_ARGS=(-B) makes an array, which is not exported); keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-})")
+
+
+def output_hints(text: str) -> list:
+    """The lines hansa adds to a failed check's, merge check's or try step's report when its output shows a
+    known cause that is not the change itself: macOS's mktemp refused, or Maven without the sandbox's proxy."""
+    lines = text.splitlines()
+    out = []
+    if any(MKTEMP_REFUSED.search(x) for x in lines):
+        out.append(MKTEMP_HINT)
+    if any(MAVEN_407.search(x) for x in lines) and any(MAVEN_WORDS.search(x) for x in lines):
+        out.append(MAVEN_407_HINT)
+    return out
+
+
 def cut_redacted(data: bytes, most: int) -> bytes:
     """Text with keys already removed, cut again to at most `most` bytes when a key's longer [key of NAME] label
     made it longer: its start and end, at whole lines where there are some, with a line in between saying how much
@@ -4488,6 +4513,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
 # detached at the base's tip, and puts the worktree back clean at that tip after. .hansa/tries/<lane>.json holds
 # the try: {id, phase: queued | running | done, ...}, and when done its result, which the command waits for.
 TRY_STEPS = ("setup", "check", "merge_check")
+TRY_KEEP = PREVIEW_KEEP  # bytes of each step's output kept, its first and last half (try_log)
 
 
 def try_file(desk: Desk, lane_name: str) -> Path:
@@ -4543,6 +4569,12 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
         repo, name = Path(lane["repo"]), lane.get("base") or "main"
         wt = desk.worktrees_dir / lane_name
         tip = git("rev-parse", name, cwd=repo)
+        if t.get("at") and t["at"] != tip:  # asked with --at: it answers for that commit only
+            shutil.rmtree(d, ignore_errors=True)
+            end_try(desk, lane_name, {"ok": False, "moved": True, "steps": {}, "onto": tip,
+                                      "note": f"{name}'s tip moved from {t['at'][:10]} to {tip[:10]} before the try "
+                                              f"started; nothing was run"})
+            return None
         ready_worktree(desk, repo, wt, tid, tip)
         try:
             wgit(desk, wt, "checkout", "-q", "--detach", tip)
@@ -4587,7 +4619,7 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
     the base's tip it ran on."""
     t = read_try(desk, lane_name)
     d = desk.state_dir / "tries" / lane_name
-    steps, failed = {}, ""
+    steps, failed, whole = {}, "", []
     for step in TRY_STEPS:
         if not t.get(step):
             continue
@@ -4595,10 +4627,16 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
             code, secs = map(int, (d / f"{step}.exit").read_text().split())
         except (OSError, ValueError):
             code = secs = None
-        log = (d / f"{step}.log").read_text(encoding="utf-8", errors="replace") if (d / f"{step}.log").exists() else ""
-        ran = code is not None or (d / f"{step}.log").exists()
+        f = d / f"{step}.log"
+        log = desk.redact(read_bounded(f, TRY_KEEP // 2, TRY_KEEP // 2)).encode("utf-8", errors="replace").decode(
+            "utf-8") if f.exists() else ""  # a byte that is not UTF-8 is one "?"
+        ran = code is not None or f.exists()
         steps[step] = {"command": t[step], "ran": ran, "exit": code, "seconds": secs,
-                       "tail": desk.redact(log).strip().splitlines()[-15:]}
+                       "tail": log.strip().splitlines()[-15:]}
+        if ran and code != 0:
+            steps[step]["hints"] = output_hints(log)
+        if ran:
+            whole.append((step, steps[step], log))
         if ran and code != 0 and not failed:
             failed = step
     for x in t.get("tmp", []):
@@ -4616,7 +4654,38 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
         note = note or desk.redact(f"the worktree could not be put back clean: {e}")[:300]
     shutil.rmtree(d, ignore_errors=True)
     ok = bool(steps) and all(x["exit"] == 0 for x in steps.values()) and not note
-    return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean})
+    log = keep_try_log(desk, lane_name, t, whole)
+    return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean,
+                                     **({"log": str(log)} if log else {})})
+
+
+def try_log(desk: Desk, lane_name: str, merge: bool = False) -> Path:
+    """Where the whole output of the lane's last try is kept (of its last --merge-check try: merge)."""
+    return desk.lanes_dir / lane_name / ("merge-check-try.log" if merge else "try.log")
+
+
+def keep_try_log(desk: Desk, lane_name: str, t: dict, whole: list):
+    """Write each step's output (read_bounded: its first and last TRY_KEEP / 2 bytes, keys removed) in place of
+    the last try's; its path, or None when no step ran or it could not be written."""
+    if not whole:
+        return None
+    out = [f"hansa lane try {lane_name}{' --merge-check' if t.get('merge') else ''} at {(t.get('onto') or '')[:12]}, "
+           f"started {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.get('started') or time.time()))}; "
+           f"each step's whole output, keys removed\n"]
+    for step, x, log in whole:
+        how = "interrupted" if x["exit"] is None else f"exit {x['exit']}"
+        out.append(f"\n===== {step.replace('_', ' ')}: {x['command']} ({how}"
+                   + (f" in {x['seconds']}s" if x["seconds"] is not None else "") + ") =====\n")
+        out.append(log if not log or log.endswith("\n") else log + "\n")
+    f = try_log(desk, lane_name, bool(t.get("merge")))
+    with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
+        data = desk.redact("".join(out)).encode("utf-8", errors="replace")
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(cut_redacted(data, TRY_KEEP * len(whole) + 4096))
+        except OSError:
+            return None
+    return f
 
 
 def proc_start(pid) -> str:

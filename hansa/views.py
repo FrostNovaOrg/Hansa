@@ -12,7 +12,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (LINUX_TRY_NOTE, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+from .run import (LINUX_TRY_NOTE, output_hints, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -200,12 +200,14 @@ def failed_check_lines(log: str, tail: list, tid: str) -> list:
     running) lifted out of its whole output (failure_spans), those of their lines above its last TAIL_LINES lines
     (a failure's message above them even when its marker is among them), each cut to BLOCK_LINES and all to
     FAILURE_LINES, then those last lines, always: never less than its last lines alone, which is all it gives
-    when nothing in it is recognised, or when the output is not kept (tail: the last lines as recorded)."""
+    when nothing in it is recognised, or when the output is not kept (tail: the last lines as recorded). Then a
+    line for each known cause its output shows (output_hints)."""
+    hints = ["  " + h for h in output_hints(log or "\n".join(tail))]
     lines = [plain(x, None) for x in log.rstrip().splitlines()]
     while lines and not lines[0].strip():
         lines.pop(0)
     if not lines:
-        return ["  " + plain(x) for x in tail]
+        return ["  " + plain(x) for x in tail] + hints
     whole = [f"  the whole output: hansa show {tid} --check"]
     last = max(0, len(lines) - TAIL_LINES)  # the lines from here are shown as its last lines
     picked, kinds = [], set()
@@ -219,13 +221,13 @@ def failed_check_lines(log: str, tail: list, tid: str) -> list:
             picked.append(f"      ... {len(keep) - BLOCK_LINES} more lines of it")
     rest = [x[:200] for x in lines[last:]]
     if not picked:
-        return ["  " + x for x in rest] + whole
+        return ["  " + x for x in rest] + whole + hints
     what = {frozenset({"test"}): "the failing tests", frozenset({"error"}): "the errors"}.get(
         frozenset(kinds), "the failing tests and errors")
     out = [f"  {what}, from its output:"] + picked[:FAILURE_LINES]
     if len(picked) > FAILURE_LINES:
         out.append(f"    ... {len(picked) - FAILURE_LINES} more lines of them")
-    return out + ["  its last lines:"] + ["    " + x for x in rest] + whole
+    return out + ["  its last lines:"] + ["    " + x for x in rest] + whole + hints
 
 
 def as_closed_now(m: dict) -> dict:
@@ -1059,6 +1061,25 @@ def local_servers_text(mac: bool, listed: bool) -> str:
             + ("; this lane lists it, and need not" if listed else ""))
 
 
+JAVA_LINES = (
+    "  a Java lane (its env names JAVA_HOME): hansa adds -Djava.io.tmpdir to JAVA_TOOL_OPTIONS in the sandbox, so"
+    " every JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr before anything else. java -version and java"
+    " -XshowSettings print on stderr, so their output starts with it; javac -version and mvn -v print on stdout,"
+    " so theirs does when stderr is read with it (2>&1). A script that reads the version should look for the"
+    " line holding `version \"`, not the first line",
+    "  Maven gets the sandbox's proxy through MAVEN_ARGS (-gs <file>): a build script that sets MAVEN_ARGS itself"
+    " drops it (in bash MAVEN_ARGS=(-B) makes an array, which is not exported), and Maven then gets 407 Proxy"
+    " Authentication Required for what its local repository lacks; keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-})")
+MKTEMP_LINE = ("  on macOS, mktemp -d, mktemp -t PREFIX and a bare mktemp ignore TMPDIR and write under /var/folders,"
+               " which a lane may not write (mktemp: mkdtemp failed on ...: Operation not permitted); a script should"
+               " give it a template in TMPDIR: mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\"")
+
+
+def tool_lines(mac: bool, env: dict) -> list:
+    """For hansa explain lane: what JVMs and macOS's mktemp do differently in a lane, where it applies."""
+    return [*(JAVA_LINES if "JAVA_HOME" in env else ()), *([MKTEMP_LINE] if mac else [])]
+
+
 def preview_text(mac: bool, ln: dict) -> list:
     """What becomes of a lane's preview on this machine, for hansa explain lane: its lines."""
     if not ln.get("preview"):
@@ -1138,6 +1159,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *preview_text(sys.platform == "darwin", ln),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
+            *tool_lines(sys.platform == "darwin", {**ln.get("env", {}), **env}),
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",
             "    any command inside the sandbox, but it changes files only in the lane's worktree, its own"
@@ -1366,6 +1388,10 @@ def try_text(lane: str, t: dict) -> str:
         out.append(f"{step.replace('_', ' ')}: {x['command']}\n  {how}" + (f" in {x['seconds']}s" if x["seconds"] is not None else "")
                    + (", last lines:" if x["tail"] else ", no output"))
         out += [f"    {plain(line, None)}" for line in x["tail"]]
+        out += [f"  {h}" for h in x.get("hints", [])]
+    if t.get("log"):
+        out.append(f"each step's whole output, keys removed: {t['log']} (hansa lane try {lane}"
+                   f"{' --merge-check' if t.get('merge') else ''} --log)")
     if t.get("clean"):
         out.append("the worktree is back clean at the base's tip, as the lane's next task expects it")
     return "\n".join(out)

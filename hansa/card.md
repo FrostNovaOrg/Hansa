@@ -75,7 +75,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane set L identity "Name <email>"` | the author and committer of every commit hansa makes for the lane: a task's commit, its merge into the base (the merge check's too), the merge of the base into a task's branch, a design session's commits, the commit `hansa lane remove --keep` makes. A name and an email in angle brackets, one line, no `<` or `>` inside either; also `hansa lane add --identity`, copied by `--like`. None: unset, and then hansa takes the repository's own `user.name` and `user.email` from its local config (`git config --local`), never the account's global one, and with neither writes `hansa <hansa@localhost>`. `hansa explain lane L` shows which is in use |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
-| `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
+| `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. `--at COMMIT`: only at that commit, refused with nothing run unless it is the base's tip; a try at another commit is waited for, never taken as the answer; exit 0 only when the try at COMMIT passed. `--log`: print each step's whole output of the last try (with `--merge-check`: of the last merge-check try), keys removed, kept in `lanes/L/` until the next one. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
@@ -277,6 +277,12 @@ to a public repository, a deploy to production) waits for the principal:
   the source of `main:prod`; `HEAD:main` is allowed), but it does not look
   into a variable the command expands or a script it runs: send
   `$HANSA_RELEASE_COMMIT`.
+- A release that should go on only if a full build passes on another desk's
+  machine (whose sandbox allows what this one's refuses): a fixed target that
+  pushes `$HANSA_RELEASE_COMMIT` to the other desk's base branch and runs
+  `hansa lane try L --merge-check --at "$HANSA_RELEASE_COMMIT"` there, and the
+  public target `--after` it. `--at` answers for that commit only, so a try
+  asked again after the base moved never passes on an older commit's verdict.
 - When the base branch holds what should go out, ask: `hansa release L
   [TARGET] "<note>"` (TARGET is needed when the lane has more than one).
   hansa records the commit, the target and its command, your note, the
@@ -507,6 +513,14 @@ here; work that needs code changed or a browser goes to a worker.
 - A Java or Maven lane: hansa sets Maven's proxy and Java's temporary folder in the sandbox by
   itself; what the project and the lane need (Mockito as a Java agent, a Maven repository of the
   lane's own, the network list) is in hansa's README, "Java and Maven in a lane". Gradle is not covered yet.
+  Every JVM there prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr first (`java -version`, `java
+  -XshowSettings`; `javac -version` and `mvn -v` with `2>&1`): a script reading the version looks for
+  the line holding `version "`, not the first line. A script that sets `MAVEN_ARGS` itself drops
+  Maven's proxy (Maven then gets `407 Proxy Authentication Required`): `MAVEN_ARGS=(-B ${MAVEN_ARGS:-})`.
+- On macOS `mktemp -d`, `mktemp -t PREFIX` and a bare `mktemp` ignore TMPDIR and fail in a lane
+  (`mkdtemp failed on /var/folders/...: Operation not permitted`): use `mktemp -d
+  "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p "$TMPDIR"`. hansa adds a line saying so, and one for
+  Maven's 407, to a failed check, merge check or try step whose output shows it.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or

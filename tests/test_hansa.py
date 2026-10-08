@@ -3197,6 +3197,188 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(run.tried_lanes(self.desk), set())
         self.assertNotIn("held by a try", views.status_text(views.status(self.desk)))
 
+    @contextlib.contextmanager
+    def try_server(self, d=None):
+        """hansa serve, running rounds in a thread while the block runs."""
+        d, stop_serving = d or Dispatcher(self.desk), threading.Event()
+
+        def serve():
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        held = cli.hold_server_lock(self.desk)  # as hansa serve holds it: it says the server runs
+        d.tick()
+        server = threading.Thread(target=serve)
+        server.start()
+        try:
+            yield d
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+
+    def lane_try(self, *args) -> tuple:
+        """hansa lane try a ARGS: (its exit code, what it printed)."""
+        said, code = io.StringIO(), 0
+        with contextlib.redirect_stdout(said):
+            try:
+                main(["--desk", str(self.desk.root), "lane", "try", "a", "--every", "0.05", *args])
+            except SystemExit as e:
+                code = e.code
+        return code, said.getvalue()
+
+    def new_tip(self) -> tuple:
+        """A commit on main after the first: (the first, the new tip)."""
+        old = self.git_out("rev-parse", "main")
+        (self.repo / "more.txt").write_text("more\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "more", cwd=self.repo)
+        return old, self.git_out("rev-parse", "main")
+
+    def test_lane_try_at_a_commit_that_is_not_the_tip_refuses_and_runs_nothing(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked")
+        old, tip = self.new_tip()
+        for merge in ([], ["--merge-check"]):
+            code, _ = self.lane_try("--at", old[:8], *merge)
+            self.assertIn(f"main's tip is {tip[:10]}, not {old[:10]}; nothing was run", str(code))
+            self.assertIn(f"--at {tip[:10]}", str(code))
+        code, _ = self.lane_try("--at", "nosuchcommit")
+        self.assertIn("nosuchcommit is no commit of lane a's repository; nothing was run", str(code))
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertFalse(run.try_file(self.desk, "a").exists())
+        self.assertEqual(self.events("lane_try_queued"), [])
+
+    def test_lane_try_at_waits_for_a_try_at_another_commit_and_never_takes_its_result(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked here")
+        old, tip = self.new_tip()
+        d = Dispatcher(self.desk)
+        held = cli.hold_server_lock(self.desk)
+        d.tick()  # a round, so the server is seen to run
+        run.write_try(self.desk, "a", {"id": "t0", "phase": "running", "asked": time.time(), "onto": old,
+                                       "check": "echo checked here", "started": time.time()})
+        stop_serving = threading.Event()
+
+        def serve():  # the try at the older commit passes; only then does the server run rounds again
+            time.sleep(0.4)
+            run.write_try(self.desk, "a", {"id": "t0", "phase": "done", "ok": True, "onto": old, "steps": {}})
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        server = threading.Thread(target=serve)
+        server.start()
+        try:
+            code, said = self.lane_try("--at", tip[:8])
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"a try of lane a is running at {old[:10]}, not the one asked for at {tip[:10]}; waiting for "
+                      f"it to end, then trying at {tip[:10]}", said)
+        self.assertIn(f"lane a tried at {tip[:10]}: ok", said)
+        [check] = self.srt_calls()  # it ran its own check, at the tip
+        self.assertEqual(self.ran(check), "echo checked here")
+        self.assertEqual(run.read_try(self.desk, "a")["onto"], tip)
+        self.assertEqual(self.events("lane_try_queued")[-1]["at"], tip)
+
+    def test_lane_try_at_exits_0_only_when_the_try_at_that_commit_passed(self):
+        from hansa import run
+        _, tip = self.new_tip()
+        self.hansa("lane", "set", "a", "check", "echo failing; exit 3")
+        with self.try_server():
+            code, said = self.lane_try("--at", tip)
+        self.assertEqual(code, 1, said)
+        self.assertIn(f"lane a tried at {tip[:10]}: FAILED", said)
+        self.hansa("lane", "set", "a", "check", "echo passing")
+        with self.try_server():
+            code, said = self.lane_try("--at", tip[:7])
+            self.assertEqual(code, 0, said)
+            code, said = self.lane_try("--at", tip[:7], "--merge-check")  # the check, as the lane's merge check
+        self.assertEqual(code, 0, said)
+        self.assertIn("merge check: echo passing\n  exit 0", said)
+        # the base moved between the ask and the start: nothing runs, and the try did not pass
+        run.write_try(self.desk, "a", {"id": "t9", "phase": "queued", "asked": time.time(), "at": "0" * 40})
+        calls = len(self.srt_calls(tries=True))
+        Dispatcher(self.desk).tick()
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["phase"], t["ok"], t["steps"]), ("done", False, {}), t)
+        self.assertIn(f"main's tip moved from 0000000000 to {tip[:10]} before the try started; nothing was run",
+                      views.try_text("a", t))
+        self.assertEqual(len(self.srt_calls(tries=True)), calls)
+
+    def test_a_failed_trys_whole_output_is_kept_keys_removed_and_a_new_try_replaces_it(self):
+        from hansa import run
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        self.hansa("lane", "set", "a", "check",
+                   f"x=first; echo \"FAIL: test_the_$x\"; echo 'token {key}'; seq 1 400; exit 1")
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 1, said)
+        self.assertNotIn("test_the_first", said)  # its last lines only
+        log = run.try_log(self.desk, "a")
+        self.assertIn(f"each step's whole output, keys removed: {log} (hansa lane try a --log)", said)
+        kept = log.read_text()
+        self.assertIn("FAIL: test_the_first\n", kept)
+        self.assertIn("token [key of registry]", kept)
+        self.assertNotIn(key, kept)
+        self.assertIn("\n400\n", kept)
+        self.assertEqual(run.read_try(self.desk, "a")["log"], str(log))
+        code, printed = self.lane_try("--log")
+        self.assertEqual((code, printed), (0, kept))
+        code, _ = self.lane_try("--log", "--merge-check")  # a merge-check try's output is kept on its own
+        self.assertIn("lane a has no kept output of a merge-check try yet", str(code))
+        self.hansa("lane", "set", "a", "check", "echo the second try")
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 0, said)
+        kept = log.read_text()
+        self.assertIn("the second try", kept)
+        self.assertNotIn("test_the_first", kept)
+
+    def test_a_failed_step_whose_output_shows_macos_mktemp_or_mavens_407_gets_its_hint(self):
+        from hansa import run
+        refused = "mktemp: mkdtemp failed on /var/folders/ab/xyz/T/tmp.Q1w2: Operation not permitted"
+        lines = views.failed_check_lines(f"running\n{refused}\n", [], "t1")
+        self.assertIn("  " + run.MKTEMP_HINT, lines)
+        self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX"', run.MKTEMP_HINT)
+        maven = ("[ERROR] Failed to execute goal on project demo: Could not resolve dependencies: status code: 407, "
+                 "reason phrase: Proxy Authentication Required (407)\n[ERROR] 407 Proxy Authentication Required")
+        lines = views.failed_check_lines(maven, [], "t1")
+        self.assertIn("  " + run.MAVEN_407_HINT, lines)
+        self.assertNotIn("  " + run.MKTEMP_HINT, lines)
+        self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", run.MAVEN_407_HINT)
+        self.assertEqual(run.output_hints("curl: (56) 407 Proxy Authentication Required"), [])
+        self.assertEqual(run.output_hints("FAIL: test_one\nAssertionError"), [])
+        # a task's check, as hansa show reports it
+        self.hansa("lane", "set", "a", "check", f"echo '{refused}' >&2; exit 1")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertFalse(m["check"]["ok"], m)
+        self.assertIn(run.MKTEMP_HINT, views.show_text(self.desk, tid))
+        # and a try's step
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 1, said)
+        self.assertIn("  " + run.MKTEMP_HINT, said)
+
+    def test_explain_lane_says_what_java_and_macos_mktemp_do_in_a_lane(self):
+        out = views.explain_text(self.desk, "lane", "a")
+        self.assertNotIn("Picked up JAVA_TOOL_OPTIONS", out)
+        self.hansa("lane", "set", "a", "env", f"JAVA_HOME={self.tmp}")
+        with unittest.mock.patch.object(views.sys, "platform", "linux"):
+            out = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("every JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr before anything else", out)
+        self.assertIn('look for the line holding `version "`, not the first line', out)
+        self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", out)
+        self.assertNotIn("mkdtemp failed", out)
+        with unittest.mock.patch.object(views.sys, "platform", "darwin"):
+            out = views.explain_text(self.desk, "lane", "a")
+        self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX" or mktemp -d -p "$TMPDIR"', out)
+
     def test_a_merge_check_can_be_cancelled_queued_or_running(self):
         d, t1, t2 = self.two_lanes(check="test -f README.md")
         self.hansa("merge", t1)

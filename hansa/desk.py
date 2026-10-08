@@ -1852,10 +1852,12 @@ class Desk:
 
     def scrub(self, key: str, provider: str) -> None:
         """Take a newly saved key out of what hansa has already written down (text that was not a key
-        when it was written): the task folders and the requests. The event log only ever grows, so
-        it keeps it."""
+        when it was written): the task folders, the requests and the lanes' kept try output. The event
+        log only ever grows, so it keeps it."""
         tasks = self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []
-        for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED)]:
+        lanes = list(self.lanes_dir.iterdir()) if self.lanes_dir.is_dir() else []
+        for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED),
+                  *(d / name for d in lanes for name in ("try.log", "merge-check-try.log"))]:
             try:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
