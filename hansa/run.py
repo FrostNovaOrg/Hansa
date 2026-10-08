@@ -308,7 +308,12 @@ DESIGN_ON_LINUX = ("design sessions do not run on Linux: there the sandbox canno
                    "start one; work on the lane with tasks, or open the design session on a Mac")
 # The characters a deny pattern keeps in a [...] class (others_than, as ranges: name_class), with -: those of the names hansa and
 # git give branches, worktrees' folders and git's own files. A name made later with another character is not
-# kept by the patterns (one there when the run starts is, by name), and hansa never uses one.
+# kept by the patterns (one there when the run starts is, by name), and hansa never uses one. macOS's sandbox
+# matches paths without regard to case, so a letter is left out of a class in both cases, and it reads a - just
+# before ] as a range up to the end of the character set, so - goes first (name_class). hansa's own names are
+# small letters, digits, . _ and -: on a case-insensitive volume a capital is the same name, and on a
+# case-sensitive one a name with a capital is kept only when it is there as a run starts, as one with another
+# character is.
 NAME_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
 # What a worker's sandbox on Linux (bubblewrap, in Claude Code and srt alike) mounts an empty file over at the top
 # of the worktree when it is missing, so it cannot be made: its fixed list of files a program may run or obey
@@ -516,7 +521,9 @@ def try_srt_at_start(desk: Desk) -> dict:
 
 
 # Before hansa starts a worker, a verifier or a design session it tries the run's sandbox: srt with the same
-# filesystem and network settings Claude Code is given, on /usr/bin/true (sandbox_guard). Claude Code carries its
+# filesystem and network settings Claude Code is given, on /usr/bin/true, then a write of what git needs open
+# there (git_needs_open), since a sandbox that starts may still keep it, as patterns read otherwise than meant
+# would (name_class); sandbox_guard. Claude Code carries its
 # own copy of the sandbox library, which may differ from the srt installed, so a try that passes is a guard, not
 # proof: hansa also watches the run's first Bash calls (sandbox_start_failure). A try that fails holds the task
 # (not failed, no try used) and the lane: hansa status says why. Kept by a fingerprint of the settings in this
@@ -529,6 +536,8 @@ SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x
                  ("the deny-read list", lambda fs, net: {"denyRead": fs["denyRead"]}),
                  ("the write list", lambda fs, net: {"allowWrite": fs["allowWrite"]}),
                  ("the network", lambda fs, net: {"network": net}))
+# The name of the script a try runs in srt to write what git needs open (_srt_writes)
+GIT_OPEN_TRY = "hansa-git-open-try.sh"
 # What a Bash result begins with when the sandbox could not start: macOS's sandbox-exec, Linux's bubblewrap
 SANDBOX_START_FAILED = ("sandbox-exec: ", "bwrap: ")
 
@@ -541,9 +550,9 @@ class SandboxRefused(RuntimeError):
     """srt ran, and refused a run's sandbox settings: the run does not start, and its task is held.
     str(): what the principal is told."""
 
-    def __init__(self, said: str, part: str = "", kind: str = "") -> None:
+    def __init__(self, said: str, part: str = "", kind: str = "", why: str = "") -> None:
         self.said, self.part, self.kind = said, part, kind
-        super().__init__(f"the sandbox could not start: {said}" + (f" (refused: {part})" if part else ""))
+        super().__init__(why or f"the sandbox could not start: {said}" + (f" (refused: {part})" if part else ""))
 
 
 def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
@@ -561,43 +570,84 @@ def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
                                                "denyWrite": list(fs.get("denyWrite", []))}}
 
 
-def _srt_true(path: str, settings: dict, tmp: str, cwd) -> tuple:
-    """srt with these settings on /usr/bin/true: (whether it ran, srt's first line, or why it did not)."""
+def git_needs_open(wt: Path, branch: str = "") -> list:
+    """What a run's commands must be able to write in git's folders, for git add and git status: the worktree's
+    own index and a new file in its own git folder; for a design session, committing to `branch`, that branch's
+    ref's .lock in its ref folder and a new file in objects/."""
+    common, own = git_folders(wt)
+    out = [own / "index", own / ".hansa-try"]
+    if branch:
+        ref = common / "refs" / "heads" / branch
+        out += [ref.parent / f"{ref.name}.lock", common / "objects" / ".hansa-try"]
+    return out
+
+
+def git_open_try(paths) -> str:
+    """A shell script writing each of `paths` as git would: one that is there opened to append, writing nothing;
+    one that is not made and removed again. It prints "refused: <path>" for each it could not write."""
+    return "".join(f"p={shlex.quote(str(x))}\n"
+                   'if [ -e "$p" ]; then ( : >> "$p" ) 2>/dev/null\n'
+                   'else ( : > "$p" ) 2>/dev/null && rm -f "$p" 2>/dev/null\n'
+                   'fi || echo "refused: $p"\n' for x in paths)
+
+
+def _srt_writes(path: str, settings: dict, tmp: str, cwd, paths) -> tuple:
+    """srt with these settings writing `paths` (git_open_try): (the first path refused, or "", srt's first line
+    when it failed otherwise)."""
+    f = Path(tmp) / GIT_OPEN_TRY
+    f.write_text(git_open_try(paths))
+    ran, said, out = _srt_true(path, settings, tmp, cwd, ["/bin/sh", str(f)])
+    refused = [x.removeprefix("refused: ") for x in out.splitlines() if x.startswith("refused: ")]
+    return (refused[0] if refused else "", "" if ran or refused else said)
+
+
+def _srt_true(path: str, settings: dict, tmp: str, cwd, argv=("/usr/bin/true",)) -> tuple:
+    """srt with these settings on /usr/bin/true (or `argv`): (whether it ran, srt's first line, or why it did not,
+    and what the command printed)."""
     f = Path(tmp) / "try-settings.json"
     write_json(f, settings)
     try:
-        r = subprocess.run([path, "--settings", str(f), "--", "/usr/bin/true"], cwd=str(cwd),
+        r = subprocess.run([path, "--settings", str(f), "--", *argv], cwd=str(cwd),
                            env={**base_env(), "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
     except subprocess.TimeoutExpired:
-        return False, f"no answer in {SRT_TRY_SECONDS} s"
+        return False, f"no answer in {SRT_TRY_SECONDS} s", ""
     except OSError as e:
-        return False, str(e)[:300]
+        return False, str(e)[:300], ""
     if r.returncode == 0:
-        return True, ""
+        return True, "", r.stdout
     lines = [x.strip() for x in (r.stderr + "\n" + r.stdout).splitlines() if x.strip()]
-    return False, f"{lines[0][:300] if lines else 'nothing'} (exit {r.returncode})"
+    return False, f"{lines[0][:300] if lines else 'nothing'} (exit {r.returncode})", r.stdout
 
 
-def try_sandbox(box: dict, wt: Path) -> dict:
+def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
     """Try the sandbox `box` (sandbox_try_settings) with srt, once for each fingerprint of its settings in this
     process: {"ok": True}; {"ok": False, "said": srt's first line, "part": what of the settings it refuses, found
     by trying each part alone (SANDBOX_PARTS)}; or {"ok": None, "said": why} when srt is not there or does not run
-    even with nothing in its settings: then Claude Code's own sandbox (failIfUnavailable) is all there is."""
+    even with nothing in its settings: then Claude Code's own sandbox (failIfUnavailable) is all there is. A
+    sandbox that starts then writes what git needs open there (git_needs_open; `branch`, a design session's):
+    one it keeps is refused too, with "why"."""
     path = shutil.which("srt")
     if not path:
         return {"ok": None, "said": SRT_MISSING}
     tmp = tempfile.mkdtemp(prefix="hansa-try-")
     try:
         full = sandbox_try_settings(box, wt, tmp)
-        key = hashlib.sha256(json.dumps([path, full], sort_keys=True).replace(tmp, "\0tmp").encode()).hexdigest()
+        needs = [str(x) for x in git_needs_open(wt, branch)]
+        key = hashlib.sha256(json.dumps([path, full, needs], sort_keys=True).replace(tmp, "\0tmp").encode()).hexdigest()
         if key in SANDBOX_TRIES:
             return SANDBOX_TRIES[key]
-        ran, said = _srt_true(path, full, tmp, wt)
+        ran, said, _ = _srt_true(path, full, tmp, wt)
         bare = {"network": {"allowedDomains": [], "deniedDomains": []},
                 "filesystem": {"allowWrite": full_paths([tmp]), "denyRead": [], "denyWrite": []}}
         if ran:
+            refused, said = _srt_writes(path, full, tmp, wt, needs)
             out = {"ok": True}
+            if refused or said:
+                part = (f"the deny-write patterns keep what git needs open: {refused}" if refused
+                        else "the write of what git needs open failed")
+                out = {"ok": False, "said": said or f"git cannot write {refused}", "part": part,
+                       "why": f"the sandbox starts, but {part}" + (f": {said}" if said else "")}
         elif not _srt_true(path, bare, tmp, wt)[0]:
             out = {"ok": None, "said": said}  # srt does not run at all: not these settings' doing
         else:
@@ -619,12 +669,13 @@ def try_sandbox(box: dict, wt: Path) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path) -> None:
-    """Try the sandbox a worker, a verifier or a design session (`kind`) of this lane is about to get (try_sandbox):
-    raise SandboxRefused when srt refuses it. A try that passes clears what an earlier one held the lane for."""
-    r = try_sandbox(box, wt)
+def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path, branch: str = "") -> None:
+    """Try the sandbox a worker, a verifier or a design session (`kind`, committing to `branch`) of this lane is
+    about to get (try_sandbox): raise SandboxRefused when srt refuses it. A try that passes clears what an
+    earlier one held the lane for."""
+    r = try_sandbox(box, wt, branch)
     if r["ok"] is False:
-        raise SandboxRefused(r["said"], r["part"], kind)
+        raise SandboxRefused(r["said"], r["part"], kind, r.get("why", ""))
     if r["ok"]:
         sandbox_clear(desk, lane_name)
 
@@ -637,8 +688,10 @@ def sandbox_held(desk: Desk) -> dict:
 
 def sandbox_held_text(h: dict) -> str:
     """Why a lane's runs are held (sandbox_held), and what starts them again, in a clause."""
-    return (f"its {h.get('kind') or 'run'}'s sandbox could not start: "
-            + str(h.get("why") or "?").removeprefix("the sandbox could not start: ")
+    why = str(h.get("why") or "?")
+    return (f"its {h.get('kind') or 'run'}'s "
+            + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
+               "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
             + "; its tasks start by themselves once a try of the sandbox passes (after a fix, restart hansa serve; "
               "hansa explain server)")
 
@@ -1267,13 +1320,17 @@ def others_than(folder: Path, names) -> list:
 
 
 def name_class(left_out) -> str:
-    """What goes between [ and ] for the characters of NAME_CHARS and - but `left_out`, written as ranges: digits,
-    capitals and small letters each as runs (0-9A-Za-np-z), then . and _ when kept, - last. macOS refuses a
-    sandbox whose profile holds two or more classes listing some sixty characters one by one; ranges it takes. A
-    negated class cannot stand in: srt escapes ^ (so [^w] holds ^ and w), and [!w] holds ! and w."""
-    out = ""
+    """What goes between [ and ] for the characters of NAME_CHARS and - but `left_out`, as macOS's sandbox reads
+    a class: - first when kept, then digits, capitals and small letters each as runs (0-9A-Za-np-z), then . and _.
+    Two facts of that reading shape it. It matches paths without regard to case, so [A] holds a and [B-Z] holds c:
+    a letter left out is left out in both cases (for ("a",): -0-9B-Zb-z._). And a - just before ] is a range up
+    to the end of the character set ([_-] holds every small letter), while a - first is a plain -. macOS also
+    refuses a sandbox whose profile holds two or more classes listing some sixty characters one by one; ranges it
+    takes. A negated class cannot stand in: srt escapes ^ (so [^w] holds ^ and w), and [!w] holds ! and w."""
+    gone = {c.lower() for c in left_out} | {c.upper() for c in left_out}
+    out = "" if "-" in gone else "-"
     for group in ("0123456789", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"):
-        kept = [c in NAME_CHARS and c not in left_out for c in group]
+        kept = [c in NAME_CHARS and c not in gone for c in group]
         i = 0
         while i < len(group):
             if not kept[i]:
@@ -1284,7 +1341,7 @@ def name_class(left_out) -> str:
                 j += 1
             out += group[i] if i == j else f"{group[i]}{group[j]}" if j == i + 1 else f"{group[i]}-{group[j]}"
             i = j + 1
-    return out + "".join(c for c in "._" if c in NAME_CHARS and c not in left_out) + ("" if "-" in left_out else "-")
+    return out + "".join(c for c in "._" if c in NAME_CHARS and c not in gone)
 
 
 def _git_patterns(wt: Path, committing: str = "") -> list:
@@ -3250,7 +3307,8 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         check_git_file(desk, wt)  # design_sandbox asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    sandbox_guard(desk, lane_name, "design session", design_sandbox(desk, lane, pname, p, wt, f"task/{tid}")["sandbox"], wt)
+    sandbox_guard(desk, lane_name, "design session", design_sandbox(desk, lane, pname, p, wt, f"task/{tid}")["sandbox"], wt,
+                  f"task/{tid}")
     if cancelled_before_start(desk, tid):
         return
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}

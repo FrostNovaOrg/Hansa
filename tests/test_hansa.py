@@ -411,6 +411,13 @@ def sandbox_glob(pattern: str) -> str:
     return "^" + rx.replace("\0", "(.*/)?").replace("\1", ".*") + "(/.*)?$"
 
 
+def macos_match(pattern: str, path: str):
+    """Whether macOS's sandbox keeps `path` by this deny pattern, as measured: without regard to case, and with a
+    - just before ] read as a range up to the end of the character set (a - first is a plain -)."""
+    rx = sandbox_glob(pattern).replace("-]", "-\U0010ffff]")
+    return re.match(rx, path, re.IGNORECASE)
+
+
 def may_write(box: dict, path, rules=None) -> bool:
     """Whether a command in this sandbox may write `path` (with links resolved, as the operating system checks
     it): under a folder of allowWrite, or of a .git folder above it, which Claude Code opens for writing in a
@@ -493,11 +500,13 @@ class DeskTest(unittest.TestCase):
 
     def srt_calls(self, tries=False, sandbox=False) -> list:
         """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts; sandbox: only its
-        tries of a worker's, a verifier's or a design session's sandbox, on /usr/bin/true (run.try_sandbox)."""
+        tries of a worker's, a verifier's or a design session's sandbox, on /usr/bin/true and writing what git needs
+        open (run.try_sandbox)."""
         calls = [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
+        tried = lambda c: c["argv"][-2:] == ["--", "/usr/bin/true"] or c["argv"][-1].endswith("/hansa-git-open-try.sh")
         if sandbox:
-            return [c for c in calls if c["argv"][-2:] == ["--", "/usr/bin/true"]]
-        calls = [c for c in calls if c["argv"][-2:] != ["--", "/usr/bin/true"]]
+            return [c for c in calls if tried(c)]
+        calls = [c for c in calls if not tried(c)]
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
 
     @staticmethod
@@ -8452,8 +8461,11 @@ class DeskTest(unittest.TestCase):
             folder = stat.S_ISDIR((after.get(p) or before[p])[0])
             self.assertTrue(may_write({}, p, rules) or folder and p in holders, p)
         self.assertNotIn(str(Path(rules[0][0]).resolve() / "HEAD"), changed)  # git commits and merges without it
+        # what git wrote outside the session's own folder: objects, the branch's ref and log
+        self.assertEqual({str(Path(p).relative_to(common)).split("/")[0] for p in changed
+                          if not Path(p).is_relative_to(Path(rules[0][0]).resolve())}, {"objects", "refs", "logs"})
 
-    def test_the_git_deny_patterns_write_their_classes_as_ranges_and_keep_the_same_names(self):
+    def test_the_git_deny_patterns_keep_the_same_names_as_macos_reads_their_classes(self):
         from hansa import run
 
         def listed(folder, names):  # others_than as it was: each class listing every character it keeps
@@ -8480,7 +8492,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn((common / "worktrees", (wt.name,)), cases)  # the worktree's folder among the others
         self.assertIn((common / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)  # the session's branch
         self.assertIn((common / "logs" / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)
-        chars = run.NAME_CHARS + "-" + "^!/ ~@é"  # and a few outside them
+        chars = run.NAME_CHARS + "-" + "^!/ ~@é`{"  # and a few outside them, ~ ` { after the small letters
         for folder, names in cases:
             old, new = listed(folder, names), run.others_than(folder, names)
             self.assertEqual(len(old), len(new), folder)
@@ -8490,16 +8502,27 @@ class DeskTest(unittest.TestCase):
                     continue
                 cls = b[b.rindex("[") + 1:b.rindex("]")]
                 self.assertNotRegex(cls, "012|ABC|abc|xyz", b)  # runs, not every character one by one
-                self.assertTrue(re.fullmatch(r"([0-9A-Za-z](-[0-9A-Za-z])?)*\.?_?-?", cls), b)  # ranges, . _, - last
-                self.assertLess(len(cls), 30, b)  # some sixty, listed one by one
+                self.assertTrue(re.fullmatch(r"-?([0-9A-Za-z](-[0-9A-Za-z])?)*\.?_?", cls), b)  # - first, ranges, . _
+                self.assertLess(len(cls), 40, b)  # some sixty, listed one by one
+                held = {x for x in run.NAME_CHARS if re.fullmatch(f"[{cls}]", x)}
+                self.assertEqual({x.lower() for x in held if x.isalpha()}, {x for x in held if x.islower()}, b)
                 starts = {n[:k] for n in names for k in range(len(n) + 1)}
                 for start in starts:
                     for c in chars:
                         for name in (start + c, start + c + "x"):
                             p = f"{folder}/{name}"
-                            self.assertEqual(bool(re.match(sandbox_glob(a), p)), bool(re.match(sandbox_glob(b), p)),
-                                             (a, b, name))
-        self.assertIn("[0-9A-Za-su-z._-]*", " ".join(run.others_than(common / "refs" / "heads", ("task",))))
+                            # what macOS keeps of the new is what the old kept of the name in small letters
+                            self.assertEqual(bool(re.match(sandbox_glob(a), f"{folder}/{name.lower()}")),
+                                             bool(macos_match(b, p)), (a, b, name))
+        self.assertIn("[-0-9A-SU-Za-su-z._]*", " ".join(run.others_than(common / "refs" / "heads", ("task",))))
+        # as measured with macOS's sandbox: for ("a",), what stays open and what is kept
+        rules = run.others_than(Path("/W"), ("a",))
+        self.assertEqual(rules[:2], ["/W/[-0-9B-Zb-z._]*", "/W/a[-0-9A-Za-z._]*"])
+        kept = lambda n: any(macos_match(r, f"/W/{n}") for r in rules)
+        for n in ("a/x", "a", "A/x"):
+            self.assertFalse(kept(n), n)
+        for n in ("b", "-x", ".x", "_x", "0x", "Zx", "Bx", "ab", "a-", "a.", "a_", "aB", "a9"):
+            self.assertTrue(kept(n), n)
 
     def refusing_srt(self, rule: str) -> None:
         """The stand-in srt, refusing a try of a run's sandbox (on /usr/bin/true) whose `settings` hold for this
@@ -8549,6 +8572,39 @@ class DeskTest(unittest.TestCase):
         Dispatcher(self.desk).tick()
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["held"]["part"]), ("queued", "the deny-write patterns"), m)
+
+    def test_a_sandbox_that_keeps_what_git_needs_open_holds_the_task_and_names_the_path(self):
+        # the stand-in srt runs the write check with the worktree's own git folder made read-only, as a deny
+        # pattern read otherwise than meant would keep it: the sandbox starts, and git add would fail in it
+        from hansa import run
+        srt = self.tmp / "bin" / "srt"
+        srt.write_text(srt.read_text().replace("os.execvp(", (
+            "if args[-1].endswith('/hansa-git-open-try.sh'):\n"
+            "    import shlex, subprocess\n"
+            "    own = os.path.dirname([shlex.split(x[2:])[0] for x in open(args[-1]) if x.startswith('p=')][1])\n"
+            "    os.chmod(own, 0o555)\n"
+            "    try:\n"
+            "        r = subprocess.run(args[cut + 1:])\n"
+            "    finally:\n"
+            "        os.chmod(own, 0o755)\n"
+            "    sys.exit(r.returncode)\nos.execvp("), 1))
+        tid = self.desk.new_task("Add hello.txt")
+        Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=self.desk.worktrees_dir / "a"))
+        self.assertEqual(m["state"], "queued", m)  # held, not failed
+        self.assertEqual(m["held"]["part"], f"the deny-write patterns keep what git needs open: {own}/.hansa-try")
+        self.assertEqual(m.get("attempts", []), [])
+        self.assertEqual(self.events("task_started"), [])
+        self.assertFalse((own / ".hansa-try").exists())
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("UNABLE TO RUN", shown)
+        self.assertIn("sandbox starts, but the deny-write patterns keep what git needs open", shown)
+        # a design session's try writes its branch's ref's .lock and a new file in objects/ too
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
+        common = run.git_folders(dwt)[0]
+        self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:],
+                         [common / "refs" / "heads" / "task" / "t0002.lock", common / "objects" / ".hansa-try"])
 
     def test_the_sandbox_try_is_kept_by_its_settings_and_a_held_task_starts_once_one_passes(self):
         from hansa import run
@@ -8618,7 +8674,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(m.get("held"))
 
-    def test_the_real_sandbox_starts_with_the_settings_hansa_gives(self):
+    def test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should(self):
         # srt itself (installed on GitHub's macOS machines, with HANSA_TESTS_NEED_SRT=1); elsewhere it skips
         from hansa import run
         need = os.environ.get("HANSA_TESTS_NEED_SRT") == "1"
@@ -8652,20 +8708,38 @@ class DeskTest(unittest.TestCase):
         wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
         dwt = Path(self.design_worktree(self.desk.new_task("Design")))  # its branch, task/t0002, has a folder
         worker = run.sandbox_settings(self.desk, lane, "claude", p, wt)["sandbox"]
+        design = run.design_sandbox(self.desk, lane, "claude", p, dwt, "task/t0002", mac=True)["sandbox"]
         common = run.git_folders(wt)[0].resolve()
-        for name, box, w in (("worker", worker, wt), ("verifier", worker, wt),
-                             ("design session", run.design_sandbox(self.desk, lane, "claude", p, dwt, "task/t0002",
-                                                                   mac=True)["sandbox"], dwt)):
+        heads = common / "refs" / "heads"
+        kept_all = [common / "worktrees" / "other0" / "new", common / "config", common / "hooks" / "new",
+                    common / "commondir", heads / "intruder", common / "worktreesb", common / "Worktrees_"]
+
+        def next_to(folder, name):  # the names next to an open one: longer, with a capital, a - or a _
+            return [folder / f"{name}{x}" for x in ("b", "B", "-", "_", "9")] + [folder / f"{name[:-1]}-"]
+        for name, box, w, branch in (("worker", worker, wt, ""), ("verifier", worker, wt, ""),
+                                     ("design session", design, dwt, "task/t0002")):
             settings = functools.partial(run.sandbox_try_settings, box, w)
             r = in_srt(settings, "/usr/bin/true")
             self.assertEqual(r.returncode, 0, f"{name}: {r.stderr or r.stdout}")
-            intruder = common / "refs" / "heads" / "intruder"
-            r = in_srt(settings, "/bin/sh", "-c", 'echo x > "$1"', "sh", str(intruder))
-            self.assertNotEqual(r.returncode, 0, name)
-            self.assertFalse(intruder.exists(), name)
-        # what git wrote outside the session's own folder: objects, the branch's ref and log
-        self.assertEqual({str(Path(p).relative_to(common)).split("/")[0] for p in changed
-                          if not Path(p).is_relative_to(Path(rules[0][0]).resolve())}, {"objects", "refs", "logs"})
+            own = Path(run.git_folders(w)[1]).resolve()
+            opened = [own / "index", own / "new-file", *[Path(x) for x in run.git_needs_open(w, branch)]]
+            kept = [*kept_all, *next_to(common / "worktrees", own.name)]
+            if branch:
+                ref = heads / branch
+                opened += [ref, ref.parent / f"{ref.name}.lock", common / "objects" / "new-file"]
+                kept += [*next_to(ref.parent, ref.name), ref.parent / f"{ref.name}.lockx", heads / "taskb",
+                         heads / "task" / "t0003"]
+            else:
+                kept += [heads / "task" / "new", common / "objects" / "new"]
+            script = Path(tempfile.mkdtemp(dir=self.tmp)) / "writes.sh"
+            script.write_text(run.git_open_try([*opened, *kept]))
+            r = in_srt(settings, "/bin/sh", str(script))
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stderr}")
+            refused = {x.removeprefix("refused: ") for x in r.stdout.splitlines() if x.startswith("refused: ")}
+            self.assertEqual([str(x) for x in opened if str(x) in refused], [], f"{name}: kept what git needs open")
+            self.assertEqual([str(x) for x in kept if str(x) not in refused], [], f"{name}: left open what it keeps")
+            for x in kept:
+                self.assertFalse(x.exists() and x not in (common / "config",), (name, x))
 
     def test_a_workers_sandbox_keeps_the_common_git_folder_and_other_worktrees_folders(self):
         from hansa import run
