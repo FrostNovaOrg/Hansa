@@ -9,10 +9,10 @@ import sys
 import time
 from pathlib import Path
 
-from . import alert, build, cost, installed, installed_text, notify, release
+from . import account, alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+from .run import (LINUX_TRY_NOTE, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -511,6 +511,7 @@ def status(desk: Desk) -> dict:
         "server_seconds_ago": int(time.time() - last) if last else None,
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
+        "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
@@ -587,6 +588,7 @@ def status_text(st: dict) -> str:
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out += [project_text(st["project"])] if st.get("project") else []
+    out += [f"sandbox try: {st['try_note']}"] if st.get("try_note") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
@@ -1223,6 +1225,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "may differ from the srt installed, so the try is a guard, not proof: when a run's first Bash calls "
             "say the sandbox could not start (sandbox-exec: or bwrap: before any call succeeded), hansa stops the "
             "run and holds its task the same way.",
+            *([f"  {LINUX_TRY_NOTE[0].upper()}{LINUX_TRY_NOTE[1:]}."] if account.LINUX else []),
             *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, h in sorted(sandbox_held(desk).items())]])
     if what == "notify":
         who = notify.names(desk)
