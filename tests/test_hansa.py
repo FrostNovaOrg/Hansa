@@ -14388,6 +14388,7 @@ class DeskTest(unittest.TestCase):
         f = Path(t) / "settings.json"
         write_json(f, run.srt_settings(self.desk, lane, "claude", p, self.repo, t))
         check = ('printf "\\n" >> .vscode/settings.json && echo made > new.txt && git status --porcelain -uall'
+                 ' && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git status --porcelain'
                  ' && echo "tmp=$TMPDIR" && : > "$TMPDIR/w" && echo wrote')
         r = subprocess.run([srt, "--settings", str(f), "--", "sh", "-c", run.in_sandbox(self.desk, lane, check)],
                            cwd=self.repo, capture_output=True, text=True, timeout=120,
@@ -14445,21 +14446,98 @@ class LinuxPreludeTest(unittest.TestCase):
                                                      "?? sub/.zshrc"])  # anchored at the top; *.log kept out
         excludes = (self.run_tmp / "hansa-git-excludes").read_text()
         self.assertTrue(excludes.startswith("*.log\n"), excludes)
-        # core.excludesFile, from the repository's config or a lane's GIT_CONFIG_*, is what is kept
-        (self.tmp / "mine").write_text("new.txt\n")
-        self.assertEqual(sorted(self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile",
-                                                GIT_CONFIG_VALUE_0=str(self.tmp / "mine"))),
-                         [" M .bashrc", " M .vscode/settings.json", "?? build.log", "?? sub/.zshrc"])
+        self.assertEqual(Path(self.git_out("config", "--path", "--get", "core.excludesFile").strip()),
+                         self.run_tmp / "hansa-git-excludes")
+        # a command's own GIT_CONFIG_COUNT and key do not remove it: it is in the global config, not the environment
+        self.assertEqual(sorted(self.git_status(before="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath "
+                                                       "GIT_CONFIG_VALUE_0=false ")),
+                         [" M .bashrc", " M .vscode/settings.json", "?? new.txt", "?? sub/.zshrc"])
+        self.assertEqual(sorted(self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.quotePath",
+                                                GIT_CONFIG_VALUE_0="false")),
+                         [" M .bashrc", " M .vscode/settings.json", "?? new.txt", "?? sub/.zshrc"])
 
-    def test_it_adds_its_excludes_once_after_what_is_set_and_uses_srts_tmpfs_only_when_there(self):
+    def git_out(self, *args, env=None) -> str:
         from hansa import run
-        show = 'echo "$TMPDIR $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_0:-} ${GIT_CONFIG_KEY_1:-} ${GIT_CONFIG_VALUE_1:-}"'
+        r = subprocess.run(["/bin/sh", "-eu", "-c", run.sandbox_prelude(True) + 'exec git "$@"', "sh", *args],
+                           cwd=self.repo, env={**self.env, **(env or {})}, capture_output=True, text=True, check=True)
+        return r.stdout
+
+    def placeholders(self):
+        from hansa import run
+        for n in run.SANDBOX_PLACEHOLDERS:
+            if not (self.repo / n).exists():
+                (self.repo / n).write_text("")
+
+    def test_the_accounts_global_settings_still_apply_from_both_files_and_from_git_config_global(self):
+        (self.home / ".gitconfig").write_text("[user]\n\tname = Someone Here\n[alias]\n\tst = status --porcelain -uall\n")
+        (self.home / ".config" / "git" / "config").write_text("[user]\n\temail = xdg@example.com\n\tname = Overridden\n")
+        self.placeholders()
+        (self.repo / "new.txt").write_text("x\n")
+        self.assertEqual(self.git_out("config", "user.name").strip(), "Someone Here")  # ~/.gitconfig after the XDG one
+        self.assertEqual(self.git_out("config", "user.email").strip(), "xdg@example.com")
+        self.assertEqual(self.git_out("st").splitlines(), ["?? new.txt"])  # the alias, and no placeholder
+        own = self.tmp / "own config"  # a lane's own GIT_CONFIG_GLOBAL, with a space in its path
+        own.write_text("[user]\n\tname = From Global\n[core]\n\texcludesFile = %s\n" % (self.tmp / "mine"))
+        (self.tmp / "mine").write_text("new.txt\n")
+        self.assertEqual(self.git_out("config", "user.name", env={"GIT_CONFIG_GLOBAL": str(own)}).strip(), "From Global")
+        self.assertEqual(self.git_out("status", "--porcelain", "-uall", env={"GIT_CONFIG_GLOBAL": str(own)}), "")
+        self.assertTrue((self.run_tmp / "hansa-git-excludes").read_text().startswith("new.txt\n"))
+        own.chmod(0)  # one git cannot read is left out, as git leaves it, and git still runs
+        self.addCleanup(own.chmod, 0o600)
+        if not os.access(own, os.R_OK):
+            self.assertEqual(self.git_out("status", "--porcelain", "-uall", env={"GIT_CONFIG_GLOBAL": str(own)}),
+                             "?? new.txt\n")
+
+    def test_a_repositorys_own_excludes_file_or_a_commands_wins_as_git_means_it_to(self):
+        self.placeholders()
+        (self.tmp / "mine").write_text("new.txt\n")
+        (self.repo / "new.txt").write_text("x\n")
+        (self.home / ".config" / "git" / "ignore").write_text("new.txt\n")
+        sh("git", "config", "core.excludesFile", str(self.tmp / "mine"), cwd=self.repo)
+        listed = self.git_status()
+        self.assertNotIn("?? new.txt", listed)
+        self.assertIn("?? .mcp.json", listed)  # the placeholders show there again (README)
+        sh("git", "config", "--unset", "core.excludesFile", cwd=self.repo)
+        listed = self.git_out("-c", f"core.excludesFile={self.tmp / 'mine'}", "status", "--porcelain", "-uall")
+        self.assertIn("?? .mcp.json", listed.splitlines())  # git -c, too (README)
+        self.assertNotIn("?? new.txt", listed.splitlines())
+        listed = self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile",
+                                 GIT_CONFIG_VALUE_0=str(self.tmp / "mine"))
+        self.assertIn("?? .mcp.json", listed)  # a lane's env setting its own, too
+        self.assertNotIn("?? new.txt", listed)
+        self.assertNotIn("?? new.txt", self.git_status())  # without them: not listed, a placeholder neither
+        self.assertNotIn("?? .mcp.json", self.git_status())
+
+    def test_an_older_git_gets_the_excludes_as_git_config_count_after_those_set(self):
+        fake = self.tmp / "oldgit"
+        fake.mkdir()
+        real = shutil.which("git")
+        (fake / "git").write_text('#!/bin/sh\n[ "$1" = version ] && { echo "git version 2.31.8"; exit 0; }\n'
+                                  'exec %s "$@"\n' % shlex.quote(real))
+        (fake / "git").chmod(0o755)
+        from hansa import run
+        show = 'echo "${GIT_CONFIG_GLOBAL:-unset} $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_0:-} ${GIT_CONFIG_KEY_1:-}"'
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show],
+                           env={**self.env, "PATH": f"{fake}{os.pathsep}{self.env['PATH']}", "GIT_CONFIG_COUNT": "1",
+                                "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x"},
+                           capture_output=True, text=True, check=True)
+        self.assertEqual(r.stdout.split(), ["unset", "2", "user.name", "core.excludesFile"])
+        self.assertFalse((self.run_tmp / "hansa-gitconfig").exists())
+        self.placeholders()
+        self.assertEqual(self.git_status(PATH=f"{fake}{os.pathsep}{self.env['PATH']}"), [])
+
+    def test_it_adds_its_excludes_once_and_uses_srts_tmpfs_only_when_there(self):
+        from hansa import run
+        show = 'echo "$TMPDIR $GIT_CONFIG_GLOBAL $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_1:-none}"'
         twice = run.sandbox_prelude(True) + "exec /bin/sh -c " + shlex.quote(run.sandbox_prelude(True) + show)
         r = subprocess.run(["/bin/sh", "-c", twice], env={**self.env, "GIT_CONFIG_COUNT": "1",
                                                           "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x"},
                            capture_output=True, text=True, check=True)
-        self.assertEqual(r.stdout.split(), [str(self.run_tmp), "2", "user.name", "core.excludesFile",
-                                            str(self.run_tmp / "hansa-git-excludes")])
+        self.assertEqual(r.stdout.split(), [str(self.run_tmp), str(self.run_tmp / "hansa-gitconfig"), "1", "none"])
+        config = (self.run_tmp / "hansa-gitconfig").read_text()
+        self.assertEqual(config.count("path ="), 2)  # the XDG config and ~/.gitconfig, not hansa's own again
+        self.assertNotIn("hansa-gitconfig", config)
+        self.assertEqual(sorted(os.listdir(self.run_tmp)), ["hansa-git-excludes", "hansa-gitconfig"])  # no part left
         tmpfs = self.run_tmp / run.SANDBOX_TMPFS
         tmpfs.mkdir()
         r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=self.env, capture_output=True,
@@ -14472,7 +14550,7 @@ class LinuxPreludeTest(unittest.TestCase):
         env = {**self.env, "PATH": f"{fake}{os.pathsep}{self.env['PATH']}"}  # a device of its own, as srt's tmpfs
         r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
                            text=True, check=True)
-        self.assertEqual(r.stdout.split()[:2], [str(tmpfs), "1"])
+        self.assertEqual(r.stdout.split()[:2], [str(tmpfs), str(tmpfs / "hansa-gitconfig")])
         self.assertTrue((tmpfs / "hansa-git-excludes").is_file())
         r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + 'echo "$JAVA_TOOL_OPTIONS"'], env=env,
                            capture_output=True, text=True, check=True)
@@ -14484,6 +14562,31 @@ class LinuxPreludeTest(unittest.TestCase):
         self.assertEqual(r.stdout.split()[0], str(self.run_tmp))
         # a worker's TMPDIR (Claude Code's own folder) has no such folder, and macOS gets none of it
         self.assertEqual(run.sandbox_prelude(False), run.JAVA_PRELUDE)
+
+
+class LinuxSandboxProbeTest(unittest.TestCase):
+    """tests/linux_sandbox_probe.sh, run as a lane's check: hansa lane try prints a log's last 15 lines."""
+
+    def test_its_output_stays_within_15_lines_however_many_files_are_untracked(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        repo, t = tmp / "repo", tmp / "t"
+        repo.mkdir()
+        t.mkdir()
+        sh("git", "init", "-q", cwd=repo)
+        probe = Path(__file__).resolve().parent / "linux_sandbox_probe.sh"
+        env = {**os.environ, "TMPDIR": str(t)}
+        r = subprocess.run(["/bin/sh", str(probe)], cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.splitlines()[-1], "(none)")
+        for i in range(12):
+            (repo / f"u{i:02}").write_text("")
+        r = subprocess.run(["/bin/sh", str(probe)], cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+        lines = (r.stdout + r.stderr).splitlines()
+        self.assertLessEqual(len(lines), 15, lines)
+        self.assertEqual(lines[-4:], ["?? u00", "?? u01", "?? u02", "... and 9 more"])
+        self.assertEqual(sorted(os.listdir(repo)), [".git", *(f"u{i:02}" for i in range(12))])  # nothing left
+        self.assertEqual(os.listdir(t), [])
 
 
 class GitOpenTryTest(unittest.TestCase):
