@@ -65,8 +65,9 @@ const T = ZH ? {
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"填在这里，只存在本机、谁也看不到内容", check:"检查接口", checking:"检查中…",
+  restMinutes:"用到额度上限后歇几分钟（空＝用总体的设置）", restNote:"报错里写了额度何时恢复，就歇到那时再加一分钟（最多 31 天）；没写才按这里的分钟数。订阅的窗口常是几小时，API 密钥可能是每分钟，套餐可能按月：按这家的情况填。因额度停下的任务回到队列，不算一次尝试。", rest:"歇",
   ready:"可用", lastCheck:"上次检查", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
-  general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟", coordinator:"协调席",
+  general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟（各家没单独设时）", coordinator:"协调席",
   auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"设计会话不用问就能跑的命令（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着这张单子。git 的规则写了也不算：提交由框架来做）",
@@ -75,7 +76,7 @@ const T = ZH ? {
   browserCmd:"浏览器工具的启动命令（协调席派活时可以给单件活开浏览器；空＝不提供浏览器）",
   coordinatorRead:"协调席（和它会话里的帮手）不用问就能读的文件夹（工作台以外；每行一个完整路径；只能读，不能改；下次启动 hansa coordinator 时生效）",
   design:"设计会话（你直接在里面跟它改一件功能，结束后交回协调席核对、合并）", join:"接进去的命令（在这台机器上运行）", shots:"截图（最新在前）",
-  designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看（空＝没有）",
+  designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看；带浏览器的活，hansa 在 macOS 上先替它跑起来（空＝没有）", previewWait:"起页面最多等几秒（空＝120）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
   providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
@@ -91,8 +92,9 @@ const T = ZH ? {
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
   last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
-  costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。",
+  costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件活重新排队再试时，每次尝试的 token 都算在里面。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
+  runs:"运行次数（每次尝试都算）", turns:"轮数",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_verifier:"验收官", "helper_verifier-high":"验收官（high）",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
@@ -106,17 +108,19 @@ const T = ZH ? {
   releases:"发布", releaseWaiting:"等你点头才会发布", releaseRecent:"最近的发布", releaseCommand:"命令（hansa 用这台机器的账户在沙箱外运行，能用账户的登录和网络）",
   releaseNote:"说明", releaseCommits:(n, since) => since ? `自上次发布 #${since} 以来的 ${n} 个提交` : `不在任何远程跟踪分支上的 ${n} 个提交（这条工作线还没发布过）`,
   releaseChecked:(n, shown) => `查了全部 ${n} 个要发出去的提交有没有禁发字眼` + (shown < n ? `（这里只列出前 ${shown} 个）` : ""),
-  releaseUnmatched:"清单上这些工作线已和保存清单时不一样，它们的发布要等你点头（再保存一次清单就重新算进来）：",
+  releaseUnmatched:"清单上这些工作线已和保存清单时不一样，它们的发布要等你点头（直接保存会保留旧的记录：用下面的按钮，或取消勾选再勾上，然后保存，才会重新算进来）：",
   releaseTakeBack:"按现在的样子重新算进来（之后点保存）",
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
-  releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令或它要跟在哪个目标之后，只要有一样变了，勾就不再算数）",
+  releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
+  releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
+  releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令、它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，勾就不再算数）",
   releaseForbidden:"不许发出去的字眼（每行一个词或短语，不分大小写；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   laneRelease:"发布命令：你在这页点头后由 hansa 运行，把基础分支发出去（空＝没有）", f_release:"发布命令",
-  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者向你提了请求、hansa serve 很久没跑完一轮）由 hansa 运行，以这台机器的账号在沙箱外、在桌面文件夹里运行；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
+  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮）由 hansa 运行，以这台机器的账号在沙箱外、在桌面文件夹里运行；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
-  laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布运行时占着仓库，那里的合并要等它",
+  laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
 } : {
   title:"Desk", status:"Status", settings:"Settings", cost:"Cost",
@@ -130,8 +134,9 @@ const T = ZH ? {
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Stored on this machine only; nobody can read it back", check:"Check", checking:"checking…",
+  restMinutes:"Rest after a usage limit (min; blank = the general setting)", restNote:"When the limit error says when the limit resets, the provider rests until then and a minute (31 days at most); these minutes count only when it does not. A subscription's window is often a few hours, an API key's limit may be per minute, a plan's may be monthly: set what fits this provider. A task stopped by a limit goes back to the queue without using a try.", rest:"rest",
   ready:"ready", lastCheck:"last check", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
-  general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a quota error (min)", coordinator:"Coordinator",
+  general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a usage limit (min), for providers without their own", coordinator:"Coordinator",
   auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
   allow:"Commands a design session may run without asking (one rule per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no list. Git rules count for nothing: hansa does the committing",
@@ -140,7 +145,7 @@ const T = ZH ? {
   browserCmd:"Browser tool command (the coordinator can give single tasks a browser; blank = none)",
   coordinatorRead:"Folders the coordinator (and the helpers in its session) may read without asking, outside the desk (one full path per line; reading only, no editing; holds from the next hansa coordinator start)",
   design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
-  designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it (blank = none)",
+  designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it; for a task with a browser, hansa starts it first, on macOS (blank = none)", previewWait:"Seconds the preview has to be ready (blank = 120)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
@@ -156,7 +161,8 @@ const T = ZH ? {
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
   last24h:"Last 24 h", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
   days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
-  costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill.",
+  costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill. A task queued again for another try counts every try's tokens.",
+  runs:"Runs (every try)", turns:"Turns",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_verifier:"verifier", "helper_verifier-high":"verifier (high)",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
@@ -170,17 +176,19 @@ const T = ZH ? {
   releases:"Releases", releaseWaiting:"Waiting for your yes", releaseRecent:"Recent releases", releaseCommand:"Command (hansa runs it as this machine's account, outside the sandbox, with its logins and network)",
   releaseNote:"Note", releaseCommits:(n, since) => since ? `${n} commit(s) since release #${since}` : `${n} commit(s) on no remote-tracking branch (no release of this lane went out before)`,
   releaseChecked:(n, shown) => `all ${n} outgoing commit(s) checked for forbidden words` + (shown < n ? ` (the first ${shown} shown here)` : ""),
-  releaseUnmatched:"These lanes on the list are no longer what they were when the list was saved, so their releases wait for your yes (saving the list again takes them back in):",
+  releaseUnmatched:"These lanes on the list are no longer what they were when the list was saved, so their releases wait for your yes (a plain Save keeps them as they were: take them back in with the button below, or untick and tick them again, then Save):",
   releaseTakeBack:"Take them back in as they are now (then Save)",
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
-  releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command or the target it must follow, changes)",
+  releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
+  releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
+  releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command, the target it must follow or the way it runs (fixed), changes)",
   releaseForbidden:"Words or phrases no release may send out (one per line, any case; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   laneRelease:"Release command: hansa runs it after your yes on this page, to send the base branch out (blank = none)", f_release:"release",
-  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator files a request, hansa serve finishes no round for a long time), as this machine's account, outside the sandbox, in the desk's folder; the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time), as this machine's account, outside the sandbox, in the desk's folder; the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
-  laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a running release holds the repository, so merges there wait for it",
+  laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
@@ -284,11 +292,13 @@ async function loadStatus() {
     st.asks.length || (st.asks_closed || []).length ? section(T.asks, [...st.asks.map(a => {
       const ans = h("input", {placeholder:T.answer, style:"flex:1"});
       return h("div", {class:"row", style:"margin:6px 0"}, h("strong", {}, "#" + a.id), h("span", {}, a.text), a.note ? h("span", {class:"ok"}, a.note) : null, ans,
-        h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value}).then(loadStatus).catch(err)}, T.close));
+        h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
+          .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close));
     }), ...(st.asks_closed || []).map(a => h("div", {class:"row muted", style:"margin:6px 0"}, h("strong", {}, "#" + a.id),
       h("span", {}, a.text), h("span", {}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`)))]) : null,
     section(T.providers, table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
-      p.name, p.kind === "subscription" ? T.subscription : T.compatible, p.model + (p.effort ? " · " + p.effort : ""),
+      p.name, p.kind === "subscription" ? T.subscription : T.compatible,
+      p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + (p.rest_own ? "" : ` (${T.general})`),
       p.problem ? h("span", {class:"warn"}, p.problem) : h("span", {class:"ok"}, T.ready),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
       checkButton(p.name, loadStatus)]))),
@@ -306,6 +316,7 @@ function releaseBlock(r) {
       h("span", {class:"muted"}, when(r.asked))),
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
+    h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs),
     r.moved ? h("div", {class:"bad"}, T.releaseMoved + ((ZH && r.moved_zh) || r.moved)) : null,
     h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
     h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
@@ -315,16 +326,24 @@ function releaseBlock(r) {
     h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", onclick: () => answer(true)}, T.releaseYes),
       reason, h("button", {onclick: () => answer(false)}, T.releaseNo)));
 }
+function releaseStop(r) {
+  if (!["approved", "starting", "running"].includes(r.state) || r.stop_asked) return null;
+  const reason = h("input", {placeholder:T.releaseStopReason});
+  return h("div", {class:"row", style:"margin-top:4px"}, reason,
+    h("button", {title:T.releaseStopNote, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
+      .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
+}
 function releasesSection(rel) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
   if (!rel.length) return null;
   return section(T.releases, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
-      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"mono"}, r.command),
-      h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused"].includes(r.state) ? "bad" : "muted"},
+      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs)),
+      h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
         (ZH && r.what_zh) || r.what, r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
         (r.hits || []).length ? h("div", {class:"mono"}, T.releaseHits + ":", r.hits.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line}`))) : null,
-        (r.tail || []).length && r.state === "failed" ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null)]))] : null);
+        (r.tail || []).length && ["failed", "stopped"].includes(r.state) ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null,
+        releaseStop(r))]))] : null);
 }
 function checkButton(name, after) {
   const b = h("button", {onclick: async () => { b.disabled = true; b.textContent = T.checking;
@@ -347,7 +366,7 @@ async function loadSettings(problems) {
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
-  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, merge_check:T.laneMergeCheck, merge_timeout_min:T.mergeTimeout, preview:T.preview, setup:T.setup,
+  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, merge_check:T.laneMergeCheck, merge_timeout_min:T.mergeTimeout, preview:T.preview, preview_wait_s:T.previewWait, setup:T.setup,
   release:T.laneRelease, targets:T.laneTargets};
 /* The recent-changes list names the field briefly; a network or write change has no field, only its event. */
 const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, merge_check:T.f_merge_check, preview:T.f_preview, release:T.f_release, network:T.network, write:T.write};
@@ -424,6 +443,7 @@ function renderSettings(problems) {
             h("button", {onclick: () => { delete S.providers[name]; renderSettings(); }}, T.remove)),
           h("div", {class:"grid"},
             T.kind, kindSel, T.model, bind(p, "model"), T.effort, pick(p, "effort", EFFORTS),
+            T.restMinutes, h("div", {}, bind(p, "rest_minutes", "number"), " ", h("span", {class:"muted"}, T.restNote)),
             ...(p.kind === "compatible"
               ? [T.endpoint, bind(p, "base_url"), T.key, h("div", {class:"row"},
                   h("span", {class: KEYS[name] ? "ok" : "warn"}, KEYS[name] ? T.keySet : T.keyMissing), keyBox,
@@ -493,8 +513,10 @@ async function loadCost() {
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
     if (!rows.length) return null;
-    return h("div", {}, h("h3", {}, T["by" + key]), table(["", T.tokens, "$ " + T.listValue, T.tokensNoPrice],
-      rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : ""])));
+    const tries = key === "task";  // every run of a task counts: its earlier tries too
+    return h("div", {}, h("h3", {}, T["by" + key]), table(["", T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
+      rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
+        ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
   };
   $("#tab-cost").replaceChildren(
     h("section", {},
@@ -510,7 +532,7 @@ async function loadCost() {
 }
 async function exportCsv() {
   const r = await api(`/api/cost?days=${costDays}&rows=1`);
-  const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by"];
+  const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by", "runs", "turns"];
   const esc = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
   const a = h("a", {href:URL.createObjectURL(new Blob([csv], {type:"text/csv"})), download:`cost-${costDays}d.csv`});

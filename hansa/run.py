@@ -27,13 +27,14 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, other_envs, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
-                   merge_message, program_candidates, read_json, resolved, task_message, update_message, write_json,
+                   merge_message, message_fallback, program_candidates, read_json, resolved, task_message, update_message, write_json,
                    write_problems)
 from .desk import lane_env as checked_env
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
 QUOTA = re.compile(r"API Error: (402|429)|rate_limit_error|usage limit reached|credit balance is too low|"
+                   r"you(?:'|’)ve hit your [\w' ]{0,40}limit|"  # Claude Code's own line for a subscription's limit
                    r"insufficient[_ ](quota|balance)|quota exceeded|too many requests|余额不足|额度不足|额度已用", re.I)
 QUOTA_STATUS = {402, 429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
@@ -41,10 +42,22 @@ AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
 # The connection to the provider failed, or the provider did (overloaded, a server error): nothing the task
 # did, and nothing that says the provider's key or quota is wrong. The task is tried once more by itself.
-NETWORK = re.compile(r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|"
-                     r"Connection (dropped|error|reset|closed|refused|timed out)|socket hang up|fetch failed|"
-                     r"(request|connection|API Error:?)[^\n]{0,40}?tim(ed[ -]?out|eout)|"
-                     r"overloaded_error|\boverloaded\b|API Error: 5\d\d\b", re.I)
+# Only on Claude Code's own error lines: one that begins "API Error" (a 5xx, a connection or timeout, the provider
+# overloaded, unable to connect), one that begins with a connection reset, refused, closed or lost while the
+# computer was asleep, a socket hang up or a fetch that failed (after an "Error:" maybe), one that ends
+# "(ENETUNREACH)", or the API's own overloaded error. A test that timed out, or a log line saying
+# "overloaded", is the task's output, not a dropped connection. The phrase found is the one named group that matched.
+NETWORK = re.compile(r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?P<server>API Error:?[ \t]*5\d\d)\b|"
+                     r"^[ \t]*(?:[\w.]*Error:[ \t]+)?API Error:?[^\n]{0,80}?(?P<api>Repeated 529 Overloaded errors|"
+                     r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|ENETUNREACH|"
+                     r"EHOSTUNREACH|Unable to connect to API(?![ \t]*:)|"  # not "...: SSL certificate ...": no drop
+                     r"Connection (?:dropped|error|reset|closed|refused|timed out|lost)|socket hang up|fetch failed|"
+                     r"(?:request|connection) tim(?:ed[ -]?out|eout)|overloaded_error|\boverloaded\b)|"
+                     r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?:(?:read|write|connect)[ \t]+)?(?P<line>ECONNRESET|ECONNREFUSED|"
+                     r"Connection (?:reset|refused|closed|lost while your computer was asleep)|socket hang up|"
+                     r"fetch failed)|"
+                     r"\((?P<unreach>ENETUNREACH)\)[ \t.]*$|"  # the network itself out of reach, at a line's end
+                     r"\"type\"[ \t]*:[ \t]*\"(?P<json>overloaded_error)\"", re.I | re.M)
 OVERLOADED_STATUS = 529
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -118,6 +131,33 @@ while [ $# -ge 4 ]; do rm -rf "$4"; shift 4; done
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
+TRIES = 3  # a task's tries before it fails
+# A run that ends on its provider's usage limit puts the task back in the queue without using a try, this
+# many times; after that each such end counts as a try, so a provider that hits its limit again right after
+# each rest does not hold one task forever.
+LIMIT_RETURNS = 5
+REST_CAP = 31 * 86400  # the longest rest a reset time read from an error gives (a monthly allowance)
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+# The zone after a time: "(Europe/Berlin)", as Claude Code prints the subscription's reset; UTC, GMT, Z; an offset.
+_ZONE = r"(?:\s*\(([A-Za-z][\w+-]*(?:/[\w+-]+)*)\)|\s*\b(UTC|GMT)\b|(Z)\b|\s*([+-]\d{2}:?\d{2})\b)?"
+# The forms of a limit's reset time in an error, each read by reset_time:
+#   a Unix time: Claude Code's "Claude AI usage limit reached|1760000000", the API's
+#     anthropic-ratelimit-unified-reset, Claude Code's resets_at
+RESET_UNIX = re.compile(r"(?:limit reached\||ratelimit-unified-reset\"?\s*[:=]\s*\"?|resets_?at\"?\s*[:=]\s*\"?)"
+                        r"(\d{10})(?!\d)", re.I)
+#   seconds from now: a retry-after header, when a message passes it on
+RESET_AFTER = re.compile(r"retry[-_ ]after\"?\s*[:=]\s*\"?(\d{1,7})(?![\d.])", re.I)
+#   "in N minutes" or "in N hours" (seconds too) after words that say the limit ends or to try again then
+RESET_IN = re.compile(r"(?:reset|try|retry|again|available|wait)\w*\b[^.\n]{0,30}?\bin\s+(\d{1,5}(?:\.\d+)?)\s*"
+                      r"(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b", re.I)
+#   a date and time: "2026-08-08 00:00 UTC" (a gateway's spend limit), ISO 8601
+RESET_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?" + _ZONE)
+#   Claude Code's subscription reset more than a day out: "resets Oct 9, 3pm (Europe/Berlin)",
+#   "resets Jan 2, 2027, 3:30pm (Europe/Berlin)"
+RESET_DAY = re.compile(r"\b(" + "|".join(MONTHS) + r")[a-z]*\.?\s+(\d{1,2})(?:,\s*(\d{4}))?,?\s+(?:at\s+)?"
+                       r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)" + _ZONE, re.I)
+#   a clock time: Claude Code's "You've hit your session limit · resets 3pm (Europe/Berlin)", "resets at 15:00"
+RESET_CLOCK = re.compile(r"\bresets?\s+(?:at\s+)?(\d{1,2})(?!\d)(?::(\d{2}))?\s*([ap]\.?m\.?)?" + _ZONE, re.I)
 # The provider would not answer this request (its content filter or a refusal). That
 # says nothing about other tasks, so the provider does not rest; the task moves on.
 REFUSED_STOPS = {"content_filter", "refusal"}
@@ -144,7 +184,7 @@ on branch task/{tid}, which was made for this task.
   line. To see a file as it was before your changes: `git show HEAD:path`.
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
-- End with a short report: what you changed, how you checked it, and anything left undone.
+{long}- End with a short report: what you changed, how you checked it, and anything left undone.
   Stop or wait for any background work you started before you write it: your last message
   is taken as your report.
 - Nobody will wake you later or answer questions: wait for your own work before you report.
@@ -171,9 +211,16 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
   base commit the task names: `git show <base>:path`).
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
-- Stop or wait for any background work you started before you write your report: your last
+{long}- Stop or wait for any background work you started before you write your report: your last
   message is taken as your report.
 - Nobody will wake you later or answer questions: wait for your own work before you report.
+"""
+
+LONG_RUNS = """- Run a long build or test suite in the foreground, in one Bash call with a timeout long enough
+  for it: give the Bash tool's timeout, in milliseconds, up to {bash_ms} ({bash_min} minutes, the most
+  one call may run here). A call that gives none stops after {default_min} minutes. The lane's check
+  may run {check_min} minutes, so a command near that is long. Never start one in the background and
+  end your turn while it runs: when your turn ends, your run ends, and what it was waiting for is lost.
 """
 
 VERIFY_TASK = """Find out, by running things, whether task {id} does what it asked. Its change is
@@ -317,6 +364,40 @@ PREVIEW_NOTE = """
 To look at the app, start it with `{preview}` (the Bash tool's background option) and open
 the address it prints in the browser.
 """
+# A task or verification with a browser, on a lane with a preview: hansa starts the preview before the worker
+# (with_preview, hansa/preview.py) and tells the worker how that went, with one of these.
+PREVIEW_READY_NOTE = """
+hansa started the lane's preview (`{preview}`) for you, in this worktree, before you started: the app
+is at @ADDRESS@. Open that address in the browser. It runs until you end, and hansa stops it then;
+do not start it again. It runs from this worktree, so a preview that reloads on changes shows
+yours. Your own commands may not reach it: look at it with the browser.
+"""
+PREVIEW_NOT_READY_NOTE = """
+hansa tried to start the lane's preview (`{preview}`) for you before you started, and it did not
+start: @WHY@ (it had {seconds} seconds to print an http://localhost:PORT address). hansa stopped it.
+Its last lines:
+@LINES@Do not try to start it yourself; say in your report that the preview did not start, with
+those lines, and do what you can without it.
+"""
+PREVIEW_LINUX_NOTE = """
+This lane has a preview (`{preview}`), but hansa does not start it on Linux: there the sandbox it would
+run in has a network of its own, so the browser, which runs outside it, could not reach the app. Do not
+try to start it yourself; say in your report that you could not look at the app, and do what you can
+without it.
+"""
+PREVIEW_FAILED_NOTE = """
+This lane has a preview (`{preview}`), but hansa could not start it: {why}. Do not try to start it
+yourself; say in your report that the preview did not start, and do what you can without it.
+"""
+PREVIEW_WAIT_S = 120  # how long a preview has to be ready when its lane sets no preview_wait_s
+PREVIEW_KEEP = 4 * 2 ** 20  # bytes of a preview's output kept, its first and last half (hansa/preview.py)
+PREVIEW_MARGIN = 4096  # bytes dropped on each side of a cut inside a line of kept output: longer than any key
+PREVIEW_LOOK_S = 0.5  # how often hansa/preview.py looks for what the preview started
+# Whether hansa starts a lane's preview for a task with a browser: on macOS only. There srt's local binding lets
+# the preview bind the machine's loopback, where the browser reaches it (and the preview reaches every service on
+# it). On Linux srt runs the command with a network namespace of its own (bubblewrap's --unshare-net), and local
+# binding does nothing: a server bound inside is on the sandbox's own loopback, which nothing outside can reach.
+PREVIEW_STARTS = sys.platform == "darwin"
 NO_BROWSER_NOTE = """
 No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
 in words what changed and where they can see it.
@@ -531,6 +612,139 @@ def no_read_rules(paths) -> list:
     return [r for x in full_paths(paths) for r in (f"Read(//{x.lstrip('/')})", rule("Read", x))]
 
 
+def _zone(m, first: int):
+    """The zone a reset time names (groups first..first+3 of _ZONE): a tzinfo; None for the machine's local
+    time, when it names none; False when it names one hansa does not know."""
+    from datetime import timedelta, timezone
+    name, utc, z, offset = m.group(first, first + 1, first + 2, first + 3)
+    if utc or z:
+        return timezone.utc
+    if offset:
+        sign, digits = (-1 if offset[0] == "-" else 1), offset[1:].replace(":", "")
+        return timezone(sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:])))
+    if name:
+        if name.upper() in ("UTC", "GMT"):
+            return timezone.utc
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 - not a zone (or no zone data): unsure of the time
+            return False
+    return None
+
+
+def _hour(h: str, ampm) -> int:
+    h = int(h)
+    if not ampm:
+        return h
+    return -1 if not 1 <= h <= 12 else h % 12 + (12 if ampm[0].lower() == "p" else 0)
+
+
+def reset_time(text: str, at: float | None = None):
+    """When a provider's usage limit resets, as its error says (see RESET_UNIX and the forms after it): a Unix
+    time, or None when the error gives none, or hansa is unsure of the one it gives. A time without a zone is the
+    machine's local time; a clock time alone is its next coming."""
+    try:
+        return _reset_time(text, at)
+    except Exception:  # noqa: BLE001 - a line hansa cannot read (an impossible offset, say): no reset time
+        return None
+
+
+def _reset_time(text, at):
+    from datetime import datetime, timedelta
+    at = time.time() if at is None else at
+    text = str(text or "").replace(" ", " ").replace("\xa0", " ").replace("\xb7", " ")
+
+    def when(y, mo, d, h, mi, s, tz):
+        if tz is False or not (0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
+            return None
+        try:
+            return datetime(y, mo, d, h, mi, s, tzinfo=tz).timestamp()
+        except (ValueError, OverflowError):
+            return None
+
+    found = None
+    if m := RESET_UNIX.search(text):
+        found = float(m.group(1))
+    elif m := RESET_AFTER.search(text):
+        found = at + int(m.group(1))
+    elif m := RESET_IN.search(text):
+        unit = m.group(2).lower()
+        found = at + float(m.group(1)) * (3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1)
+    elif m := RESET_ISO.search(text):
+        found = when(*map(int, m.group(1, 2, 3, 4, 5)), int(m.group(6) or 0), _zone(m, 7))
+    elif m := RESET_DAY.search(text):
+        tz = _zone(m, 7)
+        args = (MONTHS.index(m.group(1).lower()[:3]) + 1, int(m.group(2)), _hour(m.group(4), m.group(6)),
+                int(m.group(5) or 0), 0, tz)
+        if m.group(3):
+            found = when(int(m.group(3)), *args)
+        else:  # the year that puts it nearest to now: Jan 2 read on Dec 31 is next year's, Dec 31 read on Jan 1 last
+            year = datetime.fromtimestamp(at, tz or None).year
+            near = [t for t in (when(y, *args) for y in (year - 1, year, year + 1)) if t is not None]
+            found = min(near, key=lambda t: abs(t - at)) if near else None
+    elif (m := RESET_CLOCK.search(text)) and (m.group(2) or m.group(3)):  # "resets 3" alone is no time
+        tz = _zone(m, 4)
+        if tz is not False:
+            day = datetime.fromtimestamp(at, tz or None)
+            found = when(day.year, day.month, day.day, _hour(m.group(1), m.group(3)), int(m.group(2) or 0), 0, tz)
+            if found is not None and found < at - 3600:  # that time today has passed: tomorrow's
+                found = (datetime.fromtimestamp(found, tz or None) + timedelta(days=1)).timestamp()
+    if found is None or found < at - 3600:  # long past: not this limit's reset
+        return None
+    return found
+
+
+def own_rest_minutes(s: dict, name: str) -> int | None:
+    """The provider's own rest after a usage limit, in minutes, as the principal set it; None: the desk's."""
+    v = (s["providers"].get(name) or {}).get("rest_minutes")
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def rest_minutes(s: dict, name: str) -> int:
+    """How long the provider rests after a usage limit whose error gives no reset time."""
+    own = own_rest_minutes(s, name)
+    return own if own is not None else s.get("cool_minutes", 30)
+
+
+def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float:
+    """Rest a provider that cannot be used ("quota" or a key or login problem, unusable_reason) and return
+    until when. After a usage limit: until the reset time its error gives (reset_time) and a minute, at most
+    REST_CAP; else for its rest_minutes."""
+    t = time.time()
+    if kind != "quota":
+        until = t + 60 * KEY_REST_MINUTES
+        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
+        return until
+    try:
+        reset = reset_time(text, t)
+    except Exception as e:  # noqa: BLE001 - only a detail: the rest falls back to the fixed length
+        desk.event("detail_unread", provider=name, what="reset time", error=str(e)[:300])
+        reset = None
+    if reset is not None:
+        until = min(max(reset, t) + 60, t + REST_CAP)
+        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
+    else:
+        minutes = rest_minutes(s, name)
+        until = t + 60 * minutes
+        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
+    return until
+
+
+def rest_text(st: dict) -> str:
+    """Why a resting provider rests that long (its state, provider_state), or ''."""
+    if st.get("rest_how") == "reset":
+        return "the reset time its error gave, and a minute"
+    if st.get("rest_how") == "fixed" and st.get("rest_minutes"):
+        return f"no reset time in its error, so its rest of {st['rest_minutes']} minutes"
+    return ""
+
+
+def tries_used(attempts: list) -> int:
+    """The tries a task has used: each earlier run but those that ended on a usage limit and cost no try."""
+    return sum(1 for a in attempts if a.get("kind") != "limit" or a.get("counted"))
+
+
 def refused_by(m: dict) -> set:
     """Providers that refused this task; it is not offered to them again."""
     return {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
@@ -562,7 +776,9 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
                 as_root = f"env {login}" if p.get("config_dir") else login
                 how += f" as {who} (from root: `runuser -u {who} -- {as_root}`)"
             return f"{st['reason']}; log in with {how}, then `hansa check {name}` brings it back"
-        return f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
+        how = rest_text(st)
+        return (f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
+                + (f": {how}" if how else ""))
     return ""
 
 
@@ -638,14 +854,15 @@ ENDED = re.compile(r"\b(completed|complete|done|finished|failed|killed|stopped|c
                    re.I)
 
 
-def background_left(home: Path, sid: str) -> list:
+def background_left(home: Path, sid: str, after: int = 0) -> list:
     """What a worker started in the background (a Bash command or an agent) and had no notice of
     ending by the end of its session record, by description: it was still running when the worker
-    ended, so the worker may have written its report without it. Empty when the record cannot be read."""
+    ended, so the worker may have written its report without it. Empty when the record cannot be read.
+    Only what was started in the record's rows from `after` on (a resumed run's own: see resume)."""
     rows = _rows(home, sid) or []
     started, ended = {}, set()  # background id: description
     calls = {}  # tool use id: (tool name, input)
-    for d in rows:
+    for i, d in enumerate(rows):
         content = (d.get("message") or {}).get("content")
         for c in content if isinstance(content, list) else []:
             if not isinstance(c, dict):
@@ -670,7 +887,7 @@ def background_left(home: Path, sid: str) -> list:
                     elif given.get("run_in_background") or re.search(r"async|background", said, re.I):
                         found = AGENT_ID.search(said)
                         bid = found and found.group(1)
-                if bid:
+                if bid and i >= after:
                     what = given.get("description") or given.get("command") or given.get("prompt") or name
                     started[str(bid)] = " ".join(str(what).split())[:100]
         for s in _strings(d):
@@ -1583,30 +1800,32 @@ def design_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, branch
     return settings
 
 
-def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str) -> dict:
+def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str, local: bool = False) -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
-    worktree, the temporary folder `tmp` and the lane's write list."""
+    worktree, the temporary folder `tmp` and the lane's write list. local: with local binding whatever the
+    lane's network list says (a preview hansa starts, and nothing else)."""
     hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
-    if any(is_local(h) for h in hosts):
+    if local or any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True
     return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp]) + fs["allowWrite"],
                                                "denyRead": fs["denyRead"], "denyWrite": fs["denyWrite"]}}
 
 
-def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
-    """What a lane's setup or check (`name`) runs in: (srt, its settings file in the task's raw folder,
+def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path, local: bool = False) -> tuple:
+    """What a lane's setup, check or preview (`name`) runs in: (srt, its settings file in the task's raw folder,
     a temporary folder made for this run, for the command's TMPDIR). srt ignores the TMPDIR it is given
     and sets its own from CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the folder.
     Whoever runs the command removes the folder after it; finish and finish_check remove one left behind.
-    srt is tried first with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs."""
+    srt is tried first with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs.
+    local: local binding for this one command (srt_settings)."""
     try:
         check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     tmp = tempfile.mkdtemp(prefix=f"hansa-{name}-")
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
-    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp))
+    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, local))
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), tmp]})
     try:
         srt = try_srt(desk, f, tmp, wt)
@@ -1617,9 +1836,9 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 
 
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
-    """The srt settings of a task's setup and check, once they have ended, the lane's env file, and their temporary folders
+    """The srt settings of a task's setup, check and preview, once they have ended, the lane's env file, and their temporary folders
     still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
-    for name in ("setup", "check"):
+    for name in ("setup", "check", "preview"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
     m = desk.meta(tid)
@@ -1732,15 +1951,60 @@ def markers_text(markers: dict) -> str:
                      + (" ..." if len(ns) > 12 else "") for f, ns in markers.items())
 
 
-def publish(desk: Desk, tid: str, *names: str) -> None:
-    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed."""
+def margin_said(margin: bool) -> str:
+    """What the line saying how much output was left out adds when a cut fell inside a line (PREVIEW_MARGIN)."""
+    return (f", with {PREVIEW_MARGIN} bytes on each side of a cut inside a line, so that no key is left in part"
+            if margin else "")
+
+
+def read_bounded(path: Path, head: int, tail: int) -> str:
+    """A file's text, or of a longer one its first `head` and last `tail` bytes, cut at whole lines, with a line
+    in between saying how much was left out: never more of it read than that. A cut that falls inside a line drops
+    PREVIEW_MARGIN bytes more on its side, so no key is left there in part (desk.redact replaces whole keys only).
+    Bytes that are not UTF-8 stay one character each (surrogateescape): written back with errors="replace", each is
+    one byte again."""
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        if size <= head + tail:
+            return f.read().decode("utf-8", errors="surrogateescape")
+        first = f.read(head)
+        f.seek(size - tail)
+        last = f.read(tail)
+    a, b = first.rfind(b"\n"), last.find(b"\n")
+    first = first[:a + 1] if a >= 0 else first[:max(0, len(first) - PREVIEW_MARGIN)]
+    last = last[b + 1:] if b >= 0 else last[PREVIEW_MARGIN:]
+    return (first.decode("utf-8", errors="surrogateescape")
+            + f"\n[hansa: {size - len(first) - len(last)} bytes left out here{margin_said(a < 0 or b < 0)}]\n"
+            + last.decode("utf-8", errors="surrogateescape"))
+
+
+def cut_redacted(data: bytes, most: int) -> bytes:
+    """Text with keys already removed, cut again to at most `most` bytes when a key's longer [key of NAME] label
+    made it longer: its start and end, at whole lines where there are some, with a line in between saying how much
+    was left out. No margin is needed here: no key is left to split, and a character a cut splits is dropped."""
+    if len(data) <= most:
+        return data
+    half = max(0, most // 2 - 128)  # 128: room for the line in between
+    first, last = data[:half], data[len(data) - half:]
+    a, b = first.rfind(b"\n"), last.find(b"\n")
+    first, last = (first[:a + 1] if a >= 0 else first), (last[b + 1:] if b >= 0 else last)
+    note = f"\n[hansa: {len(data) - len(first) - len(last)} bytes left out here, after keys were removed]\n"
+    return (first.decode("utf-8", errors="ignore") + note + last.decode("utf-8", errors="ignore")).encode("utf-8")
+
+
+def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
+    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed. most: when given,
+    no more than about this many bytes of each is read and kept, its start and its end (read_bounded)."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
         for name in names:
             src = raw / name if (raw / name).exists() else d / name  # in d: started before hansa kept them apart
             if src.exists():
-                (d / name).write_text(desk.redact(src.read_text(encoding="utf-8", errors="replace")),
-                                      encoding="utf-8")
+                text = read_bounded(src, most // 2, most // 2) if most else \
+                    src.read_text(encoding="utf-8", errors="replace")
+                # errors="replace": a byte read_bounded kept that is not UTF-8 is written as one "?", not three bytes
+                data = desk.redact(text).encode("utf-8", errors="replace")
+                (d / name).write_bytes(cut_redacted(data, most) if most else data)
                 if src.parent == raw:
                     src.unlink()
         try:
@@ -2073,6 +2337,114 @@ def task_processes(tid: str, folders: list = ()) -> list:
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
 
 
+# A process's parent in its kinfo_proc (e_ppid), on macOS; and its working folder through libproc
+# (PROC_PIDVNODEPATHINFO: a struct proc_vnodepathinfo of 2352 bytes, the folder's path at 152).
+_KP_PPID, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 9, 2352
+
+
+def process_table() -> dict:
+    """This account's running processes: {pid: (parent pid, start as proc_start gives it, start in seconds since
+    the epoch)}. {} when the list cannot be read."""
+    out = {}
+    if Path("/proc").is_dir():
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            btime = next(int(x.split()[1]) for x in Path("/proc/stat").read_text().splitlines() if x.startswith("btime "))
+            hz = os.sysconf("SC_CLK_TCK")
+            entries = list(Path("/proc").iterdir())
+        except (OSError, StopIteration, ValueError):
+            return {}
+        for p in entries:
+            try:
+                if p.name.isdigit() and p.stat().st_uid == os.getuid():
+                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    if f[0] != "Z":
+                        out[int(p.name)] = (int(f[1]), f"{boot}:{f[19]}", btime + int(f[19]) / hz)
+            except (OSError, IndexError, ValueError):
+                pass
+        return out
+    for k in _mac_procs(_KERN_PROC_ALL, 0):
+        pid = struct.unpack_from("@i", k, 40)[0]
+        if pid > 0 and k[36] != _SZOMB and struct.unpack_from("@I", k, 392)[0] == os.getuid():
+            sec, usec = struct.unpack_from("@li", k, 0)
+            out[pid] = (struct.unpack_from("@i", k, _KP_PPID)[0], f"{sec}.{usec:06d}", sec + usec / 1e6)
+    return out
+
+
+def record_descendants(top: int, seen: dict) -> bool:
+    """Add to `seen` ({pid: start}) the processes now running below `top` (a process hansa started), or below one
+    seen before: whatever their process group, session or environment, so long as their parent is still known
+    at a look. Whether anything was added."""
+    table, added = process_table(), False
+    if top in table and seen.get(top) != table[top][1]:
+        seen[top], added = table[top][1], True
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, start, _) in table.items():
+            if seen.get(pid) != start and ppid in seen and table.get(ppid, (0, ""))[1] == seen[ppid]:
+                seen[pid], grew, added = start, True, True
+    return added
+
+
+def working_in(folders: list, since: float = 0) -> dict:
+    """This account's orphans (their parent is the system's first process, as for a daemon that forked twice) whose
+    working folder is one of `folders` or inside one, started at `since` or later: {pid: start}. Never this process
+    or its parent, and never one whose parent still runs: a terminal's shell, an editor or a watcher the principal
+    started there."""
+    paths = {os.path.normpath(x) for f in folders if f for x in (f, os.path.realpath(f))}
+    if not paths:
+        return {}
+    lib = buf = None
+    if not Path("/proc").is_dir():
+        try:
+            import ctypes
+            lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            buf = ctypes.create_string_buffer(_VNODEPATHINFO_SIZE)
+        except (ImportError, OSError):
+            return {}
+    out = {}
+    for pid, (ppid, start, when) in process_table().items():
+        if pid in (os.getpid(), os.getppid()) or ppid != 1 or when < since - 2:  # 2 s for both clocks' rounding
+            continue
+        try:
+            if lib is None:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+            elif lib.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) == _VNODEPATHINFO_SIZE:
+                cwd = buf.raw[152:152 + 1024].split(b"\0")[0].decode(errors="replace")
+            else:
+                continue
+        except OSError:
+            continue
+        cwd = os.path.normpath(cwd) if cwd else ""
+        if cwd and any(cwd == x or cwd.startswith(x + "/") for x in paths):
+            out[pid] = start
+    return out
+
+
+def stop_recorded(found: dict, grace: float = 5) -> list:
+    """Stop these processes ({pid: start}) that still run and are still the same process (their start matches),
+    politely and then for good, one by one, whatever their group. The ones that were running."""
+    keep = {os.getpid(), os.getppid()}
+
+    def running(p, start):
+        return p not in keep and alive(p, start) and _state(p) != "Z"
+    hit = [(int(p), s) for p, s in found.items() if s and running(int(p), s)]
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 2)):
+        for p, s in hit:
+            if running(p, s):
+                try:
+                    os.kill(p, sig)
+                except OSError:
+                    pass
+        end = time.time() + wait
+        while any(running(p, s) for p, s in hit) and time.time() < end:
+            time.sleep(0.1)
+        if not any(running(p, s) for p, s in hit):
+            break
+    return [p for p, _ in hit]
+
+
 SWEEP_GRACE = 5  # seconds between the polite signal and the one that cannot be refused
 
 
@@ -2217,6 +2589,7 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     A follow-up made with --update gets the base's current tip merged into it (update_branch)."""
     repo = Path(lane["repo"])
     tid = meta["id"]
+    desk.update(tid, repo=resolved(str(repo)) or str(repo))  # where its branch is, whatever the lane is later
     updating = bool(meta.get("update") and meta.get("start_from"))
     base = git("rev-parse", lane.get("base") or "main", cwd=repo) if updating or not meta.get("base") else meta["base"]
     start = meta.get("start_from") or base
@@ -2245,6 +2618,76 @@ def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict
     line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
     return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", in_sandbox(desk, lane, lane["setup"]), str(raw / "setup.log"), str(raw / "run.err"),
             line, tmp, srt, settings, *argv]
+
+
+def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
+    """The worker command for a task or verification with a browser on a lane with a preview: preceded by
+    hansa/preview.py, which starts the preview in srt with the lane's sandbox and local binding for it alone, waits
+    up to the lane's preview_wait_s for its address, tells the worker (PREVIEW_READY_NOTE, PREVIEW_NOT_READY_NOTE)
+    and stops it when the worker ends (end_preview, should it not). Where hansa does not start it (Linux, see
+    PREVIEW_STARTS) or cannot (srt does not run), the worker command alone, told why. Recorded on the task
+    (preview), for hansa show."""
+    shown = desk.redact(lane["preview"])
+    i = argv.index("--append-system-prompt") + 1
+    raw = desk.raw_dir(tid)
+    for f in ("preview.log", "preview.json"):
+        (raw / f).unlink(missing_ok=True)  # an earlier try's
+    if not PREVIEW_STARTS:
+        argv[i] += PREVIEW_LINUX_NOTE.format(preview=shown)
+        desk.update(tid, preview={"command": shown, "started": False,
+                                  "why": "hansa does not start a preview on Linux (hansa explain lane)"})
+        return argv
+    try:
+        srt, settings, tmp = in_srt(desk, tid, "preview", lane, pname, p, wt, local=True)
+    except Exception as e:  # noqa: BLE001 - the task goes on without it, told why
+        why = desk.redact(str(e))[:600]
+        argv[i] += PREVIEW_FAILED_NOTE.format(preview=shown, why=why)
+        desk.update(tid, preview={"command": shown, "started": False, "why": f"it could not start: {why}"})
+        return argv
+    seconds = lane.get("preview_wait_s", PREVIEW_WAIT_S)
+    desk.update(tid, preview={"command": shown, "started": True, "seconds": seconds})
+    return [sys.executable, str(Path(__file__).with_name("preview.py")), str(raw / "preview.log"),
+            str(raw / "preview.json"), str(seconds), srt, settings, tmp, tid, str(desk.root), in_sandbox(desk, lane, lane["preview"]),
+            PREVIEW_READY_NOTE.format(preview=shown),
+            PREVIEW_NOT_READY_NOTE.format(preview=shown, seconds=seconds), "--", *argv]
+
+
+def end_preview(desk: Desk, tid: str) -> None:
+    """Stop the preview hansa started for this task, with its whole process group, if it still runs: the worker's
+    end stops it (hansa/preview.py), and this makes sure, also for a worker an earlier server started; so with each
+    process preview.py saw below it that still runs (the same start), and any orphan started since that works in
+    the worktree or the preview's temporary folder (working_in). Then its output goes into the task's folder, keys removed, no more
+    than PREVIEW_KEEP of it read, and what became of it onto the task (preview)."""
+    raw = desk.raw_dir(tid)
+    rec = read_json(raw / "preview.json", {}) or {}
+    pgid = rec.get("pgid")
+    if pgid and group_running(pgid):  # a group with a process in it keeps its number, so it is still the preview's
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                break
+            end = time.time() + SWEEP_GRACE
+            while group_running(pgid) and time.time() < end:
+                time.sleep(0.1)
+            if not group_running(pgid):
+                break
+    left, seen = [], rec.get("seen") or {}
+    if pgid:  # what left the group: each process preview.py saw below it, and the orphans working in its folders since
+        left = stop_recorded({**working_in([rec.get("cwd"), rec.get("tmp")], rec.get("started") or time.time()),
+                              **seen}, SWEEP_GRACE)
+    (raw / "preview.json").unlink(missing_ok=True)
+    m = desk.meta(tid)
+    if not (m.get("preview") or {}).get("started"):
+        return
+    if left:
+        desk.event("left_running_stopped", task=tid, processes=[
+            f"{p} (left by the preview)" if str(p) in seen else f"{p} (an orphan working in the preview's folders)"
+            for p in left])
+    publish(desk, tid, "preview.log", most=PREVIEW_KEEP + 4096)  # bounded by preview.py already: this makes sure
+    desk.change(tid, lambda x: {"preview": {**(x.get("preview") or {}), "stopped": True,
+                                            **{k: rec[k] for k in ("ready", "address", "waited") if k in rec},
+                                            **({"why": desk.redact(rec["why"])} if rec.get("why") else {})}})
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
@@ -2336,7 +2779,10 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     brief = desk.lanes_dir / lane_name / "brief.md"
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
-    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp))
+    long = LONG_RUNS.format(bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane),
+                            default_min=bash_default_minutes(lane), check_min=merge_minutes(lane))
+    system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
+                                                                 long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
@@ -2377,11 +2823,12 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
-    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane), "HANSA_TASK": tid,
-           "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
-           "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
-           "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
+    # no key in it: keys are in env only. Without the preview around it: a resume starts its own (resume)
+    (raw / RESUME_ARGV).write_text(json.dumps(argv), encoding="utf-8")
+    if meta.get("browser") and s.get("browser") and lane.get("preview"):  # started after the setup, and any merge
+        argv = with_preview(desk, tid, argv, lane, pname, p, wt)
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
@@ -2392,8 +2839,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             return None
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
+        (d / PREVIEW_FIRST_LOG).unlink(missing_ok=True)  # an earlier try's
         desk.update(tid, launch=sid, session_id=sid, base=base, branch=f"task/{tid}", worktree=str(wt),
-                    setup_ran=bool(lane.get("setup")))
+                    setup_ran=bool(lane.get("setup")), resumed=None)  # a new session: an earlier try's resume is not its own
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(command, cwd=str(wt), env=env, stdin=stdin, stdout=out,
@@ -2402,6 +2850,100 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                     pid_start=proc_start(proc.pid))
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
+
+
+def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str) -> dict:
+    """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
+    return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), "HANSA_TASK": tid,
+            "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
+            "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
+            "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
+
+
+# A worker that ended its turn while background work it started still ran (background_left) has its session
+# resumed once, with RESUME_NOTE, so the run is not lost: hansa stopped that work with the worker, so it runs
+# it again in the foreground and then reports. Only once (meta "resumed"): a second time it ends as it is,
+# and the task says what was left running. The worker's own command line, without the lane's setup around it,
+# is kept in the run's raw folder (RESUME_ARGV) for this; its time limit still counts from the task's start.
+RESUME_ARGV = "worker-argv.json"
+PREVIEW_FIRST_LOG = "preview-before-resume.log"  # the first run's preview output, when a resume starts another
+RESUME_NOTE = """Your turn ended while work you started in the background was still running: {left}.
+hansa stopped it when your turn ended. Run what you still need of it again in the foreground, in one
+Bash call with a long enough timeout (the Bash tool's timeout, in milliseconds, up to {bash_ms}: {bash_min}
+minutes), and wait for it to finish. Then
+write your report, as your instructions say. This is the only time hansa resumes you.
+"""
+
+
+def resume(desk: Desk, tid: str):
+    """Resume a task or verification worker whose run ended well while background work it started was still
+    running, once (see RESUME_ARGV): its new process, or None when it is not resumed."""
+    meta = desk.meta(tid)
+    if meta.get("kind") == "design" or meta.get("resumed") or meta.get("cancel") or meta.get("timed_out"):
+        return None
+    s = desk.settings()
+    lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
+    lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
+    raw = desk.state_dir / "runs" / tid
+    run = read_json(raw / "run.json", {}) or {}
+    sid, tmp = meta.get("session_id") or "", meta.get("worker_tmp") or ""
+    if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()) \
+            or run.get("is_error") or run.get("subtype") != "success":
+        return None
+    home = config_home(desk, pname, p)
+    left = read_detail(desk, tid, "background work left", [], background_left, home, sid)
+    if not left or not meta.get("worktree"):
+        return None
+    wt = Path(meta["worktree"])
+    try:
+        check_git_file(desk, wt)
+        argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
+        argv[argv.index("--session-id")] = "--resume"
+    except (GitFileChanged, OSError, ValueError):  # finish says what happened
+        return None
+    sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
+    note = RESUME_NOTE.format(left="; ".join(left), bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane))
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
+    with desk.lock():  # a cancel or another end lands before this (no resume, its logs as they are) or after it
+        now_meta = desk.meta(tid)
+        if now_meta.get("cancel") or now_meta.get("resumed") or now_meta.get("timed_out") \
+                or now_meta.get("state") != "running" or now_meta.get("session_id") != sid:
+            return None
+        if meta.get("browser") and s.get("browser") and lane.get("preview"):
+            # the first run's preview was stopped with it (end_preview, before this): the resumed run gets one of
+            # its own, started again from the same worktree, and the first one's output is kept beside it. Only
+            # here, once the resume is certain, so a run that ends instead keeps its preview's log and record
+            first = desk.tasks_dir / tid / "preview.log"
+            if first.exists():
+                first.replace(first.with_name(PREVIEW_FIRST_LOG))
+            argv = with_preview(desk, tid, argv, lane, pname, p, wt)
+        desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
+                                  "rows": len(_rows(home, sid) or []),
+                                  "usage": usage_of(run) or read_detail(desk, tid, "usage", {}, usage_from_record, home, sid),
+                                  "turns": run.get("num_turns")})
+        with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
+            stdin.write(note.encode("utf-8"))
+            stdin.seek(0)
+            proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
+                                    start_new_session=True)
+        desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
+    desk.event("task_resumed", task=tid, lane=lane_name, provider=pname, left=[desk.redact(x) for x in left])
+    return proc
+
+
+def add_usage(a: dict, b: dict) -> dict:
+    """Two runs' usage (usage_of) as one: the tokens added up by model, and the cost where both say it."""
+    out = {m: dict(u) for m, u in a.items()}
+    for m, u in b.items():
+        t = out.get(m)
+        if t is None:
+            out[m] = dict(u)
+            continue
+        for k in ("in", "out", "cache_read", "cache_write"):
+            t[k] = (t.get(k) or 0) + (u.get(k) or 0)
+        cost = (t.get("claude_code_usd"), u.get("claude_code_usd"))
+        t["claude_code_usd"] = None if None in cost else cost[0] + cost[1]
+    return out
 
 
 def design_command(desk: Desk, tid: str):
@@ -2533,12 +3075,21 @@ def usage_of(run: dict) -> dict:
     return out
 
 
-def usage_from_record(home: Path, sid: str) -> dict:
+def usage_from_record(home: Path, sid: str, after: int = 0) -> dict:
     """Token counts from the session record, for a run stopped before Claude Code wrote its totals
     (cancelled, or stopped at the time ceiling). Some providers leave output tokens out of the
-    record, so these can be short."""
+    record, so these can be short. Only the record's rows from `after` on: a resumed run's own (see resume),
+    as the run before the resume has its numbers already."""
+    if after:
+        counts = {}
+        for d in (_rows(home, sid) or [])[after:]:
+            msg = d.get("message") or {} if d.get("type") == "assistant" else {}
+            if msg.get("id") and isinstance(msg.get("usage"), dict):
+                counts[msg["id"]] = (msg.get("model") or "?", msg["usage"])
+    else:
+        counts = _record(home, sid)[3]
     out = {}
-    for model, u in _record(home, sid)[3].values():
+    for model, u in counts.values():
         t = out.setdefault(model, {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
                                    "claude_code_usd": None, "basis": "session record"})
         t["in"] += u.get("input_tokens") or 0
@@ -2614,12 +3165,22 @@ def network_reason(run: dict, err: str) -> str:
     m = NETWORK.search(str(run.get("result") or "") or err)
     if not m:
         return ""
-    found = m.group(0)
+    found = next(x for x in m.groups() if x)
     if re.search(r"overloaded|529", found, re.I):
         return f"the provider was overloaded ({found})"
     if re.fullmatch(r"API Error: 5\d\d", found, re.I):
         return f"the provider had a server error ({found})"
     return f"the connection to the provider failed ({found})"
+
+
+def read_detail(desk: Desk, tid: str, what: str, default, fn, *args):
+    """fn(*args), a reading that only adds detail to a run's end; on an error, default, with the error in the
+    event log, so the run still ends."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001 - any error: the run ends on the plainest reading
+        desk.event("detail_unread", task=tid, what=what, error=f"{type(e).__name__}: {e}"[:300])
+        return default
 
 
 def finish(desk: Desk, tid: str, returncode) -> dict:
@@ -2628,6 +3189,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
     done.unlink(missing_ok=True)
+    (done.parent / RESUME_ARGV).unlink(missing_ok=True)
+    end_preview(desk, tid)  # before its temporary folder goes, and before the check runs in the worktree
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
@@ -2637,16 +3200,22 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
     p = desk.settings()["providers"].get(meta.get("provider"))
-    usage = usage_of(run)
+    usage = read_detail(desk, tid, "usage", {}, usage_of, run)
     if not usage and p:
-        usage = usage_from_record(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        usage = read_detail(desk, tid, "usage", {}, lambda: usage_from_record(
+            config_home(desk, meta["provider"], p), meta.get("session_id", ""), (meta.get("resumed") or {}).get("rows", 0)))
+    resumed = meta.get("resumed") or {}
+    if resumed.get("usage"):  # the first run's, before hansa resumed it
+        usage = add_usage(resumed["usage"], usage)
     designing = meta.get("kind") == "design"
-    late = report_after_notices(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
+    late = read_detail(desk, tid, "report after notices", None, report_after_notices,
+                       config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
         if p and not designing and not stopped else None
     if late:
         report = late[0] + (LATE_NOTE + late[1] if late[1] else "")
     if stopped and not result.strip() and p:
-        notes = notes_of(config_home(desk, meta["provider"], p), meta.get("session_id", ""))
+        notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
+                            meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
     if designing:
         texts, replies, _, _ = _record(config_home(desk, meta["provider"], p), meta.get("session_id", "")) if p \
@@ -2656,8 +3225,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         end_design(desk, meta)
     report = desk.redact(report)
     denied = run.get("permission_denials") or []
-    reasons = refusal_reasons(config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
-        if p and denied else {}
+    reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
+                          meta.get("session_id", "")) if p and denied else {}
     (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
@@ -2665,9 +3234,11 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
               "usage": usage, "denials": [desk.redact(denial_of(x)) for x in denied],
               "denial_reasons": [desk.redact(reasons.get(x.get("tool_use_id"), "") if isinstance(x, dict) else "")
                                  for x in denied],
-              "background_left": [desk.redact(x) for x in background_left(config_home(desk, meta["provider"], p),
-                                                                          meta.get("session_id", ""))]
-              if p and not designing else []}
+              "background_left": [desk.redact(x) for x in read_detail(
+                  desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
+                  meta.get("session_id", ""), resumed.get("rows", 0))] if p and not designing else []}
+    if resumed.get("turns") and isinstance(fields["turns"], int):
+        fields["turns"] += resumed["turns"]
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""
@@ -2690,9 +3261,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
-                head = commit_work(desk, wt, task_message(desk.settings()["lanes"].get(meta.get("lane")),
-                                                          meta.get("lane") or "", tid, meta.get("title") or ""),
+                ln = desk.settings()["lanes"].get(meta.get("lane"))
+                head = commit_work(desk, wt, task_message(ln, meta.get("lane") or "", tid, meta.get("title") or ""),
                                    branch, [merged] if merged else [])
+                fields["commit_message_note"] = message_fallback(ln, meta.get("lane") or "", "commit_message") or None
         # the task's work is the commit read or made here, by its id: the branch is never read again through a
         # link (a leftover the sweep could not find may still write there), and from now on hansa verifies,
         # merges, continues from and shows exactly this commit (branch_holds)
@@ -2746,16 +3318,26 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
         order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
         left = [p for p in order if p not in refused_by({"attempts": attempts})]
-        state = "queued" if left and len(attempts) < 3 else "failed"
+        state = "queued" if left and tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
-    elif kind:
-        minutes = desk.settings().get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
-        desk.set_provider_state(meta["provider"], cool_until=time.time() + 60 * minutes, reason=why)
-        attempts.append({"provider": meta["provider"], "at": now(), "error": why})
-        state = "queued" if len(attempts) < 3 else "failed"
+    elif kind == "quota":  # the provider's limit, not the task's doing: no try used, LIMIT_RETURNS times
+        until = rest_provider(desk, desk.settings(), meta["provider"], kind, why, f"{run.get('result') or ''}\n{err}")
+        counted = sum(a.get("kind") == "limit" for a in attempts) >= LIMIT_RETURNS
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "limit", "counted": counted,
+                         "rest_until": round(until)})
+        state = "queued" if tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
-            "queued again for the lane's next provider" if state == "queued" else "gave up after 3 tries")
+            f"gave up after {TRIES} tries" if state == "failed" else
+            f"queued again; this one used a try, since the task had already gone back {LIMIT_RETURNS} times for a "
+            "provider's limit" if counted else
+            "queued again without using a try; it starts again when a provider of its lane is ready")
+    elif kind:
+        rest_provider(desk, desk.settings(), meta["provider"], kind, why)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why})
+        state = "queued" if tries_used(attempts) < TRIES else "failed"
+        error = f"{meta['provider']}: {why}; " + (
+            "queued again for the lane's next provider" if state == "queued" else f"gave up after {TRIES} tries")
     elif net:  # tried once more on the same provider, which does not rest for it
         again = any(a.get("kind") == "network" for a in attempts)
         attempts.append({"provider": meta["provider"], "at": now(), "error": net, "kind": "network"})
@@ -2780,8 +3362,16 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         final, message = ("cancelled", "cancelled") if now_meta.get("cancel") and not changed else (state, error)
         checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                     and meta.get("kind") != "verify")  # a verification is never merged, so never checked
+        tries, kept = attempts, {}
+        if final == "queued" and len(attempts) > len(meta.get("attempts", [])):
+            # queued for another try: this run's numbers go with its attempt record, and the task's own fields are
+            # left for the next run, so each try counts once (cost.task_runs). What this try's resume recorded
+            # (resumed) is keyed to its session, and its usage is in this run's: a new try starts without it
+            tries = [*attempts[:-1], {**attempts[-1], **run_numbers(meta, fields)}]
+            kept = {"usage": {}, "turns": None}
+        again = {"resumed": None} if final == "queued" else {}
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
-                "error": desk.redact(message), "attempts": attempts, "pid_start": "", **fields}
+                "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
@@ -2789,6 +3379,39 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         sweep(desk, tid)
         meta = desk.meta(tid)
     return meta
+
+
+def run_numbers(meta: dict, fields: dict) -> dict:
+    """What one run of a task used, as kept on its attempt record when the task is queued for another try."""
+    return {"usage": fields.get("usage") or {}, "turns": fields.get("turns"), "session_id": fields.get("session_id", ""),
+            "launch": meta.get("launch", ""), "ran_from": meta.get("started"), "ended": fields.get("finished") or now(),
+            "model": meta.get("model_asked", "")}
+
+
+def keep_lost_run(desk: Desk, m: dict) -> dict:
+    """For a task an earlier server started that goes back to the queue: the numbers of the run it may have started
+    meanwhile, from its session record, to keep in earlier_runs; {} when there is none, or it is already kept.
+    Kept by launch, as each start of a task has its own; of a session resumed (resumed), the part before the resume
+    is in resumed's numbers and only the part after it is read from the record."""
+    sid, launch = m.get("session_id") or "", m.get("launch") or ""
+    if not sid or launch != sid or m.get("kind") == "design":
+        return {}
+    if any(x.get("launch", x.get("session_id")) == launch  # records made before launch was kept: their session
+           for x in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])] if isinstance(x, dict)):
+        return {}
+    p = desk.settings()["providers"].get(m.get("provider") or "")
+    resumed = m.get("resumed") or {}
+    usage = read_detail(desk, m["id"], "usage", {}, lambda: usage_from_record(
+        config_home(desk, m["provider"], p), sid, resumed.get("rows", 0))) if p else {}
+    if resumed.get("usage"):
+        usage = add_usage(resumed["usage"], usage)
+    if not usage:
+        return {}
+    return {"earlier_runs": [*(m.get("earlier_runs") or []), {
+        "provider": m.get("provider", ""), "at": now(), "usage": usage, "turns": resumed.get("turns"),
+        "session_id": sid, "launch": launch,
+        "ran_from": m.get("started"), "ended": now(), "model": m.get("model_asked", ""),
+        "why": "hansa serve stopped while it started this run; the task went back to the queue"}]}
 
 
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
@@ -2875,6 +3498,32 @@ def merge_minutes(lane: dict) -> int:
     return lane.get("merge_timeout_min") or lane.get("timeout_min", 240)
 
 
+BASH_MARGIN_MIN = 5  # beyond the check's own limit, for one Bash call that runs the lane's check
+
+
+def bash_minutes(lane: dict) -> int:
+    """How long one Bash call of a task or verification worker may run: as long as the lane's check may
+    (merge_minutes) plus BASH_MARGIN_MIN, but never past the worker's own limit, the lane's timeout_min."""
+    return min(merge_minutes(lane) + BASH_MARGIN_MIN, lane.get("timeout_min", 240))
+
+
+BASH_DEFAULT_MIN = 10  # one Bash call that asks for no timeout: a command that hangs holds it no longer
+
+
+def bash_default_minutes(lane: dict) -> int:
+    """How long one Bash call that asks for no timeout may run: BASH_DEFAULT_MIN, or bash_minutes if less."""
+    return min(BASH_DEFAULT_MIN, bash_minutes(lane))
+
+
+def bash_limits(lane: dict) -> dict:
+    """Claude Code's own limits on one Bash call (it stops a call after 2 minutes unless the call asks for more,
+    and allows at most 10): a call that asks for a timeout may run bash_minutes, so a long suite runs in one call
+    in the foreground instead of moving to the background while the worker ends its turn; one that asks for
+    none stops after bash_default_minutes, so a command that hangs does not hold it for the whole limit."""
+    return {"BASH_DEFAULT_TIMEOUT_MS": str(60000 * bash_default_minutes(lane)),
+            "BASH_MAX_TIMEOUT_MS": str(60000 * bash_minutes(lane))}
+
+
 def own_merge_check(lane: dict) -> bool:
     """Whether the lane's merge check runs a command other than its check after each task, which the task's
     own tree has therefore never passed."""
@@ -2938,7 +3587,7 @@ def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
         desk.update(v["id"], state="cancelled", error=why, cancel_by=by)
     elif v["state"] == "running":  # hansa serve stops it within seconds
         desk.update(v["id"], cancel=True, cancel_by=by)
-    else:
+    elif not v.get("closed"):  # closed already (hansa cancel of the verification itself): the first note stays
         desk.update(v["id"], closed=why)
 
 
@@ -3065,7 +3714,8 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
-                        merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None)
+                        merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None,
+                        merge_message_note=message_fallback(lane, m["lane"], "merge_message") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", task=tid, into=name, waited=True, onto=tip,
                **({"despite_check": True} if mc.get("despite_check") or unchecked else {}),
@@ -3110,10 +3760,11 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         commit = wgit(desk, wt, "rev-parse", "HEAD")
+        said = message_fallback(lane, lane_name, "merge_message")  # the message this merge commit was given
         command = merge_command(lane)
         if not command:  # the check and merge check were taken away meanwhile: nothing to run
             land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
-                                   "at": now(), "seconds": 0, "tail": []})
+                                   "at": now(), "seconds": 0, "tail": [], "message_note": said})
             return None
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
@@ -3127,7 +3778,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                     stmp, ssrt, ssettings, *argv]
         env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
-              "own": own_merge_check(lane),
+              "own": own_merge_check(lane), "message_note": said,
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
         desk.update(tid, merge_check=mc)
         with open(raw / "merge-check.log", "wb") as out:
@@ -3228,7 +3879,8 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
             return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
                                                                               "nothing was merged"})
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
-                        merge_check_result=result, unverified=unverified_note(desk, m) or None)
+                        merge_check_result=result, unverified=unverified_note(desk, m) or None,
+                        merge_message_note=result.get("message_note") or mc.get("message_note") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
                **({"command": result["command"]} if result.get("command") else {}),
@@ -3477,6 +4129,15 @@ class Dispatcher:
         if self.desk.meta(tid).get("phase") == "checking":
             finish_check(self.desk, tid)
         else:
+            try:  # the preview first: a resume starts its own, and finish reads the details after it too
+                end_preview(self.desk, tid)
+                proc = resume(self.desk, tid)
+            except Exception as e:  # noqa: BLE001 - the run ends as it did, and the event log says why
+                self.desk.event("resume_failed", task=tid, error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+                proc = None
+            if proc:
+                self.procs[tid] = proc
+                return
             finish(self.desk, tid, returncode)
 
     def look(self, tid: str, launch: str, launched, since, what: str):
@@ -3522,11 +4183,12 @@ class Dispatcher:
                                capture_output=True, timeout=30)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 pass
+        lost = keep_lost_run(self.desk, m)  # read before the lock: a session record can be long
         if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
                             {"state": "cancelled", "phase": "", "error": "cancelled before it started",
-                             "finished": now()} if x.get("cancel") else
+                             "finished": now(), **lost} if x.get("cancel") else
                             {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
-                             "lookup_failing_since": None}):
+                             "lookup_failing_since": None, **lost}):
             remove_sandbox_tmp(self.desk, m["id"])  # what it made for a worker that never started
 
     def check(self, m: dict, s: dict) -> None:
@@ -3623,7 +4285,7 @@ class Dispatcher:
             if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
                 desk.update(m["id"], merge_check={**mc, "timed_out": True})
                 stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
-        from .release import releases
+        from .release import holds_repo, releases
         tasks = desk.tasks()
         busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
         free = s["concurrency"] - sum(map(lane_occupied, tasks))
@@ -3631,8 +4293,9 @@ class Dispatcher:
         # that ran beside another would be checked on a base that the other's merge then moves
         held = {merge_target(s, m.get("lane")) for m in tasks
                 if m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running")}
-        # and none, nor a merge, where a release runs: it sends out the commit the principal saw
-        releasing = {r.get("repo") for r in releases(desk) if r.get("state") in ("starting", "running")}
+        # and none, nor a merge, where a release runs: it sends out the commit the principal saw (one that runs
+        # from a fixed checkout of that commit holds nothing)
+        releasing = {r.get("repo") for r in releases(desk) if holds_repo(r)}
         for m in sorted(tasks, key=merge_order):
             if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
                 continue
@@ -4047,8 +4710,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
         if ok:
             desk.set_provider_state(name, cool_until=0, reason="")
         elif kind:
-            minutes = s.get("cool_minutes", 30) if kind == "quota" else KEY_REST_MINUTES
-            desk.set_provider_state(name, cool_until=time.time() + 60 * minutes, reason=detail)
+            rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
     desk.ready_news()
     return result

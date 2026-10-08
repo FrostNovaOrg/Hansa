@@ -102,7 +102,51 @@ if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
                 {"type": "text", "text": t}], "usage": {"input_tokens": 100, "output_tokens": 20}}}) + "\n")
     time.sleep(float(os.environ.get("FAKE_DESIGN_SECONDS", "0")))
     sys.exit(0)
-compat = bool(os.environ.get("ANTHROPIC_BASE_URL"))
+if "--resume" in sys.argv:  # hansa resuming a run that left background work: it runs it in the foreground
+    sid = sys.argv[sys.argv.index("--resume") + 1]
+    if os.environ.get("FAKE_RESUMED"):
+        open(os.environ["FAKE_RESUMED"], "a").write(json.dumps({"prompt": prompt, "argv": sys.argv, "env": {
+            k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "HANSA_TASK")}}) + "\n")
+    drop = os.environ.get("FAKE_RESUME_DROP")  # a file: the first resumed run ends on a dropped connection
+    if drop and not os.path.exists(drop):
+        open(drop, "w").write("dropped\n")
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "session_id": sid,
+                          "result": "API Error: Connection error."}))
+        sys.exit(1)
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    counted = {"usage": {"input_tokens": 10, "output_tokens": 5}} if os.environ.get("FAKE_RECORD_USAGE") else {}
+    limit = os.environ.get("FAKE_RESUME_LIMIT")  # a file: the first resumed run ends on the provider's usage limit
+    if limit and not os.path.exists(limit):
+        open(limit, "w").write("limit\n")
+        with open(rec, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"id": "r0", "model": "mimo-x", "content": [], **counted}}) + "\n")
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "num_turns": 1,
+                          "session_id": sid, "result": "API Error: 429 rate_limit_error",
+                          "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}))
+        sys.exit(1)
+    rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}}]
+    kind = os.environ.get("FAKE_TRANSCRIPT", "")
+    if kind.endswith("-again"):  # and again ends with background work running
+        cmd = kind.startswith("bg-cmd")
+        use = {"type": "tool_use", "id": "u9", "name": "Bash" if cmd else "Agent", "input": {
+            "description": "Run the full test suite" if cmd else "Review the badge change", "run_in_background": True,
+            **({"command": "python3 -m unittest"} if cmd else {"prompt": "Review it", "subagent_type": "general-purpose"})}}
+        said, result = BG_BASH("bz9q2") if cmd else BG_AGENT("a9z9q2", "Review the badge change")
+        rows += [{"type": "assistant", "message": {"id": "r1", "content": [use]}},
+                 {"type": "user", "message": {"role": "user", "content": [
+                     {"type": "tool_result", "tool_use_id": "u9", "content": [{"type": "text", "text": said}]}]},
+                  "toolUseResult": result}]
+    report = "Report after the resume: the suite passes."
+    rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}],
+                                                  **counted}})
+    with open(rec, "a") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    totals = {} if os.environ.get("FAKE_RESUME_NO_TOTALS") else {  # as for a run stopped before it wrote them
+        "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
+                      "result": report, **totals}))
+    sys.exit(0)
+compat =bool(os.environ.get("ANTHROPIC_BASE_URL"))
 if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
                       "result": "API Error: 401 authentication_error", "session_id": "s-key", "num_turns": 1}))
@@ -128,16 +172,29 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
         open("partial.txt", "w").write("half done\n")
         status = int(what) if what.isdigit() else None
         text = {"econnreset": "API Error: Connection dropped (ECONNRESET)", "529": "API Error: Repeated 529 Overloaded errors",
-                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error"}[what]
+                "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
+                "test-timed-out": "Ran 40 tests\nERROR: test_upload (tests.test_api): the upload request timed out after 60s\nFAILED (errors=1)",
+                "log-overloaded": "The suite failed:\n2026-10-08 12:00:01 WARN queue overloaded, shedding requests\nerror: 2 tests failed",
+                "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
-                          "api_error_status": 429 if what == "quota" else status,
-                          "result": text, "session_id": "s-net", "num_turns": 3}))
+                          "api_error_status": 429 if what in ("quota", "limit") else status,
+                          "result": text, "session_id": "s-net", "num_turns": 3,
+                          **({"modelUsage": {"claude-x": {"inputTokens": 40, "outputTokens": 2}}}
+                             if os.environ.get("FAKE_NET_USAGE") else {})}))
         sys.exit(1)
 if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given, as the worker started
     t = os.environ.get("CLAUDE_CODE_TMPDIR", "")
     open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
+if os.environ.get("FAKE_SEE_PREVIEW"):  # "pid file:out file": whether the preview hansa started runs as the worker does
+    pidf, outf = os.environ["FAKE_SEE_PREVIEW"].split(":")
+    pid = int(open(pidf).read()) if os.path.exists(pidf) else 0
+    try:
+        group = os.getpgid(pid) if pid else None
+    except OSError:
+        group = None
+    open(outf, "w").write(json.dumps({"up": group is not None, "group": group, "mine": os.getpgrp()}))
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -161,8 +218,9 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     os.makedirs(os.path.dirname(rec), exist_ok=True)
     notice = lambda n: {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
         "role": "user", "content": "<task-notification> <task-id>" + n + "</task-id> timed out"}}
+    counted = {"usage": {"input_tokens": 100, "output_tokens": 20}} if os.environ.get("FAKE_RECORD_USAGE") else {}
     say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "model": "mimo-x", "content": [
-        {"type": "text", "text": t}]}}
+        {"type": "text", "text": t}], **counted}}
     report = "Report: fixed the badge; the tests pass." + (" Key: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "")
     rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}},
             say("a1", "Starting a watch."),
@@ -190,7 +248,8 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     with open(rec, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 5, "session_id": sid,
-                      "result": rows[-1]["message"]["content"][0]["text"]}))
+                      "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
+                      **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
     sys.exit(0)
 if os.environ.get("FAKE_STOP_AT_TURNS"):
     sid = sys.argv[sys.argv.index("--session-id") + 1]
@@ -256,6 +315,9 @@ if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git fold
     open(".git", "w").write("gitdir: " + os.path.abspath("copied-git") + "\n")
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
+if os.environ.get("FAKE_SEE_BASH"):  # Claude Code's own limits on one Bash call, as it was given them
+    open(os.environ["FAKE_SEE_BASH"], "a").write(json.dumps(
+        {k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")}) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
     "result": "Added hello.txt. Checked it exists." + (" Notes: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "") + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
                                                       if os.environ.get("FAKE_VERDICT") else ""),
@@ -343,6 +405,10 @@ def may_write(box: dict, path, rules=None) -> bool:
     return not any(re.match(sandbox_glob(x), p) if any(c in x for c in "*?[") else under(x) for x in deny)
 
 
+def sh_out(*args, cwd) -> str:
+    return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 
 @contextlib.contextmanager
 def as_home(home, **env):
@@ -391,8 +457,11 @@ class DeskTest(unittest.TestCase):
         path.start()
         self.addCleanup(path.stop)
         # not the Claude Code session the tests may run in: a stand-in (self.session) plays one where needed,
-        # and what hansa would post to an inbox is caught in a file (self.posts)
-        for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "HANSA_TASK"):
+        # and what hansa would post to an inbox is caught in a file (self.posts). Nor the hansa run they may run
+        # in (the suite run by a worker): its lane's env file, which its sandbox may keep the tests' runs from
+        # reading, and its task and desk, so the tests give inside a worker what they give in the lane's check
+        for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_ENV_FILE",
+                  "HANSA_TASK", "HANSA_DESK", "HANSA_ROLE"):
             os.environ.pop(k, None)
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
                           HANSA_NOTIFY_GATHER="0.5",
@@ -577,7 +646,7 @@ class DeskTest(unittest.TestCase):
                           "command line", flat)
             self.assertIn("`git show HEAD:path`", flat)
             self.assertIn("stop background work within the command that started it, or wait for it there", flat)
-            text.format(tid="t1", lane="a", tmp="/tmp/x")  # still a template with nothing else to fill
+            text.format(tid="t1", lane="a", tmp="/tmp/x", long="")  # still a template with nothing else to fill
 
     def test_a_change_holding_a_stored_key_is_never_merged_and_the_key_is_never_shown(self):
         key = "sk-test-0123456789"
@@ -711,6 +780,306 @@ class DeskTest(unittest.TestCase):
         self.assertIn("project rules: notes/PROJECT.md, 10,200 bytes, 200 lines, loaded with the card; long: the "
                       "coordinator rereads it at every turn, so keep it under 8 KB", text)
         self.assertEqual(text.count("rereads it at every turn"), 1)
+
+    def test_status_says_one_line_and_when_an_old_card_does_not_import_the_project_file_yet(self):
+        self.desk.project_path.write_text("x")
+        text = views.status_text(views.status(self.desk))
+        self.assertIn("project rules: notes/PROJECT.md, 1 byte, 1 line, loaded with the card\n", text)
+        card = self.desk.root / "CLAUDE.md"
+        card.write_text(card.read_text().replace("@notes/PROJECT.md", ""))  # a desk's card from before the import
+        self.assertIn("1 line, loaded with the card from the coordinator's next start\n",
+                      views.status_text(views.status(self.desk)))
+
+    UNITTEST_OUT = ("test_a (t.T.test_a) ... ok\n" * 40 + "test_b (t.T.test_b) ... FAIL\n"
+                    "test_c (t.T.test_c) ... ok\n\n" + "=" * 70 + "\nFAIL: test_b (t.T.test_b)\n" + "-" * 70
+                    + "\nTraceback (most recent call last):\n  File \"t.py\", line 9, in test_b\n    self.check(1)\n"
+                    "  File \"t.py\", line 14, in check\n    self.assertEqual(n, 2)\nAssertionError: 1 != 2\n\n"
+                    + "-" * 70 + "\nRan 42 tests in 0.010s\n\nFAILED (failures=1)\n" + "x.log written\n" * 8)
+
+    @staticmethod
+    def lifted(text):
+        lines = text.splitlines()
+        return [lines[k] for _, keep in views.failure_spans(lines) for k in keep]
+
+    def test_failure_spans_lift_the_failing_tests_of_common_runners(self):
+        got = self.lifted(self.UNITTEST_OUT)
+        self.assertEqual(got[:2], ["=" * 70, "FAIL: test_b (t.T.test_b)"])
+        self.assertEqual(got[-1], "AssertionError: 1 != 2")
+        self.assertNotIn("Ran 42 tests in 0.010s", got)
+        self.assertNotIn("test_a (t.T.test_a) ... ok", got)
+        pytest_out = ("t.py ..F.                                    [100%]\n\n" + "=" * 10 + " FAILURES " + "=" * 10
+                      + "\n____ test_c ____\n\n    def test_c():\n>       assert 1 == 2\nE       assert 1 == 2\n\n"
+                      "t.py:4: AssertionError\n" + "=" * 10 + " short test summary info " + "=" * 10
+                      + "\nFAILED t.py::test_c - assert 1 == 2\n" + "=" * 10 + " 1 failed, 3 passed in 0.1s " + "=" * 10)
+        got = self.lifted(pytest_out)
+        self.assertIn("E       assert 1 == 2", got)
+        self.assertIn("____ test_c ____", got)
+        self.assertIn("FAILED t.py::test_c - assert 1 == 2", got)
+        self.assertNotIn("t.py ..F.                                    [100%]", got)
+        surefire = ("[INFO] Running com.x.FooTest\n[ERROR] Tests run: 2, Failures: 1, Errors: 0, Skipped: 0, Time "
+                    "elapsed: 0.1 s <<< FAILURE! - in com.x.FooTest\n[ERROR] com.x.FooTest.bar  Time elapsed: 0.01 s"
+                    "  <<< FAILURE!\norg.opentest4j.AssertionFailedError: expected: <1> but was: <2>\n\tat "
+                    "com.x.FooTest.bar(FooTest.java:12)\n\n[INFO]\n[INFO] Results:\n[INFO]\n[ERROR] Failures: \n"
+                    "[ERROR]   FooTest.bar:12 expected: <1> but was: <2>\n[INFO]\n[ERROR] Tests run: 2, Failures: 1\n")
+        got = self.lifted(surefire)
+        self.assertIn("org.opentest4j.AssertionFailedError: expected: <1> but was: <2>", got)
+        self.assertIn("\tat com.x.FooTest.bar(FooTest.java:12)", got)
+        self.assertIn("[ERROR]   FooTest.bar:12 expected: <1> but was: <2>", got)
+        self.assertIn("[ERROR] Tests run: 2, Failures: 1", got)
+        self.assertNotIn("[INFO] Running com.x.FooTest", got)
+        got = self.lifted("=== RUN   TestX\n--- FAIL: TestX (0.00s)\n    x_test.go:9: got 2\n    --- PASS: TestX/a "
+                          "(0.00s)\nok  other\nFAIL\tpkg\t0.01s\n")
+        self.assertEqual(got, ["--- FAIL: TestX (0.00s)", "    x_test.go:9: got 2"])  # never its passing subtest
+        self.assertEqual(self.lifted("all good\nFAIL one\nexit 1\n"), [])  # the word alone is no runner's marker
+
+    def failing_show(self, out):
+        """hansa show of a task whose check failed with out."""
+        tid = self.desk.new_task("Add hello.txt")
+        (self.desk.tasks_dir / tid / "check.log").write_text(out)
+        self.desk.update(tid, state="done", commits=1, check={"command": "make test", "ok": False, "exit": 1,
+                                                              "note": "", "seconds": 2, "tail": out.splitlines()[-15:]})
+        shown = views.show_text(self.desk, tid)
+        for x in out.rstrip().splitlines()[-15:]:  # never less than its last lines told
+            self.assertIn("  " + x.rstrip()[:200], shown)
+        return shown
+
+    def test_show_never_lifts_passing_lines_that_say_fail(self):
+        doc = "".join(f"test_reports_{i} (t.T.test_reports_{i})\nReports FAIL lines {i} ... ok\n" for i in range(70))
+        shown = self.failing_show(doc + "test_says (t.T.test_says)\nSays FAIL when a check fails. ... ok\n"
+                                  + self.UNITTEST_OUT)
+        self.assertIn("  the failing tests, from its output:\n    " + "=" * 70 + "\n    FAIL: test_b (t.T.test_b)\n",
+                      shown)
+        self.assertIn("    AssertionError: 1 != 2\n", shown)
+        self.assertNotIn("... ok", shown)
+        ids = "".join(f"t.py::test_parse[FAIL-{i}] PASSED{' ' * 20}[{i:3d}%]\n" for i in range(70))
+        shown = self.failing_show(ids + "t.py::test_c FAILED                     [100%]\n\n" + "=" * 20 + " FAILURES "
+                                  + "=" * 20 + "\n" + "_" * 20 + " test_c " + "_" * 20 + "\n\n    def test_c():\n"
+                                  "        got = parse('x')\n>       assert got == 2\nE       assert 1 == 2\n\n"
+                                  "t.py:9: AssertionError\n" + "=" * 10 + " short test summary info " + "=" * 10
+                                  + "\nFAILED t.py::test_c - assert 1 == 2\n" + "=" * 10 + " 1 failed, 70 passed in "
+                                  "0.3s " + "=" * 10 + "\n" + "coverage: 81%\n" * 12)
+        self.assertIn("    E       assert 1 == 2\n", shown)
+        self.assertNotIn("PASSED", shown)
+
+    def test_show_keeps_go_tests_messages_and_a_panics_trace(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(20))
+        shown = self.failing_show("=== RUN   TestAdd\n    sub_test.go:14: got 3, want 4\n--- FAIL: TestAdd (0.00s)\n"
+                                  + passing + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestAdd\n        sub_test.go:14: got 3, "
+                      "want 4\n    --- FAIL: TestAdd (0.00s)\n  its last lines:\n", shown)
+        trace = "".join(f"example.com/m.f{i}()\n\t/src/m/f.go:{i} +0x1d\n" for i in range(20))
+        shown = self.failing_show(
+            passing + "=== RUN   TestIdx\n--- FAIL: TestIdx (0.00s)\npanic: runtime error: index out of range [5] "
+            "with length 3 [recovered]\n\tpanic: runtime error: index out of range [5] with length 3\n\ngoroutine 7 "
+            "[running]:\ntesting.tRunner.func1.2({0x1, 0x2})\n\t/go/src/testing/testing.go:1545 +0x238\n" + trace
+            + "exit status 2\nFAIL\texample.com/m\t0.003s\n" + "".join(f"ok  \texample.com/m/p{i}\t0.01s\n"
+                                                                        for i in range(14)))
+        self.assertIn("    --- FAIL: TestIdx (0.00s)\n    panic: runtime error: index out of range [5] with length 3 "
+                      "[recovered]\n", shown)
+        self.assertIn("    goroutine 7 [running]:\n    testing.tRunner.func1.2({0x1, 0x2})\n", shown)
+        self.assertIn("example.com/m.f6()", shown)
+        self.assertNotIn("example.com/m.f7()", shown)  # its trace, bounded
+
+    def test_go_test_v_keeps_a_failing_subtests_message_with_its_test(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(20))
+        shown = self.failing_show(
+            "=== RUN   TestSum\n    sum_test.go:30: table of 3\n=== RUN   TestSum/neg\n    sum_test.go:12: got -1, "
+            "want 1\n=== RUN   TestSum/pos\n    sum_test.go:14: pos is fine\n=== RUN   TestSum/zero\n"
+            "    sum_test.go:12: got 1, want 0\n--- FAIL: TestSum (0.00s)\n    --- FAIL: TestSum/neg (0.00s)\n"
+            "    --- PASS: TestSum/pos (0.00s)\n    --- FAIL: TestSum/zero (0.00s)\n" + passing
+            + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestSum\n        sum_test.go:30: table of 3\n"
+                      "    === RUN   TestSum/neg\n        sum_test.go:12: got -1, want 1\n    === RUN   TestSum/zero\n"
+                      "        sum_test.go:12: got 1, want 0\n    --- FAIL: TestSum (0.00s)\n        --- FAIL: "
+                      "TestSum/neg (0.00s)\n        --- FAIL: TestSum/zero (0.00s)\n  its last lines:\n", shown)
+        self.assertNotIn("pos is fine", shown)  # never a passing subtest's lines
+        self.assertNotIn("TestSum/pos", shown)
+
+    def test_go_test_v_keeps_the_messages_of_two_parallel_top_level_tests(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(20))
+        shown = self.failing_show(
+            "=== RUN   TestA\n=== PAUSE TestA\n=== RUN   TestB\n=== PAUSE TestB\n=== CONT  TestA\n"
+            "    a_test.go:10: A broke\n=== CONT  TestB\n    b_test.go:10: B broke\n--- FAIL: TestB (0.00s)\n"
+            "--- FAIL: TestA (0.00s)\n" + passing + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === CONT  TestA\n        a_test.go:10: A broke\n"
+                      "    === CONT  TestB\n        b_test.go:10: B broke\n    --- FAIL: TestB (0.00s)\n"
+                      "    --- FAIL: TestA (0.00s)\n  its last lines:\n", shown)
+
+    def test_go_test_v_keeps_the_message_of_a_failing_case_in_a_table_of_thirty(self):
+        runs = "".join(f"=== RUN   TestT/case{i:02d}\n" + ("    t_test.go:20: case28 WRONG\n" if i == 28 else "")
+                       for i in range(30))
+        results = "".join(f"    --- {'FAIL' if i == 28 else 'PASS'}: TestT/case{i:02d} (0.00s)\n" for i in range(30))
+        shown = self.failing_show("=== RUN   TestT\n" + runs + "--- FAIL: TestT (0.00s)\n" + results
+                                  + "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(10))
+                                  + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestT/case28\n        t_test.go:20: case28 "
+                      "WRONG\n    --- FAIL: TestT (0.00s)\n        --- FAIL: TestT/case28 (0.00s)\n  its last lines:\n",
+                      shown)
+        self.assertNotIn("case27", shown)
+
+    def test_go_test_v_keeps_a_subtests_message_when_its_fail_line_is_among_the_last_lines(self):
+        runs = "".join(f"=== RUN   TestC/c{i}\n" + ("    c_test.go:8: c0 WRONG\n" if i == 0 else "") for i in range(8))
+        results = "".join(f"    --- {'FAIL' if i == 0 else 'PASS'}: TestC/c{i} (0.00s)\n" for i in range(8))
+        shown = self.failing_show("=== RUN   TestC\n" + runs + "--- FAIL: TestC (0.00s)\n" + results
+                                  + "FAIL\nFAIL\texample.com/m\t0.002s\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestC/c0\n        c_test.go:8: c0 WRONG\n"
+                      "  its last lines:\n", shown)
+        self.assertEqual(shown.count("--- FAIL: TestC (0.00s)"), 1)  # once, among the last lines
+
+    def test_go_test_v_never_lifts_a_passing_test_of_the_same_name_in_another_package(self):
+        def package(name, fails, logs):
+            body = "".join(f"    {name}_test.go:{i}: {name} log line {i}\n" for i in range(logs))
+            if fails:
+                return (f"=== RUN   TestNew\n{body}    {name}_test.go:99: {name} REAL FAILURE\n--- FAIL: TestNew (0.00s)\n"
+                        f"FAIL\nFAIL\texample.com/m/{name}\t0.004s\n")
+            return f"=== RUN   TestNew\n{body}--- PASS: TestNew (0.00s)\nPASS\nok  \texample.com/m/{name}\t0.003s\n"
+        shown = self.failing_show(package("b", False, 30) + package("c", False, 30) + package("a", True, 2)
+                                  + "".join(f"=== RUN   TestD{i}\n--- PASS: TestD{i} (0.00s)\n" for i in range(8))
+                                  + "PASS\nok  \texample.com/m/d\t0.002s\n?   \texample.com/m/e\t[no test files]\nFAIL\n")
+        self.assertIn("  the failing tests, from its output:\n    === RUN   TestNew\n        a_test.go:0: a log line 0\n"
+                      "        a_test.go:1: a log line 1\n        a_test.go:99: a REAL FAILURE\n"
+                      "    --- FAIL: TestNew (0.00s)\n  its last lines:\n", shown)
+        self.assertNotIn("b log line", shown)
+        self.assertNotIn("c log line", shown)
+
+    def test_go_test_lifts_a_test_files_build_error_under_its_pkg_test_header(self):
+        passing = "".join(f"=== RUN   TestP{i}\n--- PASS: TestP{i} (0.00s)\n" for i in range(10))
+        shown = self.failing_show(
+            "# example.com/m/c [example.com/m/c.test]\nc/c_test.go:5:2: undefined: NewThing\n"
+            "c/c_test.go:9:14: cannot use 3 (untyped int constant) as string value in argument to Parse\n"
+            "FAIL\texample.com/m/c [build failed]\n" + passing + "PASS\nok  \texample.com/m/d\t0.002s\n"
+            "?   \texample.com/m/e\t[no test files]\nFAIL\n")
+        self.assertIn("  the errors, from its output:\n    # example.com/m/c [example.com/m/c.test]\n"
+                      "    c/c_test.go:5:2: undefined: NewThing\n    c/c_test.go:9:14: cannot use 3 (untyped int "
+                      "constant) as string value in argument to Parse\n  its last lines:\n", shown)
+        shown = self.failing_show(  # go vet's header, as before
+            "# example.com/m/c\n# [example.com/m/c]\nc/c.go:7:2: fmt.Printf format %d has arg s of wrong type string\n"
+            + passing + "FAIL\n")
+        self.assertIn("    # [example.com/m/c]\n    c/c.go:7:2: fmt.Printf format %d", shown)
+
+    def test_show_lifts_a_maven_compile_error_as_the_errors(self):
+        err = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n  符号:   类 Foo{i}\n  位置: 类 a.App\n"
+                      for i in range(5, 12))
+        again = "".join(f"[ERROR] /src/p/src/main/java/a/App.java:[{i},9] 找不到符号\n[ERROR]   符号:   类 Foo{i}\n"
+                        for i in range(5, 12))
+        shown = self.failing_show(
+            "[INFO] Scanning for projects...\n[INFO] --- compiler:3.11.0:compile (default-compile) @ p ---\n"
+            "[INFO] -------------------------------------------------------------\n[ERROR] COMPILATION ERROR : \n"
+            "[INFO] -------------------------------------------------------------\n" + err + "[INFO] 7 errors \n"
+            "[INFO] -------------------------------------------------------------\n[INFO] " + "-" * 72 + "\n"
+            "[INFO] BUILD FAILURE\n[INFO] " + "-" * 72 + "\n[INFO] Total time:  0.9 s\n[ERROR] Failed to execute goal "
+            "org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile) on project p: Compilation "
+            "failure: Compilation failure: \n" + again + "[ERROR] -> [Help 1]\n[ERROR] \n"
+            "[ERROR] Re-run Maven using the -X switch to enable full debug logging.\n")
+        self.assertIn("  the errors, from its output:\n    [ERROR] COMPILATION ERROR : \n    [ERROR] /src/p/src/main/"
+                      "java/a/App.java:[5,9] 找不到符号\n      符号:   类 Foo5\n", shown)
+        self.assertIn("App.java:[9,9]", shown)
+        self.assertNotIn("the failing tests", shown)
+        self.assertEqual(shown.count("App.java:[5,9]"), 1)  # Maven prints them twice: once here
+
+    def test_show_lifts_jests_failing_test_with_what_it_expected(self):
+        shown = self.failing_show(
+            " FAIL  ./sum.test.js\n  sum\n    ✓ adds (2 ms)\n    ✕ subtracts (3 ms)\n\n  ● sum › subtracts\n\n"
+            "    expect(received).toBe(expected) // Object.is equality\n\n    Expected: 1\n    Received: 2\n\n"
+            "      4 |\n      5 | test('subtracts', () => {\n    > 6 |   expect(sub(3, 1)).toBe(1);\n"
+            "        |                     ^\n      7 | });\n\n      at Object.toBe (sum.test.js:6:21)\n\n"
+            + "".join(f" PASS  ./m{i}.test.js\n" for i in range(16))
+            + "\nTest Suites: 1 failed, 16 passed, 17 total\nTests:       1 failed, 40 passed, 41 total\n")
+        self.assertIn("  the failing tests, from its output:\n     FAIL  ./sum.test.js\n      ● sum › subtracts\n", shown)
+        self.assertIn("        Expected: 1\n        Received: 2\n", shown)
+        self.assertNotIn("✓ adds", shown)
+
+    def test_show_lifts_the_failing_tests_and_show_check_prints_the_whole_output_without_keys(self):
+        tid = self.desk.new_task("Add hello.txt")
+        key = "sk-test-0123456789"
+        log = "using " + key + "\n" + self.UNITTEST_OUT
+        (self.desk.tasks_dir / tid / "check.log").write_text(log)
+        tail = log.strip().splitlines()[-15:]
+        self.desk.update(tid, state="done", commits=1, check={"command": "python3 -m unittest", "ok": False, "exit": 1,
+                                                              "note": "", "seconds": 2, "tail": tail})
+        self.desk.write_key("mimo", key)  # saved after the check ran: removed when it is shown all the same
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("check (run by hansa, not the worker): FAILED (exit 1) in 2 s: python3 -m unittest\n"
+                      "  the failing tests, from its output:\n    " + "=" * 70 + "\n    FAIL: test_b (t.T.test_b)", shown)
+        self.assertIn("    AssertionError: 1 != 2\n", shown)
+        self.assertIn(f"  the whole output: hansa show {tid} --check", shown)
+        self.assertNotIn("test_a (t.T.test_a) ... ok", shown)
+        whole = self.hansa_out("show", tid, "--check")
+        self.assertTrue(whole.startswith("check (run by hansa, not the worker): FAILED (exit 1): python3 -m unittest\n"
+                                         "using [key of mimo]\n"), whole[:300])
+        self.assertEqual(whole.count("test_a (t.T.test_a) ... ok"), 40)
+        self.assertNotIn(key, whole)
+        # a long run of failures is cut, and says how much more there is
+        (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"--- FAIL: Test{i} (0.00s)\n" for i in range(90)))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("    --- FAIL: Test59 (0.00s)\n    ... 15 more lines of them\n  its last lines:\n"
+                      "    --- FAIL: Test75 (0.00s)\n", shown)
+        self.assertNotIn("Test60 ", shown)
+        # nothing in it names a failing test: its last lines, as before
+        (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"line {i}\n" for i in range(30)) + "not good\n")
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("python3 -m unittest\n  line 16\n", shown)
+        self.assertIn("  not good\n", shown)
+        self.assertNotIn("line 15\n", shown)
+        # its merge check, and a task no check ran on
+        (self.desk.tasks_dir / tid / "merge-check.log").write_text("merged badly\n")
+        self.desk.update(tid, merge_check_result={"ok": False, "exit": 3, "note": "", "command": "make test",
+                                                  "onto": "0123456789abcdef", "seconds": 1, "tail": ["merged badly"]})
+        whole = self.hansa_out("show", tid, "--check")
+        self.assertIn("\n\nmerge check (on the task merged onto the base at 0123456789): FAILED (exit 3): make test\n"
+                      "merged badly", whole)
+        other = self.desk.new_task("Something else")
+        self.assertEqual(self.hansa_out("show", other, "--check"), f"{other}: no check has run on it\n")
+
+    def test_status_and_explain_say_where_the_web_page_is(self):
+        st = views.status(self.desk)
+        self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "stuck": False, "answers": True,
+                                      "served": False})
+        says = ("web page: not served now, since hansa serve is not running; it serves it at http://127.0.0.1:8765/ "
+                "(the default)")
+        self.assertIn(says, views.status_text(st))
+        lines = views.status_text({**st, "serve_code": "hansa serve runs old code: restart it",
+                                   "alert_failed": "the alert command failed"}).splitlines()
+        self.assertEqual(lines[1:4], ["hansa serve runs old code: restart it", "the alert command failed", says])
+        self.assertIn(says, self.hansa_out("explain"))
+        self.assertIn(says, self.hansa_out("explain", "server"))
+        (self.desk.state_dir / "web-port").write_text("9001")
+        (self.desk.state_dir / "web-host").write_text("0.0.0.0")
+        with unittest.mock.patch("hansa.views.server_state", return_value={"state": "up", "pid": 1, "quiet": 0,
+                                                                            "answers": True}):
+            self.assertIn("web page: http://127.0.0.1:9001/ (it listens on every address), served now by hansa serve",
+                          self.hansa_out("explain"))  # an address one can open, not 0.0.0.0
+        self.assertIn("it serves it at http://127.0.0.1:9001/ (it listens on every address) (where it last did)",
+                      self.hansa_out("explain"))
+        # a server whose rounds are stuck: its page answers while its process does, and not when that is stopped
+        stuck = {"state": "stuck", "pid": 1, "quiet": 900, "answers": True}
+        with unittest.mock.patch("hansa.views.server_state", return_value=stuck):
+            self.assertIn("served now by hansa serve, though its rounds are stuck", self.hansa_out("explain"))
+        with unittest.mock.patch("hansa.views.server_state", return_value={**stuck, "answers": False}):
+            said = self.hansa_out("explain")
+        self.assertIn("web page: http://127.0.0.1:9001/ (it listens on every address), but hansa serve is not "
+                      "answering now", said)
+        self.assertNotIn("served now", said)
+
+    def test_init_on_a_repository_with_no_commit_says_to_make_one(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=empty)
+        for args in ([], ["--base", "main"]):
+            with self.assertRaises(SystemExit) as e:
+                main(["init", str(self.tmp / "new"), "--repo", str(empty), *args])
+            self.assertIn("has no commit yet; make a first commit there (git commit), then run this again; "
+                          "no desk was made", str(e.exception.code))
+            self.assertFalse((self.tmp / "new").exists())  # nothing half made
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "z", "--repo", str(empty)])
+        self.assertIn("has no commit yet", str(e.exception.code))
+        self.assertNotIn("z", self.desk.settings()["lanes"])
+        plain_dir = self.tmp / "plain-folder"
+        plain_dir.mkdir()
+        with self.assertRaises(SystemExit) as e:
+            main(["init", str(self.tmp / "new"), "--repo", str(plain_dir)])
+        self.assertIn("is not a git checkout", str(e.exception.code))
 
     def test_hansa_notes_lists_files_with_sizes_lines_and_headings(self):
         (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
@@ -1725,6 +2094,26 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(merged[0]["waited"])
         self.assertIn(f"{t2} merged into main in its turn", notify._item(self.desk, merged[0])[1])
 
+    def test_a_merge_that_waited_its_turn_goes_in_without_a_check_with_its_lanes_merge_message(self):
+        d, t1, t2 = self.two_lanes(check="sleep 1; test -f README.md")
+        s = self.desk.settings()
+        s["lanes"]["b"]["check"] = ""  # t2 needs no check
+        s["concurrency"] = 2
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("lane", "set", "b", "merge_message", "Merge {task} ({lane}): {title}")
+        self.move_main()  # so t1 needs a merge check
+        self.hansa("merge", t1)
+        d.tick()
+        self.hansa("merge", t2)
+        self.assertTrue(self.desk.meta(t2)["merge_check"]["plain"])
+        m1 = self.settle_merge(d, t1)
+        m2 = self.settle_merge(d, t2)
+        self.assertEqual((m1["state"], m2["state"]), ("merged", "merged"), (m1, m2))
+        self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])  # none ran for t2
+        self.assertEqual(self.git_out("log", "-1", "--format=%s", m2["merge_commit"]), f"Merge {t2} (b): Add b.txt")
+        self.assertEqual(self.git_out("log", "-1", "--format=%s", m1["merge_commit"]), f"Merge {t1}: Add a.txt")
+        self.assertEqual(self.git_out("rev-parse", "main"), m2["merge_commit"])
+
     def test_a_merge_that_waited_its_turn_and_was_refused_says_no_check_ran(self):
         d, t1, t2 = self.two_lanes(check="sleep 1; test -f README.md")
         s = self.desk.settings()
@@ -2136,6 +2525,8 @@ class DeskTest(unittest.TestCase):
         self.hansa("lane", "set", "a", "env", "PORT_BASE=4000")
         self.hansa("lane", "set", "a", "write", str(self.tmp / "cache"))
         self.hansa("lane", "set", "a", "timeout_min", "90")
+        self.hansa("lane", "set", "a", "preview", "make serve")
+        self.hansa("lane", "set", "a", "note", "the C++ lane")
         self.hansa("lane", "brief", "a", "Use C++20.")
         s = self.desk.settings()
         s["providers"]["mimo"] = {**s["providers"]["claude"]}
@@ -2145,6 +2536,16 @@ class DeskTest(unittest.TestCase):
         out = self.hansa("lane", "add", "m", "--like", "a", "--providers", "mimo")
         m = self.desk.settings()["lanes"]["m"]
         self.assertEqual(m, {**a, "providers": ["mimo"]})
+        self.assertEqual((m["preview"], m["note"]), ("make serve", "the C++ lane"))
+        card = (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
+        row = next(x for x in card.splitlines() if x.startswith("| `hansa lane add L --like"))
+        with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
+            main(["lane", "add", "--help"])
+        said = " ".join(helped.getvalue().split())
+        for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
+                      "preview_wait_s", "commit_message", "merge_message", "release targets", "note"):  # all it copies, said
+            self.assertIn(field, row)
+            self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
                                                                                  "brief.md").read_text())
         self.assertIn("Use C++20.", (self.desk.lanes_dir / "m" / "brief.md").read_text())
@@ -2155,7 +2556,8 @@ class DeskTest(unittest.TestCase):
         self.assertIn("they are recorded", out)
         self.assertIn('registry.npmjs.org', out)
         self.assertTrue(out.endswith("try it: hansa lane try m\n"), out)
-        self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")[before:]), ["check", "setup"])
+        self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")[before:]),
+                         ["check", "preview", "setup"])  # each run outside the worker: recorded
         self.assertEqual(self.events("lane_added")[-1].get("like"), "a")
         self.hansa("lane", "set", "a", "check", "make check")  # a copy: a's later changes do not reach m
         self.assertEqual(self.desk.settings()["lanes"]["m"]["check"], "make test && make lint")
@@ -3260,6 +3662,67 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(run.network_reason({"is_error": False, "result": "Fixed the ECONNRESET on a dropped connection"}, ""), "")
         self.assertEqual(run.network_reason({"is_error": True, "result": "I could not do it"}, ""), "")
 
+    def test_a_failed_run_that_only_quotes_a_timeout_or_overloaded_is_not_run_again(self):
+        from hansa import run
+        for what in ("test-timed-out", "log-overloaded"):
+            with self.subTest(what):
+                count = self.net_lane(what, 1)
+                tid = self.desk.new_task("Add hello.txt")
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "failed", m)
+                self.assertEqual(count.read_text(), "1")  # not run again
+                self.assertEqual([a for a in m.get("attempts", []) if a.get("kind") == "network"], [])
+        with self.subTest("a real dropped connection"):
+            count = self.net_lane("econnreset", 1)
+            m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+            self.assertEqual((m["state"], count.read_text()), ("done", "2"), m)
+        for text in ("FAIL: test_slow (tests.test_x) ... timed out", "ERROR: test_api: request timed out after 30s",
+                     "WARN worker pool overloaded", "the server is overloaded", "Connection timed out in test_fetch",
+                     "I could not finish: the suite timed out"):
+            self.assertEqual(run.network_reason({"is_error": True, "result": text}, ""), "", text)
+        for text in ("Error: read ECONNRESET", "TypeError: fetch failed", "Error: socket hang up",
+                     "Connection refused", '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'):
+            self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
+
+    def test_workers_and_verifiers_get_bash_limits_from_the_lanes_check_limit(self):
+        from hansa import run
+        seen, argvs = self.tmp / "bash.jsonl", self.tmp / "argv.jsonl"
+        d = Dispatcher(self.desk)
+        # the most is the check's limit + 5, capped by the worker's; a call that asks for none, 10 or that if less
+        for merge_min, minutes, default in ((20, 25, 10), (None, 240, 10), (600, 240, 10), (3, 8, 8)):
+            with self.subTest(merge_timeout_min=merge_min):
+                seen.unlink(missing_ok=True)
+                argvs.unlink(missing_ok=True)
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"] = {"FAKE_SEE_BASH": str(seen), "FAKE_SHOW_ARGV": str(argvs)}
+                s["lanes"]["a"]["timeout_min"] = 240
+                s["lanes"]["a"].pop("merge_timeout_min", None)
+                if merge_min:
+                    s["lanes"]["a"]["merge_timeout_min"] = merge_min
+                self.assertEqual(self.desk.save_settings(s), [])
+                tid = self.desk.new_task("Add hello.txt")
+                self.settle(d, tid)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    main(["--desk", str(self.desk.root), "verify", tid])
+                self.settle(d, self.desk.meta(tid)["verify"])
+                self.assertEqual([json.loads(x) for x in seen.read_text().splitlines()],
+                                 [{"BASH_DEFAULT_TIMEOUT_MS": str(60000 * default),
+                                   "BASH_MAX_TIMEOUT_MS": str(60000 * minutes)}] * 2)
+                for argv in map(json.loads, argvs.read_text().splitlines()):
+                    said = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+                    self.assertIn(f"give the Bash tool's timeout, in milliseconds, up to {60000 * minutes} "
+                                  f"({minutes} minutes, the most one call may run here)", said)
+                    self.assertIn(f"A call that gives none stops after {default} minutes", said)
+                    self.assertIn(f"The lane's check may run {merge_min or 240} minutes", said)
+                    self.assertIn("Run a long build or test suite in the foreground, in one Bash call", said)
+                    self.assertIn("Never start one in the background and end your turn while it runs", said)
+        self.assertEqual(run.bash_minutes({"timeout_min": 30}), 30)
+        self.assertEqual(run.bash_minutes({"timeout_min": 60, "merge_timeout_min": 10}), 15)
+        self.assertEqual(run.bash_limits({"timeout_min": 60, "merge_timeout_min": 30}),
+                         {"BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "2100000"})
+        self.assertEqual(run.bash_limits({"timeout_min": 6}),
+                         {"BASH_DEFAULT_TIMEOUT_MS": "360000", "BASH_MAX_TIMEOUT_MS": "360000"})
+
     def test_a_verification_that_lost_the_connection_twice_says_how_to_run_it_again(self):
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
@@ -3280,7 +3743,7 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["attempts"][0]["error"], m["attempts"][0].get("kind")),
-                         ("queued", "out of quota (HTTP 429)", None), m)
+                         ("queued", "out of quota (HTTP 429)", "limit"), m)
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "claude"))
         self.desk.set_provider_state("claude", cool_until=0, reason="")
         self.assertEqual(self.settle(d, tid)["state"], "done")
@@ -3289,6 +3752,244 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
         self.assertEqual(count.read_text(), "1")
+
+    def test_a_limit_s_reset_time_is_read_in_each_form(self):
+        from datetime import datetime, timedelta, timezone
+        from zoneinfo import ZoneInfo
+        from hansa import run
+        zone = unittest.mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"})  # the machine's zone, for times that name none
+        zone.start()
+        self.addCleanup(time.tzset)  # cleanups run last first: TZ is put back, then read again
+        self.addCleanup(zone.stop)
+        time.tzset()
+        berlin, tokyo, ny = ZoneInfo("Europe/Berlin"), ZoneInfo("Asia/Tokyo"), ZoneInfo("America/New_York")
+        at = datetime(2026, 10, 8, 12, 0, tzinfo=berlin).timestamp()  # 19:00 in Tokyo
+        cases = [
+            # a clock time, as Claude Code prints a subscription's limit (within a day: hour, minutes when not :00)
+            ("You've hit your session limit · resets 3pm (Europe/Berlin)", datetime(2026, 10, 8, 15, 0, tzinfo=berlin)),
+            ("You've hit your session limit · resets 3:30pm (Europe/Berlin) · progress saved",
+             datetime(2026, 10, 8, 15, 30, tzinfo=berlin)),
+            ("You've hit your session limit · resets 9am (Europe/Berlin)", datetime(2026, 10, 9, 9, 0, tzinfo=berlin)),
+            ("Your limit resets at 13:45 UTC", datetime(2026, 10, 8, 13, 45, tzinfo=timezone.utc)),
+            ("You've hit your session limit · resets 3pm", datetime(2026, 10, 9, 15, 0, tzinfo=tokyo)),  # passed today
+            ("You've hit your session limit · resets 11pm", datetime(2026, 10, 8, 23, 0, tzinfo=tokyo)),
+            # a date and time: Claude Code's reset more than a day out; a gateway's spend limit; ISO 8601
+            ("You've hit your weekly limit · resets Oct 12, 3pm (Europe/Berlin)", datetime(2026, 10, 12, 15, 0, tzinfo=berlin)),
+            ("You've hit your Opus limit · resets Jan 2, 2027, 3:30pm (America/New_York)",
+             datetime(2027, 1, 2, 15, 30, tzinfo=ny)),
+            ('API Error: 429 {"type":"error","error":{"type":"billing_error","message":"spend limit reached (daily; '
+             'resets 2026-10-09 00:00 UTC) — request an increase"}}', datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)),
+            ("quota exceeded; resets at 2026-10-08T20:00:00+08:00",
+             datetime(2026, 10, 8, 20, 0, tzinfo=timezone(timedelta(hours=8)))),
+            ("quota exceeded until 2026-10-09 08:00", datetime(2026, 10, 9, 8, 0, tzinfo=tokyo)),  # local time
+            # a Unix time
+            ("Claude AI usage limit reached|1791460800", datetime.fromtimestamp(1791460800, timezone.utc)),
+            ('API Error: 429 {"rate_limits":{"resets_at":1791460800,"rate_limit_type":"five_hour"}}',
+             datetime.fromtimestamp(1791460800, timezone.utc)),
+            # in N minutes or hours, and a retry-after value passed on
+            ("API Error: 429 Rate limit reached for requests. Please try again in 20 minutes.", at + 1200),
+            ("API Error: 429 insufficient_quota: usage resets in 3 hours", at + 3 * 3600),
+            ("API Error: 429 too many requests, try again in 45s", at + 45),
+            ("API Error: 429 rate_limit_error retry-after: 120", at + 120),
+        ]
+        for text, want in cases:
+            with self.subTest(text):
+                want = want if isinstance(want, float) else want.timestamp()
+                self.assertEqual(run.reset_time(text, at), want)
+        for text in ("API Error: 429 rate_limit_error",  # no time: the fixed length
+                     "API Error: 429 This request would exceed the rate limit of 50,000 input tokens per minute",
+                     "You've hit your session limit · resets 3pm (Mars/Olympus)",  # a zone hansa does not know
+                     "usage limit reached; resets 3",  # no clock time
+                     "You've hit your weekly limit · resets Oct 7, 3pm (Europe/Berlin) · 2025",  # the day before
+                     "usage limit reached|1600000000",  # long past
+                     "resets 25:00 UTC"):
+            with self.subTest(text):
+                self.assertIsNone(run.reset_time(text, at))
+        self.assertEqual(run.unusable_reason({"is_error": True, "result": cases[0][0]}, "")[0], "quota")
+        # until the reset and a minute, at most 31 days; what it read is said
+        s = self.desk.settings()
+        t0 = time.time()
+        until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)",
+                                  f"API Error: 429 usage resets in 2 hours")
+        self.assertAlmostEqual(until, t0 + 7200 + 60, delta=5)
+        self.assertEqual(self.desk.provider_state()["claude"]["rest_how"], "reset")
+        until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota",
+                                  "Claude AI usage limit reached|" + str(int(t0) + 90 * 86400))
+        self.assertAlmostEqual(until, t0 + 31 * 86400, delta=5)
+
+    def test_a_provider_s_own_rest_overrides_cool_minutes(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["cool_minutes"] = 30
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid",
+                                  "rest_minutes": 300}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        s = self.desk.settings()
+        self.assertEqual((run.rest_minutes(s, "mimo"), run.rest_minutes(s, "claude")), (300, 30))
+        t0 = time.time()
+        for name, minutes in (("mimo", 300), ("claude", 30)):
+            until = run.rest_provider(self.desk, s, name, "quota", "out of quota (HTTP 429)", "API Error: 429 rate_limit_error")
+            self.assertAlmostEqual(until, t0 + 60 * minutes, delta=5)
+        self.assertIn(f"no reset time in its error, so its rest of 300 minutes",
+                      provider_problem(self.desk, s, "mimo"))
+        out = views.status_text(views.status(self.desk))
+        self.assertRegex(out, r"\n  mimo +compatible +mimo-x +rest 300 min +resting until")
+        self.assertRegex(out, r"\n  claude +subscription +opus +rest 30 min \(desk\) +resting until")
+        self.assertIn("else 300 minutes (its own rest_minutes)", views.explain_text(self.desk, "provider", "mimo"))
+        self.assertIn("else 30 minutes (the desk's cool_minutes)", views.explain_text(self.desk, "provider", "claude"))
+        status = views.status(self.desk)["providers"]
+        self.assertEqual([(p["name"], p["rest_minutes"], p["rest_own"]) for p in status],
+                         [("claude", 30, False), ("mimo", 300, True)])  # what the page shows
+
+    def test_a_usage_limit_costs_no_try_and_the_task_starts_again_after_the_rest(self):
+        from hansa import run
+        count = self.net_lane("limit", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = "You've hit your session limit · resets 3pm (Europe/Berlin)"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        self.assertEqual(run.tries_used(m["attempts"]), 0)
+        self.assertIn("queued again without using a try", m["error"])
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "reset")
+        reset = run.reset_time(s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"])
+        self.assertAlmostEqual(st["cool_until"], max(reset, time.time()) + 60, delta=30)
+        when = time.strftime("%m-%d %H:%M", time.localtime(st["cool_until"]))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"waits for the rest of claude after its usage limit, until {when} (the reset time its error "
+                      "gave, and a minute)", shown)
+        self.assertIn("That return used no try.", shown)
+        self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; no try used)", shown)
+        out = views.status_text(views.status(self.desk))  # until when, and why
+        self.assertIn(f"resting until {when} (out of quota (HTTP 429)): the reset time its error gave, and a minute", out)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not while its only provider rests
+        self.assertEqual(count.read_text(), "1")
+        self.desk.set_provider_state("claude", cool_until=time.time() - 1)  # the rest ran out
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["error"]), ("done", ""), m)
+        self.assertEqual(count.read_text(), "2")
+        self.assertNotIn("waits for the rest", views.show_text(self.desk, tid))
+
+    def test_a_provider_that_hits_its_limit_after_each_rest_uses_up_the_task_s_tries(self):
+        from hansa import run
+        count = self.net_lane("limit", 99)
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end, seen = time.time() + 60, 0
+        while time.time() < end and self.desk.meta(tid)["state"] in ("queued", "running"):
+            d.tick()
+            if len(self.desk.meta(tid).get("attempts", [])) > seen:
+                seen = len(self.desk.meta(tid)["attempts"])
+                self.desk.set_provider_state("claude", cool_until=time.time() - 1)  # each rest runs out
+            time.sleep(0.05)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertEqual(run.LIMIT_RETURNS, 5)
+        self.assertEqual([a["counted"] for a in m["attempts"]], [False] * 5 + [True] * 3)
+        self.assertEqual(count.read_text(), "8")
+        self.assertTrue(m["error"].endswith("gave up after 3 tries"), m["error"])
+        self.assertIn("earlier run on claude: out of quota (HTTP 429) (its usage limit; counted as a try)",
+                      views.show_text(self.desk, tid))
+
+    def test_a_limit_line_with_an_impossible_offset_does_not_raise(self):
+        from hansa import run
+        for offset in ("+99:99", "+24:00", "-24:00", "+2400"):
+            with self.subTest(offset):
+                self.assertIsNone(run.reset_time(f"API Error: 429 quota exceeded; resets at 2026-10-08T20:00:00{offset}"))
+
+    def limit_run(self, text: str) -> dict:
+        """One run of the fake worker that hits a usage limit whose error says `text`; the task as it ends."""
+        self.net_lane("limit", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = text
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.1)
+        return self.desk.meta(tid)
+
+    def test_a_limit_line_with_an_impossible_offset_still_ends_the_run(self):
+        t0 = time.time()
+        m = self.limit_run("API Error: 429 quota exceeded; resets at 2026-10-08T20:00:00+99:99")
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "fixed")
+        self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+
+    def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
+        from hansa import run
+
+        def broken(*_):
+            raise RuntimeError("a reader broke")
+        for name in ("usage_of", "reset_time", "background_left"):
+            patch = unittest.mock.patch.object(run, name, broken)
+            patch.start()
+            self.addCleanup(patch.stop)
+        t0 = time.time()
+        m = self.limit_run("You've hit your session limit · resets 3pm (Europe/Berlin)")
+        self.assertEqual(m["state"], "queued", m)  # the plainest reading: a limit, with the fixed rest
+        self.assertEqual([(a["kind"], a["counted"]) for a in m["attempts"]], [("limit", False)])
+        self.assertEqual((m["usage"], m["background_left"]), ({}, []))
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["rest_how"], "fixed")
+        self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+        events = [json.loads(x) for x in self.desk.events_path.read_text().splitlines()]
+        unread = sorted(e["what"] for e in events if e["event"] == "detail_unread")
+        self.assertEqual(unread, ["background work left", "reset time", "usage"])
+        self.assertTrue(all("a reader broke" in e["error"] for e in events if e["event"] == "detail_unread"))
+
+    def test_a_month_and_day_takes_the_year_nearest_to_now(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from hansa import run
+        berlin = ZoneInfo("Europe/Berlin")
+        new_year = datetime(2027, 1, 1, 12, 0, tzinfo=berlin).timestamp()
+        self.assertIsNone(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)", new_year))
+        self.assertIsNone(run.reset_time("You've hit your weekly limit · resets Oct 7, 3pm (Europe/Berlin)",
+                                         datetime(2026, 10, 8, 12, 0, tzinfo=berlin).timestamp()))
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Jan 2, 3pm (Europe/Berlin)",
+                                        datetime(2026, 12, 31, 12, 0, tzinfo=berlin).timestamp()),
+                         datetime(2027, 1, 2, 15, 0, tzinfo=berlin).timestamp())
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)",
+                                        datetime(2026, 12, 30, 12, 0, tzinfo=berlin).timestamp()),
+                         datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
+        # within the hour hansa allows for a skewed clock, a time just past is still this year's
+        self.assertEqual(run.reset_time("You've hit your weekly limit · resets Dec 31, 11pm (Europe/Berlin)",
+                                        datetime(2026, 12, 31, 23, 30, tzinfo=berlin).timestamp()),
+                         datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
+
+    def test_the_page_checks_a_provider_s_rest_minutes(self):
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn('bind(p, "rest_minutes", "number")', ui)
+        self.assertIn("T.restNote", ui)
+        want = ("provider claude: rest_minutes (its rest after a usage limit) must be a whole number from 1 to 44640, "
+                "or empty for the desk's cool_minutes")
+        for bad in (0, 44641, "30", 1.5, True):
+            with self.subTest(bad):
+                r = self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=bad))
+                self.assertEqual((r["ok"], r["problems"]), (False, [want]))
+        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
+        for good in (1, 300, 44640):
+            self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=good)),
+                             {"ok": True, "problems": []})
+            self.assertEqual(self.desk.settings()["providers"]["claude"]["rest_minutes"], good)
+        self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].pop("rest_minutes")),  # emptied on the page
+                         {"ok": True, "problems": []})
+        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
 
     def test_rejected_key_rests_provider_until_a_new_key(self):
         s = self.desk.settings()
@@ -6639,7 +7340,7 @@ class DeskTest(unittest.TestCase):
         (home / ".cache").mkdir()
         (home / ".cache" / "ln").symlink_to(home / ".nvm")
         only = f"it is inside {home}, the home folder, where a write list may hold only plain folders"
-        hidden = [".zsh", ".bun", ".zcompdump", ".gitconfig.local", ".nvm", ".pyenv", ".p10k.zsh", ".m2", ".gradle",
+        hidden = [".zsh", ".bun", ".zcompdump", ".gitconfig.local", ".nvm", ".pyenv", ".p10k.zsh", ".gradle",
                   ".npm", ".local/share/pnpm", ".cargo/bin", ".config/x", ".local/bin", ".bun/install",
                   "work/.hidden", "work/plain/.venv/lib", "work/lz", ".cache/ln", "Applications", "Applications/X.app"]
         # a user's caches: shared with what runs outside the sandbox (an updater, corepack, the user's own builds)
@@ -6667,6 +7368,9 @@ class DeskTest(unittest.TestCase):
                         self.assertTrue(len(told) == 1 and "~/hansa-cache/<lane>/<tool>" in told[0], (system, told))
                         self.assertNotIn("can be listed)", told[0].replace("nothing in it can be listed", ""))
             self.refused_and_left_out(home / "node_modules", "a folder node loads packages from")
+            # ~/.m2 holds Maven's master password, which workers may not read: refused for that first
+            self.refused_and_left_out(home / ".m2", f"it would open {home / '.m2' / 'settings-security.xml'}, a login "
+                                                    "or key that workers may not read")
             self.assertFalse(hasattr(desk, "PACKAGE_CACHES") or hasattr(desk, "HOME_CACHES"))  # no exception by name
             fine = [str(home / n) for n in ("hansa-cache/a/pip", "hansa-cache/a/npm", "work/cache", "gopher",
                                             "work/go/pkg/mod", "build cache")]
@@ -7372,7 +8076,9 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(f"Read(//{str(home / '.claude').lstrip('/')}/**)", denied)
         told = self.hansa("explain", "lane", "a")
         self.assertIn("may not read", told)
-        self.assertIn("~/.tsh", told)
+        self.assertNotIn("~/.tsh", told)  # the built-in list as a count, and where the whole of it is
+        self.assertRegex(told, r"\(built in\): \d+ names.* \(the whole list: hansa explain lane a --all\)")
+        self.assertIn("~/.tsh", self.hansa("explain", "lane", "a", "--all"))
 
     def test_anthropics_tool_settings_and_proxy_clients_settings_are_kept_from_workers(self):
         from hansa import run
@@ -7401,7 +8107,7 @@ class DeskTest(unittest.TestCase):
         denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
         for f in everywhere + (mac if sys.platform == "darwin" else ()):
             self.assertIn(f"Read(//{str(home / f).lstrip('/')}/**)", denied, f)
-        told = self.hansa("explain", "lane", "a")
+        told = self.hansa("explain", "lane", "a", "--all")
         for f in everywhere:
             self.assertIn(f"~/{f}", told)
 
@@ -8104,6 +8810,23 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", m["id"]])
         self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
 
+    def test_hansa_show_reads_a_tasks_branch_in_the_repository_it_ran_in(self):
+        # a lane removed and made again on another repository: the task's branch is where it ran (its recorded
+        # repository), so hansa show does not say the branch changed when only the lane moved
+        first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(first["state"], "done", first)
+        self.assertEqual(views.branch_moved(self.desk, first), "")
+        other = Path(tempfile.mkdtemp(dir=self.tmp))
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x",
+           cwd=other)
+        s = self.desk.settings()
+        s["lanes"]["a"]["repo"] = str(other)
+        m = {**first, "repo": str(self.repo)}
+        with unittest.mock.patch.object(self.desk, "settings", return_value=s):
+            self.assertEqual(views.branch_moved(self.desk, m), "")
+            self.assertIn("no longer holds", views.branch_moved(self.desk, {k: v for k, v in m.items() if k != "repo"}))
+
     def test_a_worker_cannot_put_a_merge_into_hansas_commit(self):
         # a MERGE_HEAD a worker wrote would make hansa's commit a merge with a commit nobody reviewed as a parent
         from hansa import run
@@ -8257,7 +8980,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         shown = views.show_text(self.desk, m["id"])
-        self.assertIn("  ✓ passed\n  FAIL one", shown)
+        self.assertIn("  ✓ passed\n  FAIL one\n", shown)  # its last lines (FAIL alone is no runner's marker), read without them
         self.assertNotIn("\x1b", shown)
         self.assertIn("\x1b[32m", (self.desk.tasks_dir / m["id"] / "check.log").read_text())  # the log keeps them
         said = views.try_text("a", {"ok": False, "onto": "abc", "steps": {"check": {
@@ -8430,6 +9153,460 @@ class DeskTest(unittest.TestCase):
                                                                     "/usr/bin/env true"])
         self.assertIn("with a browser", views.show_text(self.desk, "t0001"))
 
+    def preview_lane(self, preview: str, wait: int = 20, **env):
+        """Lane a with a browser on the desk, this preview, and the stand-in worker telling (FAKE_SEE_PREVIEW) whether
+        the preview runs as it works; the preview writes its pid to self.tmp/preview.pid. hansa starts the preview as
+        on macOS. Returns (the argv file, the file the worker writes what it saw to)."""
+        seen, saw = self.tmp / "argv.jsonl", self.tmp / "saw-preview.json"
+        s = self.desk.settings()
+        s["browser"] = "/usr/bin/env true"
+        s["lanes"]["a"].update(preview=f"echo $$ > {shlex.quote(str(self.tmp / 'preview.pid'))}; {preview}",
+                               preview_wait_s=wait, env={"FAKE_SHOW_ARGV": str(seen),
+                                                         "FAKE_SEE_PREVIEW": f"{self.tmp / 'preview.pid'}:{saw}", **env})
+        self.assertEqual(self.desk.save_settings(s), [])
+        starts = unittest.mock.patch("hansa.run.PREVIEW_STARTS", True)
+        starts.start()
+        self.addCleanup(starts.stop)
+        self.addCleanup(self.kill_preview)
+        return seen, saw
+
+    def preview_pid(self) -> int:
+        f = self.tmp / "preview.pid"
+        return int(f.read_text()) if f.exists() else 0
+
+    def kill_preview(self):
+        if self.preview_pid() > 0:  # never 0: that is this process's own group
+            try:
+                os.killpg(self.preview_pid(), signal.SIGKILL)
+            except OSError:
+                pass
+
+    def preview_gone(self, wait=15) -> bool:
+        from hansa import run
+        pid, end = self.preview_pid(), time.time() + wait
+        while time.time() < end:
+            if not run.alive(pid) or run._state(pid) == "Z":
+                return True
+            time.sleep(0.1)
+        return False
+
+    def add_browser_task(self) -> str:
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
+        return self.desk.tasks()[-1]["id"]
+
+    def test_preview_starts_in_srt_with_local_binding_for_it_alone_and_the_worker_gets_its_address(self):
+        seen, saw = self.preview_lane("echo booting; echo '  Local:   http://localhost:\x1b[1m5173\x1b[22m/'; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        [call] = [c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]
+        self.assertTrue(call["settings"]["network"]["allowLocalBinding"])  # for the preview's own process
+        self.assertEqual(call["settings"]["network"]["allowedDomains"], [])  # the lane's list, nothing added
+        self.assertEqual(Path(call["cwd"]).resolve(), (self.desk.worktrees_dir / "a").resolve())
+        self.assertEqual(call["env"].get("HANSA_TASK"), tid)
+        self.assertFalse({"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} & set(call["env"]))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        worker = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["network"]
+        self.assertNotIn("allowLocalBinding", worker)  # the worker's own sandbox stays as the lane sets it
+        prompt = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("the app\nis at http://localhost:5173/. Open that address in the browser.", prompt)
+        self.assertEqual(json.loads(saw.read_text())["up"], True)  # it ran while the worker did, in a group of its own
+        self.assertNotEqual(json.loads(saw.read_text())["group"], json.loads(saw.read_text())["mine"])
+        self.assertTrue(self.preview_gone())  # and was stopped when the worker ended
+        self.assertEqual((m["preview"]["ready"], m["preview"]["address"]), (True, "http://localhost:5173/"))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("preview (started by hansa for the browser): ready at http://localhost:5173/", shown)
+        self.assertIn(str(self.desk.tasks_dir / tid / "preview.log"), shown)
+        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.json").exists())
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview-sandbox.json").exists())
+        plain = self.desk.new_task("No browser")  # a task without a browser gets no preview
+        self.settle(Dispatcher(self.desk), plain)
+        self.assertEqual(len([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]), 1)
+        self.assertNotIn("preview", self.desk.meta(plain))
+
+    def test_preview_ready_once_a_port_it_names_answers(self):
+        skip_unless_ports(self)
+        self.preview_lane(f"exec {shlex.quote(sys.executable)} -u -c " + shlex.quote(
+            "import socket, time; s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(5); "
+            "print('listening on port', s.getsockname()[1]); time.sleep(600)"))
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertTrue(m["preview"]["ready"], m["preview"])
+        self.assertRegex(m["preview"]["address"], r"^http://localhost:\d+$")
+
+    def test_preview_not_ready_in_time_is_stopped_and_the_worker_told_with_its_last_lines(self):
+        seen, saw = self.preview_lane("echo installing; echo still compiling; exec sleep 600", wait=1)
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)  # the task goes on without it
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("and it did not\nstart: it was not ready within 1 seconds", prompt)
+        self.assertIn("    installing\n    still compiling\n", prompt)
+        self.assertEqual(json.loads(saw.read_text())["up"], False)  # stopped before the worker started
+        self.assertTrue(self.preview_gone())
+        self.assertFalse(m["preview"]["ready"])
+        self.assertIn("did not start: it was not ready within 1 seconds", views.show_text(self.desk, tid))
+        self.preview_lane("echo no address; exit 3")  # one that ends first
+        tid = self.add_browser_task()
+        self.settle(Dispatcher(self.desk), tid)
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("it ended (exit 3) before it was ready", prompt)
+        self.assertIn("    no address\n", prompt)
+
+    def test_preview_is_stopped_when_the_worker_fails_or_is_cancelled(self):
+        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_STOP_AT_TURNS="1")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(self.preview_gone())
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"])
+        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
+                          FAKE_TMP_WAIT="60")
+        (self.tmp / "preview.pid").unlink()
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        end = time.time() + 20
+        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.assertTrue(self.preview_pid() and not self.preview_gone(wait=0.5))
+        self.desk.update(tid, cancel=True)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertTrue(self.preview_gone())
+
+    def test_preview_left_by_a_worker_an_earlier_server_started_is_stopped(self):
+        self.preview_lane("echo http://localhost:8124; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
+                          FAKE_TMP_WAIT="60")
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        end = time.time() + 20
+        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        pid = self.desk.meta(tid)["pid"]
+        os.killpg(pid, signal.SIGKILL)  # the worker and what hansa ran around it, gone with no chance to stop it
+        d.procs[tid].wait()
+        self.assertFalse(self.preview_gone(wait=0.5))  # the preview, in a group of its own, still runs
+        m = self.settle(Dispatcher(self.desk), tid)  # a server started again
+        self.assertNotIn(m["state"], ("queued", "running"))
+        self.assertTrue(self.preview_gone())
+        self.assertTrue(m["preview"]["stopped"])
+        self.assertTrue((self.desk.tasks_dir / tid / "preview.log").exists())
+
+    def test_preview_is_stopped_and_its_log_kept_when_the_detail_readers_at_the_end_break(self):
+        from hansa import run
+
+        def broken(*_):
+            raise RuntimeError("a reader broke")
+        for name in ("usage_of", "usage_from_record", "report_after_notices", "background_left"):
+            patch = unittest.mock.patch.object(run, name, broken)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.preview_lane("echo booting; echo http://localhost:8126/; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertNotIn(m["state"], ("queued", "running"))
+        self.assertTrue(self.preview_gone())  # stopping it is not a detail: no reader's error keeps it running
+        self.assertTrue(m["preview"]["stopped"])
+        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
+        events = [json.loads(x) for x in self.desk.events_path.read_text().splitlines()]
+        self.assertIn("usage", {e["what"] for e in events if e["event"] == "detail_unread"})
+
+    def test_preview_of_a_resumed_run_is_stopped_first_and_started_again_for_it(self):
+        # The first run leaves background work running and is resumed once: its preview is stopped before hansa
+        # reads the run's details and decides, and the resumed run gets a preview of its own, never two at once.
+        from hansa import run
+        pids, seen = self.tmp / "pids", self.tmp / "resumed.jsonl"
+        self.preview_lane(f"for p in $(cat {shlex.quote(str(pids))} 2>/dev/null); do kill -0 $p 2>/dev/null && "
+                          f"echo still running: $p; done; echo $$ >> {shlex.quote(str(pids))}; "
+                          "echo http://localhost:8127/; exec sleep 600",
+                          FAKE_TRANSCRIPT="bg-cmd", FAKE_RESUMED=str(seen))
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        order, ended, resumed = [], run.end_preview, run.resume
+        with unittest.mock.patch.object(run, "end_preview", lambda *a: (order.append("end_preview"), ended(*a))[1]), \
+                unittest.mock.patch.object(run, "resume", lambda *a: (order.append("resume"), resumed(*a))[1]):
+            tid = self.add_browser_task()
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(order[:2], ["end_preview", "resume"])  # stopped before the resume is decided
+        self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text(),
+                         "Report after the resume: the suite passes.\n")
+        first, second = [int(x) for x in pids.read_text().split()]  # one preview for each run
+        self.assertNotEqual(first, second)
+        for pid in (first, second):
+            self.assertTrue(not run.alive(pid) or run._state(pid) == "Z", pid)
+        [call] = [json.loads(x) for x in seen.read_text().splitlines()]
+        prompt = call["argv"][call["argv"].index("--append-system-prompt") + 1]
+        self.assertEqual(prompt.count("is at http://localhost:8127/. Open that address"), 1)  # its own, once
+        self.assertIn("Run a long build or test suite in the foreground", prompt)  # the Bash limits as well
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"])
+        d = self.desk.tasks_dir / tid
+        self.assertNotIn("still running", (d / "preview.log").read_text())  # the first was gone when it started
+        self.assertNotIn("still running", (d / run.PREVIEW_FIRST_LOG).read_text())
+        self.assertIn(str(d / run.PREVIEW_FIRST_LOG), views.show_text(self.desk, tid))
+
+    def test_preview_of_a_run_cancelled_while_its_resume_is_prepared_stays_the_runs_own(self):
+        # A cancel lands while hansa prepares the one resume (sweep can take seconds): the task ends cancelled, not
+        # resumed, and the first run's preview log and record stay as they were, its own.
+        from hansa import run
+        seen = self.tmp / "resumed.jsonl"
+        self.preview_lane("echo http://localhost:8131/; exec sleep 600", FAKE_TRANSCRIPT="bg-cmd", FAKE_RESUMED=str(seen))
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        real_sweep, starts = run.sweep, []
+
+        def cancelled_meanwhile(desk, tid):
+            desk.update(tid, cancel=True)
+            return real_sweep(desk, tid)
+
+        def counted(*a):
+            starts.append(1)
+            return real_preview(*a)
+        real_preview = run.with_preview
+        with unittest.mock.patch.object(run, "sweep", cancelled_meanwhile), \
+                unittest.mock.patch.object(run, "with_preview", counted):
+            tid = self.add_browser_task()
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertIsNone(m.get("resumed"))
+        self.assertFalse(seen.exists())  # no resumed run
+        self.assertEqual(len(starts), 1)  # the first run's preview only
+        d = self.desk.tasks_dir / tid
+        self.assertFalse((d / run.PREVIEW_FIRST_LOG).exists())
+        self.assertIn("http://localhost:8131/", (d / "preview.log").read_text())
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
+        self.assertEqual(m["preview"]["address"], "http://localhost:8131/")
+        shown = views.show_text(self.desk, tid)
+        self.assertNotIn("before hansa resumed it", shown)
+        self.assertNotIn("did not start", shown)
+
+    def test_preview_output_is_kept_with_keys_removed(self):
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        self.preview_lane(f"echo token {key}; echo http://localhost:8125/; exec sleep 600")
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        log = (self.desk.tasks_dir / tid / "preview.log").read_text()
+        self.assertIn("token [key of registry]", log)
+        self.assertNotIn(key, log)
+        self.assertNotIn(key, json.dumps(m))
+        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.log").exists())
+
+    def test_preview_not_ready_note_has_the_desks_keys_removed(self):
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        seen, _ = self.preview_lane(f"echo token {key}; exec sleep 600", wait=1)
+        tid = self.add_browser_task()
+        self.settle(Dispatcher(self.desk), tid)
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("    token [key of registry]\n", prompt)
+        self.assertNotIn(key, prompt)
+
+    def test_preview_flooding_its_output_keeps_a_bounded_log_and_does_not_hold_up_the_server(self):
+        from hansa import run
+        flood = ("import sys, time\nline = b'A' * 999 + b'\\n'\nend, n = time.time() + 3, 0\n"
+                 "while time.time() < end and n < 2 ** 30:\n    sys.stdout.buffer.write(line * 1024); n += 2 ** 20\n"
+                 "sys.stdout.buffer.flush()\nprint('the end of it', flush=True)\ntime.sleep(600)\n")
+        self.preview_lane(f"echo http://localhost:8128/; exec {shlex.quote(sys.executable)} -c {shlex.quote(flood)}",
+                          FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="5")
+        raw_log, sizes = self.desk.state_dir / "runs" / "t0001" / "preview.log", []
+        took, real_finish = [], run.finish
+
+        def timed(*a):
+            t = time.time()
+            try:
+                return real_finish(*a)
+            finally:
+                took.append(time.time() - t)
+        tid, d = self.add_browser_task(), Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.run.finish", timed):
+            end = time.time() + 60
+            while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
+                d.tick()
+                if raw_log.exists():
+                    sizes.append(raw_log.stat().st_size)
+                time.sleep(0.2)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertLess(max(sizes), 2 ** 23)  # a few MB at most on disk, while it ran too
+        log = self.desk.tasks_dir / tid / "preview.log"
+        self.assertLess(log.stat().st_size, 2 ** 23)
+        text = log.read_text()
+        self.assertTrue(text.startswith("http://localhost:8128/\n"))
+        self.assertRegex(text, r"\n\[hansa: \d+ bytes of the preview's output left out here\]\nA{999}\n")
+        self.assertTrue(text.endswith("the end of it\n"))
+        self.assertLess(max(took), 10)  # hansa serve read no more than that
+        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
+        big = self.tmp / "big.log"  # what publish reads of a log hansa did not write itself is bounded too
+        with open(big, "wb") as f:
+            f.write(b"first line\n")
+            f.truncate(2 ** 30)
+            f.seek(0, 2)
+            f.write(b"\nlast line\n")
+        text = run.read_bounded(big, 2 ** 20, 2 ** 20)
+        self.assertLess(len(text), 2 ** 21 + 200)
+        self.assertTrue(text.startswith("first line\n") and text.endswith("\nlast line\n"))
+
+    def test_preview_stops_what_it_started_that_left_its_group_and_cleared_its_environment(self):
+        from hansa import run
+        py, d1, d2 = shlex.quote(sys.executable), self.tmp / "d1.pid", self.tmp / "d2.pid"
+        away = (f"import os\nopen({str(d1)!r}, 'w').write(str(os.getpid()))\nos.setsid()\nos.chdir('/')\n"
+                "os.execve('/bin/sleep', ['sleep', '600'], {})\n")  # its own session, no environment, elsewhere
+        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
+                 f"open({str(d2)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
+        self.preview_lane(f"echo http://localhost:8129/; {py} -c {shlex.quote(away)} & {py} -c {shlex.quote(twice)} & "
+                          "exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="3")
+
+        def pid_of(f):
+            return int(f.read_text()) if f.exists() and f.read_text() else 0
+
+        def kill_daemons():
+            for f in (d1, d2):
+                if pid_of(f):
+                    try:
+                        os.kill(pid_of(f), signal.SIGKILL)
+                    except OSError:
+                        pass
+        self.addCleanup(kill_daemons)
+        tid = self.add_browser_task()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertTrue(pid_of(d1) and pid_of(d2))
+        for f in (d1, d2):  # the first seen below the preview, the second working in its worktree
+            end = time.time() + 10
+            while run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z" and time.time() < end:
+                time.sleep(0.1)
+            self.assertFalse(run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z", f.name)
+
+    def kept_preview_log(self, tid: str, *chunks: bytes) -> str:
+        """What the task's folder keeps of this preview output, as preview.py and hansa serve keep it."""
+        from hansa import preview, run
+        raw = self.desk.raw_dir(tid)
+        raw.mkdir(parents=True, exist_ok=True)
+        kept = preview.Kept(str(raw / "preview.log"), run.PREVIEW_KEEP // 2)
+        for c in chunks:
+            for i in range(0, len(c), 65536):  # as drain reads the pipe
+                kept.add(c[i:i + 65536])
+        kept.close()
+        run.publish(self.desk, tid, "preview.log", most=run.PREVIEW_KEEP + 4096)
+        return str(self.desk.tasks_dir / tid / "preview.log")
+
+    def test_preview_a_key_cut_inside_a_long_line_of_the_kept_log_leaves_no_part_of_it(self):
+        from hansa import run
+        key = b"sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_bytes(key)
+        half, tid = run.PREVIEW_KEEP // 2, self.desk.new_task("Keys at the cuts")
+
+        def only_filler(text):
+            body = re.sub(r"\n\[hansa: [^\]]*\]\n", "", text)
+            self.assertLessEqual(set(body), set("xyz\n"), "a part of the key is left")
+            self.assertIn(f"with {run.PREVIEW_MARGIN} bytes on each side of a cut inside a line", text)
+        # one line with no newline: a key across the end of the kept start, another across the start of the kept end
+        out = b"x" * (half - 10) + key + b"y" * (3 * half) + key + b"z" * (half - 10)
+        log = self.kept_preview_log(tid, out)
+        only_filler(Path(log).read_text())
+        big = self.tmp / "big.log"  # read_bounded cuts the same way
+        big.write_bytes(out)
+        only_filler(self.desk.redact(run.read_bounded(big, half, half)))
+        b2 = self.desk.new_task("A key just after the start's last line")  # its start ends at a line, its end not
+        only_filler(Path(self.kept_preview_log(b2, b"x" * 100 + b"\n" + b"y" * (half - 20) + key + b"z" * half)).read_text())
+
+    def test_preview_binary_output_is_kept_within_its_bound_on_disk(self):
+        from hansa import run
+        tid = self.desk.new_task("Binary output")
+        log = self.kept_preview_log(tid, os.urandom(3 * run.PREVIEW_KEEP))
+        self.assertLessEqual(Path(log).stat().st_size, run.PREVIEW_KEEP + 4096)
+        self.assertIn("left out here", Path(log).read_text(encoding="utf-8"))  # and it is UTF-8 still
+
+    def test_preview_kept_log_with_many_short_keys_stays_within_its_bound_on_disk(self):
+        from hansa import run
+        K = run.PREVIEW_KEEP
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry-of-the-team.key").write_bytes(b"k1234567")
+        tid = self.desk.new_task("Keys flood")
+        log = Path(self.kept_preview_log(tid, (b"\xff" + b"k1234567" + b"\xfe") * (3 * K // 10)))
+        self.assertLessEqual(log.stat().st_size, K + 4096)
+        text = log.read_bytes().decode("utf-8")
+        self.assertNotIn("k1234567", text)
+        self.assertIn("[key of registry-of-the-team]", text)
+        self.assertTrue(re.search(r"\n\[hansa: \d+ bytes left out here, after keys were removed\]\n", text))
+
+    def test_preview_end_stops_an_orphan_in_the_worktree_but_not_a_process_with_a_parent_there(self):
+        from hansa import run
+        tid, folder = self.desk.new_task("Look at the page"), self.tmp / "wt"
+        (folder / "sub").mkdir(parents=True)
+        orphan_pid = self.tmp / "orphan.pid"
+        raw = self.desk.raw_dir(tid)
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / "preview.json").write_text(json.dumps({"pgid": 2 ** 22 + 7, "started": time.time() - 1, "seen": {},
+                                                      "cwd": str(folder), "tmp": str(self.tmp / "ptmp")}))
+        self.desk.change(tid, lambda x: {"preview": {"started": True}})
+        shell = subprocess.Popen(["sleep", "600"], cwd=folder / "sub")  # the principal's own, its parent alive
+        self.addCleanup(lambda: (shell.kill(), shell.wait()))
+        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
+                 f"open({str(orphan_pid)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
+        subprocess.run([sys.executable, "-c", twice], cwd=folder, check=True)
+        end = time.time() + 10
+        while not (orphan_pid.exists() and orphan_pid.read_text()) and time.time() < end:
+            time.sleep(0.05)
+        orphan = int(orphan_pid.read_text())
+
+        def kill_orphan():
+            try:
+                os.kill(orphan, signal.SIGKILL)
+            except OSError:
+                pass
+        self.addCleanup(kill_orphan)
+        while run.process_table().get(orphan, (0,))[0] != 1 and time.time() < end:
+            time.sleep(0.05)
+        run.end_preview(self.desk, tid)
+        self.assertIsNone(shell.poll())  # left alone
+        self.assertFalse(run.alive(orphan) and run._state(orphan) != "Z")
+        events = self.desk.events_path.read_text()
+        self.assertIn(f"{orphan} (an orphan working in the preview's folders)", events)
+        self.assertNotIn(str(shell.pid), events)
+
+    def test_preview_is_not_started_on_linux_and_the_worker_is_told(self):
+        seen, _ = self.preview_lane("echo http://localhost:8126/; exec sleep 600")
+        with unittest.mock.patch("hansa.run.PREVIEW_STARTS", False):
+            tid = self.add_browser_task()
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]], [])
+        self.assertFalse(self.preview_pid())
+        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn("hansa does not start it on Linux", prompt)
+        self.assertIn("not started: hansa does not start a preview on Linux", views.show_text(self.desk, tid))
+        lines = "\n".join(views.preview_text(False, self.desk.settings()["lanes"]["a"]))
+        self.assertIn("on Linux hansa does not start it", lines)
+        mac = "\n".join(views.preview_text(True, self.desk.settings()["lanes"]["a"]))
+        self.assertIn("can reach every service on this machine's loopback", mac)
+        self.assertIn("up to 20 s (preview_wait_s)", mac)
+        self.assertIn("preview: ", views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "preview_wait_s", "45")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["preview_wait_s"], 45)
+        with self.assertRaises(SystemExit):
+            self.hansa("lane", "set", "a", "preview_wait_s", "0")
+        self.hansa("lane", "set", "a", "preview_wait_s", "none")
+        self.assertNotIn("preview_wait_s", self.desk.settings()["lanes"]["a"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        said = " ".join(out.getvalue().split())
+        self.assertIn("On Linux hansa does not start it", said)
+        self.assertIn("can reach every service on the machine's loopback", said)
+
     def test_stopped_worker_still_hands_in_what_it_wrote(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
@@ -8453,12 +9630,12 @@ class DeskTest(unittest.TestCase):
         self.assertIn("The previous attempt's report:", follow)
         self.assertIn("week badge is still in English", follow)
 
-    def transcript_run(self, kind: str, key: str = "") -> str:
+    def transcript_run(self, kind: str, key: str = "", env=None) -> str:
         """The report of a worker run on mimo whose stand-in writes a session record of this kind."""
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
         s["lanes"]["a"]["providers"] = ["mimo"]
-        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": kind, **({"FAKE_WRITE": key} if key else {})}
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": kind, **({"FAKE_WRITE": key} if key else {}), **(env or {})}
         self.assertEqual(self.desk.save_settings(s), [])
         self.desk.write_key("mimo", key or "sk-test-01")
         tid = self.desk.new_task("Fix the badge")
@@ -8516,8 +9693,8 @@ class DeskTest(unittest.TestCase):
         line = ("the worker ended while its background work was still running ({}); its report may be "
                 "incomplete: read the changes before merging")
         for kind, what in (("bg-cmd", "Run the full test suite"), ("bg-agent", "Review the badge change")):
-            with self.subTest(kind):
-                self.assertEqual(self.transcript_run(kind), "Report: fixed the badge; the tests pass.\n")
+            with self.subTest(kind):  # resumed once, and it left background work running again
+                self.assertEqual(self.transcript_run(kind + "-again"), "Report after the resume: the suite passes.\n")
                 tid = self.desk.tasks()[-1]["id"]
                 m = self.desk.meta(tid)
                 self.assertEqual(m["state"], "done")  # not failed for it: the work may be complete
@@ -8527,6 +9704,77 @@ class DeskTest(unittest.TestCase):
                 tid = self.desk.tasks()[-1]["id"]
                 self.assertNotIn("background work was still running", views.show_text(self.desk, tid))
                 self.assertNotIn("background work", notify.task_line(self.desk, self.desk.meta(tid)))
+
+    def test_a_worker_that_ended_with_background_work_running_is_resumed_once_and_then_reports(self):
+        from hansa import run
+        seen = self.tmp / "resumed.jsonl"
+        report = self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen)})
+        self.assertEqual(report, "Report after the resume: the suite passes.\n")
+        tid = self.desk.tasks()[-1]["id"]
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        calls = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        argv, prompt = calls[0]["argv"], " ".join(calls[0]["prompt"].split())
+        self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
+        self.assertNotIn("--session-id", argv)
+        self.assertIn("Run the full test suite", prompt)
+        self.assertIn("in the foreground, in one Bash call", prompt)
+        self.assertIn("This is the only time hansa resumes you", prompt)
+        self.assertEqual(calls[0]["env"]["HANSA_TASK"], tid)
+        self.assertEqual(calls[0]["env"]["BASH_MAX_TIMEOUT_MS"], str(60000 * 240))
+        self.assertEqual(calls[0]["env"]["BASH_DEFAULT_TIMEOUT_MS"], str(60000 * 10))
+        self.assertIn(f"the Bash tool's timeout, in milliseconds, up to {60000 * 240}: 240 minutes", prompt)
+        self.assertEqual(m["resumed"]["left"], ["Run the full test suite"])
+        self.assertEqual(m["background_left"], [])  # the first run's work was run again, in the foreground
+        self.assertEqual(m["turns"], 5 + 2)  # both runs'
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 10)
+        self.assertNotIn("background work was still running", views.show_text(self.desk, tid))
+        self.assertFalse((self.desk.state_dir / "runs" / tid / run.RESUME_ARGV).exists())
+        self.assertIn(("task_resumed", tid), [(e["event"], e.get("task")) for e in
+                                              map(json.loads, self.desk.events_path.read_text().splitlines())])
+        # It ends with background work running a second time: not resumed again, and the task says so
+        seen.unlink()
+        self.transcript_run("bg-cmd-again", env={"FAKE_RESUMED": str(seen)})
+        tid = self.desk.tasks()[-1]["id"]
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(len(seen.read_text().splitlines()), 1)
+        self.assertEqual(m["background_left"], ["Run the full test suite"])
+        # Work seen to end, or no background work at all: no resume
+        seen.unlink()
+        self.transcript_run("bg-cmd-noticed", env={"FAKE_RESUMED": str(seen)})
+        self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
+        self.assertFalse(seen.exists())
+
+    def test_a_retry_after_a_resumed_run_dropped_its_connection_keeps_its_own_record(self):
+        # Resumed, the run ends on a dropped connection: the task is queued again, in a new session, which also
+        # leaves background work. That try is resumed in its own right, and nothing of the first try's carries.
+        seen, drop = self.tmp / "resumed.jsonl", self.tmp / "dropped"
+        report = self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen), "FAKE_RESUME_DROP": str(drop)})
+        self.assertEqual(report, "Report after the resume: the suite passes.\n")
+        tid = self.desk.tasks()[-1]["id"]
+        m = self.desk.meta(tid)
+        self.assertTrue(drop.exists())
+        calls = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(len(calls), 2)  # each try resumed once
+        first, second = [c["argv"][c["argv"].index("--resume") + 1] for c in calls]
+        self.assertNotEqual(first, second)
+        self.assertEqual(second, m["session_id"])
+        self.assertEqual(m["resumed"]["left"], ["Run the full test suite"])
+        self.assertEqual(m["background_left"], [])
+        self.assertEqual(m["turns"], 5 + 2)  # this try's runs only
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["turns"]), ("network", 5 + 1))  # the first try's, kept in its attempt
+        self.assertIn("usage", a)
+        from hansa import run
+        for text in ("API Error: Unable to connect to API. Check your internet connection",
+                     "API Error: Unable to connect to API (ENETUNREACH)", "connect ENETUNREACH 10.0.0.1:443 (ENETUNREACH)",
+                     "Connection lost while your computer was asleep"):
+            self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
+        # a certificate the machine does not trust is not a dropped connection: running it again changes nothing
+        self.assertEqual(run.network_reason({"is_error": True, "result": "API Error: Unable to connect to API: "
+                                             "SSL certificate has expired"}, ""), "")
 
     def test_background_agents_with_notices_are_not_listed_as_still_running(self):
         # Four background agents each have a "completed" notice; a test run has none.
@@ -9421,7 +10669,9 @@ class DeskTest(unittest.TestCase):
         (pkg / "agents").mkdir(parents=True)
         (pkg / "__pycache__").mkdir()
         for name, at in (("__init__.py", 1_000_000), ("agents/scout.md", 2_000_000), ("ui.html", 1_500_000),
-                         ("__pycache__/run.cpython-312.pyc", 9_000_000)):  # what Python writes as it runs: not code
+                         ("__pycache__/run.cpython-312.pyc", 9_000_000),  # what Python writes as it runs: not code
+                         (".DS_Store", 9_000_000), ("agents/.DS_Store", 9_000_000),  # left by the file manager
+                         ("run.py~", 9_000_000), ("notes.txt", 9_000_000)):  # nor anything else hansa does not ship
             (pkg / name).write_text("x")
             os.utime(pkg / name, (at, at))
         self.addCleanup(hansa.installed.cache_clear)
@@ -10158,7 +11408,8 @@ class DeskTest(unittest.TestCase):
         [u] = public_settings(self.desk)["release_unmatched"]
         self.assertEqual((u["lane"], u["why"]), ("a", "its base branch changed since the list was saved"))
         self.assertIn("基础分支", u["why_zh"])
-        self.assertIn("releases wait for the yes until the principal saves the list again",
+        self.assertIn("releases wait for the yes until the principal takes it back in on the page (its button for "
+                      "that, or unticking and ticking it again, then Save; a plain Save keeps the old entry)",
                       self.hansa("explain", "lane", "a"))
         self.assertEqual(self.desk.settings()["releases_without_asking"], [entry])  # hansa leaves the list as it is
         take_back_in()
@@ -10167,17 +11418,21 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(asked()["state"], "waiting")
         self.assertIn("release command changed", public_settings(self.desk)["release_unmatched"][0]["why"])
         take_back_in()
-        # removed and added again, under the same name, on another repository
+        # removed and added again, under the same name, on another repository: the same base branch (dev, as it
+        # was taken back in) and command, so only the repository differs
         other = self.tmp / "other-repo"
         other.mkdir()
-        sh("git", "init", "-q", "-b", "main", cwd=other)
+        sh("git", "init", "-q", "-b", "dev", cwd=other)
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=other)
         self.hansa("lane", "remove", "a")
-        self.hansa("lane", "add", "a", "--repo", str(other), "--base", "main")
+        self.hansa("lane", "add", "a", "--repo", str(other), "--base", "dev")
         self.hansa("lane", "set", "a", "release", f"touch {out}; true")
+        [entry] = self.desk.settings()["releases_without_asking"]
+        self.assertEqual((entry["base"], entry["command"]), ("dev", f"touch {out}; true"))
         r = asked()
         self.assertEqual((r["state"], r["repo"]), ("waiting", str(other.resolve())))
-        self.assertIn("repository", public_settings(self.desk)["release_unmatched"][0]["why"])
+        self.assertEqual(public_settings(self.desk)["release_unmatched"][0]["why"],
+                         "its repository changed since the list was saved")
         # one listed and asked, then changed before it ran: back to waiting for the yes
         take_back_in()
         rid = asked()["id"]
@@ -10404,6 +11659,252 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
         d.tick()
         self.assertIn("main moved since it was asked", release.get(self.desk, rid)["void"])
+
+    # -- fixed targets, and the forbidden-word scan without the desk lock -------------------------------------------
+    def fixed_target(self, name, command, tick=True):
+        """Lane a's target NAME, run from a fixed checkout; ticked for going out without asking."""
+        self.hansa("lane", "target", "a", name, command, "--fixed")
+        if tick:
+            self.tick_targets(name)
+
+    def checkouts(self) -> list:
+        d = self.desk.state_dir / "release-checkouts"
+        return sorted(x.name for x in d.iterdir()) if d.is_dir() else []
+
+    def test_a_fixed_target_runs_in_its_own_checkout_and_merges_go_through_while_it_runs(self):
+        from hansa import release
+        go, seen = self.tmp / "go", self.tmp / "seen.txt"
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.fixed_target("install", f"pwd -P > {seen}; git rev-parse HEAD >> {seen}; echo $HANSA_RELEASE_COMMIT "
+                                     f">> {seen}; echo $HANSA_RELEASE_TARGET $HANSA_RELEASE_REPO >> {seen}; "
+                                     f"while [ ! -f {go} ]; do sleep 0.1; done")
+        self.assertIn("fixed checkout", self.hansa("lane", "target", "a"))
+        told = self.hansa("release", "a", "install")
+        self.assertIn("runs from a fixed checkout of the commit, holding nothing", told)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["fixed"]), ("approved", True))
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.soon(lambda: seen.exists() and len(seen.read_text().splitlines()) == 4)
+        where, head, commit, names = seen.read_text().splitlines()
+        self.assertEqual(Path(where), (self.desk.state_dir / "release-checkouts" / "1").resolve())
+        self.assertEqual((head, commit, names), (r["commit"], r["commit"], f"install {self.repo.resolve()}"))
+        self.assertIn("fixed checkout", self.hansa("release"))
+        [row] = views.status(self.desk)["releases"]
+        self.assertEqual((row["fixed"], row["runs"]), (True, "runs from a fixed checkout of the commit, holding nothing"))
+        # a merge on the base goes through while it runs: the release holds nothing
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+        self.assertNotEqual(self.git_out("rev-parse", "main"), r["commit"])
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        go.write_text("")
+        r = self.settle_release(d, 1)
+        self.assertEqual(r["state"], "done", r)
+        self.assertEqual(self.checkouts(), [])
+        self.assertNotIn("release-checkouts", self.git_out("worktree", "list"))
+
+    def test_a_fixed_targets_checkout_is_gone_after_success_failure_timeout_and_a_restart(self):
+        from hansa import release
+        self.fixed_target("install", 'test "$X" != fail || exit 3; test "$X" != wait || sleep 60')
+        d = Dispatcher(self.desk)
+        for rid, x, state in ((1, "", "done"), (2, "fail", "failed")):
+            os.environ["X"] = x
+            self.hansa("release", "a", "install")
+            self.assertEqual(self.settle_release(d, rid)["state"], state)
+            self.assertEqual(self.checkouts(), [])
+        os.environ["X"] = "wait"
+        self.hansa("release", "a", "install")  # stopped at its time limit
+        d.tick()
+        self.assertEqual((release.get(self.desk, 3)["state"], self.checkouts()), ("running", ["3"]))
+        release.change(self.desk, 3, lambda x: {"started": x["started"] - 241 * 60})
+        r = self.settle_release(d, 3)
+        self.assertEqual((r["state"], r["problem"]), ("failed", "stopped at the lane's time limit (240 min)"))
+        self.assertEqual(self.checkouts(), [])
+        self.hansa("release", "a", "install")  # hansa serve stops, and its run with it
+        d.tick()
+        self.assertEqual(self.checkouts(), ["4"])
+        os.killpg(d.release_procs[4].pid, signal.SIGKILL)
+        d.release_procs[4].wait()
+        (self.desk.state_dir / "release-checkouts" / "9").mkdir()  # left half made by a start that failed
+        Dispatcher(self.desk).tick()
+        self.assertEqual(release.get(self.desk, 4)["state"], "failed")
+        self.assertEqual(self.checkouts(), [])
+        self.assertNotIn("release-checkouts", self.git_out("worktree", "list"))
+
+    def test_a_fixed_target_whose_command_names_the_base_branch_is_refused(self):
+        said = self.refused("lane", "target", "a", "push", "git push origin main", "--fixed")
+        self.assertIn("names the base branch (main)", said)
+        self.assertIn("$HANSA_RELEASE_COMMIT", said)
+        self.assertNotIn("targets", self.desk.settings()["lanes"]["a"])
+        self.hansa("lane", "target", "a", "push", "git push origin main")  # in the repository, it may
+        self.assertIn("names the base branch", self.refused("lane", "target", "a", "push", "--fixed"))
+        told = self.hansa("lane", "target", "a", "push", 'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"',
+                          "--fixed")
+        self.assertIn("$HANSA_RELEASE_COMMIT", told)
+        self.assertTrue(self.desk.settings()["lanes"]["a"]["targets"]["push"]["fixed"])
+        # nor can the base branch become one the command names
+        self.hansa("lane", "target", "a", "push", "git push origin dev")
+        sh("git", "branch", "dev", cwd=self.repo)
+        self.assertIn("names the base branch (dev)", self.refused("lane", "set", "a", "base", "dev"))
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("base", "main"), "main")
+
+    def test_a_fixed_target_naming_the_base_branch_with_a_revision_suffix_is_refused(self):
+        for word in ("main~0", "main^{commit}", "main^{}", "main@{0}", "refs/heads/main~1",
+                     "main~0:refs/heads/prod", "main^{commit}:refs/heads/prod", "main@{0}:refs/heads/prod"):
+            said = self.refused("lane", "target", "a", "push", f"git push origin {word}", "--fixed")
+            self.assertIn(f"names the base branch ({word})", said)
+            self.assertNotIn("targets", self.desk.settings()["lanes"]["a"])
+        # the base only as where to send is still allowed, as is a branch whose name merely begins with it
+        for cmd in ("git push origin HEAD:main", 'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"',
+                    "git push origin mainline~0"):
+            self.hansa("lane", "target", "a", "push", cmd, "--fixed")
+            self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["push"]["command"], cmd)
+
+    def test_the_tick_for_going_out_without_asking_stops_counting_when_fixed_changes(self):
+        from hansa import release
+        from hansa.desk import public_settings
+        self.with_targets(install="true")
+        self.tick_targets("install")
+        self.hansa("lane", "target", "a", "install", "--fixed")
+        self.hansa("release", "a", "install")
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        [u] = public_settings(self.desk)["release_unmatched"]
+        self.assertEqual(u["why"], "its way it runs (--fixed) changed since the list was saved")
+        self.tick_targets("install")
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0]["fixed"], "yes")
+        self.hansa("release", "a", "install")
+        self.assertEqual(release.get(self.desk, 2)["state"], "approved")
+        self.hansa("lane", "target", "a", "install", "--fixed", "none")
+        Dispatcher(self.desk).tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        # a yes given to it as it was does not run it the other way
+        r = release.get(self.desk, 2)
+        self.assertIn("how lane a target install runs", release.answer(self.desk, 2, True, "", r["commit"],
+                                                                         r["command"])["void"])
+
+    def test_the_forbidden_word_scan_does_not_hold_the_desk_lock(self):
+        from hansa import release
+        real, wrote, writers = release.forbidden_in, [], []
+
+        def slow_scan(*args, **kw):  # while it runs, another writer saves the settings
+            other = Desk(self.desk.root)
+            t = threading.Thread(target=lambda: wrote.append(other.save_settings(
+                {**other.settings(), "concurrency": 2})), daemon=True)
+            writers.append(t)
+            t.start()
+            t.join(5)  # a scan that held the lock would keep it waiting until the scan ended
+            wrote.append(not t.is_alive())
+            return real(*args, **kw)
+        self.addCleanup(lambda: [t.join(30) for t in writers])
+        self.with_release("true")
+        with unittest.mock.patch("hansa.release.forbidden_in", slow_scan):
+            self.hansa("release", "a")
+            r = release.get(self.desk, 1)
+            self.assertEqual(wrote, [[], True])
+            self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+            self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])),
+                             {"ok": True, "problems": []})
+            self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(wrote[2:], [[], True])
+
+    def test_the_start_reuses_the_requests_scan_and_scans_again_when_the_words_changed(self):
+        from hansa import release
+        self.with_release("true")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.release.forbidden_in", wraps=release.forbidden_in) as scan:
+            self.hansa("release", "a")
+            self.assertEqual(scan.call_count, 1)
+            r = release.get(self.desk, 1)
+            release.answer(self.desk, 1, True, "", r["commit"], r["command"])
+            self.assertEqual(self.settle_release(d, 1)["state"], "done")
+            self.assertEqual(scan.call_count, 1)  # nothing it depends on changed
+            self.commit_in_repo("b.txt", "b\n")
+            self.hansa("release", "a")
+            r = release.get(self.desk, 2)
+            release.answer(self.desk, 2, True, "", r["commit"], r["command"])
+            self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])),
+                             {"ok": True, "problems": []})
+            self.assertEqual(self.settle_release(d, 2)["state"], "done")
+            self.assertEqual(scan.call_count, 3)  # the word list changed: scanned again
+            self.commit_in_repo("c.txt", "c\n")
+            self.hansa("release", "a")
+            r = release.get(self.desk, 3)
+            release.answer(self.desk, 3, True, "", r["commit"], r["command"])
+            self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["c"])),
+                             {"ok": True, "problems": []})
+            d.tick()
+        self.assertEqual((release.get(self.desk, 3)["state"], scan.call_count), ("forbidden", 5))
+
+    def merge_into_main(self, branch, resolve=None):
+        """Merge the branch into the repository's main, as a merge commit; resolve: {file: text} for a conflict."""
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+        done = subprocess.run([*git, "merge", "--no-ff", "-q", "-m", f"Merge {branch}", branch], cwd=self.repo,
+                              capture_output=True)
+        if resolve:
+            self.assertNotEqual(done.returncode, 0)
+            for name, text in resolve.items():
+                (self.repo / name).write_text(text)
+                sh("git", "add", name, cwd=self.repo)
+            sh(*git, "commit", "-q", "--no-edit", cwd=self.repo)
+        return self.git_out("rev-parse", "HEAD")
+
+    def test_a_merge_of_commits_already_on_a_remote_tracking_branch_is_not_refused_for_their_words(self):
+        from hansa import release
+        self.with_release("true")
+        sh("git", "checkout", "-q", "-b", "side", cwd=self.repo)
+        self.commit_in_repo("falcon-notes.txt", "the falcon plan\n", message="Notes")
+        sh("git", "update-ref", "refs/remotes/origin/side", "side", cwd=self.repo)  # already out
+        sh("git", "checkout", "-q", "main", cwd=self.repo)
+        self.commit_in_repo("main.txt", "on main\n")
+        merge = self.merge_into_main("side")
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["falcon"])), {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r.get("hits")), ("waiting", None))
+        self.assertEqual([c["sha"] for c in r["commits"]][0], merge)
+        self.assertNotIn("falcon-notes.txt", r["files"])
+
+    def test_a_forbidden_word_from_a_merges_conflict_resolution_or_its_branch_is_caught_where_it_is(self):
+        from hansa import release
+        self.with_release("true")
+        self.commit_in_repo("plan.txt", "one\nplan\nthree\n")
+        sh("git", "checkout", "-q", "-b", "side", cwd=self.repo)
+        side = self.commit_in_repo("plan.txt", "one\nside plan\nthree\n")
+        osprey = self.commit_in_repo("bird.txt", "an osprey\n")
+        sh("git", "checkout", "-q", "main", cwd=self.repo)
+        self.commit_in_repo("plan.txt", "one\nmain plan\nthree\n")
+        merge = self.merge_into_main("side", {"plan.txt": "one\nthe falcon plan\nthree\n"})
+        self.assertNotEqual(merge, side)
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["falcon", "osprey"])),
+                         {"ok": True, "problems": []})
+        said = self.refused("release", "a")
+        self.assertIn(f"{merge[:10]} plan.txt: the falcon plan", said)
+        hits = release.get(self.desk, 1)["hits"]
+        self.assertEqual(sorted((h["commit"], h["where"], h["line"]) for h in hits if h["where"] != "file name"),
+                         sorted([(merge, "plan.txt", "the falcon plan"), (osprey, "bird.txt", "an osprey")]))
+
+    def test_an_old_bare_lane_entry_is_taken_back_in_only_by_a_tick_as_a_recorded_one_is(self):
+        from hansa import release
+        from hansa.desk import public_settings
+        self.with_release("true")
+        s = self.desk.settings()
+        s["releases_without_asking"] = ["a"]  # as a page saved it before hansa recorded what it listed
+        self.desk.settings_path.write_text(json.dumps(s))
+        [u] = public_settings(self.desk)["release_unmatched"]
+        self.assertIn("before hansa recorded", u["why"])
+        # a save of something else keeps it as it was, as it keeps a recorded entry that no longer matches
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])), {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["releases_without_asking"], ["a"])
+        self.hansa("release", "a")
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        # the page's tick (its button to take them back in sends one) records it as the lane is now
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": ""}])),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["releases_without_asking"][0]["command"], "true")
+        self.hansa("release", "a")
+        self.assertEqual(release.get(self.desk, 2)["state"], "approved")
 
     def test_the_coordinator_cannot_change_the_principals_release_settings(self):
         s = self.desk.settings()
@@ -10758,6 +12259,350 @@ class DeskTest(unittest.TestCase):
         self.assertEqual([u["target"] for u in public_settings(self.desk)["release_unmatched"]], ["prod"])
 
 
+    # -- stopping a release (hansa release --stop; Stop on the page) ----------------------------------------------
+    def test_a_release_not_started_yet_is_stopped_at_once_and_never_runs(self):
+        from hansa import release
+        ran, go = self.tmp / "quick-ran", self.tmp / "go"
+        os.environ["HANSA_ROLE"] = "coordinator"
+        self.with_targets(slow=f"while [ ! -f {go} ]; do sleep 0.1; done", quick=f"touch {ran}")
+        self.hansa("release", "a", "quick")  # waits for the principal's yes
+        told = self.hansa("release", "--stop", "1", "wrong", "commit")
+        self.assertIn("release #1 of lane a target quick is stopped; nothing was run", told)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "coordinator", "wrong commit"))
+        [ev] = self.events("release_stopped")
+        self.assertEqual((ev["id"], ev["by"], ev["reason"], ev["ran"]), (1, "coordinator", "wrong commit", False))
+        self.assertIn("already ended: it is stopped", self.refused("release", "--stop", "1"))
+        self.assertIn("there is no release #9", self.refused("release", "--stop", "9"))
+        # approved and waiting its turn behind another release of the same repository
+        self.tick_targets("slow", "quick")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "slow")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 2)["state"], "running")
+        self.hansa("release", "a", "quick")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 3)["state"], "approved")
+        self.assertIn("is stopped; nothing was run", self.hansa("release", "--stop", "#3", "server", "must", "stay"))
+        go.write_text("")
+        self.assertEqual(self.settle_release(d, 2)["state"], "done")
+        for _ in range(3):
+            d.tick()
+        r = release.get(self.desk, 3)
+        self.assertEqual((r["state"], r["stop_reason"], r.get("started")), ("stopped", "server must stay", None))
+        self.assertFalse(ran.exists())
+        self.assertIn("stopped by the coordinator", release.state_text(self.desk, r))
+        self.assertIn("nothing was run", release.state_text(self.desk, r))
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):
+            self.assertIn("only the coordinator stops a release", self.refused("release", "--stop", "2"))
+        with contextlib.redirect_stdout(out := io.StringIO()), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "release", "--help"])
+        help_text = " ".join(out.getvalue().split())
+        self.assertIn("then KILL 30 seconds later", help_text)
+        self.assertIn("should handle TERM (finish or undo the step it is in)", help_text)
+
+    def test_a_running_release_that_traps_term_is_stopped_its_output_kept_and_its_checkout_gone(self):
+        from hansa import alert, release
+        out, mark = self.alert_fake(), self.tmp / "undone"
+        os.environ["HANSA_ROLE"] = "coordinator"
+        self.fixed_target("install", f"trap 'echo undoing; echo undone > {mark}; exit 5' TERM; echo switching; "
+                                     "while :; do sleep 0.1; done")
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual((release.get(self.desk, 1)["state"], self.checkouts()), ("running", ["1"]))
+        self.soon(lambda: "switching" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        told = self.hansa("release", "--stop", "1", "a", "problem", "found")
+        self.assertIn("is being stopped", told)
+        self.assertIn("its checkout removed", told)
+        self.assertIn("being stopped by the coordinator", self.hansa("release"))
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "coordinator", "a problem found"), r)
+        self.assertTrue(r.get("termed"))
+        self.assertFalse(r.get("killed"))
+        self.assertEqual(mark.read_text().strip(), "undone")  # it had its TERM, and undid its step
+        self.assertIn("switching", r["tail"])
+        self.assertIn("undoing", (self.desk.state_dir / "releases" / "1.log").read_text())
+        self.assertEqual(self.checkouts(), [])
+        self.assertNotIn("release-checkouts", self.git_out("worktree", "list"))
+        [ev] = self.events("release_stopped")
+        self.assertEqual((ev["by"], ev["reason"], ev["ran"]), ("coordinator", "a problem found", True))
+        self.assertEqual(self.events("release_ended"), [])
+        self.assertIn("half-switched", release.state_text(self.desk, r))
+        alert.send_due(self.desk, gather=0)
+        self.assertIn("release_stopped", self.alerted(out)[-1]["kind"])
+        self.assertIn("stopped by the coordinator", self.alerted(out)[-1]["text"])
+        self.assertIn("a problem found", self.alerted(out)[-1]["text"])
+        heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_stopped"), {"key": "k", "session": None})]
+        self.assertTrue(any("was stopped by coordinator: a problem found" in x for x in heard), heard)
+
+    def test_a_running_release_that_ignores_term_is_killed_after_the_grace(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.fixed_target("install", "trap '' TERM; echo started; sleep 60")
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        pid = release.get(self.desk, 1)["pid"]
+        self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
+        self.assertEqual(release.stop_release(self.desk, 1, "not tonight", by="page"), {"ok": True, "state": "stopping"})
+        self.assertFalse(release.stop_release(self.desk, 1, "again", by="page")["ok"])  # once
+        with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
+            d.tick()
+            time.sleep(0.5)
+            d.tick()  # within the grace: what ignores TERM still runs
+            self.assertEqual(release.get(self.desk, 1)["state"], "running")
+            r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "page", "not tonight"), r)
+        self.assertTrue(r.get("killed"))
+        from hansa.run import group_running
+        self.assertFalse(group_running(pid))
+        self.assertEqual(self.checkouts(), [])
+        self.assertIn("stopped by the principal", release.state_text(self.desk, r))
+        [row] = views.status(self.desk)["releases"]
+        self.assertEqual((row["state"], row["stopped_by"], row["stop_reason"]), ("stopped", "page", "not tonight"))
+        alert.send_due(self.desk, gather=0)  # the principal's own Stop: no alert for it
+        self.assertFalse(any("release_stopped" in a["kind"] for a in self.alerted(out)))
+
+    def test_a_target_after_a_stopped_release_is_not_let_through(self):
+        from hansa import release
+        go = self.tmp / "go"
+        self.with_targets(test=f"while [ ! -f {go} ]; do sleep 0.1; done", prod=("true", {"after": "test"}))
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.hansa("release", "--stop", "1")
+        self.assertEqual(self.settle_release(d, 1)["state"], "stopped")
+        said = self.refused("release", "a", "prod")
+        self.assertIn("goes out only after target test sent out the same commit", said)
+        self.assertIn("no release of test went out", said)
+        self.assertIsNone(release.last_out(self.desk, "a", self.repo, "main", "test"))
+        self.assertEqual(len(release.releases(self.desk)), 1)
+
+    def test_a_stop_that_comes_after_the_command_ended_records_its_real_end(self):
+        from hansa import release
+        os.environ["HANSA_ROLE"] = "coordinator"
+        self.with_targets(test="echo installed; exit 0", prod=("true", {"after": "test"}))
+        self.tick_targets("test")
+        d = Dispatcher(self.desk)
+        self.hansa("release", "a", "test")
+        d.tick()
+        self.assertEqual(release.get(self.desk, 1)["state"], "running")
+        self.soon(lambda: (self.desk.state_dir / "releases" / "1.exit").exists())  # ended, not yet finished
+        self.assertEqual(release.stop_release(self.desk, 1, "too late", by="coordinator")["ok"], True)
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["exit"], r.get("termed")), ("done", 0, None), r)
+        self.assertTrue(r["stop_late"])
+        self.assertIn("came after its command had ended", release.state_text(self.desk, r))
+        self.assertEqual(self.events("release_stopped"), [])
+        [ev] = self.events("release_ended")
+        self.assertEqual((ev["ok"], ev["stop_late"]), (True, True))
+        heard = [x["line"] for x in notify.items_for(self.desk, [ev], {"key": "k", "session": None})]
+        self.assertTrue(any("the stop came after its command had ended" in x and "got TERM" not in x for x in heard), heard)
+        self.assertIsNotNone(release.last_out(self.desk, "a", self.repo, "main", "test"))  # it went out: --after holds
+        self.assertIn("prod", self.hansa("release", "a", "prod"))
+
+    def test_what_a_release_started_outside_its_group_is_stopped_at_its_end(self):
+        from hansa import release
+        script = self.tmp / "away.py"
+        script.write_text("import os, signal, sys, time\nos.setsid()\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                          "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(120)\n")
+
+        def away(n):
+            pidf = self.tmp / f"away{n}.pid"
+            return pidf, (f"{shlex.quote(sys.executable)} {script} {pidf} & while [ ! -f {pidf} ]; do sleep 0.1; done; "
+                          "echo started; sleep 1")
+
+        def gone(pidf):
+            from hansa.run import _state, alive, proc_start
+            pid = int(pidf.read_text())
+            start = proc_start(pid)
+            self.addCleanup(lambda: alive(pid, start) and os.kill(pid, signal.SIGKILL))
+            return lambda: not alive(pid, start) or _state(pid) == "Z"
+        # stopped: TERM, then KILL after the grace, to what left the group too
+        stopped, cmd = away(1)
+        self.fixed_target("install", cmd.replace("sleep 1", "sleep 60"))
+        self.hansa("release", "a", "install")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.soon(lambda: stopped.exists())
+        ended = gone(stopped)
+        d.tick()  # its round records what the command started
+        self.assertTrue(release.get(self.desk, 1).get("started_procs"))
+        release.stop_release(self.desk, 1, "not tonight", by="page")
+        with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
+            r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], bool(r.get("killed"))), ("stopped", True), r)
+        self.soon(ended, timeout=5)
+        # done: what it left running is stopped as it ends
+        done, cmd = away(2)
+        self.fixed_target("install", cmd)
+        self.hansa("release", "a", "install")
+        with unittest.mock.patch("hansa.release.SWEEP_GRACE", 1):
+            self.soon(lambda: d.tick() or done.exists())
+            ended = gone(done)
+            r = self.settle_release(d, 2)
+        self.assertEqual(r["state"], "done", r)
+        self.soon(ended, timeout=5)
+        self.assertTrue(self.events("release_left_running_stopped"))
+
+    def test_a_stop_while_the_fixed_checkout_is_made_records_that_nothing_ran(self):
+        from hansa import release
+        ran = self.tmp / "ran"
+        self.fixed_target("install", f"touch {ran}")
+        self.hansa("release", "a", "install")
+        real = release.git
+
+        def git(*args, **kw):
+            out = real(*args, **kw)
+            if args[:2] == ("worktree", "add"):
+                self.assertEqual(release.stop_release(self.desk, 1, "midway", by="coordinator")["state"], "stopping")
+            return out
+        with unittest.mock.patch.object(release, "git", git):
+            Dispatcher(self.desk).tick()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["ran"]), ("stopped", False), r)
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.checkouts(), [])
+        [ev] = self.events("release_stopped")
+        self.assertFalse(ev["ran"])
+        self.assertIn("nothing was run", release.state_text(self.desk, r))
+        self.assertNotIn("had run", release.state_text(self.desk, r))
+        heard = [x["line"] for x in notify.items_for(self.desk, [ev], {"key": "k", "session": None})]
+        self.assertTrue(any("nothing was run" in x for x in heard), heard)
+
+    def test_the_pages_stop_button(self):
+        from hansa import release
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ("releaseStop:", "releaseStopReason:", "releaseStopNote:"):
+            self.assertEqual(ui.count(x), 2, x)
+        self.assertIn('"/api/release/stop"', ui)
+        self.assertIn("should handle TERM", ui)
+        skip_unless_ports(self)
+        self.with_release("true")
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        base, tok = f"http://127.0.0.1:{httpd.server_address[1]}", self.desk.web_token()
+
+        def post(body):
+            req = urllib.request.Request(f"{base}/api/release/stop?t={tok}", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json", "X-Hansa": "1",
+                                                  "Cookie": f"hansa_t={tok}"})
+            with urllib.request.urlopen(req) as resp:
+                return json.load(resp)
+        try:
+            self.assertEqual(post({"id": 1, "reason": "wrong night"}), {"ok": True, "state": "stopped"})
+            self.assertFalse(post({"id": 1})["ok"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "page", "wrong night"))
+
+    # -- cost across tries ---------------------------------------------------------------------------------------
+    def test_cost_counts_every_try_of_a_task_and_the_run_before_a_resume_once(self):
+        conf = self.tmp / "conf"
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.desk.save_settings(s)
+        self.net_lane("econnreset", 1)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_NET_USAGE"] = "1"  # the dropped try used tokens: 42
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        # an earlier hansa serve started its worker and stopped before it recorded it: the run before the resume
+        rec = conf / "projects" / "-work" / "lost-sid.jsonl"
+        rec.parent.mkdir(parents=True)
+        rec.write_text(json.dumps({"type": "assistant", "message": {"id": "m1", "model": "claude-x",
+                                   "usage": {"input_tokens": 500, "output_tokens": 50}}}) + "\n")
+        self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", launch="lost-sid",
+                         session_id="lost-sid", started=time.time(), model_asked="claude-x")
+        d = Dispatcher(self.desk)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual([r["usage"]["claude-x"]["in"] for r in m["earlier_runs"]], [500])
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["usage"]["claude-x"]["in"], a["turns"]), ("network", 40, 3))
+        self.assertEqual(list(m["usage"]), ["claude-haiku-4-5-20251001"])  # the last run's own: not the earlier ones
+        rep = cost.report(self.desk, 1)
+        total = 550 + 42 + 6300
+        self.assertEqual(rep["total"]["tokens"], total)
+        task = rep["by"]["task"][tid]
+        self.assertEqual((task["tokens"], task["runs"], task["turns"]), (total, 3, 6))
+        for key in ("day", "seat", "lane", "task", "model", "provider"):
+            self.assertEqual(sum(v["tokens"] for v in rep["by"][key].values()), total, key)
+        self.assertEqual(views.status(self.desk)["last_24h"]["worker_tokens"], total)
+        out = self.hansa("cost", "--days", "1", "--by", "task")
+        self.assertIn(f"{total:,}", out)
+        self.assertIn("3 run(s), 6 turn(s)", out)
+        # looked at again (another restart, another round): nothing is counted twice
+        from hansa import run
+        self.assertEqual(run.keep_lost_run(self.desk, self.desk.meta(tid)), {})
+        self.desk.update(tid, launch="lost-sid", session_id="lost-sid")
+        self.assertEqual(run.keep_lost_run(self.desk, self.desk.meta(tid)), {})
+        d.tick()
+        self.assertEqual(cost.report(self.desk, 1)["total"]["tokens"], total)
+
+    def resumed_tries(self, **env) -> dict:
+        """A task on mimo whose first run leaves background work, so hansa resumes it; its session record counts
+        tokens (100 in, 20 out a reply, 300 in, 60 out in all; 10 in, 5 out for the resumed run's reply). Settled with
+        the provider's rest after a usage limit cut short. Its meta."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RECORD_USAGE": "1", **env}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        tid = self.desk.new_task("Fix the badge")
+        d, end = Dispatcher(self.desk), time.time() + 30
+        while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
+            d.tick()
+            if (self.desk.provider_state().get("mimo") or {}).get("cool_until", 0) > time.time():
+                self.desk.set_provider_state("mimo", cool_until=time.time() - 1)
+            time.sleep(0.1)
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "done", m)
+        return m
+
+    def counted(self, m: dict) -> tuple:
+        """(input tokens hansa cost counts for the task, the input tokens hansa show gives for mimo-x)."""
+        rep = cost.report(self.desk, 1)
+        shown = re.search(r"usage mimo-x[^:]*: in ([\d,]+)", views.show_text(self.desk, m["id"]))
+        return sum(r["in"] for r in rep["rows"] if r["task"] == m["id"]), int(shown.group(1).replace(",", ""))
+
+    def test_cost_counts_a_resumed_run_and_the_tries_around_it_once(self):
+        from hansa import run
+        # resumed, and the resumed run ends without its totals: its part of the session record, after the resume
+        m = self.resumed_tries(FAKE_RESUME_NO_TOTALS="1")
+        self.assertTrue(m["resumed"])
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (300 + 10, 60 + 5))
+        self.assertEqual(self.counted(m), (310, 310))
+        # resumed, the resumed run drops its connection: queued again, a new session, resumed in its turn
+        m = self.resumed_tries(FAKE_RESUMED=str(self.tmp / "r1.jsonl"), FAKE_RESUME_DROP=str(self.tmp / "dropped"))
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["usage"]["mimo-x"]["in"]), ("network", 300))  # the dropped run counted nothing
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 310)
+        self.assertEqual(self.counted(m), (610, 610))
+        self.assertIn("(2 runs, every try)", views.show_text(self.desk, m["id"]))
+        # resumed, the resumed run hits the provider's usage limit: queued again without a try, resumed in its turn
+        m = self.resumed_tries(FAKE_RESUME_LIMIT=str(self.tmp / "limited"))
+        [a] = m["attempts"]
+        self.assertEqual((a["kind"], a["usage"]["mimo-x"]["in"], a["turns"]), ("limit", 310, 5 + 1))
+        self.assertEqual(self.counted(m), (620, 620))
+        self.assertEqual(cost.report(self.desk, 1)["by"]["task"][m["id"]]["runs"], 2)
+        # a run lost as it started is kept by its launch: a kept try of the same session but another launch is not it
+        sid = "s-same"
+        m = {**m, "state": "running", "phase": "starting", "launch": sid, "session_id": sid, "resumed": None,
+             "attempts": [{**a, "session_id": sid, "launch": "s-earlier"}], "earlier_runs": []}
+        with unittest.mock.patch.object(run, "usage_from_record", lambda home, s_, after=0: {"mimo-x": {"in": 1}}):
+            self.assertEqual(run.keep_lost_run(self.desk, m)["earlier_runs"][0]["launch"], sid)
+            m["attempts"][0]["launch"] = sid
+            self.assertEqual(run.keep_lost_run(self.desk, m), {})
+
     # -- the principal's alert command (hansa/alert.py) ------------------------------------------------------------
     ALERT_FAKE = ("import json, os, sys\n"
                   "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'kind': os.environ.get('HANSA_ALERT_KIND'),"
@@ -11093,6 +12938,271 @@ class DeskTest(unittest.TestCase):
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
         self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+
+    # -- small fixes from earlier verifications --
+
+    def page_post(self, path: str, body: dict) -> dict:
+        """What the page's server answers to a POST, handled over a socket pair (no port is opened)."""
+        from hansa import web
+        made = {}
+
+        class Server:
+            def __init__(self, address, handler):
+                made["handler"], self.server_address = handler, address
+
+            def serve_forever(self):
+                pass
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer", Server):
+            start_web(self.desk, "127.0.0.1", 0)
+        data = json.dumps(body).encode()
+        ours, theirs = socket.socketpair()
+        with ours, theirs:
+            ours.sendall(f"POST {path}?t={self.desk.web_token()} HTTP/1.0\r\nX-Hansa: 1\r\n"
+                         f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+            made["handler"](theirs, ("127.0.0.1", 0), None)
+            theirs.shutdown(socket.SHUT_WR)
+            answer = b""
+            while chunk := ours.recv(65536):
+                answer += chunk
+        return json.loads(answer.split(b"\r\n\r\n", 1)[1])
+
+    def test_show_full_gives_claude_codes_reason_for_a_refused_call_whole(self):
+        tid = self.desk.new_task("Build it")
+        why = "This command reads outside the folders allowed: " + "x" * 300 + " (the end of the reason)"
+        self.desk.update(tid, state="done", denials=["Bash: make"], denial_reasons=[why])
+        self.assertIn(f"Claude Code said: {why}", views.show_text(self.desk, tid, full=True))
+        self.assertNotIn("(the end of the reason)", views.show_text(self.desk, tid))
+
+    def test_the_page_cannot_answer_a_request_that_was_closed_meanwhile(self):
+        self.desk.add_ask("May the docs lane use the npm registry?")
+        self.desk.close_ask_as_coordinator(1, "done without it")
+        # a page that had not refreshed yet still shows it open
+        said = self.page_post("/api/ask/close", {"id": 1, "answer": "Yes"})
+        self.assertFalse(said["ok"])
+        self.assertEqual(said["problems"], ["request #1 was already closed by the coordinator (done without it); "
+                                            "your answer was not taken"])
+        a = self.desk.asks()[0]
+        self.assertEqual((a["closed_by"], a["reason"], a["answer"]), ("coordinator", "done without it", ""))
+        self.assertEqual(len(self.events("ask_closed")), 1)
+        self.assertEqual(self.desk.close_ask(1, "again"), "request #1 was already closed by the coordinator "
+                                                            "(done without it); your answer was not taken")
+
+    def test_a_merge_check_of_only_spaces_written_by_hand_is_unset(self):
+        from hansa import run
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["a"].update(check="true", merge_check="   ")
+        self.desk.settings_path.write_text(json.dumps(s))
+        ln = self.desk.settings()["lanes"]["a"]
+        self.assertNotIn("merge_check", ln)
+        self.assertEqual(run.merge_command(ln), "true")
+        self.assertFalse(run.own_merge_check(ln))
+
+    def test_lane_add_takes_a_merge_check_and_its_time_limit_and_like_copies_them(self):
+        said = self.hansa("lane", "add", "b", "--repo", str(self.repo), "--check", "make test",
+                          "--merge-check", "make test-all", "--merge-timeout", "30")
+        self.assertIn('merge_check "make test-all"; merge_timeout_min 30', said)
+        lanes = self.desk.settings()["lanes"]
+        self.assertEqual((lanes["b"]["merge_check"], lanes["b"]["merge_timeout_min"]), ("make test-all", 30))
+        self.hansa("lane", "add", "c", "--like", "b")
+        self.assertEqual((self.desk.settings()["lanes"]["c"]["merge_check"],
+                          self.desk.settings()["lanes"]["c"]["merge_timeout_min"]), ("make test-all", 30))
+        self.hansa("lane", "add", "d", "--like", "b", "--merge-check", "none", "--merge-timeout", "none")
+        self.assertNotIn("merge_check", self.desk.settings()["lanes"]["d"])
+        self.assertNotIn("merge_timeout_min", self.desk.settings()["lanes"]["d"])
+        self.hansa("lane", "add", "e", "--repo", str(self.repo), "--merge-check", "  ")
+        self.assertNotIn("merge_check", self.desk.settings()["lanes"]["e"])
+
+    def test_a_message_form_written_by_hand_that_hansa_cannot_use_is_said_where_it_falls_back(self):
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["a"].update(commit_message="{title} {when}", merge_message="Merge {task")
+        self.desk.settings_path.write_text(json.dumps(s))
+        status = views.status_text(views.status(self.desk))
+        self.assertIn("WARNING: lane a's commit_message \"{title} {when}\" has an unknown placeholder {when}", status)
+        self.assertIn("WARNING: lane a's merge_message \"Merge {task\" has a { or }", status)
+        self.assertIn("hansa uses its own message in its place, with the task number (set it right: hansa lane set a "
+                      "merge_message ...)", status)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(sh_out("git", "log", "-1", "--format=%s", m["head"], cwd=self.repo), f"{tid}: Add hello.txt")
+        self.assertIn("message: lane a's commit_message \"{title} {when}\" has an unknown placeholder",
+                      views.show_text(self.desk, tid))
+        said = self.hansa("merge", tid)
+        self.assertIn("note: lane a's merge_message \"Merge {task\" has a { or }", said)
+        self.assertEqual(sh_out("git", "log", "-1", "--format=%s", "main", cwd=self.repo), f"Merge {tid}: Add hello.txt")
+        self.assertIn("message: lane a's merge_message", views.show_text(self.desk, tid))
+        s["lanes"]["a"].pop("commit_message")
+        s["lanes"]["a"].pop("merge_message")
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertNotIn("WARNING", views.status_text(views.status(self.desk)))
+
+    def test_verify_of_a_task_whose_lane_was_made_again_on_another_repository(self):
+        d, t1, t2 = self.two_lanes()
+        self.assertEqual(self.desk.meta(t1)["repo"], str(self.repo.resolve()))  # recorded when it was queued
+        s = self.desk.settings()
+        other = self.tmp / "other"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(other)], check=True)
+        del s["lanes"]["a"]  # removed after t1 ran, then made again by the same name elsewhere
+        self.assertEqual(self.desk.save_settings(s), [])
+        s["lanes"]["a"] = {**json.loads(json.dumps(s["lanes"]["b"])), "repo": str(other)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        before = len(self.desk.tasks())
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "verify", t1])
+        self.assertEqual(str(e.exception), f"hansa: {t1}'s lane a is now on {other}, not on {self.repo.resolve()}, "
+                                           f"where {t1} ran and its branch is (the lane was removed and made again); "
+                                           f"verify it with --lane L, a lane on {self.repo.resolve()}; nothing was "
+                                           f"queued")
+        self.assertEqual(len(self.desk.tasks()), before)
+        out = self.hansa("verify", t1, "--lane", "b")  # b is on the repository where t1's branch is
+        self.assertIn(f"queued on lane b:", out)
+
+    def test_hansa_serve_writes_the_code_it_runs_as_it_starts(self):
+        import errno
+        import hansa
+        from hansa import web
+
+        def taken(*args):
+            raise OSError(errno.EADDRINUSE, "in use")
+        held, real = [], cli.hold_server_lock
+
+        def hold(desk):
+            held.append(real(desk))
+            return held[-1]
+        with unittest.mock.patch.object(web, "start_web", taken), unittest.mock.patch.object(
+                cli, "hold_server_lock", hold), self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "serve"])
+        held[0].close()
+        self.assertEqual(json.loads((self.desk.state_dir / "serve-code").read_text()),
+                         {"pid": os.getpid(), "build": hansa.build(), "installed": hansa.installed()})
+
+    def test_only_hansas_own_files_count_as_shipped(self):
+        import hansa
+        here = Path(hansa.__file__).resolve().parent
+        own = subprocess.run(["git", "ls-files", "hansa"], cwd=here.parent, capture_output=True, text=True).stdout
+        for f in own.split():  # every file the repository has under hansa/
+            self.assertTrue(hansa.shipped(Path(f).relative_to("hansa")), f)
+        for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py"):
+            self.assertFalse(hansa.shipped(Path(f)), f)
+
+    def test_the_coordinators_notes_rule_is_given_for_each_spelling_of_the_desk(self):
+        link = self.tmp / "desk-link"
+        link.symlink_to(self.desk.root)
+        allow = cli.permissions(Desk(str(link)))["allow"]
+        for root in (self.desk.root.resolve(), link):
+            self.assertIn(f"Edit(//{str(root).lstrip('/')}/notes/**)", allow)
+        self.assertEqual(cli.permissions(Desk(str(self.desk.root.resolve())))["allow"].count(
+            f"Edit(//{str(self.desk.root.resolve()).lstrip('/')}/notes/**)"), 1)
+        real = Path("/private/tmp/x")  # macOS: /tmp leads to /private/tmp
+        with unittest.mock.patch.object(Desk, "__init__", lambda d, root: None):
+            d = Desk("/private/tmp/x")
+        d.root, d.given = real, real
+        with unittest.mock.patch.object(cli, "resolved", lambda x: str(real) if x == "/tmp/x" else x):
+            self.assertEqual(cli.desk_spellings(d), ["/private/tmp/x", "/tmp/x"])
+        with unittest.mock.patch.object(cli, "resolved", lambda x: x):  # where /tmp is a folder of its own
+            self.assertEqual(cli.desk_spellings(d), ["/private/tmp/x"])
+
+    def test_cost_turns_heads_each_session_once_marks_a_turn_cut_by_since_and_takes_no_by(self):
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        t0 = time.time() - 3600
+
+        def at(n):
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t0 + n * 60))
+
+        def turn(n, mid):
+            usage = {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 100,
+                     "cache_creation_input_tokens": 0}
+            return [{"type": "user", "timestamp": at(n), "origin": {"kind": "human"},
+                     "message": {"role": "user", "content": "hi"}},
+                    {"type": "assistant", "timestamp": at(n), "message": {"id": mid, "model": "claude-opus-5",
+                                                                         "content": [], "usage": usage}}]
+        cut = turn(0, "a0") + [{**turn(10, "a1")[1], "message": {**turn(10, "a1")[1]["message"], "usage": {
+            "input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 0}}}]
+        for name, lines in (("aaaaaaaa-1", cut + turn(20, "a2")), ("bbbbbbbb-1", turn(15, "b1") + turn(25, "b2"))):
+            (proj / f"{name}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = cost.turns(self.desk, 1, since=t0 + 5 * 60)  # the first turn started before, its second step after
+        self.assertEqual([(t["session"][:1], t["before_window"], t["length"]) for t in rep["turns"]],
+                         [("a", True, 5001), ("b", False, 101), ("a", False, 101), ("b", False, 101)])
+        text = views.cost_turns_text(rep)
+        self.assertEqual((text.count("session aaaaaaaa"), text.count("session bbbbbbbb")), (1, 1))
+        lines = text.splitlines()
+        a, b = lines.index("session aaaaaaaa"), lines.index("session bbbbbbbb")
+        self.assertEqual(b - a, 3)  # a's two turns under its heading, then b's
+        self.assertIn("(from before the window: its steps, worth and length from its first step in it)", lines[a + 1])
+        self.assertNotIn("before the window", lines[a + 2])
+        with self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "cost", "--turns", "--by", "lane"])
+        self.assertIn("--turns lists the coordinator's turns session by session", str(e.exception))
+
+    def test_a_follower_restarted_before_posting_the_srt_line_posts_it_after_the_restart(self):
+        srt = {"key": ["srt"], "line": "- srt could not run: setups and checks wait"}
+        restarts, delivered = [], []
+
+        class Restarted(Exception):
+            pass
+
+        def run_follower(feeds, marks, gather="60"):
+            def ask(req):
+                if req["op"] == "start":
+                    return {"pos": req.get("resume", 0), "server_up": True}
+                if req["op"] == "feed":
+                    pos, items = feeds.pop(0) if feeds else (req["pos"], [])
+                    return {"pos": pos, "items": items, "server_up": True}
+                return {}
+
+            def restart(state):
+                restarts.append(state)
+                raise Restarted
+
+            def deliver(sock, text, sess, me):
+                delivered.append(text)
+                return True
+            with unittest.mock.patch.object(notify, "source", lambda desk: ask), \
+                    unittest.mock.patch.object(notify, "code_mark", lambda: marks.pop(0) if len(marks) > 1 else marks[0]), \
+                    unittest.mock.patch.object(notify, "CODE_SETTLE", 0), \
+                    unittest.mock.patch.object(notify, "_restart", restart), \
+                    unittest.mock.patch.object(notify, "_deliver", deliver), \
+                    unittest.mock.patch.object(notify, "_say", lambda *a: None), \
+                    unittest.mock.patch.object(notify, "gone", lambda sess: not feeds and restarts), \
+                    unittest.mock.patch.object(notify, "Namer", lambda *a: type("N", (), {"tick": lambda self: ""})()), \
+                    unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_GATHER": gather, "HANSA_NOTIFY_POLL": "0"}):
+                try:
+                    notify.follow(self.desk, "k1", {"pid": os.getpid()}, "sock", "nonce")
+                except Restarted:
+                    pass
+        # the srt line is read, and held to be posted with what follows; the code changes before it goes out
+        run_follower([(100, [srt])], ["old", "old", "new"])
+        self.assertEqual((delivered, restarts[0]["pos"]), ([], 0))
+        self.assertFalse(restarts[0]["told_srt"])  # not told yet: read again after the restart, it is posted
+        os.environ["HANSA_NOTIFY_RESUME"] = json.dumps(restarts[0])
+        self.addCleanup(os.environ.pop, "HANSA_NOTIFY_RESUME", None)
+        run_follower([(100, [srt])], ["new"], gather="0")
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("srt could not run", delivered[0])
+
+    def test_closing_a_task_keeps_the_note_its_closed_verification_already_has(self):
+        d = Dispatcher(self.desk)
+        t1 = self.desk.new_task("Add hello.txt")
+        self.settle(d, t1)
+        self.hansa("verify", t1)
+        vid = self.desk.meta(t1)["verify"]
+        self.assertEqual(self.settle(d, vid)["state"], "done")
+        self.hansa("cancel", vid)  # the verification itself, closed first
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa cancel")
+        self.hansa("cancel", t1)
+        self.assertEqual(self.desk.meta(t1)["state"], "cancelled")
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa cancel")
+
+    def test_workers_may_not_read_mavens_master_password_but_may_read_the_build_settings(self):
+        from hansa.desk import home_secrets
+        self.assertIn(".m2/settings-security.xml", home_secrets())
+        for kept in (".m2/settings.xml", ".m2", ".gradle/gradle.properties", ".gradle"):  # mirrors, proxies a build needs
+            self.assertNotIn(kept, home_secrets())
 
 class JavaPreludeTest(unittest.TestCase):
     """run.JAVA_PRELUDE, the sh hansa runs in the sandbox before a lane's commands and a worker's: Maven's proxy

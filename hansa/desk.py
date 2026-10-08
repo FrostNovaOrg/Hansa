@@ -27,6 +27,7 @@ import json
 import os
 import re
 import secrets as _secrets
+import shlex
 import shutil
 import site
 import string
@@ -56,26 +57,29 @@ MAX_DENY = 50
 MAX_WORDS = 200  # the words no release may send out (release_forbidden)
 # The project's own rules, the coordinator's and the principal's to keep: the card imports it (@notes/PROJECT.md),
 # so Claude Code loads it with the card at every start, after /clear and after compaction. hansa makes it once, at
-# hansa init, and never writes it again. A missing one loads nothing and stops nothing.
+# hansa init, and rewrites it only when asked (hansa notes archive). A missing one loads nothing and stops nothing.
 PROJECT_FILE = "notes/PROJECT.md"
 PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it builds, what may never go out, who "
-                 "decides what. Loaded with the card at every start; hansa never changes this file. Keep it short. -->\n")
+                 "decides what. Loaded with the card at every start; hansa changes this file only for hansa notes archive. "
+                 "Keep it short. -->\n")
 # Past this, hansa status says the file is long: it is part of the conversation's first message, so every turn
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
 # The events that may call for an alert to the principal (alert.from_event)
-ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "ask")
+ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
+           "ask")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
-# it: {lane, target, repo, base, command, after} (after: the target it must follow, "" for none); a target goes out
-# without asking only while it still has all of them. An entry saved before targets had names holds {lane, repo,
-# base, release}: the lane's unnamed target and its command; an entry without after counts only for a target that
-# must follow none
-LISTED_AS = ("repo", "base", "command", "after")
+# it: {lane, target, repo, base, command, after, fixed?} (after: the target it must follow, "" for none; fixed: "yes"
+# for a target that runs from a fixed checkout, left out for one that runs in the repository); a target goes out without asking only while it still has
+# all of them. An entry saved before targets had names holds {lane, repo, base, release}: the lane's unnamed target
+# and its command; an entry without after or fixed counts only for a target that must follow none and runs in the
+# repository
+LISTED_AS = ("repo", "base", "command", "after", "fixed")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release")
 MAX_TARGETS = 20  # named release targets on one lane
-TARGET_FIELDS = ("command", "timeout_min", "after")
+TARGET_FIELDS = ("command", "timeout_min", "after", "fixed")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
@@ -108,6 +112,9 @@ HOME_SECRETS = (
     ".gem/credentials", ".config/hub", ".config/glab-cli", ".config/tea", ".composer/auth.json",
     ".config/composer/auth.json", ".pub-cache/credentials.json", ".config/dart/pub-credentials.json",
     ".sbt/.credentials", ".ivy2/.credentials", ".config/pypoetry/auth.toml", ".subversion/auth",
+    # Maven's master password, which unlocks the passwords settings.xml holds encrypted (settings.xml itself and
+    # ~/.gradle/gradle.properties also hold mirrors and proxies a build needs: the principal lists them if not)
+    ".m2/settings-security.xml",
     # proxy clients' settings: they hold the proxy's server passwords or subscription links
     ".config/clash", ".config/clash.meta", ".config/mihomo", ".config/clash-verge",
     ".config/io.github.clash-verge-rev.clash-verge-rev", ".config/sing-box", ".config/v2ray", ".config/xray",
@@ -199,6 +206,9 @@ DEFAULT_ALLOW: list = []
 def home_secrets() -> tuple:
     """The built-in names, under the home folder, of what no worker may read on this system."""
     return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
+
+
+REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
 
 
 def default_settings() -> dict:
@@ -331,7 +341,8 @@ def validate(s: dict, root=None) -> list:
             continue
         if {"key", "api_key", "token"} & set(pv):
             p.append(f"{at}: keys are not kept in settings; use the key box on the page")
-        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "key", "api_key", "token"}
+        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "rest_minutes", "key", "api_key",
+                           "token"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if pv.get("kind") not in PROVIDER_KINDS:
@@ -343,6 +354,9 @@ def validate(s: dict, root=None) -> list:
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
             p.append(f"{at}: the endpoint address must start with https://")
+        if pv.get("rest_minutes") is not None and not _is_int(pv["rest_minutes"], 1, REST_MINUTES_MOST):
+            p.append(f"{at}: rest_minutes (its rest after a usage limit) must be a whole number from 1 to "
+                     f"{REST_MINUTES_MOST}, or empty for the desk's cool_minutes")
         cdir = pv.get("config_dir", "")
         if cdir and not str(cdir).startswith("/"):  # nothing expands ~ for a worker
             p.append(f"{at}: config_dir must be a full path starting with /")
@@ -359,8 +373,8 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
-                           "preview", "setup", "release", "targets", "max_turns", "timeout_min", "merge_timeout_min",
-                           "note", *MESSAGE_FIELDS}
+                           "preview", "preview_wait_s", "setup", "release", "targets", "max_turns", "timeout_min",
+                           "merge_timeout_min", "note", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -402,6 +416,8 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: timeout_min must be from 1 to 1440")
         if "merge_timeout_min" in ln and not _is_int(ln["merge_timeout_min"], 1, 1440):
             p.append(f"{at}: merge_timeout_min must be from 1 to 1440")
+        if "preview_wait_s" in ln and not _is_int(ln["preview_wait_s"], 1, 1800):
+            p.append(f"{at}: preview_wait_s must be from 1 to 1800")
 
     co = s.get("coordinator")
     if not isinstance(co, dict):
@@ -840,7 +856,7 @@ def target_problems(ln: dict) -> list:
         if not isinstance(name, str) or not NAME.match(name):
             p.append(f"{at}: use lowercase letters, digits and '-'")
         if not isinstance(t, dict):
-            p.append(f"{at}: must be an object with command, and optionally timeout_min and after")
+            p.append(f"{at}: must be an object with command, and optionally timeout_min, after and fixed")
             continue
         extra = set(t) - set(TARGET_FIELDS)
         if extra:
@@ -850,6 +866,14 @@ def target_problems(ln: dict) -> list:
             p.append(f"{at}: command must be one shell command line (up to 1000 characters)")
         if "timeout_min" in t and not _is_int(t["timeout_min"], 1, 1440):
             p.append(f"{at}: timeout_min must be from 1 to 1440")
+        if "fixed" in t and t["fixed"] is not True:
+            p.append(f"{at}: fixed must be true (or left out)")
+        named_base = t.get("fixed") is True and isinstance(cmd, str) and names_branch(cmd, ln.get("base") or "main")
+        if named_base:
+            p.append(f"{at}: runs from a fixed checkout of the release's commit, but its command names the base "
+                     f"branch ({named_base}), which by the time it runs may have moved past the commit the principal "
+                     "saw; name the commit instead: $HANSA_RELEASE_COMMIT (git push origin "
+                     f"\"$HANSA_RELEASE_COMMIT:refs/heads/{ln.get('base') or 'main'}\", say), or HEAD")
         after = t.get("after")
         if after is not None and (not isinstance(after, str) or after == name or after not in named):
             p.append(f"{at}: after must name another release target of the same lane")
@@ -862,6 +886,24 @@ def target_problems(ln: dict) -> list:
             seen.add(at["after"])
             at = named.get(at["after"])
     return p
+
+
+def names_branch(command: str, branch: str) -> str:
+    """The word of a command line that names the branch as what to read or send (main, refs/heads/main, the source
+    side of main:dest, and any of these followed by git's revision syntax: main~0, main^{commit}, main@{0}), '' for
+    none; naming it only as where to send (HEAD:main, $X:refs/heads/main) is not reading it. Only the command line
+    itself is read: a variable it expands or a script it runs is not looked into."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        words = command.split()
+    for w in words:
+        src = re.split(r"[~^]|@\{", w.lstrip("+").split(":", 1)[0], maxsplit=1)[0]
+        if src in (branch, f"refs/heads/{branch}", f"heads/{branch}"):
+            return w
+    return ""
 
 
 def _listed_ok(x) -> bool:
@@ -883,7 +925,8 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
         return {"repo": "", "base": "", "command": "", "after": ""}
     t = lane_targets(ln).get(target, {})
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
-            "command": str(t.get("command") or ""), "after": str(t.get("after") or "")}
+            "command": str(t.get("command") or ""), "after": str(t.get("after") or ""),
+            **({"fixed": "yes"} if t.get("fixed") else {})}
 
 
 def listed_key(entry) -> tuple:
@@ -895,14 +938,17 @@ def listed_key(entry) -> tuple:
     return None, None
 
 
-def record_listed(listed, lanes: dict) -> list:
+def record_listed(listed, lanes: dict, before=()) -> list:
     """The page's save of the list: a lane name, or {lane, target}, it sends is recorded with what the lane and the
-    target are now; an entry recorded before is kept as it was."""
+    target are now; an entry on the list before (before: the list as it was) is kept as it was, a bare lane name
+    saved by an older page as much as a recorded entry: either is taken back in only when the page sends it as a
+    tick ({lane, target}, as its button to take them back in does)."""
     if not isinstance(listed, list):
         return listed
+    kept = [x for x in before if isinstance(x, str)] if isinstance(before, list) else []
     out = []
     for x in listed:
-        fresh = isinstance(x, str) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
+        fresh = (isinstance(x, str) and x not in kept) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
         if fresh and _listed_ok(x):
             lane, target = listed_key(x)
             x = {"lane": lane, "target": target, **listed_as(lanes.get(lane), target)}
@@ -944,8 +990,9 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
                                     ("command", ("release command", "发布命令")),
-                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")))
-               if then.get(k, "") != now_as[k]]
+                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")),
+                                    ("fixed", ("way it runs (--fixed)", "运行方式（--fixed）")))
+               if then.get(k, "") != now_as.get(k, "")]
     if not changed:
         return ""
     return (f"保存清单之后它的{'和'.join(w[1] for w in changed)}变了" if zh else
@@ -1001,6 +1048,22 @@ def _message(ln, field: str, tid: str, title: str, lane: str) -> str | None:
         return None
     title = title if "{task}" in form.replace("{{", "") else own_title(title)
     return form.format(task=tid, title=title or "work", lane=lane or "")
+
+
+def message_fallback(ln, lane: str, field: str) -> str:
+    """When a lane's commit_message or merge_message is set but cannot be used (written by hand in the settings
+    file; hansa lane set refuses it), the line saying so: hansa uses its own message, task number included."""
+    form = (ln or {}).get(field)
+    if form is None or form == "" or not message_problem(form):
+        return ""
+    return (f"lane {lane}'s {field} {json.dumps(form, ensure_ascii=False)} {message_problem(form)}; hansa uses its "
+            f"own message in its place, with the task number (set it right: hansa lane set {lane} {field} ...)")
+
+
+def bad_messages(s: dict) -> list:
+    """message_fallback of each lane's message forms, for hansa status while the setting is bad."""
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
+    return [x for n, ln in sorted(lanes.items()) for f in MESSAGE_FIELDS if (x := message_fallback(ln, n, f))]
 
 
 def task_message(ln, lane: str, tid: str, title: str) -> str:
@@ -1547,6 +1610,7 @@ def is_git_rule(rule: str) -> bool:
 class Desk:
     def __init__(self, root) -> None:
         self.root = Path(root).resolve()
+        self.given = Path(os.path.abspath(os.path.expanduser(str(root))))  # as it was spelled, links not followed
         self.settings_path = self.root / "settings.json"
         self.secrets_dir = self.root / "secrets"
         self.tasks_dir = self.root / "tasks"
@@ -1578,6 +1642,10 @@ class Desk:
         loaded = read_json(self.settings_path, {})
         if isinstance(loaded, dict):
             s.update(loaded)
+        for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
+            # a merge_check of only spaces, written by hand, is unset, as hansa lane set makes it: never a command
+            if isinstance(ln, dict) and isinstance(ln.get("merge_check"), str) and not ln["merge_check"].strip():
+                del ln["merge_check"]
         return s
 
     def settings_rev(self) -> str:
@@ -1601,7 +1669,8 @@ class Desk:
                             for k in theirs]
             else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
                 lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
-                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes),
+                new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes,
+                                                                       old.get("releases_without_asking")),
                        "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
             problems = validate(new, self.root) + self.keys_in_release(old, new) + self.keys_in_alert(old, new)
             if problems:
@@ -1792,6 +1861,9 @@ class Desk:
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}
             meta.update({k: v for k, v in opts.items() if v not in (None, "")})
+            own = self.settings()["lanes"].get(meta["lane"]) if meta["lane"] else None
+            if isinstance(own, dict) and own.get("repo") and not meta.get("repo"):  # its lane's repository now:
+                meta["repo"] = resolved(own["repo"]) or own["repo"]  # a lane made again elsewhere is not the task's
             write_json(d / "meta.json", meta)
         self.event("task_added", task=tid, lane=meta["lane"], **({"browser": True} if meta.get("browser") else {}))
         return tid
@@ -1865,14 +1937,22 @@ class Desk:
         self.event("ask", id=n, by=by)
         return n
 
-    def close_ask(self, n: int, answer: str = "", by: str = "") -> None:
+    def close_ask(self, n: int, answer: str = "", by: str = "") -> str:
+        """Answers an open request; one no longer open (closed meanwhile by the coordinator, say, while the page
+        still showed it) is left as it was: what was refused is returned, "" when it was answered."""
         with self.lock():
             asks = self.asks()
-            for a in asks:
-                if a["id"] == n:
-                    a["closed"], a["answer"] = now(), self.redact(answer.strip())
+            a = next((a for a in asks if a.get("id") == n), None)
+            if not a:
+                return f"there is no request #{n}; nothing was answered"
+            if a.get("closed"):
+                return (f"request #{n} was already closed"
+                        + (f" by the coordinator ({a['reason']})" if a.get("closed_by") == "coordinator" else "")
+                        + "; your answer was not taken")
+            a["closed"], a["answer"] = now(), self.redact(answer.strip())
             write_json(self.asks_path, asks)
         self.event("ask_closed", id=n, by=by)
+        return ""
 
     def close_ask_as_coordinator(self, n: int, reason: str, by: str = "") -> None:
         """The coordinator closes an open request of this desk itself (hansa ask --close), saying why; the page

@@ -35,11 +35,24 @@ def build() -> str:
     return f"{__version__} {sha}".strip()
 
 
+SHIPPED = ("card.md", "ui.html", "no-signature")  # hansa's own files besides its Python sources and agents/*.md
+
+
+def shipped(rel: Path) -> bool:
+    """Whether a file at this path inside hansa/ is one of hansa's own: what an install puts in place."""
+    if "__pycache__" in rel.parts:
+        return False
+    if len(rel.parts) == 1:
+        return rel.suffix == ".py" or rel.name in SHIPPED
+    return len(rel.parts) == 2 and rel.parts[0] == "agents" and rel.suffix == ".md"
+
+
 @functools.lru_cache(maxsize=1)
 def installed() -> float:
     """When the code running here was put in place: when hansa/BUILD was written where an install wrote one, else
-    when hansa's newest file last changed (a checkout's commit time says when it was committed, not when it was
-    put in place). Asked once: hansa serve asks as it starts,
+    when hansa's newest own file last changed (a checkout's commit time says when it was committed, not when it was
+    put in place): its Python sources and the other files it ships (shipped), not a .DS_Store or an editor's
+    backup left beside them. Asked once: hansa serve asks as it starts,
     so it keeps the answer for the code it loaded (run.serve_code). 0 when unknown."""
     here = Path(__file__).resolve().parent
     try:
@@ -48,7 +61,7 @@ def installed() -> float:
         pass
     latest = 0.0
     for f in here.rglob("*"):
-        if "__pycache__" in f.relative_to(here).parts or f.suffix == ".pyc":
+        if not shipped(f.relative_to(here)):
             continue
         try:
             if f.is_file():

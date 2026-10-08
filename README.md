@@ -30,7 +30,10 @@ ssh -L 8765:127.0.0.1:8765 HOST /path/to/bin/hansa --desk /path/to/desk web
 It prints an address with a token; open it in the browser and keep the
 terminal open. More than one desk on a machine: each desk's `hansa serve` needs
 its own port (`hansa serve --port 8766`), and that desk's `hansa web` finds it
-(tunnel that port instead). On the page: add providers (a Claude Code login, or any
+(tunnel that port instead); `hansa status` and `hansa explain` say the address and
+port the page is served on, and whether `hansa serve` serves it now. A repository
+for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one
+without, in one line. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
@@ -82,7 +85,9 @@ page gives.
   provider order, allowed commands (for design sessions), network and write lists, environment,
   check, preview and setup commands, limits, and the merge check's own command and limit,
   `merge_check` and `merge_timeout_min`, for a heavier command run only before a merge: unset, the
-  merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`);
+  merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`:
+  side by side means lanes on one repository; when they each add to a CHANGELOG, `CHANGELOG.md merge=union`
+  in the repository's `.gitattributes` keeps their merges from conflicting there);
   each lane's standing instructions (`hansa lane brief`, kept in
   `lanes/<lane>/brief.md`); pause and resume; each lane's release command
   (`hansa lane set L release "git push origin main"`) or its named release
@@ -92,9 +97,12 @@ page gives.
   usual publish commands (`npm`, `pnpm`, `yarn`, `uv` and `poetry publish`,
   `twine upload`, `cargo publish`, `gem push`, `docker` and `podman push`,
   `mvn deploy`) from its own shell, whatever its mode, written plainly or with
-  options before the subcommand (`git -C DIR push`); run through another
-  program or shell (`bash -c "git push"`, `xargs`, a script) they are not
-  caught, and in manual mode such a command asks the principal. `hansa release`
+  options before the subcommand (`git -C DIR push`), and after a plain `xargs`
+  or a wrapper such as `env`, `nice` or `timeout`, which Claude Code looks
+  past (`xargs git push` is caught); run through another shell
+  (`bash -c "git push"`), a script, or an `xargs` with options of its own
+  before the command (`xargs -n1 git push`), they are not caught, and in
+  manual mode such a command asks the principal. `hansa release`
   runs the release command itself after the principal's yes.
   Each lane may also set the form of the messages hansa writes into its
   repository: `commit_message` for the commit of a task's work (and the merge
@@ -135,9 +143,13 @@ page gives.
   AI tools and Anthropic's own tool settings in `~/.config/anthropic`, cloud
   tools, git and registry credentials, proxy clients' settings with their
   server passwords or subscription links, password stores and keyrings, the
-  keychains, cookies, mail and messages under `~/Library`), or of
+  keychains, cookies, mail and messages under `~/Library`; Maven's master
+  password, `~/.m2/settings-security.xml`), or of
   the folders and files the principal lists on the page (Settings, "workers may
-  not read": this machine's own folders of keys; Read is denied there to every
+  not read": this machine's own folders of keys, and `~/.m2/settings.xml` or
+  `~/.gradle/gradle.properties` when they hold deploy credentials the project's
+  builds do not need: hansa leaves them readable, as they also hold the mirrors
+  and proxies a build may need; Read is denied there to every
   Claude Code run hansa starts, the coordinator too. An entry that would stop
   every worker is refused on saving, each with its reason: the home folder,
   the desk, a lane's repository, a folder on the `PATH`, the system's programs
@@ -241,6 +253,37 @@ page gives.
   not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
   hooks from an empty folder and commit and tag signing off, whatever a
   setting there says; in the lane's own checkout its hooks run as before.
+- One Bash call of a task or verification worker may run as long as the lane's
+  check may, plus 5 minutes, but never past the worker's own limit: hansa sets
+  Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most
+  10 minutes). The check's limit is the lane's `merge_timeout_min`, else its
+  `timeout_min`; the worker's is `timeout_min`. A call that asks for no timeout
+  still stops after 10 minutes (`BASH_DEFAULT_TIMEOUT_MS`; less when the most is
+  less), so a command that hangs does not hold it for the whole limit. Workers
+  are told these limits in minutes, to give the Bash tool's timeout (in
+  milliseconds, up to the most) for a long build or suite, and to run it in the
+  foreground, in one Bash call, never in the background while they end their
+  turn. A worker that does end its turn while
+  background work it started still runs is resumed once, in the same session,
+  with a short message: that work was stopped with it, so it runs it again in the
+  foreground, waits for it, then reports. A second time it is not resumed; `hansa
+  show` then says what was still running. The time limit counts from the task's
+  start, across both runs. When the task is queued again for a new try (after a
+  dropped connection, say), that try starts with nothing of the earlier try's
+  resume: it may be resumed once in its own right, and the earlier try's turns
+  and tokens stay in its attempt record. For a browser task whose lane has a
+  preview, the first run's preview is stopped when that run ends, before hansa
+  decides on the resume, and the resumed run gets one started again from the same
+  worktree: never two at once. The first one's output is kept beside the second's
+  (`preview-before-resume.log`, which `hansa show` names).
+- A run that ended on a dropped connection is tried once more by itself. hansa
+  reads only Claude Code's own error lines for this: one that begins `API Error`
+  (a 5xx, a connection error or reset, a request that timed out, an overloaded
+  provider, unable to connect, but not a certificate error), one that begins
+  with a connection reset, refused or closed, a socket hang up, a fetch that failed or "Connection lost while your
+  computer was asleep", one that ends `(ENETUNREACH)`, and the API's
+  `overloaded_error`. A test that
+  timed out, or a log line saying "overloaded", is the task's own failure.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a
@@ -289,13 +332,62 @@ page gives.
   would stop every command of the lane's workers), no `PATH` entry that is empty
   or not a full path, and no place inside the desk. The file hansa writes it to
   for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
+- A task or verification with a browser (`hansa add --browser`, `hansa verify
+  --browser`) on a lane with a `preview` (the command that starts the app, such
+  as `npm run dev`) gets the app started for it. On macOS hansa starts the
+  preview itself before the worker: in the lane's worktree, after the lane's
+  setup, in `srt` with the lane's sandbox (network and write lists, env, the
+  prelude), with local binding allowed for that one process; the worker's own
+  sandbox stays as the lane sets it. hansa waits up to the lane's
+  `preview_wait_s` (default 120 seconds) for the first `http://localhost:PORT`
+  or `http://127.0.0.1:PORT` address the preview prints, or a port it names
+  that answers, and puts the address in the worker's instructions; a preview
+  not ready by then is stopped, and the worker is told it did not start, with
+  its last lines, and goes on without it. hansa stops the preview with its
+  whole process group when the worker ends, however it ends (done, failed,
+  cancelled, stopped at the ceiling, or ended while `hansa serve` was
+  restarted). It stops the processes the preview started that left that group
+  too: while the preview runs, hansa looks every half second for what runs
+  below it and records each one (its number and start time), and at the end
+  stops each recorded one still running, whatever its group or environment,
+  and any orphan (a process whose parent is the system's first process, as a
+  daemon that forked twice is) started since whose working folder is in the
+  worktree or the preview's temporary folder. A process with a living parent
+  that the preview did not start is not touched, so a shell, an editor or a
+  file watcher you start in the worktree while a browser task runs there is
+  left alone. But a process you start there with `nohup` (or an editor that
+  detaches itself from the shell that started it) becomes an orphan once that
+  shell ends, and is stopped at the end of the task. What can still escape on macOS: a process that forks twice,
+  leaves the group, clears its environment and changes folder all between two
+  looks (half a second). It keeps running after the task, with the
+  preview's sandbox, local binding included: it can reach the machine's
+  loopback, write in the worktree and the lane's write list, and reach the
+  hosts on the lane's network list, until it ends or the machine restarts. A
+  worker's own processes are not recorded this way: hansa still finds what a
+  worker leaves by `HANSA_TASK` in its environment or its run's folder in its
+  arguments, as before. Its output is kept in the task's folder as
+  `preview.log`, keys removed, at most its first and last 2 MB on disk with a
+  line saying how much was left out between them (a byte that is not UTF-8 is
+  kept as one `?`; where a cut falls inside a line, 4 KB more on each side of
+  it are left out, so no key is kept in part, and the line says so; if
+  removing keys made it longer, it is cut again after; hansa reads the whole output as
+  it comes, so a preview that prints without end never waits on it and never
+  fills the disk); `hansa show` says where and what became of it. **On macOS such a
+  preview can reach every service on this machine's loopback while it runs**,
+  as a lane with `localhost` on its network list can: that is the price of
+  looking at the app in a browser on a Mac. **On Linux hansa does not start
+  it**: `srt` runs a command there in a network namespace of its own
+  (bubblewrap's `--unshare-net`; local binding is a macOS setting), so a
+  server bound inside listens on the sandbox's own loopback, and the browser,
+  which runs outside the sandbox, cannot reach it. The worker is told so. A
+  design session starts its own preview, as before.
 - Releases are the last step. hansa merges into a lane's base branch and stops
   there; a lane's release command (a push, a wait for CI such as `gh run watch
   --exit-status`, a deploy script) is how the base branch goes out. A lane
   that sends it out in more than one way (a push to the public repository, an
   install on a test server, an install on the production server) names its
   release targets instead, with `hansa lane target L NAME "<command>"
-  [--minutes N] [--after OTHER]`: each has its own command, its own time limit
+  [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
   (else the lane's `timeout_min`) and optionally another target of the lane
   that must have sent out the same commit first; a lane has either the
   `release` command (its one unnamed target) or named targets. `hansa
@@ -313,10 +405,12 @@ page gives.
   starts. Otherwise the page shows it, with its target, with Release and
   Refuse; a target the principal ticks as released without asking (each one
   on its own) needs no answer while the lane's repository and base branch, the
-  target's command and the target it must follow (its `--after`, or none) are
-  what they were when the list was saved, and while the desk is not paused: a
+  target's command, the target it must follow (its `--after`, or none) and
+  whether it is `--fixed` are what they were when the list was saved, and while the desk is not paused: a
   change to any of them, `--after` dropped or changed included, unticks it
-  until the principal saves the list again; `--minutes` alone does not, and a
+  until the principal takes it back in (the page's button that takes changed
+  entries back in as they are now, or unticking and ticking it again, then
+  Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
   target taken out and set again with the same command and `--after` keeps its
   tick. hansa serve runs the
   command only then, and only while the base branch and the command are still
@@ -325,12 +419,43 @@ page gives.
   outside the sandbox (it needs the account's logins and network), with
   hansa's own environment (not the lane's env), the target's time limit as its
   limit, its output kept without keys in `.hansa/releases/`. One release at a
-  time per repository, and none while a merge or merge check runs there, nor a
-  merge while a release runs: a release holds the repository, so a long
-  install keeps that repository's merges waiting (a later change may let such
-  a target run from a fixed checkout instead). The coordinator hears when the principal answers
+  time per repository. A release that runs in the repository holds it: none
+  starts while a merge or merge check runs there, nor a merge while it runs. A
+  target set `--fixed` runs instead in a detached checkout of the release's
+  commit made for it under the desk (removed when it ends, however it ends,
+  and swept after a restart), with `HANSA_RELEASE_COMMIT`,
+  `HANSA_RELEASE_TARGET` and `HANSA_RELEASE_REPO` in its environment, and
+  holds nothing, so a long install leaves the repository's merges going on;
+  its command should send the commit (`$HANSA_RELEASE_COMMIT`, or `HEAD`), not
+  the base branch, which may have moved past what the principal saw. hansa
+  refuses a fixed target whose command line itself names the base branch as
+  what to send (`main`, `refs/heads/main`, `main~0`, `main^{commit}`,
+  `main@{0}`, or the source of `main:prod`; `HEAD:main` is allowed), but a
+  variable the command expands or a script it runs is not looked into. The commits going out
+  are read and checked for forbidden words without holding the desk, each
+  commit's own change once (a merge's: only what it adds beyond its parents,
+  git's `--cc`), and recorded only if they are still what goes out; hansa
+  serve checks again at the start only when the commit, the starting point,
+  the words or the command changed. The coordinator hears when the principal answers
   and when the release ends. `hansa release` lists them; `hansa explain lane L`
   shows each target's command and its last release.
+- A release can be stopped: the coordinator with `hansa release --stop ID
+  [reason]`, the principal with Stop on the page. One that has not started yet
+  (waiting for the principal's answer, or approved and waiting its turn) is
+  closed as stopped and never runs. A running one gets TERM to its command's
+  whole process group, then KILL 30 seconds later to what still runs; it is
+  recorded as stopped, with who stopped it and why, and its output so far is
+  kept (a fixed target's checkout is removed as at any other end). A stopped
+  release went out for no `--after`: a target that must follow it is not let
+  through. A stopped install may leave the server half-switched, so a release
+  command for which that matters should handle TERM: finish or undo the step it
+  is in. A stop that comes after the command has already ended is not a stop:
+  the release is recorded done or failed, as its exit says, with a note that the
+  stop came after it ended. What a release's command starts is recorded while
+  it runs, also what leaves its process group, and what of it still runs is
+  stopped at any end (a stop, the time limit, a failure, done). The principal's
+  alert command is told when the coordinator stops one (`release_stopped`); the
+  coordinator hears when the principal does.
 - Alerts reach the principal away from the page. The principal may set one
   alert command line on the page (Settings, Alerts), such as a script that
   sends a phone message; the page records that it saved it, and when. Only the
@@ -338,12 +463,12 @@ page gives.
   set` has nothing like it. `hansa serve` runs it when a release starts waiting
   for the principal's yes (also when a ticked target's tick no longer holds and
   its release goes back to waiting), when a release ends (done, failed, void or
-  forbidden), when a request to the principal is filed (`hansa ask`), and when
+  forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), and when
   its own rounds have stopped for 15 minutes; not for ordinary task events,
   which go to the coordinator. It runs as the desk's account, outside the
   sandbox, in the desk's folder, with hansa's own environment (not a lane's),
   the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
-  `ask`, `server_stuck`, `test`; comma-separated when several go out together)
+  `release_stopped`, `ask`, `server_stuck`, `test`; comma-separated when several go out together)
   and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
   characters; a release's text names its lane and target. It has 30 seconds; its own exit ends the run, even if it leaves a
   child running, and only at the limit is its process group killed. Alerts
@@ -424,6 +549,33 @@ Mockito documents; in the pom:
 Gradle is not covered yet: the prelude sets nothing for it but
 `JAVA_TOOL_OPTIONS`.
 
+## When a provider hits a usage limit
+When a provider answers with a usage limit (HTTP 402 or 429, or the wording of one), it rests: no task
+starts on it until the rest ends, and a task stopped by the limit moves to the next ready provider of its
+lane, or waits for one.
+
+- **Until the reset time, when the error gives one**, and a minute, for at most 31 days. hansa reads a
+  clock time (`You've hit your session limit · resets 3pm (Europe/Berlin)`, as Claude Code prints a
+  subscription's limit), a date and time (`resets Oct 9, 3pm (Europe/Berlin)`, `resets 2026-08-08 00:00
+  UTC`), a Unix time (`usage limit reached|1760000000`, `resets_at`), a `retry-after` value given in the
+  message, and "in N minutes" or "in N hours" (`Please try again in 20 minutes`). A time without a zone is
+  the machine's local time; a month and day without a year is in the year that puts it nearest to now.
+  A form hansa is unsure of, a time already past, or a line it cannot read gets the fixed length below.
+- **Else for the provider's own rest**, `rest_minutes` on the page (1 to 44640, a month), or the desk's
+  `cool_minutes` (30 by default) when it is empty. Fit it to the provider: a subscription's window is a
+  few hours, an API key's limit may be per minute, a plan's allowance may be monthly.
+- **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
+  using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
+  limit again right after each rest cannot hold a task forever. Any other failure counts as before.
+  `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
+  when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
+- **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
+  dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on its
+  attempt record; a run an earlier `hansa serve` started and lost track of is read from its session record
+  as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
+  the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
+  and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
+
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the
@@ -444,7 +596,8 @@ go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
 loads it with the card at every start, after `/clear` and after compaction, and the
 import survives every card refresh. `hansa init` makes the file once, holding only
 an HTML comment that says what it is for (Claude Code drops such comments, so it
-costs nothing until something is written there); hansa never writes it again. A
+costs nothing until something is written there); after that hansa rewrites it
+only when the coordinator asks, with `hansa notes archive PROJECT.md HEADING`. A
 missing file loads nothing and stops nothing. The coordinator and you keep it; the
 coordinator edits it without asking, as anything under `notes/`. Workers do not
 see it: rules for a lane's workers go in its brief. `hansa status` shows its size,
@@ -465,8 +618,11 @@ looks like an empty box: it may send the guess as if you wrote it.
 - Alpha: settings, commands and files may still change between versions.
 - A worker's and a design session's commands (the lane's preview among them),
   and the lane's setup and check commands, run in the operating system's
-  sandbox; the coordinator does not, and runs as the desk's user. There are no
-  design sessions on Linux (above). Run a desk as a user, or on a machine, whose files you
+  sandbox, and so does the preview hansa starts for a task with a browser (on
+  macOS only, with local binding: it can reach every service on the machine's
+  loopback while it runs, as a design session's commands can); the coordinator
+  does not, and runs as the desk's user. There are no design sessions on Linux
+  (above). Run a desk as a user, or on a machine, whose files you
   are content for that code to reach.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, lane_targets, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
+                   kept_from_workers, lane_targets, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
@@ -39,29 +39,54 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
-    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
-        d.mkdir(parents=True, exist_ok=True)
-    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
-    s = default_settings()
-    if repo:
+    if repo:  # looked at before anything is made, so a refusal leaves no half-made desk
         if not resolved(repo):
             raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
         repo = resolved(repo)
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
-        base = base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+        base = lane_base(repo, base, "no desk was made")
+    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
+    s = default_settings()
+    if repo:
         s["lanes"][lane] = default_lane(repo, base)
         (desk.lanes_dir / lane).mkdir(exist_ok=True)
         (desk.lanes_dir / lane / "brief.md").write_text("", encoding="utf-8")
     write_json(desk.settings_path, s)
     (desk.root / "CLAUDE.md").write_text(CARD.read_text(encoding="utf-8"), encoding="utf-8")
-    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; never written again
+    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
         desk.project_path.write_text(PROJECT_INTRO, encoding="utf-8")
     (desk.root / ".claude").mkdir(exist_ok=True)
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
     return desk
+
+
+def lane_base(repo: str, base: str, nothing: str) -> str:
+    """A new lane's base: base, or else the branch the checkout is on; refused in one line when it is not a git
+    checkout or has no commit yet (a lane's tasks start from a commit). nothing: what was not done, said after."""
+    try:
+        if git("rev-parse", "--is-inside-work-tree", cwd=repo) and not subprocess.run(
+                ["git", "rev-parse", "-q", "--verify", "HEAD^{commit}"], cwd=repo, capture_output=True).stdout.strip():
+            raise SystemExit(f"hansa: {repo} has no commit yet; make a first commit there (git commit), then run "
+                             f"this again; {nothing}")
+        return base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); {nothing}")
+
+
+def desk_spellings(desk: Desk) -> list:
+    """The desk's path, and the other spellings that lead to it the coordinator may write: as it was given, and on
+    macOS without /private in front (/tmp/desk for /private/tmp/desk), when they lead to the same folder."""
+    out = [str(desk.root)]
+    short = str(desk.root).removeprefix("/private") if str(desk.root).startswith("/private/") else ""
+    for x in (str(desk.given), short):
+        if x and x not in out and (resolved(x) or x) == str(desk.root):
+            out.append(x)
+    return out
 
 
 def permissions(desk: Desk) -> dict:
@@ -71,8 +96,10 @@ def permissions(desk: Desk) -> dict:
     guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl",
                f"//{r}/lanes/**"]
     # an Edit rule covers every file-editing tool (Write too); //path is absolute. Claude Code allows a write only
-    # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win
-    return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/notes/**)"],
+    # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win.
+    # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
+    # the short way matches only with both
+    return {"allow": ["Bash(hansa:*)", *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
             "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]
             + [f"Bash({c}:*)" for c in NO_PUBLISH] + [f"Bash({r})" for r in no_publish_with_options()]}
 
@@ -88,8 +115,9 @@ NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish",
 def no_publish_with_options() -> list:
     """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
     reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
-    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. They stop
-    nothing run through another program or shell (bash -c, xargs, a script)."""
+    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. Claude Code
+    matches them after a plain xargs and wrappers such as env, nice or timeout too; they stop nothing run
+    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push)."""
     return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
 
 
@@ -222,7 +250,8 @@ def cmd_status(a):
 
 def cmd_show(a):
     desk = Desk.find(a.desk)
-    print(views.report_text(desk, a.id) if a.report else views.show_text(desk, a.id, full=a.full))
+    print(views.report_text(desk, a.id) if a.report else views.check_output_text(desk, a.id) if a.check
+          else views.show_text(desk, a.id, full=a.full))
 
 
 def cmd_diff(a):
@@ -428,8 +457,9 @@ def cmd_merge(a):
                 pass
             raise SystemExit(desk.redact(conflict_advice(a.id, base, places, str(e)[:300])))
         note = unverified_note(desk, m)  # before its verification is closed
+        said = message_fallback(lane, m["lane"], "merge_message")
         desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
-                    unverified=note or None)
+                    unverified=note or None, merge_message_note=said or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
     desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}),
@@ -440,6 +470,8 @@ def cmd_merge(a):
                                                      f"{merge_command(lane)})" if unchecked else ""))
     if note:
         print(f"note: {note}. It is merged: this is a note, not a stop")
+    if said:
+        print(f"note: {said}")
 
 
 def _unverified_later(desk: Desk, m: dict) -> str:
@@ -650,7 +682,9 @@ def _verify(desk: Desk, a) -> None:
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
     lane = m.get("lane", "")
-    if (a.lane and a.lane != lane) or lane not in desk.settings()["lanes"]:
+    own = desk.settings()["lanes"].get(lane)
+    moved = own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"])
+    if (a.lane and a.lane != lane) or own is None or moved:
         _lane_reaches(desk, a.lane or lane, m)
         lane = a.lane or lane
     held = branch_holds(desk.settings()["lanes"][lane]["repo"], m)  # what is verified is the recorded commit
@@ -676,12 +710,22 @@ def _verify(desk: Desk, a) -> None:
           + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
 
 
+def _same_repo(x: str, y: str) -> bool:
+    return (resolved(x) or x) == (resolved(y) or y)
+
+
 def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
     """Refuses, queueing nothing, a lane that cannot reach the task's change: one that is not on the desk, or not on
     the repository of the task's own lane, where the task's branch is."""
     lanes = desk.settings()["lanes"]
     nothing = "; nothing was queued"
     own = lanes.get(m.get("lane"))
+    if own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"]):
+        if name == m["lane"]:  # removed and made again on another repository: not where the task's branch is
+            raise SystemExit(f"hansa: {m['id']}'s lane {name} is now on {own['repo']}, not on {m['repo']}, where "
+                             f"{m['id']} ran and its branch is (the lane was removed and made again); verify it "
+                             f"with --lane L, a lane on {m['repo']}{nothing}")
+        own = {**own, "repo": m["repo"]}
     if own is None and name == m.get("lane"):
         raise SystemExit(f"hansa: {m['id']}'s lane {name or '(none)'} is no longer on the desk; verify it with --lane L, "
                          f"a lane on the repository where its branch {m.get('branch') or 'task/' + m['id']} is"
@@ -696,11 +740,33 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
                              f"({m['head'][:12]}), so lane {name} cannot be shown to reach it. Verify it on a lane on "
                              f"the repository where that branch is{nothing}")
         return
-    same = lambda x, y: (resolved(x) or x) == (resolved(y) or y)
-    if not same(lanes[name]["repo"], own["repo"]):
+    if not _same_repo(lanes[name]["repo"], own["repo"]):
         raise SystemExit(f"hansa: lane {name} cannot reach {m['id']}'s change: it is on {lanes[name]['repo']}, and "
                          f"{m['id']}'s branch is in {own['repo']}, the repository of its lane {m['lane']}. Verify it "
                          f"on a lane on that repository{nothing}")
+
+
+def _stop_release(desk: Desk, a) -> None:
+    """hansa release --stop ID [reason]: call a release off."""
+    if os.environ.get("HANSA_TASK"):
+        raise SystemExit("hansa: only the coordinator stops a release; a worker, verification or design session "
+                         "cannot. Say in your report why it should not go out")
+    rid = a.stop.lstrip("#")
+    if not rid.isdigit():
+        raise SystemExit(f"hansa: --stop takes a release's number (hansa release lists them), not {a.stop!r}")
+    reason = " ".join(([a.lane] if a.lane else []) + list(a.note))
+    out = release.stop_release(desk, int(rid), reason, by=os.environ.get("HANSA_ROLE", "cli"))
+    if not out["ok"]:
+        raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
+    r = release.get(desk, int(rid)) or {}
+    if out["state"] == "stopped":
+        print(desk.redact(f"release #{rid} of {release.what(r)} is stopped; nothing was run"))
+        return
+    print(desk.redact(
+        f"release #{rid} of {release.what(r)} is being stopped: hansa serve sends TERM to its command's process group "
+        f"within seconds, and KILL {release.STOP_GRACE} s later to what still runs; it is then recorded as stopped, "
+        f"its output so far kept" + (" and its checkout removed" if r.get("fixed") else "")
+        + ". The server may be left half-switched: hansa release shows its last lines"))
 
 
 def cmd_pause(a):
@@ -772,6 +838,9 @@ def cmd_ask(a):
 
 def cmd_release(a):
     desk = Desk.find(a.desk)
+    if a.stop is not None:
+        _stop_release(desk, a)
+        return
     if not a.lane:
         print(desk.redact(release.list_text(desk)))
         return
@@ -788,7 +857,8 @@ def cmd_release(a):
             + (f" by target {r['target']}" if r.get("target") else "") + ", "
             + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
                f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
-            + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']}")
+            + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
+            f"({release.runs_text(r)})")
     if r["state"] == "forbidden":
         raise SystemExit(desk.redact(
             f"hansa: {head}\nrefused: what goes out holds words the principal keeps from going out (the web page, "
@@ -807,7 +877,8 @@ def cmd_release(a):
                           f"desk is paused ({paused}): while it is, only a release the principal said yes to runs, so "
                           f"this one waits until the desk is resumed. {after}" if paused else
                           f"{head}\n{listed}: hansa "
-                          f"serve runs the command in {r['repo']} within seconds. {after}"))
+                          f"serve runs the command {'from a checkout of ' + r['commit'][:10] + ' made for it' if r.get('fixed') else 'in ' + r['repo']} "
+                          f"within seconds. {after}"))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
     print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
@@ -834,7 +905,10 @@ def cmd_notify_feed(a):
 
 
 def cmd_explain(a):
-    print(views.explain_text(Desk.find(a.desk), a.what or "", a.name or ""))
+    if a.all and a.what != "lane":
+        raise SystemExit("hansa: --all is for hansa explain lane NAME: the whole built-in list of what its workers "
+                         "may not read")
+    print(views.explain_text(Desk.find(a.desk), a.what or "", a.name or "", a.all))
 
 
 def _since(text: str) -> float:
@@ -853,6 +927,10 @@ def _since(text: str) -> float:
 
 
 def cmd_cost(a):
+    if a.turns and a.by:
+        raise SystemExit("hansa: --turns lists the coordinator's turns session by session, with totals by what "
+                         "started them; it has no --by. For totals by day, seat, lane, task, model or provider: "
+                         "hansa cost --by ...")
     if a.turns:
         rep = cost.turns(Desk.find(a.desk), a.days, _since(a.since) if a.since else None)
         print(json.dumps(rep, ensure_ascii=False, indent=1) if a.json else views.cost_turns_text(rep))
@@ -862,7 +940,7 @@ def cmd_cost(a):
         rep = {k: v for k, v in rep.items() if k != "rows"} if not a.rows else rep
         print(json.dumps(rep, ensure_ascii=False, indent=1))
     else:
-        print(views.cost_text(rep, a.by))
+        print(views.cost_text(rep, a.by or "day"))
 
 
 def cmd_check(a):
@@ -913,6 +991,7 @@ def cmd_serve(a):
         raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
                          f"server on a free port with hansa serve --port N (hansa web then finds it)")
     (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
+    (desk.state_dir / "web-host").write_text(a.host, encoding="utf-8")  # with it, where hansa status says the page is
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
@@ -938,10 +1017,7 @@ def cmd_serve(a):
 
 def web_port(desk: Desk) -> int:
     """The port this desk's hansa serve last served the page on: another desk's server may hold the default."""
-    try:
-        return int((desk.state_dir / "web-port").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 8765
+    return views.web_address(desk)[1]
 
 
 def cmd_web(a):
@@ -1201,11 +1277,11 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 
 LANE_LISTS = ("providers", "allow", "network", "write")
-LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min")
+LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "max_turns", "timeout_min", "merge_timeout_min", "note", *MESSAGE_FIELDS)
-# empty (none) takes them out: the check's command and limit again, hansa's own message forms
-LANE_UNSET = ("merge_check", "merge_timeout_min", *MESSAGE_FIELDS)
+               "release", "max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s", "note", *MESSAGE_FIELDS)
+# empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait
+LANE_UNSET = ("merge_check", "merge_timeout_min", "preview_wait_s", *MESSAGE_FIELDS)
 OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -1330,7 +1406,8 @@ def cmd_lane(a):
             # none as lane set takes it: alone it means empty, with other values it is refused
             given = {f: _lane_value(f, v if isinstance(v, list) else [v]) for f, v in (
                 ("providers", a.providers), ("check", a.check), ("setup", a.setup), ("allow", a.allow),
-                ("network", a.network)) if v is not None}
+                ("network", a.network), ("merge_check", a.merge_check), ("merge_timeout_min", a.merge_timeout))
+                if v is not None}
             if a.base is not None:
                 _lane_value("base", [a.base])
             if a.like:
@@ -1345,9 +1422,9 @@ def cmd_lane(a):
                 like = s["lanes"][a.like]
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
-                for f in ("check", "setup", "merge_check"):
-                    if ln.get(f) == "":
-                        del ln[f]
+                for f in ("check", "setup", "merge_check", "merge_timeout_min"):
+                    if ln.get(f) in ("", None):  # none: unset, as hansa lane set leaves it
+                        ln.pop(f, None)
                 repo, base = ln["repo"], ln.get("base", "main")
             elif not a.repo:
                 raise SystemExit("hansa: say which git checkout the lane works on (--repo PATH), or which lane to "
@@ -1361,12 +1438,9 @@ def cmd_lane(a):
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
             if not a.like:
-                try:
-                    base = a.base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-                except (RuntimeError, OSError) as e:
-                    raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); nothing was changed")
+                base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
-                ln.update({k: v for k, v in given.items() if v})
+                ln.update({k: v for k, v in given.items() if v or isinstance(v, int)})
             new["lanes"][a.name] = ln
             _save(desk, new)
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
@@ -1575,12 +1649,13 @@ def _target_text(name: str, t: dict, ln: dict) -> str:
     return (f"{name or '(unnamed: the release command)'}: {t.get('command')}  "
             f"[{t.get('timeout_min') or ln.get('timeout_min', 240)} min"
             + ("" if t.get("timeout_min") else ", the lane's") + "]"
-            + (f"  after {t['after']}" if t.get("after") else ""))
+            + (f"  after {t['after']}" if t.get("after") else "")
+            + f"  ({release.runs_text(t)})")
 
 
 def _lane_target(desk: Desk, a, new: dict) -> None:
-    """hansa lane target L [NAME [COMMAND|none] [--minutes N|none] [--after T|none]]: list, set or remove a lane's
-    named release targets."""
+    """hansa lane target L [NAME [COMMAND|none] [--minutes N|none] [--after T|none] [--fixed [none]]]: list, set
+    or remove a lane's named release targets."""
     ln = new["lanes"][a.name]
     if not a.target:
         shown = lane_targets(ln)
@@ -1596,8 +1671,8 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
     named = ln.get("targets") if isinstance(ln.get("targets"), dict) else {}
     old = named.get(a.target)
     if cmd == "none":  # the help's word for taking it out
-        if a.minutes is not None or a.after is not None:
-            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes or --after. "
+        if a.minutes is not None or a.after is not None or a.fixed is not None:
+            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after or --fixed. "
                              "Nothing was changed")
         if old is None:
             raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; its targets: "
@@ -1639,6 +1714,14 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
             t.pop("after", None)
         else:
             t["after"] = a.after
+    if a.fixed is not None:
+        if a.fixed == "none":
+            t.pop("fixed", None)
+        elif a.fixed == "yes":
+            t["fixed"] = True
+        else:
+            raise SystemExit("hansa: --fixed takes no value (runs from a fixed checkout), or none (runs in the "
+                             "repository again). Nothing was changed")
     ln["targets"] = {**named, a.target: t}
     _save(desk, new)
     desk.event("lane_set", lane=a.name, field="targets", target=a.target)
@@ -1651,6 +1734,15 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
               f"for going out without asking), so this change is recorded and a release asked with the old command no "
               f"longer runs. Tell the principal, in the conversation, what you changed and why. Ask for a release "
               f"with: hansa release {a.name} {a.target} \"<note>\"")
+    if bool((old or {}).get("fixed")) != bool(t.get("fixed")):
+        print(f"It now {release.runs_text(t)}"
+              + (f": its command runs in a checkout of the release's commit made for it, so it names that commit as "
+                 f"$HANSA_RELEASE_COMMIT (or HEAD), never the base branch, which may have moved by then; "
+                 f"$HANSA_RELEASE_REPO is the lane's repository" if t.get("fixed") else "")
+              + ". A tick for going out without asking stops counting until the principal takes it back in on "
+                "the page (its button for that, or unticking and ticking it again, then Save; a plain Save keeps "
+                "the old entry); "
+                "tell the principal, in the conversation, what you changed and why.")
 
 
 def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
@@ -1893,6 +1985,8 @@ def main(argv=None):
     g.add_argument("--full", action="store_true", help="the whole text and the whole report")
     g.add_argument("--report", action="store_true", help="the report alone, whole (for a verification, its verdict "
                                                          "and its report)")
+    g.add_argument("--check", action="store_true", help="the whole output of the task's last check and of its last "
+                                                        "merge check, keys removed")
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
@@ -1954,12 +2048,30 @@ def main(argv=None):
                      "for a commit the other one already sent out. It waits for the principal's yes on the web page "
                      "(unless the principal lists that target as released without asking and the desk is not "
                      "paused; a tick stops counting when the lane's repository or base branch, or the target's "
-                     "command or --after, changes, not when only --minutes does); then hansa serve runs the command in the lane's repository, as the desk's account, "
-                     "outside the sandbox, with hansa's environment and the target's minutes (else the lane's) as its "
-                     "limit, and only while the base branch and the command are what the principal saw. One release "
-                     "runs at a time per repository, and it holds the repository: merges there wait while it runs, "
-                     "a long install too (a later change may let such a target run from a fixed checkout instead). "
-                     "hansa release alone lists the open and recent releases. Only the coordinator asks")
+                     "command, --after or --fixed, changes, not when only --minutes does); then hansa serve runs the "
+                     "command, as the desk's account, outside the sandbox, with hansa's environment and the target's "
+                     "minutes (else the lane's) as its limit, and only while the base branch and the command are what "
+                     "the principal saw. One release runs at a time per repository. A release runs in the lane's "
+                     "repository and holds it: merges there wait while it runs, a long install too. A target set "
+                     "--fixed (hansa lane target L NAME --fixed) runs instead from a checkout of the release's commit "
+                     "made for it, removed when it ends, and holds nothing: merges there go on; its command names the "
+                     "commit as $HANSA_RELEASE_COMMIT, never the base branch. Each says which way it runs. The commits "
+                     "going out are read and checked for forbidden words without holding the desk (other commands, the "
+                     "page and hansa serve go on meanwhile), each commit's own change once (a merge's: only what it "
+                     "adds beyond its parents); hansa serve checks again at the start only when the commit, the "
+                     "starting point, the words or the command changed since. hansa release alone lists the open and "
+                     "recent releases. Only the coordinator asks. hansa release --stop ID [reason] calls one off: one "
+                     "waiting for the principal or approved and waiting its turn is closed as stopped; a running one "
+                     f"gets TERM to its command's whole process group, then KILL {release.STOP_GRACE} seconds later to "
+                     "what still runs, and is recorded as stopped, with who stopped it and why, its output so far kept "
+                     "(a fixed target's checkout is removed as at any other end); one whose command had already ended "
+                     "is recorded as it ended, with the stop noted as late. What a release's command started that "
+                     "still runs, also outside its process group, is stopped at any end. The principal's alert command is "
+                     "told (release_stopped). A stopped release went out for no --after. A stopped install may leave "
+                     "the server half-switched: a release command for which that matters should handle TERM (finish "
+                     "or undo the step it is in)")
+    p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
+                   f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("lane", nargs="?")
     p.add_argument("note", nargs="*")
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
@@ -1984,6 +2096,8 @@ def main(argv=None):
             "| notify")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "states", "server", "notify"])
     p.add_argument("name", nargs="?")
+    p.add_argument("--all", action="store_true", help="with lane NAME: the whole built-in list of what its workers "
+                   "may not read, name by name (without it, how many names it has)")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
     lane = p.add_subparsers(dest="action", metavar="add | set | target | brief | remove | try")
     q = lane.add_parser("add", help="a new lane on a git checkout", description=(
@@ -1991,7 +2105,7 @@ def main(argv=None):
         "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
         "concurrency in all, and to split work among providers give each its own lane with its provider order. "
         "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax; so write its preview "
-        "(started by a design session's Bash tool) the same way. " +
+        "(started by a design session's Bash tool, or by hansa for a task with a browser) the same way. " +
         "The network list is the hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
@@ -2002,7 +2116,9 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
-                   "providers, setup, check, network, folders it may write, env, limits) and standing instructions; "
+                   "providers, setup, check, merge_check, preview, network, folders it may write, env, allow, limits "
+                   "with merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, note) "
+                   "and standing instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Not with --repo")
     q.add_argument("--base", help="base branch (default: the checkout's current branch)")
@@ -2010,6 +2126,10 @@ def main(argv=None):
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
                    "unless the lane has a merge_check (/bin/sh -c)")
     q.add_argument("--setup", help="the command that installs dependencies before each task (/bin/sh -c)")
+    q.add_argument("--merge-check", metavar="COMMAND", help="the command the merge check runs before each merge in "
+                   "place of the check, on the task merged with the base (/bin/sh -c; default: the check)")
+    q.add_argument("--merge-timeout", metavar="MIN", help="the merge check's time limit in minutes (default: the "
+                   "lane's timeout_min)")
     q.add_argument("--network", nargs="+", metavar="HOST", help="the hosts its workers, setup and check may reach "
                    "(default: none)")
     q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
@@ -2018,7 +2138,19 @@ def main(argv=None):
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message and merge_message take "
-        "one value (none: empty); max_turns, timeout_min and merge_timeout_min take one whole number. check runs "
+        "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
+        "preview is the command that starts the app (npm run dev, say). A design session starts it itself. For a task "
+        "or verification with a browser (hansa add --browser), hansa starts it on macOS before the worker: in the "
+        "worktree after the lane's setup, in srt with the lane's sandbox plus local binding for that one process "
+        "(the worker's own sandbox stays as the lane sets it); it waits up to preview_wait_s seconds (default 120; "
+        "none: back to that) for the first http://localhost:PORT or http://127.0.0.1:PORT address the preview prints, "
+        "or a port it names that answers, and tells the worker the address, or that it did not start, with its last "
+        "lines; it stops the preview, with its whole process group and each process seen below it (looked for every "
+        "half second), when the worker ends, however it ends; its output is kept in the task's folder, keys removed, "
+        "its first and last 2 MB at most (hansa show says where). On macOS such a preview can reach every "
+        "service on the machine's loopback while it runs, as a lane with localhost on its network list can: the price "
+        "of looking at the app in a browser on a Mac. On Linux hansa does not start it: srt gives the command a network "
+        "of its own, so the browser, outside the sandbox, could not reach the app; the worker is told so. check runs "
         "after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
         "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
         "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
@@ -2029,7 +2161,7 @@ def main(argv=None):
         "merge_message is the form of the message of a task's merge into the base (unset: Merge t0001: <title>). "
         "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
         "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
-        "commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
+        "preview_wait_s, commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). It is the lane's one "
         "unnamed release target; a lane that sends its base branch out in more than one way names its targets "
         "instead (hansa lane target L NAME ...), and then has no release. " +
@@ -2054,9 +2186,19 @@ def main(argv=None):
         "first target. hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
         "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
         "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
-        "command and --after keeps it; --minutes alone does not untick). A release holds the lane's repository while it runs: "
-        "merges there wait for it, a long install too; a later change may let such a target run from a fixed "
-        "checkout instead"))
+        "command, --after and --fixed keeps it; --minutes alone does not untick). A release runs in the lane's "
+        "repository and holds it while it runs: merges there wait for it, a long install too. --fixed runs the "
+        "target instead from a detached checkout of the release's commit that hansa makes for it under the desk "
+        "(removed when it ends, however it ends, and swept after a restart), holding nothing: merges and checks in "
+        "the repository go on meanwhile; releases of one repository still run one at a time. Its environment has "
+        "HANSA_RELEASE_COMMIT (the commit the principal saw), HANSA_RELEASE_TARGET and HANSA_RELEASE_REPO (the lane's "
+        "repository). Such a command must name the commit, as $HANSA_RELEASE_COMMIT or HEAD (git push origin "
+        "\"$HANSA_RELEASE_COMMIT:refs/heads/main\", say), never the base branch (git push origin main would send "
+        "wherever main has moved by then). hansa refuses a fixed target whose command line itself names the base "
+        "branch as what to send (main, refs/heads/main, main~0, main^{commit}, main@{0}, or the source of main:prod; "
+        "HEAD:main names it only as where to send, and is allowed); a variable the command expands or a script it "
+        "runs is not looked into, so a fixed target's command should send $HANSA_RELEASE_COMMIT. "
+        "--fixed none runs it in the repository again"))
     q.add_argument("name")
     q.add_argument("target", nargs="?", metavar="NAME")
     q.add_argument("command", nargs="*", metavar="COMMAND", help="the command line (/bin/sh -c), quoted; none takes "
@@ -2064,6 +2206,9 @@ def main(argv=None):
     q.add_argument("--minutes", metavar="N", help="its own time limit, 1-1440 (none: the lane's timeout_min)")
     q.add_argument("--after", metavar="TARGET", help="another target of the lane that must have sent out the same "
                    "commit first (none: no order)")
+    q.add_argument("--fixed", nargs="?", const="yes", metavar="none", help="run from a checkout of the release's "
+                   "commit made for it, holding nothing; its command names $HANSA_RELEASE_COMMIT, not the base branch "
+                   "(none: run in the repository again)")
     q = lane.add_parser("brief", help="print a lane's standing instructions, or replace them with TEXT or --file")
     q.add_argument("name")
     q.add_argument("text", nargs="*")
@@ -2109,7 +2254,8 @@ def main(argv=None):
                      "every view the rows add up to the total.")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--since", help="HH:MM today, or YYYY-MM-DD HH:MM: count from then instead of --days")
-    p.add_argument("--by", default="day", choices=["day", "seat", "lane", "task", "model", "provider"])
+    p.add_argument("--by", choices=["day", "seat", "lane", "task", "model", "provider"], help="the totals by "
+                   "(default: day); not with --turns")
     p.add_argument("--json", action="store_true")
     p.add_argument("--rows", action="store_true", help="with --json: include every row")
     p.add_argument("--turns", action="store_true", help="the coordinator's own usage turn by turn: what started "
