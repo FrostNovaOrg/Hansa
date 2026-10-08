@@ -6983,6 +6983,88 @@ class DeskTest(unittest.TestCase):
                 self.assertIn(r, allowed)
         self.assertNotIn("WebFetch", verifier)
 
+    def test_a_refused_rule_saved_earlier_does_not_lock_the_page(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch", "Bash(git commit:*)", "Bash(x),WebFetch"]
+        self.desk.settings_path.write_text(json.dumps(s))  # saved before they were refused
+        fix = "hansa lane set a allow 'Bash(pnpm test:*)'"
+        self.assertEqual(public_settings(self.desk)["problems"], [])  # the page has nothing of its own to fix
+        r = self.page_save(lambda s: s.update(release_forbidden=["Project Falcon"]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.desk.settings()["release_forbidden"], ["Project Falcon"])
+        [warning] = r["lane_warnings"]
+        for x in ("allow WebFetch lets a worker fetch any site", "allow Bash(git commit:*) runs git",
+                  "allow Bash(x),WebFetch would reach Claude Code as more than one rule", fix):
+            self.assertIn(x, warning)
+        self.assertEqual(public_settings(self.desk)["lane_warnings"], [warning])
+        self.assertIn("LANE_WARNINGS", (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+        for args in (("lane", "set", "a", "network", "pypi.org"), ("lane", "add", "d", "--like", "a")):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), *args])
+            self.assertIn("WebFetch", str(e.exception.code), args)
+            self.assertIn(fix, str(e.exception.code), args)
+        self.assertNotIn("d", self.desk.settings()["lanes"])
+        self.assertIn(fix, views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "allow", "Bash(pnpm test:*)")  # the command named
+        self.assertNotIn("lane_warnings", self.page_save(lambda s: s.update(release_forbidden=[])))
+
+    def test_webfetch_reaches_only_named_public_sites(self):
+        s = self.desk.settings()
+        refused = {
+            "an address": ("127.0.0.1", "127.0.0.2", "127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "0x7f000001",
+                           "0.0.0.0", "10.0.0.1", "192.168.1.1", "169.254.169.254", "::1", "[::1]", "[fe80::1]",
+                           "*.0.0.1", "127.0.0.1:80"),
+            "names this machine": ("localhost", "LOCALHOST", "foo.localhost", "*.localhost"),
+            "meant for a local or private network": (
+                "host.docker.internal", "*.internal", "my-mac.local", "nas.lan", "router.home.arpa",
+                "1.0.0.127.in-addr.arpa", "a.test", "a.invalid", "a.example", "box.localdomain"),
+            "a wildcard over the shared suffix": (
+                "*.com", "*.co.uk", "*.com.au", "*.co.jp", "*.com.cn", "*.github.io", "*.gitlab.io", "*.pages.dev",
+                "*.workers.dev", "*.vercel.app", "*.netlify.app", "*.herokuapp.com", "*.appspot.com", "*.web.app",
+                "*.firebaseapp.com", "*.blogspot.com", "*.cloudfront.net", "*.amazonaws.com",
+                "*.azurewebsites.net", "*.ngrok.io")}
+        for why, hosts in refused.items():
+            for host in hosts:
+                s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+                [p] = validate(s)
+                self.assertIn(why, p, host)
+                self.assertIn("WebFetch(domain:docs.python.org)", p, host)  # how to list a site
+        for host in ("docs.python.org", "*.python.org", "octocat.github.io", "example.com"):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            self.assertEqual(validate(s), [], host)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "WebFetch(domain:169.254.169.254)"])
+        self.assertIn("is an address", str(e.exception.code))
+        self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)")
+        explained = " ".join(views.explain_text(self.desk, "lane", "a").split())
+        self.assertIn("unlike the network list, it runs in Claude Code's own process, outside the sandbox", explained)
+
+    def test_a_rule_on_a_lanes_allow_list_is_exactly_one_rule(self):
+        from hansa.run import lane_allow
+        s = self.desk.settings()
+        for bad in ("Bash(x),WebFetch", "Bash(x) Read(y)", "Bash(x),WebFetch,Read(y)", "Bash(x)(y)", "Bash((x)",
+                    "Bash(x)) WebFetch (y)", "Bash()"):
+            s["lanes"]["a"]["allow"] = [bad]
+            [p] = validate(s)
+            self.assertIn("would reach Claude Code as more than one rule", p, bad)
+        s["lanes"]["a"]["allow"] = ["Bash(echo $(date):*)", "Bash(pnpm test:*)"]
+        self.assertEqual(validate(s), [])
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "Bash(x),WebFetch"])
+        self.assertIn("more than one rule", str(e.exception.code))
+        s["lanes"]["a"]["allow"] = ["Bash(x),WebFetch", "Bash(pnpm test:*)"]  # saved before: left out of runs
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(pnpm test:*)"])
+        self.assertIn("Bash(x),WebFetch (ignored: it would reach Claude Code as more than one rule",
+                      views.explain_text(self.desk, "lane", "a"))
+
+    def test_allow_with_a_rule_twice_keeps_it_once(self):
+        self.hansa("lane", "set", "a", "allow", "WebSearch", "Bash(pnpm test:*)", "WebSearch")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["allow"], ["WebSearch", "Bash(pnpm test:*)"])
+        self.hansa("lane", "add", "c", "--like", "a", "--allow", "WebSearch", "WebSearch")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["allow"], ["WebSearch"])
+
     def test_workers_and_verifiers_are_told_the_lanes_setup_and_check_as_hansa_runs_them(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"

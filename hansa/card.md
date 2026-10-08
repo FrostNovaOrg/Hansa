@@ -108,8 +108,11 @@ finding, say) costs turns. A worker needs no allowed commands: it may run any
 command inside its sandbox. A lane's allowed commands still go to its workers
 and verifiers as to its design sessions, and that list is where a lane gives
 Claude Code's web tools, which reach the network from Claude Code's own process,
-outside the sandbox: `WebFetch(domain:HOST)` for each site (HOST as the network
-list writes it, `*.` in front allowed; a bare `WebFetch` is refused), and
+outside the sandbox: `WebFetch(domain:HOST)` for each site (HOST a public
+site's name as the network list writes it, `*.` in front allowed and opening
+every name under it; a bare `WebFetch`, an IP address, `localhost`, a local or
+private name such as `.internal`, or a wildcard over a shared suffix such as
+`*.co.uk` is refused; give each rule as its own value), and
 `WebSearch`, which sends search queries out of the machine. MCP tools are
 refused there. A change of `allow` is recorded: tell the principal what you
 changed and why. What a check needs from outside it is a host on the

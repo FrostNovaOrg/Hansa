@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, HANSA_IDENTITY, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   is_git_rule, web_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   one_rule, refused_rule, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
 
@@ -2347,9 +2347,10 @@ def commands_tmp(tmp: str) -> str:
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     """The worktree's files plus the lane's own commands, for its workers, verifiers and design sessions alike.
     Git rules a lane still lists from before are left out: hansa does the committing, and read-only git needs
-    no rule. So are web rules saved before they were refused (web_rule_problem), such as a bare WebFetch."""
+    no rule. So are the other rules saved before they were refused (refused_rule): a bare WebFetch, one that would
+    reach Claude Code as several."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
-    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not is_git_rule(r) and not web_rule_problem(r)]
+    return files + ["TodoWrite"] + list(dict.fromkeys(r for r in lane.get("allow", []) if not refused_rule(r)))
 
 
 def command_rules(command: str) -> list:
@@ -3556,6 +3557,7 @@ def design_command(desk: Desk, tid: str):
         extra.append(f"Bash({lane['preview']}:*)")
     if lane.get("check"):  # it is told to keep the checks passing, so it may run them
         extra += command_rules(lane["check"])
+    extra = [r for r in extra if one_rule(r)]  # a command whose rule Claude Code would read as several gets none
     try:
         check_git_file(desk, wt)  # design_sandbox asks git in the worktree
     except GitFileChanged as e:

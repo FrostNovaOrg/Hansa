@@ -42,7 +42,6 @@ from pathlib import Path
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # either case: npm_config_cache and http_proxy are ordinary names
-RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
 # A host a lane's workers may reach during a task: registry.npmjs.org, *.pypi.org, localhost:3000
 LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
@@ -206,7 +205,7 @@ XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
 # Rules every lane's workers, verifiers and design sessions are given without asking: none. A lane's allowed
 # commands go to all three; workers run any command inside their sandbox and need no Bash rule, so a lane lists
-# what its design sessions run (its tests, say) and the web tools its runs may use (web_rule_problem).
+# what its design sessions run (its tests, say) and the web tools its runs may use (refused_rule).
 DEFAULT_ALLOW: list = []
 
 
@@ -292,9 +291,10 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def validate(s: dict, root=None) -> list:
+def validate(s: dict, root=None, page: bool = False) -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
-    which no lane's write list may reach into."""
+    which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
+    rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings)."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
@@ -392,13 +392,10 @@ def validate(s: dict, root=None) -> list:
         else:
             p += [f"{at}: unknown provider {x}" for x in order if x not in provs]
         allow = ln.get("allow", [])
-        if not isinstance(allow, list) or not all(isinstance(r, str) and RULE.match(r) for r in allow):
+        if not isinstance(allow, list):
             p.append(f"{at}: allow must be a list of rules such as Bash(pnpm test:*)")
-        elif any(is_git_rule(r) for r in allow):
-            p.append(f"{at}: git is handled by hansa (workers can already look at status, diffs and history, "
-                     "and hansa commits for them); remove the rules that run git")
-        if isinstance(allow, list):
-            p += [f"{at}: allow {r} {web_rule_problem(r)}" for r in allow if isinstance(r, str) and web_rule_problem(r)]
+        elif not page:  # one saved before it was refused is left out of runs; the page shows it as a warning
+            p += allow_problems(name, ln)
         hosts = ln.get("network", [])
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
@@ -1706,36 +1703,135 @@ def kept_from_workers(s: dict, root=None) -> tuple:
 # WebFetch only as WebFetch(domain:HOST), WebSearch as it is. The MCP tools reach servers that run outside the
 # sandbox too, and no rule holds them to listed sites: no lane lists them (hansa gives a task its browser itself).
 MCP_TOOLS = ("ListMcpResourcesTool", "ReadMcpResourceTool")
-WEB_FETCH_HOW = ("list each site as WebFetch(domain:HOST), with HOST as the network list writes it, such as "
-                 "WebFetch(domain:docs.python.org) or WebFetch(domain:*.python.org)")
+WEB_FETCH_HOW = ("list each site as WebFetch(domain:HOST), with HOST a public site's name as the network list writes "
+                 "it, such as WebFetch(domain:docs.python.org) or WebFetch(domain:*.python.org)")
+# Names meant for this machine or a local or private network: WebFetch, outside the sandbox, would reach them
+LOCAL_SUFFIXES = ("localhost", "local", "internal", "lan", "home.arpa", "arpa", "test", "invalid", "example",
+                  "localdomain")
+# Common suffixes under which every name belongs to someone else: a wildcard over one opens all of them
+SHARED_SUFFIXES = frozenset((
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au", "co.jp", "ne.jp", "or.jp",
+    "com.cn", "net.cn", "org.cn", "com.hk", "com.tw", "com.sg", "co.kr", "co.nz", "co.in", "co.za", "com.br",
+    "com.mx", "com.ar", "com.tr", "co.il", "co.id", "com.my", "com.ph", "com.vn", "com.ru",
+    "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app", "netlify.app", "herokuapp.com",
+    "appspot.com", "web.app", "firebaseapp.com", "blogspot.com", "cloudfront.net", "amazonaws.com",
+    "azurewebsites.net", "ngrok.io", "ngrok-free.app", "onrender.com", "fly.dev", "glitch.me", "repl.co",
+    "s3.amazonaws.com", "r2.dev", "surge.sh", "readthedocs.io"))
+
+
+def one_rule(rule) -> bool:
+    """Whether a rule reaches Claude Code as one rule, which reads --allowedTools and --disallowedTools as a list
+    split on commas and spaces outside parentheses: a tool name, then at most one parenthesised part that closes
+    only at the rule's last character (Bash(echo $(date):*) is one)."""
+    m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", rule) if isinstance(rule, str) else None
+    rest = rule[m.end():] if m else None
+    if rest is None or _has_control(rule):
+        return False
+    if not rest:
+        return True
+    if len(rest) < 3 or rest[0] != "(":
+        return False
+    depth = 0
+    for i, c in enumerate(rest):
+        depth += (c == "(") - (c == ")")
+        if depth == 0:
+            return i == len(rest) - 1
+    return False
+
+
+ONE_RULE_WHY = ("would reach Claude Code as more than one rule, as it splits the list on commas and spaces: give "
+                "each rule as its own value, a tool name with at most one (...) part that closes at the end")
+
+
+def web_host_problem(host: str) -> str:
+    """Why WebFetch may not be held to host, as it is not one public site's name: an address, this machine, a
+    local or private network, or a wildcard over a suffix others share; '' for one it may."""
+    name = host.lower()
+    wild = name.startswith("*.")
+    bare = name[2:] if wild else name
+    last = bare.rstrip(".").rsplit(".", 1)[-1]
+    if ("[" in name or ":" in name and re.fullmatch(r"[0-9a-f:.*]+", name)
+            or re.fullmatch(r"0x[0-9a-f]*|[0-9]+", last.split(":")[0])):  # as a URL reads an IP address
+        return ("is an address, not a site's name: WebFetch runs in Claude Code's own process, outside the sandbox, "
+                "where an address can reach this machine or a private network; " + WEB_FETCH_HOW)
+    if not is_host(host) or name.endswith(".") or ":" in name:
+        return "is not a site's name alone; " + WEB_FETCH_HOW + " (no port)"
+    local = next((x for x in LOCAL_SUFFIXES if bare == x or bare.endswith("." + x)), "")
+    if local == "localhost":
+        return ("names this machine, which WebFetch would reach from Claude Code's own process, outside the "
+                "sandbox; " + WEB_FETCH_HOW)
+    if local:
+        return (f"is a name under .{local}, meant for a local or private network, which WebFetch would reach from "
+                f"Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
+    if wild and ("." not in bare or bare in SHARED_SUFFIXES):
+        return (f"is a wildcard over the shared suffix .{bare}: every name under it belongs to someone else; "
+                + WEB_FETCH_HOW)
+    return ""
 
 
 def web_rule_problem(rule: str) -> str:
     """Why an allowed-command rule cannot be on a lane's list, as it reaches the network outside the sandbox
-    without being held to listed sites; '' for one that may."""
+    without being held to listed public sites; '' for one that may."""
     m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$", rule.strip())
     tool, arg = (m.group(1), m.group(2)) if m else ("", None)
     if tool == "WebFetch":
         host = arg[len("domain:"):] if arg and arg.startswith("domain:") else None
-        if host is None or not is_host(host) or ":" in host:
+        if host is None or not host.strip("*.") or host in ("*", "*.*"):
             return ("lets a worker fetch any site from Claude Code's own process, outside the sandbox's network "
-                    "list; " + WEB_FETCH_HOW + " (no port)")
-        if host.lower() in ("localhost", "127.0.0.1"):
-            return "would reach this machine's own loopback from outside the sandbox; " + WEB_FETCH_HOW
-        if host.startswith("*.") and "." not in host[2:]:
-            return f"covers every site under .{host[2:]}; " + WEB_FETCH_HOW
+                    "list; " + WEB_FETCH_HOW)
+        return web_host_problem(host)
     if tool.startswith("mcp__") or tool in MCP_TOOLS:
         return ("reaches an MCP server, which runs outside the sandbox and is not held to listed sites; a task that "
                 "needs a browser gets one with hansa add --browser")
     return ""
 
 
+GIT_RULE_WHY = ("runs git, and git is handled by hansa (workers can already look at status, diffs and history, and "
+                "hansa commits for them)")
+
+
+def refused_rule(rule) -> str:
+    """Why a rule cannot be on a lane's allowed commands: it is not one rule (one_rule), runs git, or reaches the
+    network unheld (web_rule_problem); '' for one that may. Runs leave out one saved before it was refused."""
+    if not isinstance(rule, str) or not one_rule(rule):
+        return ONE_RULE_WHY
+    return GIT_RULE_WHY if is_git_rule(rule) else web_rule_problem(rule)
+
+
+def allow_fix(name: str, allow: list) -> str:
+    """The coordinator's command that leaves a lane's allowed commands without the rules refused_rule refuses."""
+    rest = [r for r in dict.fromkeys(r for r in allow if isinstance(r, str)) if not refused_rule(r)]
+    return f"hansa lane set {name} allow " + (" ".join(shlex.quote(r) for r in rest) or "none")
+
+
+def allow_problems(name: str, ln: dict) -> list:
+    """The refused rules a lane's allowed commands hold (refused_rule), as one line naming each and the coordinator's
+    command that removes them; [] for none. On the page it is a warning: only the coordinator changes lanes."""
+    allow = ln.get("allow", []) if isinstance(ln, dict) else []
+    if not isinstance(allow, list):
+        return []
+    bad = [(r, refused_rule(r)) for r in allow if refused_rule(r)]
+    if not bad:
+        return []
+    fix = allow_fix(name, allow)
+    return [f"lane {name}: " + "; ".join(f"allow {r if isinstance(r, str) else json.dumps(r)} {why}" for r, why in bad)
+            + f"; runs leave {'it' if len(bad) == 1 else 'them'} out, and the coordinator removes "
+            f"{'it' if len(bad) == 1 else 'them'} with: {fix}"]
+
+
+def lane_warnings(s: dict) -> list:
+    """What the page shows of the lanes' refused rules (allow_problems): it saves the rest all the same."""
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
+    return [x for name, ln in lanes.items() for x in allow_problems(name, ln)]
+
+
 def web_sites(allow: list) -> tuple:
     """What a lane's allowed commands give of Claude Code's web tools: (the sites WebFetch reaches, whether
-    WebSearch is given). Rules web_rule_problem refuses give nothing."""
-    sites = [r.strip()[len("WebFetch(domain:"):-1] for r in allow
-             if r.strip().startswith("WebFetch(domain:") and not web_rule_problem(r)]
-    return sites, any(re.match(r"^WebSearch(\(.*\))?$", r.strip()) for r in allow)
+    WebSearch is given). Rules refused_rule refuses give nothing."""
+    sites = [r[len("WebFetch(domain:"):-1] for r in allow
+             if isinstance(r, str) and r.startswith("WebFetch(domain:") and not refused_rule(r)]
+    return sites, any(isinstance(r, str) and re.match(r"^WebSearch(\(.*\))?$", r) and not refused_rule(r)
+                      for r in allow)
 
 
 def is_git_rule(rule: str) -> bool:
@@ -1810,7 +1906,10 @@ class Desk:
                 new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes,
                                                                        old.get("releases_without_asking")),
                        "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
-            problems = validate(new, self.root) + self.keys_in_release(old, new) + self.keys_in_alert(old, new)
+            # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
+            page = by == "page" and new.get("lanes") == old.get("lanes")
+            problems = (validate(new, self.root, page=page) + self.keys_in_release(old, new)
+                        + self.keys_in_alert(old, new))
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -2137,5 +2236,6 @@ def public_settings(desk: Desk) -> dict:
     unmatched = [{"lane": listed_key(x)[0], "target": listed_key(x)[1], "why": why,
                   "why_zh": listed_mismatch(s, x, True)}
                  for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why]
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped,
-            "deny_skipped": not_kept, "release_unmatched": unmatched}
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
+            "read_skipped": skipped, "deny_skipped": not_kept, "release_unmatched": unmatched,
+            "lane_warnings": lane_warnings(s)}

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import account, alert, build, cost, installed, installed_text, notify, release
-from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, web_rule_problem, web_sites, listed_targets, read_json,
+from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (LINUX_TRY_NOTE, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
@@ -1088,7 +1088,8 @@ def web_lines(allow: list) -> list:
         return ["  web tools (Claude Code's own, outside the sandbox's network list): none"]
     return ["  web tools (Claude Code's own, outside the sandbox's network list; workers, verifiers and design"
             " sessions alike):",
-            *(["    WebFetch reaches only: " + ", ".join(sites)] if sites else []),
+            *(["    WebFetch reaches only: " + ", ".join(sites) + " (unlike the network list, it runs in Claude"
+               " Code's own process, outside the sandbox; a *. wildcard opens every name under it)"] if sites else []),
             *(["    WebSearch: sends search queries out of the machine"] if search else [])]
 
 
@@ -1166,9 +1167,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "  allowed commands (given to the lane's workers, verifiers and design sessions; workers run any command"
             " in their sandbox and need no Bash rule, design sessions run outside it and may run these plus their"
             " own git add, commit and merge):" + ("" if ln.get("allow") else " none"),
-            *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else
-                         f" (ignored: it {web_rule_problem(r)})" if web_rule_problem(r) else "")
-              for r in ln.get("allow", [])],
+            *["    " + (r if isinstance(r, str) else json.dumps(r))
+              + (f" (ignored: it {refused_rule(r)})" if refused_rule(r) else "") for r in ln.get("allow", [])],
+            *(["    runs leave the ignored ones out; the coordinator removes them with: "
+               + allow_fix(name, ln.get("allow", []))] if any(map(refused_rule, ln.get("allow", []))) else []),
             *release.lane_lines(desk, name, ln),
             *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"
               for f, what in (("commit_message", "message of the commit of a task's work, and of the merge of the base"

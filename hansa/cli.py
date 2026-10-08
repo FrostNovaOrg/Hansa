@@ -15,8 +15,8 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
-from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
-                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
+from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
+                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, refused_rule, resolved, stored, write_json,
                    PROJECT_INTRO)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
@@ -1341,6 +1341,8 @@ def _lane_value(field: str, values: list):
     elif "none" in [x for v in values for x in (v.split(",") if field == "providers" else [v])]:
         raise SystemExit(f"hansa: none means an empty {field}, so it cannot come with other values "
                          f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
+    if field == "allow":  # a rule given twice is kept once
+        return list(dict.fromkeys(x for x in values if x))
     if field in LANE_LISTS:
         return [x for v in values for x in (v.split(",") if field == "providers" else v.split()
                                             if field == "release_files" else [v]) if x]
@@ -1466,6 +1468,12 @@ def cmd_lane(a):
                 if given.get("providers") == []:
                     raise SystemExit("hansa: a lane needs a provider; nothing was changed")
                 like = s["lanes"][a.like]
+                bad = [r for r in like.get("allow", []) if refused_rule(r)]
+                if bad:  # copied or not, they are refused in that lane
+                    raise SystemExit(f"hansa: lane {a.like}'s allowed commands hold rules no longer accepted: "
+                                     + "; ".join(f"{r} {refused_rule(r)}" for r in bad)
+                                     + f". Remove them with: {allow_fix(a.like, like.get('allow', []))}. Nothing was "
+                                     f"changed")
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
                 for f in ("check", "setup", "merge_check", "merge_timeout_min", "identity"):
@@ -2208,8 +2216,9 @@ def main(argv=None):
     q.add_argument("--allow", nargs="+", metavar="RULE", help="rules the lane's workers, verifiers and design "
                    "sessions are given without asking: commands such as 'Bash(pnpm test:*)' (workers run any command "
                    "in their sandbox and need none; design sessions do), and web tools: "
-                   "'WebFetch(domain:docs.python.org)' or 'WebFetch(domain:*.python.org)' for each site (a bare "
-                   "WebFetch is refused), WebSearch (it sends search queries out of the machine)")
+                   "'WebFetch(domain:docs.python.org)' or 'WebFetch(domain:*.python.org)' for each public site (a "
+                   "bare WebFetch, an address, a local or private name or a wildcard over a shared suffix is "
+                   "refused), WebSearch (it sends search queries out of the machine); each rule its own value")
     q.add_argument("--release-files", nargs="+", metavar="PATH", help="the files the lane's releases build and run "
                    "outside the sandbox, as paths or globs relative to the repository, separated by spaces (\"pom.xml "
                    "**/pom.xml build.sh tools/release.sh\"): hansa merge refuses a change touching one of them until "
@@ -2218,9 +2227,11 @@ def main(argv=None):
         "allow is the rules the lane's workers, verifiers and design sessions are given without asking: commands "
         "such as Bash(pnpm test:*) (workers run any command in their sandbox and need none; design sessions do), "
         "and Claude Code's web tools, which reach the network from its own process, outside the sandbox's network "
-        "list: WebFetch only as WebFetch(domain:HOST) for each site, HOST as the network list writes it (*. in front "
-        "allowed; a bare WebFetch, or one for every site, is refused), and WebSearch, which sends search queries out "
-        "of the machine; MCP tools are refused. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "list: WebFetch only as WebFetch(domain:HOST) for each site, HOST a public site's name as the network list "
+        "writes it (*. in front allowed, and it opens every name under it; a bare WebFetch, one for every site, an IP "
+        "address, localhost, a name for a local or private network such as .internal or .local, or a wildcard over "
+        "a shared suffix such as *.co.uk or *.github.io is refused), and WebSearch, which sends search queries out "
+        "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several, such as Bash(x),WebFetch, is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
         "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "

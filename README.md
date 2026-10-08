@@ -45,10 +45,17 @@ gives Claude Code's web tools, which reach the network from Claude Code's own
 process, outside the sandbox's network list: `WebFetch` only site by site, as
 `WebFetch(domain:docs.python.org)` or `WebFetch(domain:*.python.org)` (a bare
 `WebFetch`, or one for every site, is refused), and `WebSearch`, which sends
-search queries out of the machine. MCP tools are refused on the list (a task
-gets a browser with `hansa add --browser`). A change of the list is recorded,
-and `hansa explain lane L` shows the web tools and their sites beside the
-network list.
+search queries out of the machine. `WebFetch` takes public site names only: an
+IP address in any form, `localhost` and the names meant for local or private
+networks (`.local`, `.internal`, `.lan`, `.home.arpa`, `.test` and the like)
+are refused, and so is a wildcard over a suffix others share (`*.co.uk`,
+`*.github.io`), as a wildcard opens every name under it. Each rule is one value:
+one that Claude Code would split into several (`Bash(x),WebFetch`) is refused.
+MCP tools are refused on the list (a task gets a browser with
+`hansa add --browser`). A change of the list is recorded, and
+`hansa explain lane L` shows the web tools and their sites beside the network
+list. A rule saved before it was refused is left out of runs; the page warns of
+it, names the coordinator's command that removes it, and saves the rest.
 
 hansa tells the coordinator's session when a task ends or you answer a request,
 through the session's inbox (`hansa notify` shows which sessions it posts to).

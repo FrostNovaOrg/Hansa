@@ -80,6 +80,7 @@ const T = ZH ? {
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
   providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
+  laneWarnings:"这些工作线的允许命令里有现在不收的规则：运行时会被略去，别的设置照样能保存。要删掉它们，请协调席执行下面写的命令：",
   concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
   laneCommands:"工作线最近改过的命令、网络和可写文件夹（最新在前，最多 20 条）",
   laneCommandsNote:"装依赖和验收命令由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟执行层一样的网络和可写范围）；起页面的命令由设计会话自己跑，设计会话不在沙箱里。网络和可写文件夹的改动，会放宽这条工作线的执行层（连同装依赖和验收）能做的事。",
@@ -149,6 +150,7 @@ const T = ZH ? {
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
+  laneWarnings:"These lanes' allowed commands hold rules no longer accepted: runs leave them out, and the other settings save all the same. To remove them, ask the coordinator to run the command named:",
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
   laneCommands:"Recent changes to lane commands, networks and write folders (newest first, at most 20)",
   laneCommandsNote:"hansa runs the setup and check commands itself, in srt with the lane's sandbox (the workers' network and folders); the preview command is run by the design session, which has no sandbox. Network and write changes widen what the lane's workers, and its setup and check, may do.",
@@ -356,11 +358,11 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], RELEASE_UNMATCHED = [];
+let S = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], RELEASE_UNMATCHED = [], LANE_WARNINGS = [];
 async function loadSettings(problems) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
   S = r.settings; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || [];
-  RELEASE_UNMATCHED = r.release_unmatched || [];
+  RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
@@ -457,6 +459,7 @@ function renderSettings(problems) {
       h("div", {class:"row"}, newProv, h("button", {onclick: () => { const n = newProv.value.trim();
         if (n && !S.providers[n]) { S.providers[n] = {kind:"compatible", model:"", effort:"", base_url:""}; renderSettings(); } }}, T.addProvider))),
     section(T.lanes, h("p", {class:"warn"}, T.lanesNote), h("p", {class:"muted"}, T.briefNote),
+      ...(LANE_WARNINGS.length ? [h("p", {class:"warn"}, T.laneWarnings), h("ul", {}, LANE_WARNINGS.map(p => h("li", {class:"warn mono"}, p)))] : []),
       Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"}, h("strong", {}, name),
         h("div", {class:"facts"}, laneFields(l).map(([k, v]) => [h("span", {class:"muted"}, LANE_LABELS[k] || k), h("pre", {class:"mono"}, v)])))),
       h("h3", {}, T.laneCommands), h("p", {class:"muted"}, T.laneCommandsNote),
