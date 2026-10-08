@@ -13816,7 +13816,8 @@ class DeskTest(unittest.TestCase):
         [a] = self.alerted(out)
         self.assertEqual(a["kind"], "ask")
         self.assertIn(f"request #{n} waits for you on the page: Please renew the deploy login", a["text"])
-        self.assertEqual((a["cwd"], a["task"], a["mine"]), (str(self.desk.root), None, "yes"))
+        self.assertEqual((a["task"], a["mine"]), (None, "yes"))
+        self.assertNotEqual(a["cwd"], str(self.desk.root))  # a folder of its own
         os.environ.pop("HANSA_TASK")
         # a release waits for the yes, and ends void
         self.hansa("lane", "set", "a", "release", "true")
@@ -14070,6 +14071,375 @@ class DeskTest(unittest.TestCase):
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
         self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+
+    # -- the one-time code of a release's alert --
+
+    def queued_code(self, rid) -> str:
+        """The one-time code the queued alert for release rid holds."""
+        from hansa import alert
+        [x] = [x for x in alert.queued(self.desk) if x.get("release") == rid and x.get("code")]
+        return x["code"]
+
+    def code_answer(self, *args) -> tuple:
+        """(what hansa release ARGS printed, what it said when it refused: '' when it did not)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                main(["--desk", str(self.desk.root), "release", *args])
+            except SystemExit as e:
+                return out.getvalue(), str(e.code)
+        return out.getvalue(), ""
+
+    def test_a_waiting_release_queues_an_alert_holding_a_one_time_code(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a", "first")
+        code = self.queued_code(1)
+        self.assertRegex(code, "^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$")
+        [q] = alert.queued(self.desk)
+        self.assertEqual(q["kind"], "release_waiting")
+        self.assertIn(f"or say code {code} to the coordinator", q["text"])
+        # only a keyed hash is kept, with a key in secrets/
+        r = release.get(self.desk, 1)
+        self.assertNotIn(code, json.dumps(r))
+        self.assertTrue(r["code"]["hash"])
+        key = release.code_key_file(self.desk)
+        self.assertEqual((key.parent, key.stat().st_mode & 0o777), (self.desk.secrets_dir, 0o600))
+        self.assertEqual(self.desk.keys(), {})  # not a provider's key
+        self.assertIn("waits to go out", release.page_rows(self.desk, self.desk.settings())[0]["code"])
+        alert.send_due(self.desk, gather=0)
+        self.assertIn(f"say code {code} to the coordinator", self.alerted(out)[-1]["text"])
+        row = release.page_rows(self.desk, self.desk.settings())[0]
+        self.assertTrue(row["code_sent"])
+        self.assertIn("went out in the principal's alert", row["code"])
+        self.assertIn("one-time code of their alert", self.hansa("status"))
+        self.assertIn("hansa release yes ID CODE", self.hansa("explain"))
+        # a code goes first, so a long gathered text does not cut it
+        self.desk.add_ask("x" * 2000)
+        self.hansa("release", "a", "again")
+        code = self.queued_code(2)
+        alert.send_due(self.desk, gather=0)
+        self.assertIn(code, self.alerted(out)[-1]["text"])
+
+    def test_a_release_code_appears_nowhere_else_hansa_writes(self):
+        from hansa import alert, release, web
+        # a command that fails, writing back what it read: what is kept of its run has the code taken out
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat; exit 1"})), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a", "the note")
+        code = self.queued_code(1)
+        result = alert.send_due(self.desk, gather=0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["tail"], [])  # none of what it printed is kept
+        self.assertNotIn(code, json.dumps(result))
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertTrue(release.page_rows(self.desk, self.desk.settings())[0]["code_sent"])
+        tid = self.desk.new_task("Add hello.txt")
+        said = "\n".join([self.hansa("status"), self.hansa("show", tid), self.hansa("release"), self.hansa("explain"),
+                          json.dumps(views.status(self.desk)), json.dumps(public_settings(self.desk)),
+                          json.dumps(web._events(self.desk, 200, ""))])  # the page's data
+        self.assertNotIn(code, said)
+        for f in self.desk.root.rglob("*"):
+            if f.is_file() and self.desk.secrets_dir not in f.parents:
+                self.assertNotIn(code.encode(), f.read_bytes(), f)
+        # the same with an alert that goes out
+        out = self.alert_fake()
+        self.hansa("release", "a", "again")
+        code = self.queued_code(2)
+        alert.send_due(self.desk, gather=0)
+        self.assertIn(code, self.alerted(out)[-1]["text"])
+        for f in self.desk.root.rglob("*"):
+            if f.is_file() and self.desk.secrets_dir not in f.parents:
+                self.assertNotIn(code.encode(), f.read_bytes(), f)
+
+    def test_the_right_release_code_approves_recorded_as_through_the_code(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        alert.send_due(self.desk, gather=0)
+        said, refused = self.code_answer("yes", "1", f"{code[:3].lower()} {code[3:]}")  # as said: any case, a space
+        self.assertEqual(refused, "")
+        self.assertIn("release #1 of lane a is approved", said)
+        self.assertNotIn(code, said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["answered_by"], r["channel"]), ("approved", "coordinator", "code"))
+        self.assertNotIn("hash", r["code"])
+        e = self.events("release_answered")[-1]
+        self.assertEqual((e["yes"], e["by"], e["channel"]), (True, "coordinator", "code"))
+        row = release.page_rows(self.desk, self.desk.settings())[0]
+        self.assertEqual(row["channel"], "code")
+        self.assertIn("through the coordinator, with the one-time code", row["what"])
+        # it works once
+        self.assertIn("not waiting", self.code_answer("yes", "1", code)[1])
+
+    def test_a_wrong_release_code_is_refused_and_three_void_it(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        wrong = "ABCDEF" if code != "ABCDEF" else "ABCDEG"
+        for n in (1, 2):
+            refused = self.code_answer("yes", "1", wrong)[1]
+            self.assertIn(f"not the code of release #1 ({n} of 3 wrong", refused)
+            self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        refused = self.code_answer("yes", "1", wrong)[1]
+        self.assertIn("after 3 wrong codes it is void, so only the page answers it now", refused)
+        self.assertEqual([e["wrong"] for e in self.events("release_code_wrong")], [1, 2, 3])
+        refused = self.code_answer("yes", "1", code)[1]  # the right code no longer answers
+        self.assertIn("approval is on the page", refused)
+        self.assertIn("3 wrong codes", refused)
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("void (3 wrong codes)", release.page_rows(self.desk, self.desk.settings())[0]["code"])
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+
+    def test_a_release_code_does_not_answer_another_release(self):
+        from hansa import release
+        self.alert_fake()
+        self.with_targets(test="true", prod="true")
+        self.hansa("release", "a", "test")
+        self.hansa("release", "a", "prod")
+        first, second = self.queued_code(1), self.queued_code(2)
+        self.assertNotEqual(first, second)
+        self.assertIn("not the code of release #2", self.code_answer("yes", "2", first)[1])
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        self.assertEqual(self.code_answer("yes", "1", first)[1], "")
+        self.assertEqual(self.code_answer("yes", "2", second)[1], "")
+        self.assertEqual([release.get(self.desk, n)["state"] for n in (1, 2)], ["approved", "approved"])
+
+    def test_a_release_code_lapses_after_the_page_a_stop_a_re_ask_a_change_and_a_day(self):
+        from hansa import release
+        self.alert_fake()
+        self.with_targets(one="true", two="true", three="true", four="true", five="true")
+        for n, t in enumerate(("one", "two", "three", "four", "five"), 1):
+            self.hansa("release", "a", t)
+        codes = {n: self.queued_code(n) for n in range(1, 6)}
+        # the page answers
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, False, "not now", r["commit"], r["command"]), {"ok": True})
+        self.assertIn("not waiting for an answer: it is refused", self.code_answer("yes", "1", codes[1])[1])
+        # a stop
+        self.hansa("release", "--stop", "2", "later")
+        self.assertIn("it is stopped", self.code_answer("yes", "2", codes[2])[1])
+        # a re-ask: a new waiting alert for the same release gives a new code, and voids the old one
+        self.desk.event("release_waits", id=3, lane="a", target="three", why="asked again")
+        new = self.queued_code(3)
+        self.assertNotEqual(new, codes[3])
+        self.assertIn("not the code of release #3", self.code_answer("yes", "3", codes[3])[1])
+        self.assertEqual(self.code_answer("yes", "3", new)[1], "")
+        # after 24 hours
+        later = time.time() + release.CODE_LIFE + 1
+        with unittest.mock.patch.object(release.time, "time", return_value=later):
+            self.assertIn("lapsed (it is older than 24 hours)", self.code_answer("yes", "4", codes[4])[1])
+            self.assertIn("older than 24 hours", self.code_answer("yes", "4", codes[4])[1])
+        self.assertEqual(release.get(self.desk, 4)["state"], "waiting")
+        # a changed command: the release no longer waits as it was asked
+        self.hansa("lane", "target", "a", "five", "echo changed")
+        refused = self.code_answer("yes", "5", codes[5])[1]
+        self.assertIn("is void", refused)
+        self.assertEqual(release.get(self.desk, 5)["state"], "void")
+
+    def test_without_an_alert_command_there_is_no_code_and_the_page_answers(self):
+        from hansa import alert, release
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertNotIn("code", release.get(self.desk, 1))
+        refused = self.code_answer("yes", "1", "ABCDEF")[1]
+        self.assertIn("no alert command, so no code is sent: approval of release #1 is on the page only", refused)
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("answers on the page only: no alert command is set", self.hansa("status"))
+        self.assertIn("no release gets a one-time code", self.hansa("explain"))
+        self.assertIn("pass the code the principal said", self.code_answer("yes", "1")[1])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["release", "--help"])
+        self.assertIn("With no alert command there is no code", " ".join(out.getvalue().split()))
+
+    def test_hansa_release_no_with_the_code_refuses_the_release(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        said, refused = self.code_answer("no", "1", code, "not", "this", "week")
+        self.assertEqual(refused, "")
+        self.assertIn("is refused, as the principal said with the code", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["reason"], r["channel"]), ("refused", "not this week", "code"))
+        e = self.events("release_answered")[-1]
+        self.assertEqual((e["yes"], e["channel"]), (False, "code"))
+        self.assertIn("refused by the principal", release.state_text(self.desk, r))
+        self.assertIn("with the one-time code", release.state_text(self.desk, r))
+
+    def test_an_alert_command_echoing_a_code_in_title_case_after_a_long_prefix_leaves_none_of_it(self):
+        from hansa import alert, release, web
+        cmd = (f"{shlex.quote(sys.executable)} -c \"import sys; t = sys.stdin.read(); "
+               f"print('x' * 190 + t.title()); print(t.title().replace(' ', '-'))\"; exit 1")
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        result = alert.send_due(self.desk, gather=0)
+        self.assertEqual((result["ok"], result["exit"], result["tail"]), (False, 1, []))
+        self.assertIn("not kept, as the alert held a one-time code", result["withheld"])
+        [e] = self.events("alert_failed")
+        self.assertEqual((e["exit"], e["tail"]), (1, []))
+        self.assertIn("one-time code", e["withheld"])
+        status = self.hansa("status")
+        self.assertIn("alert command FAILED", status)
+        self.assertIn("its output was not kept, as the alert held a one-time code", status)
+        said = "\n".join([status, json.dumps(views.status(self.desk)), json.dumps(web._events(self.desk, 200, "")),
+                          self.desk.events_path.read_text(), alert.last_file(self.desk).read_text()]).lower()
+        self.assertNotIn(code.lower(), said)
+        self.assertNotIn("xxxxxxxxxx", said)  # nothing of the output at all, so no cut part of a code
+        # an alert without a code keeps its output as before
+        self.desk.add_ask("hello there")
+        result = alert.send_due(self.desk, gather=0)
+        self.assertNotIn("withheld", result)
+        self.assertIn("Hello-There", " ".join(result["tail"]))
+        # where a code passes through text hansa keeps, it is hidden in any case and with spaces or dashes, before
+        # any cut
+        self.assertEqual(release.hide_codes("say Ab3-d e9 now", ["AB3DE9"]), "say [code] now")
+
+    def test_the_alert_command_runs_in_a_folder_of_its_own_not_the_desk(self):
+        from hansa import alert
+        cmd = "pwd; echo kept > alert-log.txt; exit 1"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        result = alert.test(self.desk)
+        where = Path(result["tail"][0])
+        self.assertNotEqual(where.resolve(), self.desk.root.resolve())
+        self.assertEqual(where.resolve().parent, alert.runs_dir(self.desk).resolve())  # in secrets/, closed to agents
+        self.assertFalse(where.exists())  # removed afterwards
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")  # with a code too
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(list(self.desk.root.rglob("alert-log.txt")), [])
+
+    def test_yes_and_no_are_not_lane_names(self):
+        from hansa import release
+        for name in ("yes", "NO", "No"):
+            with self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "add", name, "--like", "a")
+            self.assertIn("cannot name a lane", str(e.exception.code))
+        self.assertEqual(sorted(self.desk.settings()["lanes"]), ["a"])
+        s = self.desk.settings()
+        s["lanes"]["yes"] = s["lanes"]["a"]  # wherever a lane is named: the settings refuse it too
+        self.assertIn("yes and no (in any case) are not lane names", " ".join(self.desk.save_settings(s)))
+        # a desk that already has such a lane: the answer form records nothing, and says to remove it first
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["yes"] = s["lanes"]["a"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        before = self.desk.events_path.read_text()
+        refused = self.code_answer("yes", "1", code)[1]
+        self.assertIn("lane named yes: that lane must be removed first", refused)
+        self.assertEqual(self.desk.events_path.read_text(), before)
+        self.assertIsNone(release.get(self.desk, 2))
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("lane named yes", self.code_answer("NO", "1", code)[1])
+        # once it is gone, the code answers
+        del s["lanes"]["yes"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(self.code_answer("Yes", "1", code)[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+
+    def test_the_readme_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
+        root = Path(__file__).resolve().parent.parent
+        readme = " ".join((root / "README.md").read_text().split())
+        self.assertIn("Your alert command must not keep the alert's text anywhere the coordinator can read it (a "
+                      "file, a log, a chat history): the code in it approves a release.", readme)
+        self.assertIn("must not keep the alert's text anywhere the coordinator can read it",
+                      (root / "hansa" / "ui.html").read_text())
+
+    def test_a_killed_servers_alert_folder_is_closed_to_agents_and_swept_at_the_next_start(self):
+        from hansa import alert, run
+        root = Path(__file__).resolve().parent.parent
+        here = self.tmp / "where.txt"
+        cmd = f"pwd > {shlex.quote(str(here))}; cat > here.txt; sleep 60"
+        child = subprocess.Popen([sys.executable, "-c", "import sys; from hansa import alert; from hansa.desk import Desk; "
+                                  "alert.run(Desk(sys.argv[1]), sys.argv[2], 'release_waiting', 'say code AB3DE9')",
+                                  str(self.desk.root), cmd], cwd=root, start_new_session=True)
+        try:
+            for _ in range(200):
+                if here.exists() and here.read_text().strip():
+                    break
+                time.sleep(0.05)
+            folder = Path(here.read_text().strip())
+            for _ in range(200):
+                if (folder / "here.txt").exists() and (folder / "here.txt").read_text():
+                    break
+                time.sleep(0.05)
+        finally:  # the server killed: its alert thread removes nothing
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        self.assertEqual((folder / "here.txt").read_text(), "say code AB3DE9")
+        self.assertEqual(folder.resolve().parent, alert.runs_dir(self.desk).resolve())
+        # in secrets/: the coordinator's rules deny reading it, and workers, verifiers and design sessions too
+        self.assertIn(self.desk.secrets_dir.resolve(), folder.resolve().parents)
+        self.assertIn(self.desk.secrets_dir, run.desk_private(self.desk))
+        self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", cli.permissions(self.desk)["deny"])
+        self.assertEqual(stat.S_IMODE(self.desk.secrets_dir.stat().st_mode), 0o700)
+        # the next hansa serve sweeps it as it starts
+        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaises(RuntimeError):
+            main(["--desk", str(self.desk.root), "serve", "--port", "0"])
+        self.assertFalse(folder.exists())
+        self.assertEqual(list(alert.runs_dir(self.desk).iterdir()), [])
+
+    def test_init_refuses_a_lane_named_yes_or_no(self):
+        for name in ("yes", "NO"):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["init", str(self.tmp / f"new-{name}"), "--repo", str(self.repo), "--lane", name])
+            self.assertIn(f"{name} cannot name a lane: yes and no (in any case) are kept for hansa release yes|no ID "
+                          "CODE", str(e.exception.code))
+            self.assertFalse((self.tmp / f"new-{name}").exists())
+
+    def test_the_page_says_where_the_alert_command_runs(self):
+        root = Path(__file__).resolve().parent.parent
+        page = (root / "hansa" / "ui.html").read_text()
+        self.assertNotIn("in the desk's folder", page)
+        self.assertNotIn("在桌面文件夹里运行", page)
+        self.assertIn("in a temporary folder of its own under the desk's secrets/alert-runs", page)
+        self.assertIn("在桌面 secrets/alert-runs 下它自己的临时文件夹里运行", page)
+        self.assertNotIn("in the desk's folder", (root / "hansa" / "alert.py").read_text())
+
+    def test_a_code_given_as_two_words_is_refused_without_counting_a_wrong_code(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        refused = self.code_answer("yes", "1", code[:3], code[3:])[1]
+        self.assertIn("takes the code as one word", refused)
+        self.assertIn("Nothing was checked or counted", refused)
+        self.assertEqual(self.events("release_code_wrong"), [])
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertEqual(self.code_answer("yes", "1", f"{code[:3]}-{code[3:]}")[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["release", "--help"])
+        self.assertIn("given as one word (dashes allowed, no spaces", " ".join(out.getvalue().split()))
+        card = " ".join((Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text().split())
+        self.assertIn("The code is one word (dashes allowed, no spaces)", card)
+
+    def test_a_timed_out_alert_names_its_real_time_limit(self):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "sleep 5"})), {"ok": True, "problems": []})
+        self.desk.add_ask("hello")
+        result = alert.send_due(self.desk, gather=0, timeout=0.5)
+        self.assertTrue(result["timed_out"])
+        status = self.hansa("status")
+        self.assertIn("(timed out after 0.5 s)", status)
+        self.assertNotIn(f"after {alert.TIMEOUT} s", status)
 
     # -- small fixes from earlier verifications --
 

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -17,7 +18,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
                    kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
-                   PROJECT_INTRO)
+                   PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
                   lane_identity,
@@ -36,7 +37,15 @@ BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-s
 ON_MAC = sys.platform == "darwin"
 
 
+def answer_lane_refused(name: str) -> str:
+    """Why a lane may not be named yes or no (lane add, init --lane)."""
+    return (f"hansa: {name} cannot name a lane: yes and no (in any case) are kept for hansa release yes|no ID CODE, "
+            "the principal's answer; nothing was changed")
+
+
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> Desk:
+    if answer_name(lane):
+        raise SystemExit(answer_lane_refused(lane))
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
@@ -150,6 +159,8 @@ def _text(args) -> str:
 
 
 def cmd_init(a):
+    if answer_name(a.lane):  # before anything is made, for another account too
+        raise SystemExit(answer_lane_refused(a.lane))
     if a.user:
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
@@ -805,6 +816,30 @@ def _stop_release(desk: Desk, a) -> None:
         + ". The server may be left half-switched: hansa release shows its last lines"))
 
 
+def _answer_by_code(desk: Desk, a) -> None:
+    """hansa release yes|no ID CODE [reason]: the principal's answer, said in the conversation with the one-time code
+    of their alert, passed on."""
+    rid, rest = int(a.note[0].lstrip("#")), list(a.note[1:])
+    if not rest:
+        raise SystemExit(f"hansa: pass the code the principal said in the conversation: hansa release {a.lane} {rid} "
+                         "CODE. Never guess one; without it, the principal answers on the page. Nothing was changed")
+    yes = a.lane.strip().lower() == "yes"
+    if yes and len(rest) > 1:  # a code split over words, or a reason a yes does not take: nothing is checked or counted
+        raise SystemExit(f"hansa: hansa release yes {rid} CODE takes the code as one word (dashes allowed, no spaces), "
+                         "and nothing after it; pass it again as one word. Nothing was checked or counted")
+    out = release.answer_by_code(desk, rid, yes, rest[0], " ".join(rest[1:]))  # by the coordinator, for the principal
+    if not out["ok"]:
+        raise SystemExit("hansa: " + desk.redact("; ".join(out["problems"])) + ".")
+    r = release.get(desk, rid) or {}
+    if not yes:
+        print(desk.redact(f"release #{rid} of {release.what(r)} is refused, as the principal said with the code of "
+                          "their alert; nothing runs. Do not push or deploy it yourself"))
+        return
+    print(desk.redact(f"release #{rid} of {release.what(r)} is approved, as the principal said with the code of their "
+                      f"alert (recorded as given through you); {release.waits_text(desk, desk.settings(), r)}. hansa "
+                      "tells you when it ends"))
+
+
 def cmd_pause(a):
     Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
     print("paused: no new tasks start until `hansa resume`; running tasks finish")
@@ -883,6 +918,15 @@ def cmd_release(a):
     if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
         raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
                          "cannot. Say in your report that it may be ready to go out")
+    if answer_name(a.lane) and a.note and a.note[0].lstrip("#").isdigit():  # always an answer, never a request
+        taken = [n for n in desk.settings()["lanes"] if answer_name(n)]
+        if taken:
+            raise SystemExit(f"hansa: hansa release {a.lane} ID CODE is the principal's answer, but this desk has a "
+                             f"lane named {', '.join(taken)}: that lane must be removed first (hansa lane remove), "
+                             "then pass the code again. Nothing was recorded")
+        a.lane = a.lane.strip().lower()
+        _answer_by_code(desk, a)
+        return
     note, target = list(a.note), None
     if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
         target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
@@ -1020,6 +1064,7 @@ def cmd_serve(a):
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
+    alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
     except OSError as e:
@@ -1027,6 +1072,10 @@ def cmd_serve(a):
             raise
         raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
                          f"server on a free port with hansa serve --port N (hansa web then finds it)")
+
+    def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stopped)
     (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
     (desk.state_dir / "web-host").write_text(a.host, encoding="utf-8")  # with it, where hansa status says the page is
     beat(desk)  # its rounds count from now, not from the last server's
@@ -1050,6 +1099,8 @@ def cmd_serve(a):
             time.sleep(a.every)
     except KeyboardInterrupt:
         desk.event("server_stopped")
+    finally:
+        alert.sweep_runs(desk)
 
 
 def web_port(desk: Desk) -> int:
@@ -1446,6 +1497,8 @@ def cmd_lane(a):
         s = desk.settings()
         new = json.loads(json.dumps(s))
         if a.action == "add":
+            if answer_name(a.name):
+                raise SystemExit(answer_lane_refused(a.name))
             if a.name in s["lanes"]:
                 raise SystemExit(f"hansa: there is already a lane {a.name}; change it with hansa lane set {a.name} ...")
             # none as lane set takes it: alone it means empty, with other values it is refused
@@ -2130,6 +2183,16 @@ def main(argv=None):
                      "told (release_stopped). A stopped release went out for no --after. A stopped install may leave "
                      "the server half-switched: a release command for which that matters should handle TERM (finish "
                      "or undo the step it is in)")
+    p.epilog = ("hansa release yes ID CODE, hansa release no ID CODE [reason]: the principal's answer to release ID, "
+                "said in the conversation with the one-time code that only the principal's alert carries (6 "
+                "characters, no 0/O or 1/I/l), given as one word (dashes allowed, no spaces: a yes with a word too many is "
+                "refused, nothing counted). hansa checks it against release ID only; a right code answers it once, "
+                "recorded as the principal's answer given through the coordinator (channel code); a wrong one is "
+                f"refused and counted, and after {release.CODE_TRIES} the code is void and only the page answers. A "
+                f"code lapses when the release is answered (on the page too), stopped or no longer what was asked, after "
+                f"{release.CODE_LIFE // 3600} hours, and when a new waiting alert for it gives a new one. With no alert "
+                "command there is no code: the principal answers on the page. yes and no are not lane names, so this "
+                "form is always an answer. Never guess a code, nor ask the principal to send it anywhere else")
     p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("lane", nargs="?")

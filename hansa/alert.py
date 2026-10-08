@@ -9,7 +9,8 @@ when hansa serve has finished no round for STUCK_ALERT seconds; not for ordinary
 coordinator. The coordinator sends none: no hansa command does.
 
 Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
-as the desk's account, outside the sandbox, in the desk's folder, with hansa's own environment (not a lane's env),
+as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
+with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together) and the text on standard input (UTF-8,
 keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alerts that come within GATHER seconds
 of each other go out in one run (none waits more than MOST_WAIT); one run at a time (.hansa/alert.lock), and at
@@ -18,7 +19,12 @@ line saying how many were held back. An entry of the queue that cannot be read i
 (event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
 only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
-there is no retry: the next alert tries again. The text is in English: the page has no language setting (it
+there is no retry: the next alert tries again. A
+release_waiting alert carries the release's one-time code (release.new_code), which goes nowhere else: its queue
+entry is gone once sent, and none of what the command printed for such an alert is kept (only how it ended).
+That folder is removed when the command ends, and what a stopped
+or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
+verifiers and design sessions, so a leftover that holds the alert's text is never theirs to read. The text is in English: the page has no language setting (it
 follows the browser's language, which hansa does not know when it sends).
 """
 from __future__ import annotations
@@ -28,6 +34,7 @@ import fcntl
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -43,6 +50,7 @@ MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
 MOST_TEXT = 1000  # characters on the command's standard input
 TAIL = 5  # lines of a failed run's output kept
+WITHHELD = "its output was not kept, as the alert held a one-time code"  # nor any part of it, in any form
 MOST_RUNS = 20  # runs an hour at most; beyond it, alerts are held and go out together
 HOUR = 3600
 STUCK_ALERT = 15 * 60  # seconds hansa serve finishes no round before the principal is alerted
@@ -55,6 +63,25 @@ def queue_file(desk: Desk) -> Path:
 
 def last_file(desk: Desk) -> Path:
     return desk.state_dir / "alert-last.json"
+
+
+def runs_dir(desk: Desk) -> Path:
+    """Where each run's own folder is made: in secrets/, which the coordinator, workers, verifiers and design sessions
+    may not read, as what the command writes there may hold the alert's text and its code."""
+    return desk.secrets_dir / "alert-runs"
+
+
+def sweep_runs(desk: Desk) -> None:
+    """Remove the folders of runs that a stopped or killed hansa serve left (hansa serve calls this as it starts,
+    before its alert thread runs)."""
+    d = runs_dir(desk)
+    if d.is_dir():
+        for x in d.iterdir():
+            if x.is_dir() and not x.is_symlink():
+                shutil.rmtree(x, ignore_errors=True)
+            else:
+                with contextlib.suppress(OSError):
+                    x.unlink()
 
 
 def command(s: dict) -> str:
@@ -98,20 +125,25 @@ def _clean(desk: Desk) -> list:
     return good
 
 
-def add(desk: Desk, kind: str, text: str) -> bool:
-    """Queue an alert for the next run; False (nothing queued) when no alert command is set."""
+def add(desk: Desk, kind: str, text: str, code: str = "", release=None) -> bool:
+    """Queue an alert for the next run; False (nothing queued) when no alert command is set. code: the one-time
+    code of release `release` the text holds (it replaces one queued before for that release, now void); the entry
+    goes once it is sent, and none of what the command prints for it is kept."""
     if not command(desk.settings()):
         return False
     with desk.lock():
         q = _clean(desk)
-        q.append({"kind": kind, "text": desk.redact(text), "at": time.time()})
+        if code:
+            q = [x for x in q if not (x.get("code") and x.get("release") == release)]
+        q.append({"kind": kind, "text": desk.redact(text), "at": time.time(),
+                  **({"code": code, "release": release} if code else {})})
         desk.state_dir.mkdir(exist_ok=True)
         write_json(queue_file(desk), q)
     return True
 
 
 # -- what is alerted -------------------------------------------------------------------------------------------------
-def _release_text(desk: Desk, rid, waiting: bool) -> str:
+def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
     from . import release
     r = release.get(desk, rid)
     if not r:
@@ -119,8 +151,11 @@ def _release_text(desk: Desk, rid, waiting: bool) -> str:
     target = r.get("target") or ""  # "": the lane's one unnamed target, its release command
     head = (f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} "
             f"({r.get('base')} at {str(r.get('commit') or '')[:10]})")
-    if waiting:
-        return (f"{head} waits for your yes on the page: {r.get('count', 0)} commit(s), command: {r.get('command')}"
+    if waiting:  # the code first, so that no cut of a long text takes it
+        return (f"{head} waits for your yes on the page"
+                + (f", or say code {code} to the coordinator in the conversation (it answers this release only, once, "
+                   f"for {release.CODE_LIFE // 3600} hours; send it nowhere else)" if code else "")
+                + f": {r.get('count', 0)} commit(s), command: {r.get('command')}"
                 + (f"; note: {r['note']}" if r.get("note") else ""))
     return f"{head}: {release.state_text(desk, r)}"
 
@@ -128,7 +163,12 @@ def _release_text(desk: Desk, rid, waiting: bool) -> str:
 def from_event(desk: Desk, kind: str, fields: dict) -> None:
     """Queue the alert an event calls for, if any (Desk.event calls this)."""
     if kind == "release_asked" and fields.get("state") == "waiting" or kind == "release_waits":
-        add(desk, "release_waiting", _release_text(desk, fields.get("id"), True))
+        from . import release
+        rid = fields.get("id")
+        if not command(desk.settings()):  # no alert command: no code; the page answers
+            return
+        code = release.new_code(desk, rid)  # a new one each time it waits: one made before is void
+        add(desk, "release_waiting", _release_text(desk, rid, True, code), code=code, release=rid)
     elif kind in ("release_ended", "release_void", "release_forbidden"):
         add(desk, "release_ended", _release_text(desk, fields.get("id"), False))
     elif kind == "release_stopped" and fields.get("by") != "page":  # the principal knows of their own Stop
@@ -148,6 +188,7 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
 def text_of(desk: Desk, items: list, held: int = 0) -> str:
     """What the command reads on its standard input: one line per alert, keys removed, cut at MOST_TEXT characters.
     held: how many of them the limit of MOST_RUNS runs an hour held back."""
+    items = sorted(items, key=lambda x: not x.get("code"))  # those holding a code first: no cut takes it
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
     head = f"[hansa] desk {desk.root.name}"
     if held:
@@ -158,19 +199,27 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     return text if len(text) <= MOST_TEXT else text[:MOST_TEXT - 1] + "…"
 
 
-def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT) -> dict:
-    """Run the alert command once: {ok, exit, timed_out, tail, at}."""
+def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, codes=()) -> dict:
+    """Run the alert command once: {ok, exit, timed_out, limit, tail, at}. It runs in a folder of its own under
+    runs_dir, removed after however the command ends (what a killed server left, sweep_runs removes), so that what it
+    writes to a relative path lands nowhere hansa keeps or anyone but the principal reads. codes: the one-time codes the text holds;
+    then none of what the command printed is kept (tail is empty, withheld says why), as it may echo a code in any
+    form."""
     env = {**os.environ, "HANSA_ALERT_KIND": kinds}
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
     timed_out, code, out = False, None, b""
     # stdin and output are files, not pipes: the command's own exit ends the run, even when a child it left behind
     # still holds them; only at the time limit is its whole group killed
-    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said:
+    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(desk.secrets_dir, 0o700)
+    runs_dir(desk).mkdir(mode=0o700, exist_ok=True)
+    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said, \
+            tempfile.TemporaryDirectory(prefix="run-", dir=runs_dir(desk)) as here:
         given.write(text.encode("utf-8"))
         given.seek(0)
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=str(desk.root), env=env, stdin=given,
+            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=here, env=env, stdin=given,
                                     stdout=said, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 code = proc.wait(timeout=timeout)
@@ -184,10 +233,13 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT) -
             out = said.read()
         except OSError as e:
             out = str(e).encode()
+    result = {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "limit": timeout, "tail": [],
+              "at": now(),
+              "kinds": kinds}
+    if codes:
+        return {**result, "withheld": WITHHELD}
     said = desk.redact(out.decode("utf-8", errors="replace")).strip().splitlines()[-TAIL:]
-    tail = [x[:200] for x in said]
-    return {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "tail": tail, "at": now(),
-            "kinds": kinds}
+    return {**result, "tail": [x[:200] for x in said]}
 
 
 @contextlib.contextmanager
@@ -230,7 +282,8 @@ def _record(desk: Desk, result: dict, count: int, began: float) -> None:
         desk.event("alert_sent", kinds=result["kinds"], alerts=count)
     else:
         desk.event("alert_failed", kinds=result["kinds"], alerts=count, exit=result["exit"],
-                   timed_out=result["timed_out"], tail=result["tail"])
+                   timed_out=result["timed_out"], limit=result.get("limit"), tail=result["tail"],
+                   **({"withheld": result["withheld"]} if result.get("withheld") else {}))
 
 
 def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, timeout: float = TIMEOUT,
@@ -260,16 +313,31 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             q = _clean(desk)
             write_json(queue_file(desk), [])
         cmd = command(desk.settings())
+        codes = [x for x in q if isinstance(x.get("code"), str) and x["code"]]
         if not cmd or not q:  # cleared since they were queued: nothing to send them with
+            _codes_went(desk, codes, "", False)
             return None
         held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
         held = len(q) if held_since else 0
         if held_since:
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
-        result = run(desk, cmd, kinds, text_of(desk, q, held), timeout)
+        text = text_of(desk, q, held)
+        result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes])
+        _codes_went(desk, codes, text, result["ok"])
         _record(desk, result, len(q), t)
         return result
+
+
+def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
+    """Record on each release whether its code went out; one that did not (no command to send it with, or cut from
+    the text) is void: the page answers that release."""
+    from . import release
+    for x in codes:
+        if x["code"] in text:
+            release.code_sent(desk, x.get("release"), x["code"], ok)
+        else:
+            release.code_unsent(desk, x.get("release"), x["code"])
 
 
 def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
@@ -324,8 +392,10 @@ def failure_line(desk: Desk) -> str:
     f = rec.get("failed")
     if not isinstance(f, dict):
         return ""
-    how = f"timed out after {TIMEOUT} s" if f.get("timed_out") else f"exit {f.get('exit')}"
-    tail = " | ".join(f.get("tail") or [])
+    limit = f.get("limit") if isinstance(f.get("limit"), (int, float)) and not isinstance(f.get("limit"), bool) \
+        else TIMEOUT  # recorded before the limit was: the default
+    how = f"timed out after {limit:g} s" if f.get("timed_out") else f"exit {f.get('exit')}"
+    tail = " | ".join(f.get("tail") or []) or (WITHHELD if f.get("withheld") else "")
     last = rec.get("last") or {}
     later = (f"; a later one went out {_when(last.get('at'))}" if last.get("ok") and (last.get("at") or 0) > (f.get("at") or 0)
              else "")
@@ -339,8 +409,11 @@ def explain_line(s: dict) -> str:
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
     if not cmd:
         return ("Alerts: no alert command is set. The principal may set one on the page, which hansa runs when a "
-                "release waits for the principal or ends, or a request is filed; you send no alerts and cannot set it.")
+                "release waits for the principal or ends, or a request is filed; you send no alerts and cannot set it. "
+                "With none, no release gets a one-time code: the principal approves releases on the page only.")
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
             "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, or hansa serve finishes no "
-            "round for a long time. You send no alerts and cannot set it.")
+            "round for a long time. You send no alerts and cannot set it. A release waiting for the principal gets a "
+            "one-time code that only that alert carries: the principal answers on the page, or says the code in the "
+            "conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). Never guess one.")

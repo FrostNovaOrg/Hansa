@@ -515,6 +515,7 @@ def status(desk: Desk) -> dict:
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
+        "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "concurrency": s["concurrency"],
@@ -647,6 +648,10 @@ def status_text(st: dict) -> str:
         out.append("releases (hansa release):")
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
                 if r["state"] in release.OPEN]
+        if any(r["state"] == "waiting" for r in st["releases"]):
+            out.append("  the principal answers on the page, or says the one-time code of their alert in the "
+                       "conversation: pass it with hansa release yes|no ID CODE" if st.get("release_codes") else
+                       "  the principal answers on the page only: no alert command is set, so no code is sent")
     if st["asks"]:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
