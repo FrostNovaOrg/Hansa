@@ -16,8 +16,8 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
-from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
-                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
+from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
@@ -1209,7 +1209,9 @@ def no_read_paths(desk: Desk, plan: dict, theirs: str = "") -> tuple:
     refused = plan.get("no_read_refused") if isinstance(plan.get("no_read_refused"), list) else []
     said = [x for x in refused if isinstance(x, str)]
     # root does not read the account's settings: the account's hansa looked at the lanes' repositories
-    good, more = deny_split(given, desk.root, None if theirs else desk.settings()["lanes"])
+    good, more, stops = deny_parts(given, desk.root, None if theirs else desk.settings()["lanes"])
+    if stops:  # as coordinator_desk: a path the plan gives that cannot be written as a rule stops the session
+        raise SystemExit(f"hansa: {stop_text(stops)}")
     return good, [*said, *(m for m in more if m not in said)]
 
 
@@ -1337,7 +1339,9 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
             desk.event("helper_retired", file=name)
     desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
     write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": now()})
-    kept, unkept = kept_from_workers(s, desk.root)
+    kept, unkept, stops = no_read_parts(s, desk.root)
+    if stops:  # Read would be open there to the session: it does not start
+        raise SystemExit(f"hansa: {stop_text(stops)}")
     for line in unkept:
         desk.event("no_read_skipped", why=line)
     read, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)

@@ -616,7 +616,12 @@ here; work that needs code changed or a browser goes to a worker.
   `Caskroom` (where its program links lead), `~/.config`, `~/.local`,
   `~/.cache` (and `~/Library` on macOS) or the temporary folder; a file or folder
   inside one may be listed, one formula's folder in `Cellar` too; nor `/dev` or
-  anything in it, such as `/dev/null`); which lanes' releases go
+  anything in it, such as `/dev/null`). A saved entry that cannot be applied
+  (one of `()[]{}*?\` in a name or where its link leads, say) stops every run,
+  yours too, until the principal changes it on the page (`hansa status` says
+  `STOPPED:`); one that has come to close a lane's repository, a worktree or a
+  folder on the `PATH` is left out of runs instead, and that folder is open to
+  them: settle it with the principal); which lanes' releases go
   out without the principal's yes, and the words no release may send out.
   Ask with `hansa ask`; do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.

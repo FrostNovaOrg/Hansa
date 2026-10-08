@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import (DENY_AT, HANSA_IDENTITY, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    is_git_rule, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
@@ -2196,8 +2196,12 @@ def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
 def no_read(desk: Desk) -> tuple:
     """What the principal keeps workers from reading (settings, workers_may_not_read), as a run may be given
     it: (the paths that pass the checks now, a line for each left out). The list is checked on saving, but a
-    lane's repository or a folder on the PATH may have come under one since."""
-    good, said = kept_from_workers(desk.settings(), desk.root)
+    lane's repository, a worktree or a folder on the PATH may have come under one since: that one is left out.
+    One that cannot be applied for any other reason (a pattern character in a name, or where a link now leads)
+    stops the run: RuntimeError, saying which entry and why (no_read_stop)."""
+    good, said, stops = no_read_parts(desk.settings(), desk.root)
+    if stops:
+        raise RuntimeError(stop_text(stops))
     return good, [f"left out of this run: {x.removeprefix(DENY_AT)} (the principal changes the list on the web "
                   "page, Settings)" for x in said]
 
@@ -3346,6 +3350,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                            cancel=False, held=None, sandbox_failed=None)
     if not meta:
         return None
+    no_read(desk)  # before anything is prepared: an entry that cannot be applied fails the run (not_started)
     s = desk.settings()
     lane, p = s["lanes"][lane_name], s["providers"][pname]
     wt, base = prepare(desk, lane_name, lane, meta)
@@ -3528,6 +3533,7 @@ def design_command(desk: Desk, tid: str):
     Built inside the session's own terminal (hansa.session), so no key is on a command line."""
     if account.LINUX:
         raise RuntimeError(DESIGN_ON_LINUX)
+    no_read(desk)  # an entry that cannot be applied: the session does not start
     s, meta = desk.settings(), desk.meta(tid)
     lane_name = meta["lane"]
     lane, pname = s["lanes"][lane_name], meta["provider"]
@@ -3603,6 +3609,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None)
     if not meta:
         return
+    no_read(desk)  # as a worker's start
     wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
     desk.update(tid, base=base, branch=f"task/{tid}", worktree=str(wt), session_id=str(uuid.uuid4()))
     try:
