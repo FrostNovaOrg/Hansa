@@ -8664,6 +8664,7 @@ class DeskTest(unittest.TestCase):
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["held"]["part"]), ("queued", "the deny-write patterns"), m)
 
+    @design_as_on_mac  # macOS's reading of the patterns, on every system; Linux's list at its end
     def test_a_sandbox_that_keeps_what_git_needs_open_holds_the_task_and_names_the_path(self):
         # the stand-in srt answers the write check with one more deny, of a new file in the worktree's own git
         # folder, as a deny pattern read otherwise than meant would keep it: the sandbox starts, and git add would fail
@@ -8687,7 +8688,10 @@ class DeskTest(unittest.TestCase):
         common = run.git_folders(dwt)[0]
         self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:],
                          [common / "refs" / "heads" / "task" / "t0002.lock", common / "objects" / ".hansa-try"])
+        with unittest.mock.patch.object(account, "LINUX", True):  # on Linux, where no design session runs: none of these
+            self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:], [])
 
+    @design_as_on_mac  # macOS's reading of the patterns; on Linux new names are not tried: the next test
     def test_a_sandbox_whose_patterns_do_not_keep_a_new_name_holds_the_task_and_names_the_path(self):
         # the stand-in srt reads the deny patterns as macOS does: here one that matches nothing, as a class of more
         # than 15 elements does, stands in for those that keep new names next to the worktree's own folder
@@ -8716,6 +8720,22 @@ class DeskTest(unittest.TestCase):
                          [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x", heads / "task" / "t0002x",
                           heads / ".hansa-try-kept"])
         self.assertEqual(run.git_needs_kept(self.repo), [])  # a main checkout: no patterns to try
+
+    def test_on_linux_a_sandbox_whose_patterns_keep_nothing_runs_the_task_and_the_status_says_what_is_left(self):
+        # srt on Linux drops every pattern, so the try there checks no new name: the same patterns as in the test
+        # before hold no task, and hansa status says what the try leaves to hansa's checks (LINUX_TRY_NOTE)
+        from hansa import run
+        real = run.others_than
+        unkept = lambda folder, names: [p if Path(folder).name != "worktrees" or "[" not in p
+                                        else p[:p.rindex("[")] + "[" + "0123456789abcdefg" + "]*" for p in real(folder, names)]
+        with unittest.mock.patch("hansa.run.others_than", unkept), unittest.mock.patch.object(account, "LINUX", True):
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "done", m)
+            self.assertFalse(m.get("held"))
+            self.assertEqual(run.sandbox_held(self.desk), {})
+            self.assertGreater(len(self.srt_calls(sandbox=True)), 0)  # tried, and passed
+            self.assertIn(run.LINUX_TRY_NOTE, views.status_text(views.status(self.desk)))
 
     def stand_in_srt(self, line: str) -> None:
         """The stand-in srt with one of its settings (FAKE_SRT) set: RUN_TRY or LINUX_TRY."""
