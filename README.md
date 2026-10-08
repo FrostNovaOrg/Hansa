@@ -432,9 +432,8 @@ page gives.
   preview's sandbox, local binding included: it can reach the machine's
   loopback, write in the worktree and the lane's write list, and reach the
   hosts on the lane's network list, until it ends or the machine restarts. A
-  worker's own processes are not recorded this way: hansa still finds what a
-  worker leaves by `HANSA_TASK` in its environment or its run's folder in its
-  arguments, as before. Its output is kept in the task's folder as
+  worker's own processes are recorded too, on each round of `hansa serve`
+  (see what hansa stops when a run ends, below). Its output is kept in the task's folder as
   `preview.log`, keys removed, at most its first and last 2 MB on disk with a
   line saying how much was left out between them (a byte that is not UTF-8 is
   kept as one `?`; where a cut falls inside a line, 4 KB more on each side of
@@ -712,8 +711,21 @@ looks like an empty box: it may send the guess as if you wrote it.
 - hansa replaces the principal's keys wherever it shows or records text, and will not
   merge a change that holds one. It cannot see into compressed files, and the
   event log keeps what it recorded before a key was saved.
-- What a worker leaves running is stopped when the worker ends, unless `hansa serve`
-  was restarted in between.
+- What hansa stops when a run ends (a worker, a verifier, a design session, or
+  the lane's check after one): the run's process group; then each process
+  `hansa serve` recorded below the run while it ran, whatever its group,
+  environment or working folder (on each of its rounds, every few seconds, on
+  the task, so a restarted server still has the record), if it still runs and
+  is still the same process (its start time; a number since given to another
+  process is left alone). Nothing is recorded for a run whose own process number
+  no longer has the start time hansa saved for it, so a process that was given
+  that number later, and its group, are never taken for the run's; then each process that names the task: `HANSA_TASK`
+  in its environment, or the run's temporary folder in its arguments or as its
+  TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
+  lists what was stopped, with its group or alone, and the event log has it. What can still escape: a process started and moved
+  out of every marker (`env -i`, another folder, a session of its own) between
+  two rounds, whose parent ended before the next round. A design session's
+  tmux session is ended with it; the tmux server is left running.
 - A lane repository's merge hooks run while `hansa merge` holds the desk, so
   `hansa serve` waits for them.
 - One `hansa serve` per desk, on one machine.

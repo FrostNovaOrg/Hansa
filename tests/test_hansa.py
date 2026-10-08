@@ -312,6 +312,12 @@ if os.environ.get("FAKE_LEAVE_DETACHED"):  # the same, in a session of its own: 
     c = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "left-behind"], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     open(os.environ["FAKE_LEAVE_DETACHED"], "w").write(str(c.pid))
+if os.environ.get("FAKE_LEAVE_HIDDEN"):  # one that drops every marker: env -i, another TMPDIR, another folder
+    c = subprocess.Popen(["/usr/bin/env", "-i", "TMPDIR=" + os.path.dirname(os.environ["FAKE_LEAVE_HIDDEN"]),
+                          sys.executable, "-c", "import time; time.sleep(60)"], cwd="/", start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    open(os.environ["FAKE_LEAVE_HIDDEN"], "w").write(str(c.pid))
+    time.sleep(float(os.environ.get("FAKE_LEAVE_HIDDEN_WAIT", "1.5")))  # running a while: a round sees it
 if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_TASK, naming folders: its run's, and others
     tmp, bare = os.environ["CLAUDE_CODE_TMPDIR"], {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "TMPDIR")}
     open(os.path.join(tmp, "load.sh"), "w").write("while :; do sleep 1; done\n")
@@ -1887,6 +1893,142 @@ class DeskTest(unittest.TestCase):
         left = self.sleeper(tmp + "v/load.sh", env=bare)
         m = run.finish(self.desk, vid, 0)
         self.assertEqual([x["pid"] for x in m["left_running"]], [left.pid])
+
+    def leave_hidden(self):
+        """Have the stand-in worker leave a process with no marker the sweep looks for; the file that gets its pid."""
+        from hansa.run import alive
+        pidfile = self.tmp / "hidden.pid"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_LEAVE_HIDDEN": str(pidfile)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.addCleanup(lambda: pidfile.exists() and alive(int(pidfile.read_text())) and
+                        os.kill(int(pidfile.read_text()), 9))
+        return pidfile
+
+    def test_what_a_worker_starts_without_any_marker_is_recorded_and_stopped_at_its_end(self):
+        from hansa.run import alive, task_processes
+        pidfile = self.leave_hidden()
+        tid = self.desk.new_task("Add hello.txt")
+        d, child = Dispatcher(self.desk), None
+        end = time.time() + 20
+        while time.time() < end and child is None:
+            d.tick()
+            if pidfile.exists() and pidfile.read_text():
+                child = int(pidfile.read_text())
+            time.sleep(0.1)
+        folders = [r["path"] for r in self.desk.meta(tid).get("worker_tmps") or []]
+        self.assertNotIn(child, [p for p, _ in task_processes(tid, folders)])  # no marker finds it
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(alive(child))
+        self.assertIn(child, [x["pid"] for x in m["left_running"]])
+        self.assertEqual((m.get("started_procs"), m.get("run_groups")), ({}, {}))  # the record goes with the run
+
+    def test_the_record_of_what_a_run_started_survives_a_restart_of_the_server(self):
+        from hansa.run import alive
+        pidfile = self.leave_hidden()
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_LEAVE_HIDDEN_WAIT"] = "3"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 20
+        while time.time() < end:
+            d.tick()
+            child = int(pidfile.read_text()) if pidfile.exists() and pidfile.read_text() else None
+            if child and str(child) in (self.desk.meta(tid).get("started_procs") or {}):
+                break
+            time.sleep(0.1)
+        self.assertIn(str(child), self.desk.meta(tid)["started_procs"])
+        d.procs[tid].wait(20)  # the worker ends while no server runs
+        del d
+        self.assertTrue(alive(child))
+        m = self.settle(Dispatcher(self.desk), tid)  # a new server, which only has the task's record
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(alive(child))
+        self.assertIn(child, [x["pid"] for x in m["left_running"]])
+
+    def test_a_recorded_process_whose_number_went_to_another_is_not_stopped(self):
+        from hansa import run
+        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        theirs, leader, ours = self.sleeper(env=bare), self.sleeper(env=bare), self.sleeper(env=bare)
+        tid = self.desk.new_task("Add hello.txt")
+        old = "1.000000" if sys.platform == "darwin" else "boot:1"  # the start of the process once recorded
+        self.desk.update(tid, started_procs={str(theirs.pid): old, str(leader.pid): old,
+                                             str(ours.pid): run.proc_start(ours.pid)},
+                         run_groups=[leader.pid])  # a group led by a later process of the same number
+        stopped = run.sweep(self.desk, tid)
+        self.assertEqual([x["pid"] for x in stopped], [ours.pid])
+        self.assertIsNotNone(ours.wait(10))
+        self.assertEqual((theirs.poll(), leader.poll()), (None, None))
+        self.assertEqual(self.desk.meta(tid)["started_procs"], {})
+
+    def stranger(self):
+        """A process of the principal's (a shell with a child, leading a session of its own) and its child's pid."""
+        from hansa.run import process_table
+        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        sh = subprocess.Popen(["/bin/sh", "-c", "sleep 60 & wait"], env=bare, start_new_session=True)
+        self.addCleanup(lambda: (os.killpg(sh.pid, 9) if sh.poll() is None else None, sh.wait()))
+        end = time.time() + 10
+        while time.time() < end:
+            kids = [p for p, (pp, _, _) in process_table().items() if pp == sh.pid]
+            if kids:
+                return sh, kids[0]
+            time.sleep(0.05)
+        self.fail("the stranger's child did not start")
+
+    def test_a_process_given_the_runs_number_after_a_restart_is_neither_recorded_nor_stopped(self):
+        from hansa.run import alive
+        sh, kid = self.stranger()
+        tid = self.desk.new_task("Add hello.txt")
+        old = "1.000000" if sys.platform == "darwin" else "boot:1"  # the run's process, as an earlier server saved it
+        self.desk.update(tid, state="running", phase="", lane="a", pid=sh.pid, pid_start=old)
+        d = Dispatcher(self.desk)  # a new server: the run's process ended, and its number went to the stranger
+        d.record(self.desk.tasks())
+        m = self.desk.meta(tid)
+        self.assertEqual((m.get("started_procs") or {}, m.get("run_groups") or {}), ({}, {}))
+        d.tick()
+        self.assertNotEqual(self.desk.meta(tid)["state"], "running")
+        self.assertIsNone(sh.poll(), "the stranger was stopped")
+        self.assertTrue(alive(kid))
+        self.assertNotIn(sh.pid, [x["pid"] for x in self.desk.meta(tid).get("left_running") or []])
+
+    def test_a_process_given_the_runs_number_between_two_rounds_is_neither_recorded_nor_stopped(self):
+        from hansa import run
+        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        ours = self.sleeper(env=bare)  # what the run started, recorded on an earlier round
+        sh, kid = self.stranger()
+        tid = self.desk.new_task("Add hello.txt")
+        old = "1.000000" if sys.platform == "darwin" else "boot:1"  # the run's own process, ended since
+        self.desk.update(tid, state="running", phase="", lane="a", pid=sh.pid, pid_start=old,
+                         started_procs={str(ours.pid): run.proc_start(ours.pid)}, run_groups={str(sh.pid): old})
+        Dispatcher(self.desk).record(self.desk.tasks())
+        m = self.desk.meta(tid)
+        self.assertEqual(m["started_procs"], {str(ours.pid): run.proc_start(ours.pid)})  # kept, nothing added
+        self.assertEqual(m["run_groups"], {str(sh.pid): old})
+        stopped = run.sweep(self.desk, tid)
+        self.assertEqual([x["pid"] for x in stopped], [ours.pid])
+        self.assertIsNotNone(ours.wait(10))
+        self.assertIsNone(sh.poll(), "the stranger's group was stopped")
+        self.assertTrue(run.alive(kid))
+
+    def test_what_is_stopped_with_the_runs_group_is_listed_and_logged(self):
+        from hansa import run
+        for kind in ("leader's start", "list of an earlier version"):
+            with self.subTest(kind):
+                sh, kid = self.stranger()  # here the run's own process, as recorded while it ran, and what it started
+                tid = self.desk.new_task("Add hello.txt")
+                procs = {str(sh.pid): run.proc_start(sh.pid), str(kid): run.proc_start(kid)}
+                self.desk.update(tid, started_procs=procs, run_groups={str(sh.pid): run.proc_start(sh.pid)}
+                                 if kind == "leader's start" else [sh.pid])
+                stopped = run.sweep(self.desk, tid)
+                self.assertIsNotNone(sh.wait(10))
+                self.assertFalse(run.alive(kid))
+                self.assertEqual(sorted(x["pid"] for x in stopped), sorted([sh.pid, kid]))
+                self.assertEqual(sorted(x["pid"] for x in self.desk.meta(tid)["left_running"]), sorted([sh.pid, kid]))
+                [e] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                       if e["event"] == "left_running_stopped" and e["task"] == tid]
+                self.assertEqual(len(e["processes"]), 2)
 
     def test_git_behind_a_wrapper_is_still_git(self):
         from hansa.run import lane_allow
