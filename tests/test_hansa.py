@@ -3198,6 +3198,221 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(run.tried_lanes(self.desk), set())
         self.assertNotIn("held by a try", views.status_text(views.status(self.desk)))
 
+    @contextlib.contextmanager
+    def try_server(self, d=None):
+        """hansa serve, running rounds in a thread while the block runs."""
+        d, stop_serving = d or Dispatcher(self.desk), threading.Event()
+
+        def serve():
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        held = cli.hold_server_lock(self.desk)  # as hansa serve holds it: it says the server runs
+        d.tick()
+        server = threading.Thread(target=serve)
+        server.start()
+        try:
+            yield d
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+
+    def lane_try(self, *args) -> tuple:
+        """hansa lane try a ARGS: (its exit code, what it printed)."""
+        said, code = io.StringIO(), 0
+        with contextlib.redirect_stdout(said):
+            try:
+                main(["--desk", str(self.desk.root), "lane", "try", "a", "--every", "0.05", *args])
+            except SystemExit as e:
+                code = e.code
+        return code, said.getvalue()
+
+    def new_tip(self) -> tuple:
+        """A commit on main after the first: (the first, the new tip)."""
+        old = self.git_out("rev-parse", "main")
+        (self.repo / "more.txt").write_text("more\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "more", cwd=self.repo)
+        return old, self.git_out("rev-parse", "main")
+
+    def test_lane_try_at_a_commit_that_is_not_the_tip_refuses_and_runs_nothing(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked")
+        old, tip = self.new_tip()
+        for merge in ([], ["--merge-check"]):
+            code, _ = self.lane_try("--at", old[:8], *merge)
+            self.assertIn(f"main's tip is {tip[:10]}, not {old[:10]}; nothing was run", str(code))
+            self.assertIn(f"--at {tip[:10]}", str(code))
+        code, _ = self.lane_try("--at", "nosuchcommit")
+        self.assertIn("nosuchcommit is no commit of lane a's repository; nothing was run", str(code))
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertFalse(run.try_file(self.desk, "a").exists())
+        self.assertEqual(self.events("lane_try_queued"), [])
+
+    def test_lane_try_at_waits_for_a_try_at_another_commit_and_never_takes_its_result(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked here")
+        old, tip = self.new_tip()
+        d = Dispatcher(self.desk)
+        held = cli.hold_server_lock(self.desk)
+        d.tick()  # a round, so the server is seen to run
+        run.write_try(self.desk, "a", {"id": "t0", "phase": "running", "asked": time.time(), "onto": old,
+                                       "check": "echo checked here", "started": time.time()})
+        stop_serving = threading.Event()
+
+        def serve():  # the try at the older commit passes; only then does the server run rounds again
+            time.sleep(0.4)
+            run.write_try(self.desk, "a", {"id": "t0", "phase": "done", "ok": True, "onto": old, "steps": {}})
+            while not stop_serving.is_set():
+                d.tick()
+                time.sleep(0.05)
+        server = threading.Thread(target=serve)
+        server.start()
+        try:
+            code, said = self.lane_try("--at", tip[:8])
+        finally:
+            stop_serving.set()
+            server.join()
+            held.close()
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"a try of lane a is running at {old[:10]}, not the one asked for at {tip[:10]}; waiting for "
+                      f"it to end, then trying at {tip[:10]}", said)
+        self.assertIn(f"lane a tried at {tip[:10]}: ok", said)
+        [check] = self.srt_calls()  # it ran its own check, at the tip
+        self.assertEqual(self.ran(check), "echo checked here")
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["onto"], t["at"]), (tip, tip))  # the commit asked for is kept after the try ends
+        self.assertIsInstance(t["ended"], float)
+        self.assertEqual(self.events("lane_try_queued")[-1]["at"], tip)
+
+    def test_lane_try_at_exits_0_only_when_the_try_at_that_commit_passed(self):
+        from hansa import run
+        _, tip = self.new_tip()
+        self.hansa("lane", "set", "a", "check", "echo failing; exit 3")
+        with self.try_server():
+            code, said = self.lane_try("--at", tip)
+        self.assertEqual(code, 1, said)
+        self.assertIn(f"lane a tried at {tip[:10]}: FAILED", said)
+        self.hansa("lane", "set", "a", "check", "echo passing")
+        with self.try_server():
+            code, said = self.lane_try("--at", tip[:7])
+            self.assertEqual(code, 0, said)
+            code, said = self.lane_try("--at", tip[:7], "--merge-check")  # the check, as the lane's merge check
+        self.assertEqual(code, 0, said)
+        self.assertIn("merge check: echo passing\n  exit 0", said)
+        # the base moved between the ask and the start: nothing runs, and the try did not pass
+        run.write_try(self.desk, "a", {"id": "t9", "phase": "queued", "asked": time.time(), "at": "0" * 40})
+        calls = len(self.srt_calls(tries=True))
+        Dispatcher(self.desk).tick()
+        t = run.read_try(self.desk, "a")
+        self.assertEqual((t["phase"], t["ok"], t["steps"]), ("done", False, {}), t)
+        self.assertIn(f"main's tip moved from 0000000000 to {tip[:10]} before the try started; nothing was run",
+                      views.try_text("a", t))
+        self.assertEqual(len(self.srt_calls(tries=True)), calls)
+
+    def test_a_failed_trys_whole_output_is_kept_keys_removed_and_a_new_try_replaces_it(self):
+        from hansa import run
+        key = "sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_text(key)
+        self.hansa("lane", "set", "a", "check",
+                   f"x=first; echo \"FAIL: test_the_$x\"; echo 'token {key}'; seq 1 400; exit 1")
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 1, said)
+        self.assertNotIn("test_the_first", said)  # its last lines only
+        log = run.try_log(self.desk, "a")
+        self.assertIn(f"each step's whole output, keys removed: {log} (hansa lane try a --log)", said)
+        kept = log.read_text()
+        self.assertIn("FAIL: test_the_first\n", kept)
+        self.assertIn("token [key of registry]", kept)
+        self.assertNotIn(key, kept)
+        self.assertIn("\n400\n", kept)
+        self.assertEqual(run.read_try(self.desk, "a")["log"], str(log))
+        code, printed = self.lane_try("--log")
+        self.assertEqual((code, printed), (0, kept))
+        code, _ = self.lane_try("--log", "--merge-check")  # a merge-check try's output is kept on its own
+        self.assertIn("lane a has no kept output of a merge-check try yet", str(code))
+        self.hansa("lane", "set", "a", "check", "echo the second try")
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 0, said)
+        kept = log.read_text()
+        self.assertIn("the second try", kept)
+        self.assertNotIn("test_the_first", kept)
+
+    def test_a_failed_step_whose_output_shows_macos_mktemp_or_mavens_407_gets_its_hint(self):
+        from hansa import run
+        refused = "mktemp: mkdtemp failed on /var/folders/ab/xyz/T/tmp.Q1w2: Operation not permitted"
+        lines = views.failed_check_lines(f"running\n{refused}\n", [], "t1")
+        self.assertIn("  " + run.MKTEMP_HINT, lines)
+        self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX"', run.MKTEMP_HINT)
+        self.assertEqual(run.output_hints(refused, "linux"), [run.MKTEMP_HINT])  # /var/folders: macOS's
+        # only for Operation not permitted
+        full = "mktemp: mkdtemp failed on /var/folders/ab/xyz/T/tmp.Q1w2: No space left on device"
+        self.assertEqual(run.output_hints(full, "darwin"), [])
+        # Linux's mktemp gets no macOS hint
+        linux = "mktemp: failed to create directory via template '/srv/x.XXXXXX': Operation not permitted"
+        self.assertEqual(run.output_hints(linux, "linux"), [run.MKTEMP_OUTSIDE_HINT])
+        self.assertNotIn("macOS", run.MKTEMP_OUTSIDE_HINT)
+        # what Maven prints: 3.9's Apache binary, and a distribution's package
+        for maven in ("[ERROR] Failed to execute goal on project demo: Could not resolve dependencies for project "
+                      "org.example:demo:jar:1.0: Failed to collect dependencies at junit:junit:jar:4.13.2: Failed to "
+                      "read artifact descriptor for junit:junit:jar:4.13.2: The following artifacts could not be "
+                      "resolved: junit:junit:pom:4.13.2 (absent): Could not transfer artifact junit:junit:pom:4.13.2 "
+                      "from/to central (https://repo.maven.apache.org/maven2): status code: 407, reason phrase: Proxy "
+                      "Authentication Required (407) -> [Help 1]",
+                      "[ERROR] Plugin org.apache.maven.plugins:maven-resources-plugin:3.3.1 or one of its dependencies "
+                      "could not be resolved: Could not transfer artifact org.apache.maven.plugins:maven-resources-"
+                      "plugin:pom:3.3.1 from/to central (https://repo.maven.apache.org/maven2): proxy authentication "
+                      "failed for https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-resources-plugin/"
+                      "3.3.1/maven-resources-plugin-3.3.1.pom, status: 407 Proxy Authentication Required -> [Help 1]"):
+            lines = views.failed_check_lines(f"[INFO] Scanning for projects...\n{maven}\n", [], "t1")
+            self.assertIn("  " + run.MAVEN_407_HINT, lines)
+            self.assertNotIn("  " + run.MKTEMP_HINT, lines)
+        self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", run.MAVEN_407_HINT)
+        # npm, curl, pip and Gradle stay quiet, and so does a 407 inside a path
+        for other in ("npm ERR! code E407\nnpm ERR! 407 Proxy Authentication Required - GET "
+                      "https://registry.npmjs.org/left-pad\n[ERROR] Could not resolve dependencies",
+                      "curl: (56) CONNECT tunnel failed, response 407\ncurl: (56) Received HTTP code 407 from proxy "
+                      "after CONNECT: Proxy Authentication Required",
+                      "curl: (22) The requested URL returned error: 407 Proxy Authentication Required while "
+                      "downloading .mvn/wrapper/maven-wrapper.jar; Could not transfer artifact",
+                      "ERROR: Could not install packages due to an OSError: HTTPSConnectionPool: Max retries exceeded "
+                      "(Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection failed: 407 "
+                      "Proxy Authentication Required')))",
+                      "> Could not resolve com.google.guava:guava:33.0-jre.\n   > Could not GET 'https://repo.maven."
+                      "apache.org/maven2/guava.pom'. Received status code 407 from server: Proxy Authentication Required",
+                      "[ERROR] Could not resolve dependencies: cannot read /cache/proxy authentication/407/x.pom"):
+            self.assertEqual(run.output_hints(other), [], other)
+        self.assertEqual(run.output_hints("FAIL: test_one\nAssertionError"), [])
+        # a task's check, as hansa show reports it
+        self.hansa("lane", "set", "a", "check", f"echo '{refused}' >&2; exit 1")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertFalse(m["check"]["ok"], m)
+        self.assertIn(run.MKTEMP_HINT, views.show_text(self.desk, tid))
+        # and a try's step
+        with self.try_server():
+            code, said = self.lane_try()
+        self.assertEqual(code, 1, said)
+        self.assertIn("  " + run.MKTEMP_HINT, said)
+
+    def test_explain_lane_says_what_java_and_macos_mktemp_do_in_a_lane(self):
+        out = views.explain_text(self.desk, "lane", "a")
+        self.assertNotIn("Picked up JAVA_TOOL_OPTIONS", out)
+        self.hansa("lane", "set", "a", "env", f"JAVA_HOME={self.tmp}")
+        with unittest.mock.patch.object(views.sys, "platform", "linux"):
+            out = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("every JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr before anything else", out)
+        self.assertIn('look for the line holding `version "`, not the first line', out)
+        self.assertIn("MAVEN_ARGS=(-B ${MAVEN_ARGS:-})", out)
+        self.assertNotIn("mkdtemp failed", out)
+        with unittest.mock.patch.object(views.sys, "platform", "darwin"):
+            out = views.explain_text(self.desk, "lane", "a")
+        self.assertIn('mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX" or mktemp -d -p "$TMPDIR"', out)
+
     def test_a_merge_check_can_be_cancelled_queued_or_running(self):
         d, t1, t2 = self.two_lanes(check="test -f README.md")
         self.hansa("merge", t1)
@@ -6905,6 +7120,268 @@ class DeskTest(unittest.TestCase):
     def allowed_by(argv):
         return argv[argv.index("--allowedTools") + 1:]
 
+    def test_a_lanes_allow_list_holds_web_tools_to_listed_sites(self):
+        s = self.desk.settings()
+        for bad in ("WebFetch", "WebFetch(*)", "WebFetch(domain:*)", "WebFetch(domain:*.com)", "WebFetch(example.com)",
+                    "WebFetch(domain:localhost)", "WebFetch(domain:docs.python.org:443)", "mcp__fetch__fetch",
+                    "mcp__fetch", "ReadMcpResourceTool"):
+            s["lanes"]["a"]["allow"] = [bad]
+            self.assertTrue(any(f"allow {bad} " in p for p in validate(s)), bad)
+        for good in ("WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)", "WebSearch",
+                     "Bash(pnpm test:*)"):
+            s["lanes"]["a"]["allow"] = [good]
+            self.assertEqual(validate(s), [], good)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "WebFetch"])
+        self.assertIn("WebFetch(domain:docs.python.org)", str(e.exception.code))  # how to list a site
+        self.assertIn("nothing was changed", str(e.exception.code))
+        self.assertEqual(self.desk.settings()["lanes"]["a"].get("allow", []), [])
+        out = self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)")
+        self.assertIn('-> ["WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)"]', out)
+
+    def test_a_change_of_allow_is_recorded_and_told_to_the_principal(self):
+        out = self.hansa("lane", "set", "a", "allow", "WebSearch", "Bash(pnpm test:*)")
+        self.assertIn("Tell the principal, in the conversation, what you changed and why", out)
+        self.assertIn("workers, verifiers and design sessions", out)
+        self.assertEqual([(e["lane"], e["old"], e["new"]) for e in self.events("lane_allow_changed")],
+                         [("a", [], ["WebSearch", "Bash(pnpm test:*)"])])
+        out = self.hansa("lane", "set", "a", "allow", "Bash(pnpm test:*)", "WebSearch")  # the same rules: no change
+        self.assertNotIn("Tell the principal", out)
+        self.assertEqual(len(self.events("lane_allow_changed")), 1)
+        out = self.hansa("lane", "add", "c", "--like", "a")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["allow"], ["Bash(pnpm test:*)", "WebSearch"])
+        self.assertIn("Tell the principal, in the conversation, what you listed and why", out)
+        self.assertEqual([(e["lane"], e["old"], e["new"]) for e in self.events("lane_allow_changed")][-1],
+                         ("c", [], ["Bash(pnpm test:*)", "WebSearch"]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        self.assertIn("workers, verifiers and design sessions", " ".join(out.getvalue().split()))
+
+    def test_explain_lane_names_who_gets_the_allow_list_and_the_web_tools_sites(self):
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("web tools (Claude Code's own, outside the sandbox's network list): none", explained)
+        self.assertNotIn("design sessions only", explained)
+        s = self.desk.settings()
+        s["lanes"]["a"]["network"] = ["registry.npmjs.org"]
+        s["lanes"]["a"]["allow"] = ["WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)", "WebSearch"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("given to the lane's workers, verifiers and design sessions", explained)
+        self.assertIn("network during a task: registry.npmjs.org", explained)
+        self.assertIn("WebFetch reaches only: docs.python.org, *.python.org", explained)
+        self.assertIn("WebSearch: sends search queries out of the machine", explained)
+        s["lanes"]["a"]["allow"] = ["WebFetch"]  # saved before it was refused: shown as ignored
+        self.desk.settings_path.write_text(json.dumps(s))
+        explained = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("WebFetch (ignored: it lets a worker fetch any site", explained)
+        self.assertIn("web tools (Claude Code's own, outside the sandbox's network list): none", explained)
+
+    def test_workers_and_verifiers_are_given_the_lanes_allow_list(self):
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        worker = self.allowed_by(json.loads(seen.read_text().splitlines()[-1]))
+        s["lanes"]["a"]["allow"].append("WebFetch")  # saved before it was refused: left out of the run
+        self.desk.settings_path.write_text(json.dumps(s))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
+        verifier = self.allowed_by(argv)
+        for allowed in (worker, verifier):
+            for r in ("Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"):
+                self.assertIn(r, allowed)
+        self.assertNotIn("WebFetch", verifier)
+
+    def test_a_refused_rule_saved_earlier_does_not_lock_the_page(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch", "Bash(git commit:*)", "Bash(x),WebFetch"]
+        self.desk.settings_path.write_text(json.dumps(s))  # saved before they were refused
+        fix = "hansa lane set a allow 'Bash(pnpm test:*)'"
+        self.assertEqual(public_settings(self.desk)["problems"], [])  # the page has nothing of its own to fix
+        r = self.page_save(lambda s: s.update(release_forbidden=["Project Falcon"]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.desk.settings()["release_forbidden"], ["Project Falcon"])
+        [warning] = r["lane_warnings"]
+        for x in ("allow WebFetch lets a worker fetch any site", "allow Bash(git commit:*) runs git",
+                  "allow Bash(x),WebFetch would reach Claude Code as more than one rule", fix):
+            self.assertIn(x, warning)
+        self.assertEqual(public_settings(self.desk)["lane_warnings"], [warning])
+        self.assertIn("LANE_WARNINGS", (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+        for args in (("lane", "set", "a", "network", "pypi.org"), ("lane", "add", "d", "--like", "a")):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), *args])
+            self.assertIn("WebFetch", str(e.exception.code), args)
+            self.assertIn(fix, str(e.exception.code), args)
+        self.assertNotIn("d", self.desk.settings()["lanes"])
+        self.assertIn(fix, views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "allow", "Bash(pnpm test:*)")  # the command named
+        self.assertNotIn("lane_warnings", self.page_save(lambda s: s.update(release_forbidden=[])))
+
+    def test_webfetch_reaches_only_named_public_sites(self):
+        s = self.desk.settings()
+        refused = {
+            "an address": ("127.0.0.1", "127.0.0.2", "127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "0x7f000001",
+                           "0.0.0.0", "10.0.0.1", "192.168.1.1", "169.254.169.254", "::1", "[::1]", "[fe80::1]",
+                           "*.0.0.1", "127.0.0.1:80"),
+            "names this machine": ("localhost", "LOCALHOST", "foo.localhost", "*.localhost"),
+            "meant for a local or private network": (
+                "host.docker.internal", "*.internal", "my-mac.local", "nas.lan", "router.home.arpa",
+                "1.0.0.127.in-addr.arpa", "a.test", "a.invalid", "a.example", "box.localdomain"),
+            "a wildcard over the shared suffix": (
+                "*.com", "*.co.uk", "*.com.au", "*.co.jp", "*.com.cn", "*.github.io", "*.gitlab.io", "*.pages.dev",
+                "*.workers.dev", "*.vercel.app", "*.netlify.app", "*.herokuapp.com", "*.appspot.com", "*.web.app",
+                "*.firebaseapp.com", "*.blogspot.com", "*.cloudfront.net", "*.amazonaws.com",
+                "*.azurewebsites.net", "*.ngrok.io")}
+        for why, hosts in refused.items():
+            for host in hosts:
+                s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+                [p] = validate(s)
+                self.assertIn(why, p, host)
+                self.assertIn("WebFetch(domain:docs.python.org)", p, host)  # how to list a site
+        for host in ("docs.python.org", "*.python.org", "octocat.github.io", "example.com"):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            self.assertEqual(validate(s), [], host)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "WebFetch(domain:169.254.169.254)"])
+        self.assertIn("is an address", str(e.exception.code))
+        self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)")
+        explained = " ".join(views.explain_text(self.desk, "lane", "a").split())
+        self.assertIn("unlike the network list, it runs in Claude Code's own process, outside the sandbox", explained)
+
+    def test_a_rule_on_a_lanes_allow_list_is_exactly_one_rule(self):
+        from hansa.run import lane_allow
+        s = self.desk.settings()
+        for bad in ("Bash(x),WebFetch", "Bash(x) Read(y)", "Bash(x),WebFetch,Read(y)", "Bash(x)) WebFetch (y)",
+                    "Bash()", "Bash(x)y"):
+            s["lanes"]["a"]["allow"] = [bad]
+            [p] = validate(s)
+            self.assertIn("would reach Claude Code as more than one rule", p, bad)
+        s["lanes"]["a"]["allow"] = ["Bash(echo $(date):*)", "Bash(pnpm test:*)"]
+        self.assertEqual(validate(s), [])
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", "Bash(x),WebFetch"])
+        self.assertIn("more than one rule", str(e.exception.code))
+        s["lanes"]["a"]["allow"] = ["Bash(x),WebFetch", "Bash(pnpm test:*)"]  # saved before: left out of runs
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(pnpm test:*)"])
+        self.assertIn("Bash(x),WebFetch (ignored: it would reach Claude Code as more than one rule",
+                      views.explain_text(self.desk, "lane", "a"))
+
+    def test_allow_with_a_rule_twice_keeps_it_once(self):
+        self.hansa("lane", "set", "a", "allow", "WebSearch", "Bash(pnpm test:*)", "WebSearch")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["allow"], ["WebSearch", "Bash(pnpm test:*)"])
+        self.hansa("lane", "add", "c", "--like", "a", "--allow", "WebSearch", "WebSearch")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["allow"], ["WebSearch"])
+
+    def test_rules_are_checked_as_claude_code_splits_them(self):
+        from hansa import run
+        from hansa.desk import one_rule, split_rules
+        # Claude Code's splitter: commas and spaces outside parentheses, and every ) ends them, not a depth
+        self.assertEqual(split_rules("Bash(echo $(true) WebFetch ok)"), ["Bash(echo $(true)", "WebFetch", "ok)"])
+        self.assertEqual(split_rules("Bash(a(b),WebFetch,c)"), ["Bash(a(b)", "WebFetch", "c)"])
+        split = ("Bash(echo $(true) WebFetch ok)", "Bash(a(b),WebFetch,c)", "Bash(x (y) WebFetch)")
+        whole = ("Bash(npm run test:*)", "Bash(echo $(date):*)", "Read(//Users/x/Library/Application Support/y/**)")
+        for r in split:
+            self.assertFalse(one_rule(r), r)
+        for r in whole:
+            self.assertTrue(one_rule(r), r)
+        s = self.desk.settings()
+        for bad in split:
+            s["lanes"]["a"]["allow"] = [bad]
+            [p] = validate(s)
+            self.assertIn("would reach Claude Code as more than one rule", p, bad)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", bad])
+            self.assertIn("more than one rule", str(e.exception.code), bad)
+        # saved before: never reaches a run; nor does a check whose rule would split, for a design session
+        s["lanes"]["a"].update(allow=[*split, "Bash(npm run test:*)"], check="pytest $(git ls-files tests) -q")
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual([r for r in run.lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
+                         ["Bash(npm run test:*)"])
+        tid = self.desk.new_task("Design it", kind="design")
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
+                         model_asked="sonnet")
+        argv, _, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        for r in [*self.denied_by(argv), *self.allowed_by(argv)]:
+            self.assertEqual(split_rules(r), [r])
+        self.assertFalse([r for r in self.allowed_by(argv) if "WebFetch" in r or "pytest" in r])
+
+    def test_a_folder_whose_deny_rule_would_split_is_refused_and_never_dropped(self):
+        from hansa import run
+        out = io.StringIO()
+        for bad in (self.tmp / "Work (2024) x" / "desk", self.tmp / "Work (a),b" / "desk"):
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                main(["init", str(bad)])
+            self.assertIn(f"the path {os.path.realpath(bad)} would make rules", str(e.exception.code))
+            self.assertIn("move it to a path", str(e.exception.code))
+            self.assertFalse(bad.exists())
+        ok = self.tmp / "Library" / "Application Support" / "desk"
+        with contextlib.redirect_stdout(out):
+            main(["init", str(ok)])
+        self.assertTrue((ok / "settings.json").is_file())
+        repo = self.tmp / "Work (2024) x" / "repo"
+        shutil.copytree(self.repo, repo)
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(repo)])
+        self.assertIn("move it to a path", str(e.exception.code))
+        self.assertNotIn("b", self.desk.settings()["lanes"])
+        # a desk moved to such a path since: no worker, verifier or design session starts, and nothing is dropped
+        moved = self.tmp / "Work (2024) x" / "desk"
+        shutil.move(str(self.desk.root), str(moved))
+        self.desk = Desk(moved)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("hansa started no worker", m["error"])
+        self.assertIn(f"the path {os.path.realpath(moved)}", m["error"])
+        self.assertIn("move it to a path", m["error"])
+        did = self.desk.new_task("Design it", kind="design")
+        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
+                         model_asked="sonnet")
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, did)
+        with self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)
+        self.assertIn("hansa started no design session", str(e.exception))
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\n")
+        echo.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(moved),
+                            "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout, "")  # Claude Code never started
+        self.assertIn("the coordinator's session was not started", r.stderr)
+        self.assertIn("move it to a path", r.stderr)
+        self.assertIn("move it to a path", run.paths_problem(self.desk, self.repo))
+
+    def test_webfetch_refuses_names_that_come_back_as_this_machine(self):
+        s = self.desk.settings()
+        for host, why in (("metadata", "no dot"), ("router", "no dot"), ("instance-data", "no dot"),
+                          ("127.0.0.1.nip.io", "under nip.io"), ("*.nip.io", "under nip.io"),
+                          ("10-0-0-1.sslip.io", "under sslip.io"), ("a.xip.io", "under xip.io"),
+                          ("x.traefik.me", "under traefik.me"), ("localtest.me", "under localtest.me"),
+                          ("lvh.me", "under lvh.me"), ("*.lvh.me", "under lvh.me"), ("app.vcap.me", "under vcap.me"),
+                          ("Lacolhost.com", "under lacolhost.com")):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            [p] = validate(s)
+            self.assertIn(why, p, host)
+            self.assertIn("WebFetch(domain:docs.python.org)", p, host)
+        for host in ("docs.python.org", "*.python.org"):
+            s["lanes"]["a"]["allow"] = [f"WebFetch(domain:{host})"]
+            self.assertEqual(validate(s), [], host)
+        self.hansa("lane", "set", "a", "allow", "WebFetch(domain:docs.python.org)")
+        explained = " ".join(views.explain_text(self.desk, "lane", "a").split())
+        self.assertIn("any listed name can be pointed at any address, this machine included: list only sites you "
+                      "know, and the principal sees every change", explained)
+
     def test_workers_and_verifiers_are_told_the_lanes_setup_and_check_as_hansa_runs_them(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -8647,44 +9124,146 @@ class DeskTest(unittest.TestCase):
             # inside a PATH folder, the desk or the repository, and one that is not there: accepted
             fine = [str(good), str(tools / "bin" / "sub"), str(self.repo.resolve() / "private"), "/nowhere/at/all"]
             self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=fine)), {"ok": True, "problems": []})
-            # written into settings.json another way: a run leaves each out and says so in the task
+            # written into settings.json another way: one that would close a lane's repository or a folder on the
+            # PATH is left out of a run, which says so in the task; any other stops the run (the next test)
+            left = {p: why for p, why in bad.items() if why in ("lane a's repository", "a folder on the PATH")}
+            self.assertEqual(len(left), 4)
             s = self.desk.settings()
             s["workers_may_not_read"] = [*bad, str(good)]
             write_json(self.desk.settings_path, s)
-            self.assertEqual(len(public_settings(self.desk)["deny_skipped"]), len(bad))  # the page says which
+            shown = public_settings(self.desk)
+            self.assertEqual(len(shown["deny_skipped"]) + len(shown["deny_stops"]), len(bad))  # the page says which
+            self.assertEqual(len(shown["deny_stops"]), len(bad) - len(left))
+            self.assertIn("hansa starts no worker", shown["no_read_stop"])
+            told = self.hansa("explain", "lane", "a")
+            self.assertIn(f"not applied, and no run starts: {home}: it is {home}, the home folder", told)
+            s["workers_may_not_read"] = [*left, str(good)]
+            write_json(self.desk.settings_path, s)
+            self.assertEqual((len(public_settings(self.desk)["deny_skipped"]), public_settings(self.desk)["no_read_stop"]),
+                             (len(left), ""))
             tid = self.desk.new_task("Add hello.txt")
             m = self.settle(Dispatcher(self.desk), tid)
             self.assertEqual(m["state"], "done", m)
             argv = json.loads(seen.read_text().splitlines()[-1])
             deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
             self.assertIn(str(good), deny)
-            self.assertFalse(set(bad) & set(deny), deny)
+            self.assertFalse(set(left) & set(deny), deny)
             self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
                              [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir,
                                                                           self.desk.notes_dir)]
                              + [f"Read(//{str(self.desk.root).lstrip('/')}/CLAUDE.md)"])
-            self.assertEqual(len(m["no_read_left_out"]), len(bad))
+            self.assertEqual(len(m["no_read_left_out"]), len(left))
             shown = views.show_text(self.desk, tid)
-            for path, why in bad.items():
-                lines = [x for x in shown.splitlines() if why in x and x.startswith(tuple(
-                    f"what workers may not read: left out of this run: {p}: " for p in (path, json.dumps(path))))]
+            for path, why in left.items():
+                lines = [x for x in shown.splitlines() if why in x and x.startswith(
+                    f"what workers may not read: left out of this run: {path}: ") and "open to the runs" in x]
                 self.assertEqual(len(lines), 1, (path, shown))
-            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(bad))
+            self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(left))
             told = self.hansa("explain", "lane", "a")
-            self.assertIn(f"not applied: {home}: it is {home}, the home folder", told)
+            self.assertIn(f"not applied: {self.repo.resolve()}: it is {self.repo.resolve()}, lane a's repository", told)
             # the coordinator's start leaves them out too, and says so
             r = self.echo_coordinator()
             self.assertEqual(r.returncode, 0, r.stderr)
             denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
             self.assertIn(f"Read(//{str(good).lstrip('/')}/**)", denied)
-            self.assertNotIn(f"Read(//{str(home).lstrip('/')}/**)", denied)
-            self.assertNotIn("Read(///**)", denied)
-            # a folder on the PATH below it, as on many machines (~/.local/bin), is said after this reason
-            said = [x for x in r.stderr.splitlines()
-                    if f"{home}: it is {home}, the home folder of the user hansa runs as, or a folder above it" in x]
+            self.assertNotIn(f"Read(//{str(self.repo.resolve()).lstrip('/')}/**)", denied)
+            said = [x for x in r.stderr.splitlines() if f"{tools}: it is {tools / 'bin'}, a folder on the PATH" in x]
             self.assertEqual(len(said), 1, r.stderr)
             self.assertIn("; skipped", said[0])
-            self.assertEqual(len(self.events("no_read_skipped")), len(bad))
+            self.assertEqual(len(self.events("no_read_skipped")), len(left))
+
+    @design_as_on_mac
+    def test_an_entry_of_what_workers_may_not_read_that_cannot_be_written_as_a_rule_stops_every_run(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        plain, odd = (self.tmp / "plain").resolve(), (self.tmp / "keys (old)").resolve()
+        plain.mkdir()
+        odd.mkdir()
+        link = self.tmp.resolve() / "keys-link"
+        link.symlink_to(plain)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        # a valid list runs: the link is kept from workers as given and where it leads
+        self.assertEqual(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)])), {"ok": True, "problems": []})
+        done = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), done)["state"], "done")
+        deny = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]["denyRead"]
+        self.assertTrue({str(link), str(plain)} <= set(deny), deny)
+        self.assertEqual(views.status(self.desk)["no_read_stop"], "")
+        # a list saved earlier with a parenthesis in a name, and a link changed since to lead to such a place
+        for entries, said in (([str(odd)], str(odd)), ([str(link)], str(link))):
+            if entries == [str(link)]:
+                link.unlink()
+                link.symlink_to(odd)
+            s = self.desk.settings()
+            s["workers_may_not_read"] = entries
+            write_json(self.desk.settings_path, s)
+            stop = public_settings(self.desk)["no_read_stop"]
+            self.assertIn(said, stop)
+            for x in ("hansa starts no worker, verifier, design session or coordinator", "()[]{}*?\\",
+                      "on the web page, Settings"):
+                self.assertIn(x, stop)
+            runs = len(seen.read_text().splitlines())
+            # the worker
+            tid = self.desk.new_task("Add more.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "failed", m)
+            self.assertIn(stop, m["error"])
+            # the verifier
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "verify", done])
+            vid = self.desk.meta(done)["verify"]
+            v = self.settle(Dispatcher(self.desk), vid)
+            self.assertEqual(v["state"], "failed", v)
+            self.assertIn(stop, v["error"])
+            self.assertEqual(len(seen.read_text().splitlines()), runs)  # no Claude Code started
+            # the design session: refused before tmux is asked, and its command refuses too
+            did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+            with unittest.mock.patch.object(run, "tmux_bin", lambda: "/nonexistent/tmux"):
+                with self.assertRaises(RuntimeError) as e:
+                    run.start_design(self.desk, did, "a")
+            self.assertIn(stop, str(e.exception))
+            self.assertFalse((self.desk.worktrees_dir / "a-design").exists())
+            self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
+                             session_id="sid-d", model_asked="sonnet")
+            with self.assertRaises(RuntimeError) as e:
+                run.design_command(self.desk, did)
+            self.assertIn(stop, str(e.exception))
+            self.desk.update(did, state="cancelled")
+            # the coordinator
+            r = self.echo_coordinator()
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(stop, r.stderr)
+            self.assertNotIn("--disallowedTools", r.stdout)
+            # hansa status and the page say it each time
+            self.assertIn(f"STOPPED: {stop}", views.status_text(views.status(self.desk)))
+            self.assertEqual(public_settings(self.desk)["deny_skipped"], [])
+            for x in ("NO_READ_STOP = r.no_read_stop", "section(T.noReadStop", "st.no_read_stop"):
+                self.assertIn(x, (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+
+    def test_an_entry_left_out_for_a_lanes_repository_is_said_in_status_and_on_the_page(self):
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [str(self.repo.resolve())]
+        write_json(self.desk.settings_path, s)
+        st = views.status(self.desk)
+        self.assertEqual(st["no_read_stop"], "")
+        self.assertEqual(len(st["no_read_left_out"]), 1)
+        text = views.status_text(st)
+        for x in (f"what workers may not read, entry left out: {self.repo.resolve()}: it is {self.repo.resolve()}, "
+                  "lane a's repository", "that folder is open to the runs of that lane"):
+            self.assertIn(x, text)
+        self.assertEqual(views.status_text(views.status(self.desk)), text)  # every time, not once
+        shown = public_settings(self.desk)
+        self.assertEqual((shown["deny_stops"], shown["no_read_stop"]), ([], ""))
+        self.assertEqual(len(shown["deny_skipped"]), 1)
+        self.assertIn("that folder is open to the runs of that lane", shown["deny_skipped"][0])
+        self.assertIn(str(self.repo.resolve()), shown["deny_skipped"][0])
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn("st.no_read_left_out", ui)
+        # a run still starts
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
 
     def test_a_lanes_write_list_change_is_recorded_for_the_principal(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "write"))  # [] -> []: no change
@@ -13819,7 +14398,8 @@ class DeskTest(unittest.TestCase):
         [a] = self.alerted(out)
         self.assertEqual(a["kind"], "ask")
         self.assertIn(f"request #{n} waits for you on the page: Please renew the deploy login", a["text"])
-        self.assertEqual((a["cwd"], a["task"], a["mine"]), (str(self.desk.root), None, "yes"))
+        self.assertEqual((a["task"], a["mine"]), (None, "yes"))
+        self.assertNotEqual(a["cwd"], str(self.desk.root))  # a folder of its own
         os.environ.pop("HANSA_TASK")
         # a release waits for the yes, and ends void
         self.hansa("lane", "set", "a", "release", "true")
@@ -14073,6 +14653,375 @@ class DeskTest(unittest.TestCase):
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
         self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+
+    # -- the one-time code of a release's alert --
+
+    def queued_code(self, rid) -> str:
+        """The one-time code the queued alert for release rid holds."""
+        from hansa import alert
+        [x] = [x for x in alert.queued(self.desk) if x.get("release") == rid and x.get("code")]
+        return x["code"]
+
+    def code_answer(self, *args) -> tuple:
+        """(what hansa release ARGS printed, what it said when it refused: '' when it did not)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                main(["--desk", str(self.desk.root), "release", *args])
+            except SystemExit as e:
+                return out.getvalue(), str(e.code)
+        return out.getvalue(), ""
+
+    def test_a_waiting_release_queues_an_alert_holding_a_one_time_code(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a", "first")
+        code = self.queued_code(1)
+        self.assertRegex(code, "^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$")
+        [q] = alert.queued(self.desk)
+        self.assertEqual(q["kind"], "release_waiting")
+        self.assertIn(f"or say code {code} to the coordinator", q["text"])
+        # only a keyed hash is kept, with a key in secrets/
+        r = release.get(self.desk, 1)
+        self.assertNotIn(code, json.dumps(r))
+        self.assertTrue(r["code"]["hash"])
+        key = release.code_key_file(self.desk)
+        self.assertEqual((key.parent, key.stat().st_mode & 0o777), (self.desk.secrets_dir, 0o600))
+        self.assertEqual(self.desk.keys(), {})  # not a provider's key
+        self.assertIn("waits to go out", release.page_rows(self.desk, self.desk.settings())[0]["code"])
+        alert.send_due(self.desk, gather=0)
+        self.assertIn(f"say code {code} to the coordinator", self.alerted(out)[-1]["text"])
+        row = release.page_rows(self.desk, self.desk.settings())[0]
+        self.assertTrue(row["code_sent"])
+        self.assertIn("went out in the principal's alert", row["code"])
+        self.assertIn("one-time code of their alert", self.hansa("status"))
+        self.assertIn("hansa release yes ID CODE", self.hansa("explain"))
+        # a code goes first, so a long gathered text does not cut it
+        self.desk.add_ask("x" * 2000)
+        self.hansa("release", "a", "again")
+        code = self.queued_code(2)
+        alert.send_due(self.desk, gather=0)
+        self.assertIn(code, self.alerted(out)[-1]["text"])
+
+    def test_a_release_code_appears_nowhere_else_hansa_writes(self):
+        from hansa import alert, release, web
+        # a command that fails, writing back what it read: what is kept of its run has the code taken out
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat; exit 1"})), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a", "the note")
+        code = self.queued_code(1)
+        result = alert.send_due(self.desk, gather=0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["tail"], [])  # none of what it printed is kept
+        self.assertNotIn(code, json.dumps(result))
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertTrue(release.page_rows(self.desk, self.desk.settings())[0]["code_sent"])
+        tid = self.desk.new_task("Add hello.txt")
+        said = "\n".join([self.hansa("status"), self.hansa("show", tid), self.hansa("release"), self.hansa("explain"),
+                          json.dumps(views.status(self.desk)), json.dumps(public_settings(self.desk)),
+                          json.dumps(web._events(self.desk, 200, ""))])  # the page's data
+        self.assertNotIn(code, said)
+        for f in self.desk.root.rglob("*"):
+            if f.is_file() and self.desk.secrets_dir not in f.parents:
+                self.assertNotIn(code.encode(), f.read_bytes(), f)
+        # the same with an alert that goes out
+        out = self.alert_fake()
+        self.hansa("release", "a", "again")
+        code = self.queued_code(2)
+        alert.send_due(self.desk, gather=0)
+        self.assertIn(code, self.alerted(out)[-1]["text"])
+        for f in self.desk.root.rglob("*"):
+            if f.is_file() and self.desk.secrets_dir not in f.parents:
+                self.assertNotIn(code.encode(), f.read_bytes(), f)
+
+    def test_the_right_release_code_approves_recorded_as_through_the_code(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        alert.send_due(self.desk, gather=0)
+        said, refused = self.code_answer("yes", "1", f"{code[:3].lower()} {code[3:]}")  # as said: any case, a space
+        self.assertEqual(refused, "")
+        self.assertIn("release #1 of lane a is approved", said)
+        self.assertNotIn(code, said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["answered_by"], r["channel"]), ("approved", "coordinator", "code"))
+        self.assertNotIn("hash", r["code"])
+        e = self.events("release_answered")[-1]
+        self.assertEqual((e["yes"], e["by"], e["channel"]), (True, "coordinator", "code"))
+        row = release.page_rows(self.desk, self.desk.settings())[0]
+        self.assertEqual(row["channel"], "code")
+        self.assertIn("through the coordinator, with the one-time code", row["what"])
+        # it works once
+        self.assertIn("not waiting", self.code_answer("yes", "1", code)[1])
+
+    def test_a_wrong_release_code_is_refused_and_three_void_it(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        wrong = "ABCDEF" if code != "ABCDEF" else "ABCDEG"
+        for n in (1, 2):
+            refused = self.code_answer("yes", "1", wrong)[1]
+            self.assertIn(f"not the code of release #1 ({n} of 3 wrong", refused)
+            self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        refused = self.code_answer("yes", "1", wrong)[1]
+        self.assertIn("after 3 wrong codes it is void, so only the page answers it now", refused)
+        self.assertEqual([e["wrong"] for e in self.events("release_code_wrong")], [1, 2, 3])
+        refused = self.code_answer("yes", "1", code)[1]  # the right code no longer answers
+        self.assertIn("approval is on the page", refused)
+        self.assertIn("3 wrong codes", refused)
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("void (3 wrong codes)", release.page_rows(self.desk, self.desk.settings())[0]["code"])
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+
+    def test_a_release_code_does_not_answer_another_release(self):
+        from hansa import release
+        self.alert_fake()
+        self.with_targets(test="true", prod="true")
+        self.hansa("release", "a", "test")
+        self.hansa("release", "a", "prod")
+        first, second = self.queued_code(1), self.queued_code(2)
+        self.assertNotEqual(first, second)
+        self.assertIn("not the code of release #2", self.code_answer("yes", "2", first)[1])
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        self.assertEqual(self.code_answer("yes", "1", first)[1], "")
+        self.assertEqual(self.code_answer("yes", "2", second)[1], "")
+        self.assertEqual([release.get(self.desk, n)["state"] for n in (1, 2)], ["approved", "approved"])
+
+    def test_a_release_code_lapses_after_the_page_a_stop_a_re_ask_a_change_and_a_day(self):
+        from hansa import release
+        self.alert_fake()
+        self.with_targets(one="true", two="true", three="true", four="true", five="true")
+        for n, t in enumerate(("one", "two", "three", "four", "five"), 1):
+            self.hansa("release", "a", t)
+        codes = {n: self.queued_code(n) for n in range(1, 6)}
+        # the page answers
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, False, "not now", r["commit"], r["command"]), {"ok": True})
+        self.assertIn("not waiting for an answer: it is refused", self.code_answer("yes", "1", codes[1])[1])
+        # a stop
+        self.hansa("release", "--stop", "2", "later")
+        self.assertIn("it is stopped", self.code_answer("yes", "2", codes[2])[1])
+        # a re-ask: a new waiting alert for the same release gives a new code, and voids the old one
+        self.desk.event("release_waits", id=3, lane="a", target="three", why="asked again")
+        new = self.queued_code(3)
+        self.assertNotEqual(new, codes[3])
+        self.assertIn("not the code of release #3", self.code_answer("yes", "3", codes[3])[1])
+        self.assertEqual(self.code_answer("yes", "3", new)[1], "")
+        # after 24 hours
+        later = time.time() + release.CODE_LIFE + 1
+        with unittest.mock.patch.object(release.time, "time", return_value=later):
+            self.assertIn("lapsed (it is older than 24 hours)", self.code_answer("yes", "4", codes[4])[1])
+            self.assertIn("older than 24 hours", self.code_answer("yes", "4", codes[4])[1])
+        self.assertEqual(release.get(self.desk, 4)["state"], "waiting")
+        # a changed command: the release no longer waits as it was asked
+        self.hansa("lane", "target", "a", "five", "echo changed")
+        refused = self.code_answer("yes", "5", codes[5])[1]
+        self.assertIn("is void", refused)
+        self.assertEqual(release.get(self.desk, 5)["state"], "void")
+
+    def test_without_an_alert_command_there_is_no_code_and_the_page_answers(self):
+        from hansa import alert, release
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertNotIn("code", release.get(self.desk, 1))
+        refused = self.code_answer("yes", "1", "ABCDEF")[1]
+        self.assertIn("no alert command, so no code is sent: approval of release #1 is on the page only", refused)
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("answers on the page only: no alert command is set", self.hansa("status"))
+        self.assertIn("no release gets a one-time code", self.hansa("explain"))
+        self.assertIn("pass the code the principal said", self.code_answer("yes", "1")[1])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["release", "--help"])
+        self.assertIn("With no alert command there is no code", " ".join(out.getvalue().split()))
+
+    def test_hansa_release_no_with_the_code_refuses_the_release(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        said, refused = self.code_answer("no", "1", code, "not", "this", "week")
+        self.assertEqual(refused, "")
+        self.assertIn("is refused, as the principal said with the code", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["reason"], r["channel"]), ("refused", "not this week", "code"))
+        e = self.events("release_answered")[-1]
+        self.assertEqual((e["yes"], e["channel"]), (False, "code"))
+        self.assertIn("refused by the principal", release.state_text(self.desk, r))
+        self.assertIn("with the one-time code", release.state_text(self.desk, r))
+
+    def test_an_alert_command_echoing_a_code_in_title_case_after_a_long_prefix_leaves_none_of_it(self):
+        from hansa import alert, release, web
+        cmd = (f"{shlex.quote(sys.executable)} -c \"import sys; t = sys.stdin.read(); "
+               f"print('x' * 190 + t.title()); print(t.title().replace(' ', '-'))\"; exit 1")
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        result = alert.send_due(self.desk, gather=0)
+        self.assertEqual((result["ok"], result["exit"], result["tail"]), (False, 1, []))
+        self.assertIn("not kept, as the alert held a one-time code", result["withheld"])
+        [e] = self.events("alert_failed")
+        self.assertEqual((e["exit"], e["tail"]), (1, []))
+        self.assertIn("one-time code", e["withheld"])
+        status = self.hansa("status")
+        self.assertIn("alert command FAILED", status)
+        self.assertIn("its output was not kept, as the alert held a one-time code", status)
+        said = "\n".join([status, json.dumps(views.status(self.desk)), json.dumps(web._events(self.desk, 200, "")),
+                          self.desk.events_path.read_text(), alert.last_file(self.desk).read_text()]).lower()
+        self.assertNotIn(code.lower(), said)
+        self.assertNotIn("xxxxxxxxxx", said)  # nothing of the output at all, so no cut part of a code
+        # an alert without a code keeps its output as before
+        self.desk.add_ask("hello there")
+        result = alert.send_due(self.desk, gather=0)
+        self.assertNotIn("withheld", result)
+        self.assertIn("Hello-There", " ".join(result["tail"]))
+        # where a code passes through text hansa keeps, it is hidden in any case and with spaces or dashes, before
+        # any cut
+        self.assertEqual(release.hide_codes("say Ab3-d e9 now", ["AB3DE9"]), "say [code] now")
+
+    def test_the_alert_command_runs_in_a_folder_of_its_own_not_the_desk(self):
+        from hansa import alert
+        cmd = "pwd; echo kept > alert-log.txt; exit 1"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        result = alert.test(self.desk)
+        where = Path(result["tail"][0])
+        self.assertNotEqual(where.resolve(), self.desk.root.resolve())
+        self.assertEqual(where.resolve().parent, alert.runs_dir(self.desk).resolve())  # in secrets/, closed to agents
+        self.assertFalse(where.exists())  # removed afterwards
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")  # with a code too
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(list(self.desk.root.rglob("alert-log.txt")), [])
+
+    def test_yes_and_no_are_not_lane_names(self):
+        from hansa import release
+        for name in ("yes", "NO", "No"):
+            with self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "add", name, "--like", "a")
+            self.assertIn("cannot name a lane", str(e.exception.code))
+        self.assertEqual(sorted(self.desk.settings()["lanes"]), ["a"])
+        s = self.desk.settings()
+        s["lanes"]["yes"] = s["lanes"]["a"]  # wherever a lane is named: the settings refuse it too
+        self.assertIn("yes and no (in any case) are not lane names", " ".join(self.desk.save_settings(s)))
+        # a desk that already has such a lane: the answer form records nothing, and says to remove it first
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["yes"] = s["lanes"]["a"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        before = self.desk.events_path.read_text()
+        refused = self.code_answer("yes", "1", code)[1]
+        self.assertIn("lane named yes: that lane must be removed first", refused)
+        self.assertEqual(self.desk.events_path.read_text(), before)
+        self.assertIsNone(release.get(self.desk, 2))
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("lane named yes", self.code_answer("NO", "1", code)[1])
+        # once it is gone, the code answers
+        del s["lanes"]["yes"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(self.code_answer("Yes", "1", code)[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+
+    def test_the_readme_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
+        root = Path(__file__).resolve().parent.parent
+        readme = " ".join((root / "README.md").read_text().split())
+        self.assertIn("Your alert command must not keep the alert's text anywhere the coordinator can read it (a "
+                      "file, a log, a chat history): the code in it approves a release.", readme)
+        self.assertIn("must not keep the alert's text anywhere the coordinator can read it",
+                      (root / "hansa" / "ui.html").read_text())
+
+    def test_a_killed_servers_alert_folder_is_closed_to_agents_and_swept_at_the_next_start(self):
+        from hansa import alert, run
+        root = Path(__file__).resolve().parent.parent
+        here = self.tmp / "where.txt"
+        cmd = f"pwd > {shlex.quote(str(here))}; cat > here.txt; sleep 60"
+        child = subprocess.Popen([sys.executable, "-c", "import sys; from hansa import alert; from hansa.desk import Desk; "
+                                  "alert.run(Desk(sys.argv[1]), sys.argv[2], 'release_waiting', 'say code AB3DE9')",
+                                  str(self.desk.root), cmd], cwd=root, start_new_session=True)
+        try:
+            for _ in range(200):
+                if here.exists() and here.read_text().strip():
+                    break
+                time.sleep(0.05)
+            folder = Path(here.read_text().strip())
+            for _ in range(200):
+                if (folder / "here.txt").exists() and (folder / "here.txt").read_text():
+                    break
+                time.sleep(0.05)
+        finally:  # the server killed: its alert thread removes nothing
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        self.assertEqual((folder / "here.txt").read_text(), "say code AB3DE9")
+        self.assertEqual(folder.resolve().parent, alert.runs_dir(self.desk).resolve())
+        # in secrets/: the coordinator's rules deny reading it, and workers, verifiers and design sessions too
+        self.assertIn(self.desk.secrets_dir.resolve(), folder.resolve().parents)
+        self.assertIn(self.desk.secrets_dir, run.desk_private(self.desk))
+        self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", cli.permissions(self.desk)["deny"])
+        self.assertEqual(stat.S_IMODE(self.desk.secrets_dir.stat().st_mode), 0o700)
+        # the next hansa serve sweeps it as it starts
+        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaises(RuntimeError):
+            main(["--desk", str(self.desk.root), "serve", "--port", "0"])
+        self.assertFalse(folder.exists())
+        self.assertEqual(list(alert.runs_dir(self.desk).iterdir()), [])
+
+    def test_init_refuses_a_lane_named_yes_or_no(self):
+        for name in ("yes", "NO"):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["init", str(self.tmp / f"new-{name}"), "--repo", str(self.repo), "--lane", name])
+            self.assertIn(f"{name} cannot name a lane: yes and no (in any case) are kept for hansa release yes|no ID "
+                          "CODE", str(e.exception.code))
+            self.assertFalse((self.tmp / f"new-{name}").exists())
+
+    def test_the_page_says_where_the_alert_command_runs(self):
+        root = Path(__file__).resolve().parent.parent
+        page = (root / "hansa" / "ui.html").read_text()
+        self.assertNotIn("in the desk's folder", page)
+        self.assertNotIn("在桌面文件夹里运行", page)
+        self.assertIn("in a temporary folder of its own under the desk's secrets/alert-runs", page)
+        self.assertIn("在桌面 secrets/alert-runs 下它自己的临时文件夹里运行", page)
+        self.assertNotIn("in the desk's folder", (root / "hansa" / "alert.py").read_text())
+
+    def test_a_code_given_as_two_words_is_refused_without_counting_a_wrong_code(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        refused = self.code_answer("yes", "1", code[:3], code[3:])[1]
+        self.assertIn("takes the code as one word", refused)
+        self.assertIn("Nothing was checked or counted", refused)
+        self.assertEqual(self.events("release_code_wrong"), [])
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertEqual(self.code_answer("yes", "1", f"{code[:3]}-{code[3:]}")[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["release", "--help"])
+        self.assertIn("given as one word (dashes allowed, no spaces", " ".join(out.getvalue().split()))
+        card = " ".join((Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text().split())
+        self.assertIn("The code is one word (dashes allowed, no spaces)", card)
+
+    def test_a_timed_out_alert_names_its_real_time_limit(self):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "sleep 5"})), {"ok": True, "problems": []})
+        self.desk.add_ask("hello")
+        result = alert.send_due(self.desk, gather=0, timeout=0.5)
+        self.assertTrue(result["timed_out"])
+        status = self.hansa("status")
+        self.assertIn("(timed out after 0.5 s)", status)
+        self.assertNotIn(f"after {alert.TIMEOUT} s", status)
 
     # -- small fixes from earlier verifications --
 

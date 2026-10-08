@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -15,15 +16,16 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
-from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
-                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
-                   PROJECT_INTRO)
+from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, refused_rule, resolved, stored, write_json,
+                   argv_rules_problem, path_rule_problem,
+                   PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
                   lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -36,10 +38,21 @@ BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-s
 ON_MAC = sys.platform == "darwin"
 
 
+def answer_lane_refused(name: str) -> str:
+    """Why a lane may not be named yes or no (lane add, init --lane)."""
+    return (f"hansa: {name} cannot name a lane: yes and no (in any case) are kept for hansa release yes|no ID CODE, "
+            "the principal's answer; nothing was changed")
+
+
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> Desk:
+    if answer_name(lane):
+        raise SystemExit(answer_lane_refused(lane))
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
+    for x in dict.fromkeys([str(desk.root), str(desk.given)]):  # every rule for the desk's folders starts with it
+        if path_rule_problem(x):
+            raise SystemExit(f"hansa: {path_rule_problem(x)}; no desk was made")
     if repo:  # looked at before anything is made, so a refusal leaves no half-made desk
         if not resolved(repo):
             raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
@@ -47,6 +60,8 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
+        if path_rule_problem(repo):
+            raise SystemExit(f"hansa: {path_rule_problem(repo)}; no desk was made")
         base = lane_base(repo, base, "no desk was made")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -150,6 +165,8 @@ def _text(args) -> str:
 
 
 def cmd_init(a):
+    if answer_name(a.lane):  # before anything is made, for another account too
+        raise SystemExit(answer_lane_refused(a.lane))
     if a.user:
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
@@ -805,6 +822,30 @@ def _stop_release(desk: Desk, a) -> None:
         + ". The server may be left half-switched: hansa release shows its last lines"))
 
 
+def _answer_by_code(desk: Desk, a) -> None:
+    """hansa release yes|no ID CODE [reason]: the principal's answer, said in the conversation with the one-time code
+    of their alert, passed on."""
+    rid, rest = int(a.note[0].lstrip("#")), list(a.note[1:])
+    if not rest:
+        raise SystemExit(f"hansa: pass the code the principal said in the conversation: hansa release {a.lane} {rid} "
+                         "CODE. Never guess one; without it, the principal answers on the page. Nothing was changed")
+    yes = a.lane.strip().lower() == "yes"
+    if yes and len(rest) > 1:  # a code split over words, or a reason a yes does not take: nothing is checked or counted
+        raise SystemExit(f"hansa: hansa release yes {rid} CODE takes the code as one word (dashes allowed, no spaces), "
+                         "and nothing after it; pass it again as one word. Nothing was checked or counted")
+    out = release.answer_by_code(desk, rid, yes, rest[0], " ".join(rest[1:]))  # by the coordinator, for the principal
+    if not out["ok"]:
+        raise SystemExit("hansa: " + desk.redact("; ".join(out["problems"])) + ".")
+    r = release.get(desk, rid) or {}
+    if not yes:
+        print(desk.redact(f"release #{rid} of {release.what(r)} is refused, as the principal said with the code of "
+                          "their alert; nothing runs. Do not push or deploy it yourself"))
+        return
+    print(desk.redact(f"release #{rid} of {release.what(r)} is approved, as the principal said with the code of their "
+                      f"alert (recorded as given through you); {release.waits_text(desk, desk.settings(), r)}. hansa "
+                      "tells you when it ends"))
+
+
 def cmd_pause(a):
     Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
     print("paused: no new tasks start until `hansa resume`; running tasks finish")
@@ -883,6 +924,15 @@ def cmd_release(a):
     if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
         raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
                          "cannot. Say in your report that it may be ready to go out")
+    if answer_name(a.lane) and a.note and a.note[0].lstrip("#").isdigit():  # always an answer, never a request
+        taken = [n for n in desk.settings()["lanes"] if answer_name(n)]
+        if taken:
+            raise SystemExit(f"hansa: hansa release {a.lane} ID CODE is the principal's answer, but this desk has a "
+                             f"lane named {', '.join(taken)}: that lane must be removed first (hansa lane remove), "
+                             "then pass the code again. Nothing was recorded")
+        a.lane = a.lane.strip().lower()
+        _answer_by_code(desk, a)
+        return
     note, target = list(a.note), None
     if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
         target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
@@ -1020,6 +1070,7 @@ def cmd_serve(a):
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
+    alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
     except OSError as e:
@@ -1027,6 +1078,10 @@ def cmd_serve(a):
             raise
         raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
                          f"server on a free port with hansa serve --port N (hansa web then finds it)")
+
+    def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stopped)
     (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
     (desk.state_dir / "web-host").write_text(a.host, encoding="utf-8")  # with it, where hansa status says the page is
     beat(desk)  # its rounds count from now, not from the last server's
@@ -1050,6 +1105,8 @@ def cmd_serve(a):
             time.sleep(a.every)
     except KeyboardInterrupt:
         desk.event("server_stopped")
+    finally:
+        alert.sweep_runs(desk)
 
 
 def web_port(desk: Desk) -> int:
@@ -1131,6 +1188,9 @@ def cmd_coordinator(a):
     if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
         env["DISABLE_AUTOUPDATER"] = "1"
     argv = [claude] + (["--add-dir", *dirs] if dirs else []) + ["--disallowedTools", *no_edit, *no_builtin, *no_read]
+    unsplit = argv_rules_problem(argv)
+    if unsplit:  # a deny rule Claude Code would split leaves its folder open: the session never starts with one
+        raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
@@ -1158,7 +1218,9 @@ def no_read_paths(desk: Desk, plan: dict, theirs: str = "") -> tuple:
     refused = plan.get("no_read_refused") if isinstance(plan.get("no_read_refused"), list) else []
     said = [x for x in refused if isinstance(x, str)]
     # root does not read the account's settings: the account's hansa looked at the lanes' repositories
-    good, more = deny_split(given, desk.root, None if theirs else desk.settings()["lanes"])
+    good, more, stops = deny_parts(given, desk.root, None if theirs else desk.settings()["lanes"])
+    if stops:  # as coordinator_desk: a path the plan gives that cannot be written as a rule stops the session
+        raise SystemExit(f"hansa: {stop_text(stops)}")
     return good, [*said, *(m for m in more if m not in said)]
 
 
@@ -1286,7 +1348,9 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
             desk.event("helper_retired", file=name)
     desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
     write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": now()})
-    kept, unkept = kept_from_workers(s, desk.root)
+    kept, unkept, stops = no_read_parts(s, desk.root)
+    if stops:  # Read would be open there to the session: it does not start
+        raise SystemExit(f"hansa: {stop_text(stops)}")
     for line in unkept:
         desk.event("no_read_skipped", why=line)
     read, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)
@@ -1341,6 +1405,8 @@ def _lane_value(field: str, values: list):
     elif "none" in [x for v in values for x in (v.split(",") if field == "providers" else [v])]:
         raise SystemExit(f"hansa: none means an empty {field}, so it cannot come with other values "
                          f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
+    if field == "allow":  # a rule given twice is kept once
+        return list(dict.fromkeys(x for x in values if x))
     if field in LANE_LISTS:
         return [x for v in values for x in (v.split(",") if field == "providers" else v.split()
                                             if field == "release_files" else [v]) if x]
@@ -1446,6 +1512,8 @@ def cmd_lane(a):
         s = desk.settings()
         new = json.loads(json.dumps(s))
         if a.action == "add":
+            if answer_name(a.name):
+                raise SystemExit(answer_lane_refused(a.name))
             if a.name in s["lanes"]:
                 raise SystemExit(f"hansa: there is already a lane {a.name}; change it with hansa lane set {a.name} ...")
             # none as lane set takes it: alone it means empty, with other values it is refused
@@ -1466,6 +1534,12 @@ def cmd_lane(a):
                 if given.get("providers") == []:
                     raise SystemExit("hansa: a lane needs a provider; nothing was changed")
                 like = s["lanes"][a.like]
+                bad = [r for r in like.get("allow", []) if refused_rule(r)]
+                if bad:  # copied or not, they are refused in that lane
+                    raise SystemExit(f"hansa: lane {a.like}'s allowed commands hold rules no longer accepted: "
+                                     + "; ".join(f"{r} {refused_rule(r)}" for r in bad)
+                                     + f". Remove them with: {allow_fix(a.like, like.get('allow', []))}. Nothing was "
+                                     f"changed")
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
                 for f in ("check", "setup", "merge_check", "merge_timeout_min", "identity"):
@@ -1483,6 +1557,9 @@ def cmd_lane(a):
             theirs = account.foreign_repo(repo)
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
+            for x in dict.fromkeys([repo, *([a.repo] if a.repo else [])]):  # the coordinator's rules name it
+                if path_rule_problem(x):
+                    raise SystemExit(f"hansa: {path_rule_problem(x)}; nothing was changed")
             if not a.like:
                 base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
@@ -1520,6 +1597,11 @@ def cmd_lane(a):
                 warning = _loopback_warning(a.name, ln["network"])
                 if warning:
                     print(desk.redact(warning))
+            if ln.get("allow"):
+                desk.event("lane_allow_changed", lane=a.name, old=[], new=ln["allow"])
+                print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, are "
+                      f"recorded: {_shown(ln['allow'])}. Tell the principal, in the conversation, what you listed "
+                      f"and why.")
             if ln.get("setup") or ln.get("check") or ln.get("merge_check"):
                 print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
                       "in the conversation, what they run and why.")
@@ -1594,6 +1676,11 @@ def cmd_lane(a):
         warning = _loopback_warning(a.name, value)
         if warning:
             print(desk.redact(warning))
+    if a.field == "allow" and set(old) != set(value):
+        desk.event("lane_allow_changed", lane=a.name, old=old, new=value)
+        print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, changed: "
+              f"{_shown(old)} -> {_shown(value)}, so this change is recorded. Tell the principal, in the "
+              f"conversation, what you changed and why.")
     if a.field == "write" and set(old) != set(value):
         desk.event("lane_write_changed", lane=a.name, old=old, new=value)
         print(f"The folders the lane's workers may write besides the worktree changed: {_shown(old)} -> "
@@ -1863,55 +1950,106 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
 
 
 def _lane_try(desk: Desk, a) -> None:
-    """Have hansa serve run the lane's setup and check once, as for a task but with no worker, and wait for it."""
-    with desk.lock():  # no task starts on the lane between this look and the try being queued
-        ln = desk.settings()["lanes"].get(a.name)
-        if not ln:
-            raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
-        if a.merge_check and not merge_command(ln):
-            raise SystemExit(f"hansa: lane {a.name} has no merge check and no check, so there is no merge check to "
-                             f"try. Set one with hansa lane set {a.name} merge_check|check \"<command>\"")
-        if not a.merge_check and not ln.get("setup") and not ln.get("check"):
-            raise SystemExit(f"hansa: lane {a.name} has no setup and no check, so there is nothing to try. Set them "
-                             f"with hansa lane set {a.name} setup|check \"<command>\""
-                             + (f"; its merge check: hansa lane try {a.name} --merge-check"
-                                if ln.get("merge_check") else ""))
-        t = read_try(desk, a.name)
-        if t.get("phase") in ("queued", "running"):  # asked for before, by a command that stopped waiting
-            print(f"a try of lane {a.name} is already {t['phase']}; waiting for it", flush=True)
-        else:
-            holder = lane_holder(desk, a.name)
-            if holder:
-                raise SystemExit(f"hansa: lane {a.name} is busy with {holder['id']} ({holder['state']}: "
-                                 f"{holder['title']}); nothing was run. Try again when it is free: "
-                                 + (f"{notify.wait_step(desk, holder['id'], True)}; then hansa lane try {a.name}"
-                                    if notify.hears_of(desk, holder["id"]) else
-                                    f"hansa wait {holder['id']}, then hansa lane try {a.name}"))
-            st = server_state(desk)
-            if st["state"] == "gone":
-                raise SystemExit("hansa: hansa serve is not running, and a try runs through it (with its environment, "
-                                 "as tasks do); nothing was run. Start it, then try again")
-            if st["state"] == "stuck":
-                raise SystemExit(f"hansa: hansa serve (pid {st['pid']}) is busy or stuck: no round finished for "
-                                 f"{quiet_text(st['quiet'])}, and a try runs through it; nothing was run. See hansa "
-                                 f"explain server, then try again")
-            t = {"id": uuid.uuid4().hex[:12], "phase": "queued", "asked": now(),
-                 **({"merge": True} if a.merge_check else {})}
-            write_try(desk, a.name, t)
-            desk.event("lane_try_queued", lane=a.name, **({"merge_check": True} if a.merge_check else {}))
-            steps = ["setup"] * bool(ln.get("setup")) + (
-                [f"merge check ({merge_command(ln)}, stopped after {merge_minutes(ln)} minutes)"] if a.merge_check
-                else ["check"] * bool(ln.get("check")))
-            print(f"lane {a.name}: hansa serve runs its " + " and ".join(steps)
-                  + f" in its worktree, at {ln.get('base') or 'main'}'s tip, in its sandbox; waiting for the result",
-                  flush=True)
+    """Have hansa serve run the lane's setup and check once, as for a task but with no worker, and wait for it.
+    --at COMMIT: only at that commit, which must be the base's tip; a try queued or running at another commit
+    (or of the other kind) is waited for, never taken as the answer. --log: print the last try's kept output."""
+    if a.log:
+        return _lane_try_log(desk, a)
+    at, waited = "", None
+    while True:
+        with desk.lock():  # no task starts on the lane between this look and the try being queued
+            ln = desk.settings()["lanes"].get(a.name)
+            if not ln:
+                raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
+            if a.merge_check and not merge_command(ln):
+                raise SystemExit(f"hansa: lane {a.name} has no merge check and no check, so there is no merge check to "
+                                 f"try. Set one with hansa lane set {a.name} merge_check|check \"<command>\"")
+            if not a.merge_check and not ln.get("setup") and not ln.get("check"):
+                raise SystemExit(f"hansa: lane {a.name} has no setup and no check, so there is nothing to try. Set them "
+                                 f"with hansa lane set {a.name} setup|check \"<command>\""
+                                 + (f"; its merge check: hansa lane try {a.name} --merge-check"
+                                    if ln.get("merge_check") else ""))
+            if a.at:
+                at = _try_at(ln, a, waited)
+            t = read_try(desk, a.name)
+            if t.get("phase") in ("queued", "running"):  # asked for before, by a command that stopped waiting
+                if not at or (bool(t.get("merge")) == bool(a.merge_check)
+                              and (t.get("onto") or t.get("at")) == at):
+                    print(f"a try of lane {a.name}" + (f" at {at[:10]}" if at else "")
+                          + f" is already {t['phase']}; waiting for it", flush=True)
+                    break
+                waited = t
+            else:
+                holder = lane_holder(desk, a.name)
+                if holder:
+                    raise SystemExit(f"hansa: lane {a.name} is busy with {holder['id']} ({holder['state']}: "
+                                     f"{holder['title']}); nothing was run. Try again when it is free: "
+                                     + (f"{notify.wait_step(desk, holder['id'], True)}; then hansa lane try {a.name}"
+                                        if notify.hears_of(desk, holder["id"]) else
+                                        f"hansa wait {holder['id']}, then hansa lane try {a.name}"))
+                st = server_state(desk)
+                if st["state"] == "gone":
+                    raise SystemExit("hansa: hansa serve is not running, and a try runs through it (with its environment, "
+                                     "as tasks do); nothing was run. Start it, then try again")
+                if st["state"] == "stuck":
+                    raise SystemExit(f"hansa: hansa serve (pid {st['pid']}) is busy or stuck: no round finished for "
+                                     f"{quiet_text(st['quiet'])}, and a try runs through it; nothing was run. See hansa "
+                                     f"explain server, then try again")
+                t = {"id": uuid.uuid4().hex[:12], "phase": "queued", "asked": now(),
+                     **({"merge": True} if a.merge_check else {}), **({"at": at} if at else {})}
+                write_try(desk, a.name, t)
+                desk.event("lane_try_queued", lane=a.name, **({"merge_check": True} if a.merge_check else {}),
+                           **({"at": at} if at else {}))
+                steps = ["setup"] * bool(ln.get("setup")) + (
+                    [f"merge check ({merge_command(ln)}, stopped after {merge_minutes(ln)} minutes)"] if a.merge_check
+                    else ["check"] * bool(ln.get("check")))
+                print(f"lane {a.name}: hansa serve runs its " + " and ".join(steps)
+                      + f" in its worktree, at {ln.get('base') or 'main'}'s tip"
+                      + (f" ({at[:10]})" if at else "") + ", in its sandbox; waiting for the result", flush=True)
+                break
+        where = (f"at {waited['onto'][:10]}" if waited.get("onto") else
+                 "at the tip it starts on" if not waited.get("at") else f"at {waited['at'][:10]}")
+        print(f"a try of lane {a.name} is {waited['phase']} {where}"
+              + (" with the merge check" if waited.get("merge") else "") + f", not the one asked for at {at[:10]}"
+              + (" with the merge check" if a.merge_check else "")
+              + "; waiting for it to end, then trying at " + at[:10] + " if the base's tip is still there", flush=True)
+        _await_try(desk, a, waited["id"], other=True)
+    now_t = _await_try(desk, a, t["id"])
+    print(desk.redact(views.try_text(a.name, now_t)))
+    if not now_t.get("ok") or (at and now_t.get("onto") != at):
+        raise SystemExit(1)
+
+
+def _try_at(ln: dict, a, waited) -> str:
+    """The commit --at names, in full, refused (nothing run) unless it is the base's tip now."""
+    repo, base = Path(ln["repo"]), ln.get("base") or "main"
+    try:
+        at = git("rev-parse", "--verify", "--quiet", f"{a.at}^{{commit}}", cwd=repo)
+    except RuntimeError:
+        at = ""
+    if not at:
+        raise SystemExit(f"hansa: {a.at} is no commit of lane {a.name}'s repository; nothing was run")
+    tip = git("rev-parse", base, cwd=repo)
+    if tip != at:
+        raise SystemExit(f"hansa: {base}'s tip is {tip[:10]}, not {at[:10]}"
+                         + (", since the try hansa waited for ended" if waited else "")
+                         + f"; nothing was run. A try with --at answers for that commit only: hansa lane try "
+                         f"{a.name}{' --merge-check' if a.merge_check else ''} --at {tip[:10]} tries the tip")
+    return at
+
+
+def _await_try(desk: Desk, a, tid: str, other: bool = False) -> dict:
+    """Wait for the try tid to end; its record. other: a try at another commit, waited for only so that the one
+    asked for can run after it: it ends for this when it is gone or replaced too."""
     gone = None
     while True:
         now_t = read_try(desk, a.name)
-        if now_t.get("id") != t["id"]:
+        if now_t.get("id") != tid:
+            if other:
+                return now_t
             raise SystemExit(f"hansa: the try of lane {a.name} was replaced by another; see hansa lane try {a.name}")
         if now_t.get("phase") == "done":
-            break
+            return now_t
         st = server_state(desk)  # stuck runs no rounds, so it neither starts nor finishes the try
         if st["state"] not in ("gone", "stuck"):
             gone = None
@@ -1921,9 +2059,12 @@ def _lane_try(desk: Desk, a) -> None:
             why = ("stopped" if st["state"] == "gone" else
                    f"(pid {st['pid']}) is busy or stuck, with no round finished for {quiet_text(st['quiet'])},")
             again = "Start hansa serve" if st["state"] == "gone" else "Once its rounds come again (hansa explain server)"
+            if other:
+                raise SystemExit(f"hansa: hansa serve {why} before the try hansa waited for ended; nothing was run "
+                                 f"at {a.at}. {again}, then hansa lane try {a.name} --at {a.at}")
             with desk.lock():  # a server that comes back now starts it under this lock, or finds it gone
                 last = read_try(desk, a.name)
-                if last.get("id") == t["id"] and last.get("phase") == "queued":  # never started: it would hold the lane
+                if last.get("id") == tid and last.get("phase") == "queued":  # never started: it would hold the lane
                     try_file(desk, a.name).unlink(missing_ok=True)
                     desk.event("lane_try_withdrawn", lane=a.name)
                     raise SystemExit(f"hansa: hansa serve {why} before the try started, so it was withdrawn and "
@@ -1933,9 +2074,19 @@ def _lane_try(desk: Desk, a) -> None:
                              + ("it runs" if st["state"] == "gone" else "its rounds come") + " again, "
                              f"hansa lane try {a.name} waits for this try's result")
         time.sleep(a.every)
-    print(desk.redact(views.try_text(a.name, now_t)))
-    if not now_t.get("ok"):
-        raise SystemExit(1)
+
+
+def _lane_try_log(desk: Desk, a) -> None:
+    """hansa lane try L --log [--merge-check]: the whole output of the lane's last try of that kind."""
+    if a.at:
+        raise SystemExit("hansa: --log prints the last try's output and runs nothing; --at goes with a try")
+    if a.name not in desk.settings()["lanes"] and not (desk.lanes_dir / a.name).is_dir():
+        raise SystemExit(f"hansa: there is no lane {a.name}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
+    f = try_log(desk, a.name, a.merge_check)
+    if not f.is_file():
+        raise SystemExit(f"hansa: lane {a.name} has no kept output of a{' merge-check' if a.merge_check else ''} try "
+                         f"yet; hansa lane try {a.name}{' --merge-check' if a.merge_check else ''} runs one")
+    sys.stdout.write(desk.redact(f.read_text(encoding="utf-8", errors="replace")))
 
 
 def cmd_concurrency(a):
@@ -2130,6 +2281,16 @@ def main(argv=None):
                      "told (release_stopped). A stopped release went out for no --after. A stopped install may leave "
                      "the server half-switched: a release command for which that matters should handle TERM (finish "
                      "or undo the step it is in)")
+    p.epilog = ("hansa release yes ID CODE, hansa release no ID CODE [reason]: the principal's answer to release ID, "
+                "said in the conversation with the one-time code that only the principal's alert carries (6 "
+                "characters, no 0/O or 1/I/l), given as one word (dashes allowed, no spaces: a yes with a word too many is "
+                "refused, nothing counted). hansa checks it against release ID only; a right code answers it once, "
+                "recorded as the principal's answer given through the coordinator (channel code); a wrong one is "
+                f"refused and counted, and after {release.CODE_TRIES} the code is void and only the page answers. A "
+                f"code lapses when the release is answered (on the page too), stopped or no longer what was asked, after "
+                f"{release.CODE_LIFE // 3600} hours, and when a new waiting alert for it gives a new one. With no alert "
+                "command there is no code: the principal answers on the page. yes and no are not lane names, so this "
+                "form is always an answer. Never guess a code, nor ask the principal to send it anywhere else")
     p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("lane", nargs="?")
@@ -2195,15 +2356,25 @@ def main(argv=None):
                    "(default: none)")
     q.add_argument("--identity", metavar='"NAME <EMAIL>"', help="the author and committer of every commit hansa "
                    "makes for the lane (default: the repository's own user.name and user.email, else hansa's)")
-    q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
-                   "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
+    q.add_argument("--allow", nargs="+", metavar="RULE", help="rules the lane's workers, verifiers and design "
+                   "sessions are given without asking: commands such as 'Bash(pnpm test:*)' (workers run any command "
+                   "in their sandbox and need none; design sessions do), and web tools: "
+                   "'WebFetch(domain:docs.python.org)' or 'WebFetch(domain:*.python.org)' for each public site (a "
+                   "bare WebFetch, an address, a local or private name or a wildcard over a shared suffix is "
+                   "refused), WebSearch (it sends search queries out of the machine); each rule its own value")
     q.add_argument("--release-files", nargs="+", metavar="PATH", help="the files the lane's releases build and run "
                    "outside the sandbox, as paths or globs relative to the repository, separated by spaces (\"pom.xml "
                    "**/pom.xml build.sh tools/release.sh\"): hansa merge refuses a change touching one of them until "
                    "a verification of it holds (hansa verify ID), and no flag overrides that")
     q = lane.add_parser("set", help="change one field of a lane", description=(
-        "allow is the commands a design session may run without asking (workers run any command in their "
-        "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "allow is the rules the lane's workers, verifiers and design sessions are given without asking: commands "
+        "such as Bash(pnpm test:*) (workers run any command in their sandbox and need none; design sessions do), "
+        "and Claude Code's web tools, which reach the network from its own process, outside the sandbox's network "
+        "list: WebFetch only as WebFetch(domain:HOST) for each site, HOST a public site's name as the network list "
+        "writes it (*. in front allowed, and it opens every name under it; a bare WebFetch, one for every site, an IP "
+        "address, localhost, a name for a local or private network such as .internal or .local, or a wildcard over "
+        "a shared suffix such as *.co.uk or *.github.io is refused, as are names with no dot and names such as nip.io or lvh.me that come back as this machine; any listed name can still be pointed at any address, so list only sites you know), and WebSearch, which sends search queries out "
+        "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
         "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
@@ -2308,6 +2479,13 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("--merge-check", action="store_true", help="run the setup and the lane's merge check command (its "
                    "merge_check, else its check) instead, under the merge check's time limit")
+    q.add_argument("--at", metavar="COMMIT", help="answer for this commit only (full or abbreviated, in the lane's "
+                   "repository): refused, with nothing run, unless it is the base's tip; a try queued or running at "
+                   "another commit is waited for, then this one runs if the tip is still COMMIT; exit 0 only when the "
+                   "try at COMMIT passed")
+    q.add_argument("--log", action="store_true", help="print the whole output of the lane's last try (with "
+                   "--merge-check: of its last merge-check try), keys removed, its first and last 2 MB at most per step; "
+                   "runs nothing")
     q.add_argument("--every", type=float, default=0.5, help=argparse.SUPPRESS)
     p = add("notes", cmd_notes, "the coordinator's notes: list the files under notes/ with their headings, or move "
             "a finished section out of one: hansa notes archive FILE HEADING [--to OTHER]")

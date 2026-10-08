@@ -10,9 +10,9 @@ import time
 from pathlib import Path
 
 from . import account, alert, build, cost, installed, installed_text, notify, release
-from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+from .run import (LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -200,12 +200,14 @@ def failed_check_lines(log: str, tail: list, tid: str) -> list:
     running) lifted out of its whole output (failure_spans), those of their lines above its last TAIL_LINES lines
     (a failure's message above them even when its marker is among them), each cut to BLOCK_LINES and all to
     FAILURE_LINES, then those last lines, always: never less than its last lines alone, which is all it gives
-    when nothing in it is recognised, or when the output is not kept (tail: the last lines as recorded)."""
+    when nothing in it is recognised, or when the output is not kept (tail: the last lines as recorded). Then a
+    line for each known cause its output shows (output_hints)."""
+    hints = ["  " + h for h in output_hints(log or "\n".join(tail))]
     lines = [plain(x, None) for x in log.rstrip().splitlines()]
     while lines and not lines[0].strip():
         lines.pop(0)
     if not lines:
-        return ["  " + plain(x) for x in tail]
+        return ["  " + plain(x) for x in tail] + hints
     whole = [f"  the whole output: hansa show {tid} --check"]
     last = max(0, len(lines) - TAIL_LINES)  # the lines from here are shown as its last lines
     picked, kinds = [], set()
@@ -219,13 +221,13 @@ def failed_check_lines(log: str, tail: list, tid: str) -> list:
             picked.append(f"      ... {len(keep) - BLOCK_LINES} more lines of it")
     rest = [x[:200] for x in lines[last:]]
     if not picked:
-        return ["  " + x for x in rest] + whole
+        return ["  " + x for x in rest] + whole + hints
     what = {frozenset({"test"}): "the failing tests", frozenset({"error"}): "the errors"}.get(
         frozenset(kinds), "the failing tests and errors")
     out = [f"  {what}, from its output:"] + picked[:FAILURE_LINES]
     if len(picked) > FAILURE_LINES:
         out.append(f"    ... {len(picked) - FAILURE_LINES} more lines of them")
-    return out + ["  its last lines:"] + ["    " + x for x in rest] + whole
+    return out + ["  its last lines:"] + ["    " + x for x in rest] + whole + hints
 
 
 def as_closed_now(m: dict) -> dict:
@@ -498,6 +500,7 @@ def status(desk: Desk) -> dict:
     server = server_state(desk)
     day = time.time() - 86400  # the last 24 h, each thing by when it happened: not reset at midnight
     rows = cost.worker_rows(desk, day)  # by when the run ended
+    no_read = no_read_parts(s, desk.root)
     return {
         "desk": str(desk.root),
         "build": build(),
@@ -515,8 +518,11 @@ def status(desk: Desk) -> dict:
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
+        "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
+        # entries of what workers may not read that stop every run, and those left out of runs (desk.no_read_parts)
+        "no_read_stop": stop_text(no_read[2]), "no_read_left_out": no_read[1],
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -584,6 +590,9 @@ def status_text(st: dict) -> str:
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
+    out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
+    out += [f"what workers may not read, entry left out: {x.removeprefix(DENY_AT)}"
+            for x in st.get("no_read_left_out") or []]
     out += [page_text(st["page"])] if st.get("page") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
@@ -647,6 +656,10 @@ def status_text(st: dict) -> str:
         out.append("releases (hansa release):")
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
                 if r["state"] in release.OPEN]
+        if any(r["state"] == "waiting" for r in st["releases"]):
+            out.append("  the principal answers on the page, or says the one-time code of their alert in the "
+                       "conversation: pass it with hansa release yes|no ID CODE" if st.get("release_codes") else
+                       "  the principal answers on the page only: no alert command is set, so no code is sent")
     if st["asks"]:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
@@ -1059,6 +1072,25 @@ def local_servers_text(mac: bool, listed: bool) -> str:
             + ("; this lane lists it, and need not" if listed else ""))
 
 
+JAVA_LINES = (
+    "  a Java lane (its env names JAVA_HOME): hansa adds -Djava.io.tmpdir to JAVA_TOOL_OPTIONS in the sandbox, so"
+    " every JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr before anything else. java -version and java"
+    " -XshowSettings print on stderr, so their output starts with it; javac -version and mvn -v print on stdout,"
+    " so theirs does when stderr is read with it (2>&1). A script that reads the version should look for the"
+    " line holding `version \"`, not the first line",
+    "  Maven gets the sandbox's proxy through MAVEN_ARGS (-gs <file>): a build script that sets MAVEN_ARGS itself"
+    " drops it (in bash MAVEN_ARGS=(-B) makes an array, which is not exported), and Maven then gets 407 Proxy"
+    " Authentication Required for what its local repository lacks; keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-})")
+MKTEMP_LINE = ("  on macOS, mktemp -d, mktemp -t PREFIX and a bare mktemp ignore TMPDIR and write under /var/folders,"
+               " which a lane may not write (mktemp: mkdtemp failed on ...: Operation not permitted); a script should"
+               " give it a template in TMPDIR: mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\"")
+
+
+def tool_lines(mac: bool, env: dict) -> list:
+    """For hansa explain lane: what JVMs and macOS's mktemp do differently in a lane, where it applies."""
+    return [*(JAVA_LINES if "JAVA_HOME" in env else ()), *([MKTEMP_LINE] if mac else [])]
+
+
 def preview_text(mac: bool, ln: dict) -> list:
     """What becomes of a lane's preview on this machine, for hansa explain lane: its lines."""
     if not ln.get("preview"):
@@ -1078,6 +1110,20 @@ def preview_text(mac: bool, ln: dict) -> list:
             "    on Linux hansa does not start it: srt runs it with a network of its own (a namespace with its own"
             " loopback), so the browser, outside the sandbox, could not reach a server bound there; the worker is"
             " told so"]
+
+
+def web_lines(allow: list) -> list:
+    """What a lane's allowed commands give of Claude Code's web tools, which reach the network from its own
+    process, outside the sandbox's network list."""
+    sites, search = web_sites(allow)
+    if not sites and not search:
+        return ["  web tools (Claude Code's own, outside the sandbox's network list): none"]
+    return ["  web tools (Claude Code's own, outside the sandbox's network list; workers, verifiers and design"
+            " sessions alike):",
+            *(["    WebFetch reaches only: " + ", ".join(sites) + " (unlike the network list, it runs in Claude"
+               " Code's own process, outside the sandbox; a *. wildcard opens every name under it; any listed name can be pointed at any address, this"
+               " machine included: list only sites you know, and the principal sees every change)"] if sites else []),
+            *(["    WebSearch: sends search queries out of the machine"] if search else [])]
 
 
 def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False) -> str:
@@ -1139,6 +1185,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *([f"  {x[0].upper()}{x[1:]}." for x in LINUX_SANDBOX_NOTES] if account.LINUX else []),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
+            *tool_lines(sys.platform == "darwin", {**ln.get("env", {}), **env}),
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",
             "    any command inside the sandbox, but it changes files only in the lane's worktree, its own"
@@ -1148,14 +1195,17 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *no_read_lines(desk, s, name, whole),
             "  network during a task: " + (", ".join(ln.get("network", [])) or "none"),
             "    " + local_servers_text(sys.platform == "darwin", any(is_local(h) for h in ln.get("network", []))),
+            *web_lines(ln.get("allow", [])),
             "  folders a worker may also write (a build or test tool's cache): "
             + (", ".join(may_write) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in left_out],
-            "  allowed commands (for design sessions only, which run outside the sandbox and may run these plus"
-            " their own git add, commit and merge; workers run any command in theirs):"
-            + ("" if ln.get("allow") else " none"),
-            *["    " + r + (" (ignored: hansa handles git)" if is_git_rule(r) else "")
-              for r in ln.get("allow", [])],
+            "  allowed commands (given to the lane's workers, verifiers and design sessions; workers run any command"
+            " in their sandbox and need no Bash rule, design sessions run outside it and may run these plus their"
+            " own git add, commit and merge):" + ("" if ln.get("allow") else " none"),
+            *["    " + (r if isinstance(r, str) else json.dumps(r))
+              + (f" (ignored: it {refused_rule(r)})" if refused_rule(r) else "") for r in ln.get("allow", [])],
+            *(["    runs leave the ignored ones out; the coordinator removes them with: "
+               + allow_fix(name, ln.get("allow", []))] if any(map(refused_rule, ln.get("allow", []))) else []),
             *release.lane_lines(desk, name, ln),
             *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"
               for f, what in (("commit_message", "message of the commit of a task's work, and of the merge of the base"
@@ -1318,7 +1368,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
-    kept, left = kept_from_workers(s, desk.root)
+    kept, left, stops = no_read_parts(s, desk.root)
     mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
            if sys.platform == "darwin" else "")
     built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
@@ -1334,7 +1384,8 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
             "    folders and files the principal keeps from workers (set on the web page, Settings; you cannot set"
             " it: hansa ask; Read is denied there to you, workers, verifiers and design sessions as well; no"
             " lane's repository or write list may be one, inside one or above one): " + (", ".join(kept) or "none"),
-            *(f"      not applied: {x.removeprefix('workers cannot be kept from reading ')}" for x in left)]
+            *(f"      not applied, and no run starts: {x.removeprefix(DENY_AT)}" for x in stops),
+            *(f"      not applied: {x.removeprefix(DENY_AT)}" for x in left)]
 
 
 def read_lines(desk: Desk, s: dict) -> list:
@@ -1367,6 +1418,10 @@ def try_text(lane: str, t: dict) -> str:
         out.append(f"{step.replace('_', ' ')}: {x['command']}\n  {how}" + (f" in {x['seconds']}s" if x["seconds"] is not None else "")
                    + (", last lines:" if x["tail"] else ", no output"))
         out += [f"    {plain(line, None)}" for line in x["tail"]]
+        out += [f"  {h}" for h in x.get("hints", [])]
+    if t.get("log"):
+        out.append(f"each step's whole output, keys removed: {t['log']} (hansa lane try {lane}"
+                   f"{' --merge-check' if t.get('merge') else ''} --log)")
     if t.get("clean"):
         out.append("the worktree is back clean at the base's tip, as the lane's next task expects it")
     return "\n".join(out)

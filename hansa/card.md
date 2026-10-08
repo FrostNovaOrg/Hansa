@@ -60,6 +60,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
 | `hansa release --stop ID ["<reason>"]` | call release ID off: one not started yet is closed as stopped; a running one's command gets TERM, then KILL 30 s later, and is recorded as stopped (the server may be left half-switched) |
 | `hansa release L [TARGET] ["<note>"]` | ask for a release of lane L's base branch as it is now, by one of its release targets (TARGET is needed when the lane has more than one): hansa runs that target's command after the principal's yes on the page (see Releasing). `hansa release` alone lists the open and recent releases |
+| `hansa release yes\|no ID CODE [reason]` | pass on the principal's answer to release ID, said in the conversation with the one-time code of their alert (see Releasing); never guess a code |
 | `hansa retry <id> "<what to change>" [--fresh \| --update]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. `--file PATH` reads a long note from a file (`-`: standard input). Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below) |
 | `hansa verify <id> ["what to look at"] [--lane L] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged. It runs on the task's own lane unless `--lane L` puts it on another lane on the same repository |
@@ -75,7 +76,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane set L identity "Name <email>"` | the author and committer of every commit hansa makes for the lane: a task's commit, its merge into the base (the merge check's too), the merge of the base into a task's branch, a design session's commits, the commit `hansa lane remove --keep` makes. A name and an email in angle brackets, one line, no `<` or `>` inside either; also `hansa lane add --identity`, copied by `--like`. None: unset, and then hansa takes the repository's own `user.name` and `user.email` from its local config (`git config --local`), never the account's global one, and with neither writes `hansa <hansa@localhost>`. `hansa explain lane L` shows which is in use |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
-| `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
+| `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. `--at COMMIT`: only at that commit, refused with nothing run unless it is the base's tip; a try at another commit is waited for, never taken as the answer; exit 0 only when the try at COMMIT passed. `--log`: print each step's whole output of the last try (with `--merge-check`: of the last merge-check try), keys removed, kept in `lanes/L/` until the next one. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
@@ -105,7 +106,19 @@ look at). Keep one task to one goal, say what done looks like and what to report
 and size it so one worker can finish it in one go; split anything bigger. Ask
 only for what the goal needs: each extra demand (a close-up screenshot of every
 finding, say) costs turns. A worker needs no allowed commands: it may run any
-command inside its sandbox. What a check needs from outside it is a host on the
+command inside its sandbox. A lane's allowed commands still go to its workers
+and verifiers as to its design sessions, and that list is where a lane gives
+Claude Code's web tools, which reach the network from Claude Code's own process,
+outside the sandbox: `WebFetch(domain:HOST)` for each site (HOST a public
+site's name as the network list writes it, `*.` in front allowed and opening
+every name under it; a bare `WebFetch`, an IP address, `localhost`, a local or
+private name such as `.internal`, or a wildcard over a shared suffix such as
+`*.co.uk` is refused, as are names with no dot and names such as `nip.io` or
+`lvh.me` that come back as this machine; any listed name can still be pointed at
+any address, so list only sites you know; give each rule as its own value), and
+`WebSearch`, which sends search queries out of the machine. MCP tools are
+refused there. A change of `allow` is recorded: tell the principal what you
+changed and why. What a check needs from outside it is a host on the
 lane's network list or a folder on its write list (`hansa explain lane L` shows both).
 If a task has to look at web pages, add `--browser`: that task's worker, and no
 other, gets a browser with no saved logins. It reads page text directly; charts,
@@ -144,7 +157,8 @@ files, commits, the lane's check result, calls the worker had no permission for
 (with the reason Claude Code gave, when it is known), tokens. Such a call means the
 worker could not do something: git history is hansa's, and the desk's keys and
 state stay closed; decide whether the task should be rewritten. A lane's allowed
-commands do not change what a worker may do; they matter only to design sessions.
+commands add no command a worker could not run anyway; what they add for workers
+and verifiers is the web tools they list.
 A command the worker says was refused, or a network call that failed, is usually
 the sandbox doing its job: fix it in the task (ask for less, or leave the
 download to the setup) or in the lane, never by switching the sandbox off. A failed check shows its last
@@ -277,6 +291,12 @@ to a public repository, a deploy to production) waits for the principal:
   the source of `main:prod`; `HEAD:main` is allowed), but it does not look
   into a variable the command expands or a script it runs: send
   `$HANSA_RELEASE_COMMIT`.
+- A release that should go on only if a full build passes on another desk's
+  machine (whose sandbox allows what this one's refuses): a fixed target that
+  pushes `$HANSA_RELEASE_COMMIT` to the other desk's base branch and runs
+  `hansa lane try L --merge-check --at "$HANSA_RELEASE_COMMIT"` there, and the
+  public target `--after` it. `--at` answers for that commit only, so a try
+  asked again after the base moved never passes on an older commit's verdict.
 - When the base branch holds what should go out, ask: `hansa release L
   [TARGET] "<note>"` (TARGET is needed when the lane has more than one).
   hansa records the commit, the target and its command, your note, the
@@ -310,6 +330,18 @@ to a public repository, a deploy to production) waits for the principal:
   release the principal said yes to runs: a listed lane's waits until it is
   resumed. Tell the principal in the conversation that it waits. A new
   request for the same target replaces one still waiting.
+- The principal answers on the page, or in the conversation with the
+  one-time code their alert carries (6 characters; only when they have an
+  alert command: without one, the page alone answers, and `hansa status` and
+  `hansa explain` say which). When the principal gives you a code, pass it:
+  `hansa release yes ID CODE`, or `hansa release no ID CODE [reason]` to
+  refuse. The code is one word (dashes allowed, no spaces): a yes with a
+  word too many is refused, and nothing is counted. It answers that release only, once; a wrong one is refused and
+  counted, and after 3 the code is void and only the page answers. It lapses
+  when the release is answered, stopped or no longer what was asked, after
+  24 hours, or when a new alert for it brings a new one. Never guess a code,
+  and never ask the principal to send it anywhere else: it travels only in
+  their alert.
 - Only after the yes does `hansa serve` run the command: in the lane's
   repository at that commit, as the desk's account, outside the sandbox, with
   hansa's own environment (not the lane's env), the target's minutes (else the
@@ -457,8 +489,8 @@ here; work that needs code changed or a browser goes to a worker.
   one simple command at a time, never by telling git to trust them. In
   `manual` mode a command other than `hansa` waits for the principal's approval.
 - Also yours, with `hansa lane` and `hansa concurrency`: the lanes themselves
-  (which lanes there are, each one's provider order, allowed commands (for
-  design sessions only), environment, check, the command that starts the app for design sessions
+  (which lanes there are, each one's provider order, allowed commands (given
+  to its workers, verifiers and design sessions), environment, check, the command that starts the app for design sessions
   (preview), the one that installs dependencies before each task (setup), the
   one that sends its base branch out (release), and its limits of turns and
   minutes) and how many tasks run at once. hansa checks
@@ -507,6 +539,15 @@ here; work that needs code changed or a browser goes to a worker.
 - A Java or Maven lane: hansa sets Maven's proxy and Java's temporary folder in the sandbox by
   itself; what the project and the lane need (Mockito as a Java agent, a Maven repository of the
   lane's own, the network list) is in hansa's README, "Java and Maven in a lane". Gradle is not covered yet.
+  Every JVM there prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr first (`java -version`, `java
+  -XshowSettings`; `javac -version` and `mvn -v` with `2>&1`): a script reading the version looks for
+  the line holding `version "`, not the first line. A script that sets `MAVEN_ARGS` itself drops
+  Maven's proxy (Maven then gets `407 Proxy Authentication Required`): `MAVEN_ARGS=(-B ${MAVEN_ARGS:-})`.
+- On macOS `mktemp -d`, `mktemp -t PREFIX` and a bare `mktemp` ignore TMPDIR and fail in a lane
+  (`mkdtemp failed on /var/folders/...: Operation not permitted`): use `mktemp -d
+  "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p "$TMPDIR"`. hansa adds a line saying so, and one for
+  Maven's 407 (`407` and `proxy authentication` on a line with Maven's own words), to a failed check, merge
+  check or try step whose output shows it.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or
@@ -603,7 +644,12 @@ here; work that needs code changed or a browser goes to a worker.
   `Caskroom` (where its program links lead), `~/.config`, `~/.local`,
   `~/.cache` (and `~/Library` on macOS) or the temporary folder; a file or folder
   inside one may be listed, one formula's folder in `Cellar` too; nor `/dev` or
-  anything in it, such as `/dev/null`); which lanes' releases go
+  anything in it, such as `/dev/null`). A saved entry that cannot be applied
+  (one of `()[]{}*?\` in a name or where its link leads, say) stops every run,
+  yours too, until the principal changes it on the page (`hansa status` says
+  `STOPPED:`); one that has come to close a lane's repository, a worktree or a
+  folder on the `PATH` is left out of runs instead, and that folder is open to
+  them: settle it with the principal); which lanes' releases go
   out without the principal's yes, and the words no release may send out.
   Ask with `hansa ask`; do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.

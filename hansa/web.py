@@ -16,7 +16,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import alert, cost, release, views
-from .desk import Desk, deny_split, public_settings, read_json, read_split
+from .desk import Desk, deny_split, lane_warnings, public_settings, read_json, read_split
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
@@ -80,7 +80,8 @@ def _save_settings(desk: Desk, body: dict) -> dict:
             brief = desk.lanes_dir / name / "brief.md"
             brief.parent.mkdir(parents=True, exist_ok=True)
             brief.touch(exist_ok=True)
-    return {"ok": not problems, "problems": problems}
+    warnings = [] if problems else lane_warnings(new)  # the coordinator's to fix: the page saved all the same
+    return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {})}
 
 
 def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):

@@ -33,13 +33,39 @@ its own port (`hansa serve --port 8766`), and that desk's `hansa web` finds it
 (tunnel that port instead); `hansa status` and `hansa explain` say the address and
 port the page is served on, and whether `hansa serve` serves it now. A repository
 for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one
-without, in one line. On the page: add providers (a Claude Code login, or any
+without, in one line. They also refuse a desk or repository whose path holds a
+`)` followed later by a space or a comma (`Work (2024) x/desk`): Claude Code
+would split the rules hansa writes for it, and a rule meant to close a folder
+would leave it open. No run starts while such a rule would come out. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
 `hansa concurrency`. A worker runs any command inside its sandbox, writing
-only its worktree, its own temporary folder and the lane's write list; a
-lane's allowed commands matter only to design sessions.
+only its worktree, its own temporary folder and the lane's write list. A
+lane's allowed commands go to its workers, verifiers and design sessions alike:
+workers need no command rule, design sessions do. The list is also where a lane
+gives Claude Code's web tools, which reach the network from Claude Code's own
+process, outside the sandbox's network list: `WebFetch` only site by site, as
+`WebFetch(domain:docs.python.org)` or `WebFetch(domain:*.python.org)` (a bare
+`WebFetch`, or one for every site, is refused), and `WebSearch`, which sends
+search queries out of the machine. `WebFetch` takes public site names only: an
+IP address in any form, `localhost` and the names meant for local or private
+networks (`.local`, `.internal`, `.lan`, `.home.arpa`, `.test` and the like)
+are refused, and so is a wildcard over a suffix others share (`*.co.uk`,
+`*.github.io`), as a wildcard opens every name under it. So are names with no
+dot (`metadata`, which a resolver may complete) and the well-known names that
+come back as an address written in them or as this machine (`nip.io`,
+`sslip.io`, `lvh.me`, `localtest.me` and the like, with every name under them).
+Any listed name can still be pointed at any address, this machine included:
+list only sites you know; the principal sees every change. Each rule is one
+value, checked as Claude Code splits the list (on commas and spaces outside
+parentheses, where every `)` closes them): one it would split into several,
+such as `Bash(x),WebFetch` or `Bash(a(b),WebFetch,c)`, is refused.
+MCP tools are refused on the list (a task gets a browser with
+`hansa add --browser`). A change of the list is recorded, and
+`hansa explain lane L` shows the web tools and their sites beside the network
+list. A rule saved before it was refused is left out of runs; the page warns of
+it, names the coordinator's command that removes it, and saves the rest.
 
 hansa tells the coordinator's session when a task ends or you answer a request,
 through the session's inbox (`hansa notify` shows which sessions it posts to).
@@ -151,7 +177,7 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   alert command (below). The page also shows what goes on, and asks the
   principal about each release (below).
 - The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
-  provider order, allowed commands (for design sessions), network and write lists, environment,
+  provider order, allowed commands (for workers, verifiers and design sessions), network and write lists, environment,
   check, preview and setup commands, limits, and the merge check's own command and limit,
   `merge_check` and `merge_timeout_min`, for a heavier command run only before a merge: unset, the
   merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`:
@@ -242,7 +268,18 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   macOS), the temporary folder, the desk's worktrees folder or a lane's
   worktree, or a folder above any of them, and `/dev` or anything in it; a
   file or folder inside one of the others, such as one file in `~/.config` or
-  one formula's folder in `Cellar`, may be listed), no network but the
+  one formula's folder in `Cellar`, may be listed. A name with one of
+  `()[]{}*?\`, in the entry or where its link leads, cannot be written as a
+  rule and is refused too. A list saved before, or a link changed since, that
+  holds such an entry, or any other the page would refuse now, stops every
+  run: hansa starts no worker, verifier, design session or coordinator, fails
+  each task it would have started with the entry and the reason, and says it in
+  `hansa status` and at the top of the page, until the principal changes the
+  entry on the page (Settings). Only an entry that has come to close a lane's
+  repository, a worktree or a folder on the `PATH` is left out of runs
+  instead, as a contradiction the coordinator and the principal settle; while
+  it lasts, `hansa status` and the page say each time which entry it is and that
+  the folder is open to that lane's runs and every other), no network but the
   lane's network list (`hansa lane set L network ...`), and no git command that
   changes history. They do not commit: hansa commits each task's changes on its
   own branch, and merges only what the coordinator merges. The lane's setup,
@@ -554,7 +591,26 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   entries back in as they are now, or unticking and ticking it again, then
   Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
   target taken out and set again with the same command and `--after` keeps its
-  tick. hansa serve runs the
+  tick. The principal answers in one of two ways: on the page, or by saying
+  in the conversation the one-time code that comes with the alert for that
+  release (6 characters, no look-alikes), which the coordinator passes on
+  with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only
+  in the principal's alert: hansa keeps only a keyed hash of it (the key is in
+  the desk's `secrets/`, which no agent may read), keeps none of what the
+  alert command prints for such an alert (only how it ended), runs the command
+  in a temporary folder of its own under the desk's `secrets/alert-runs`
+  (closed to every agent, removed when it ends), and never writes
+  the code in events, the release's
+  record, `hansa status`, `hansa release` or the page, which says only whether
+  a code went out and when. It answers that release only, once, and is
+  recorded as the principal's answer given through the coordinator (channel
+  `code`); three wrong codes void it, and it lapses when the release is
+  answered, stopped or no longer what was asked, after 24 hours, or when a new
+  alert for the release brings a new one. With no alert command there is no
+  code: the page alone answers. Your alert command must not keep the alert's
+  text anywhere the coordinator can read it (a file, a log, a chat history):
+  the code in it approves a release. No lane may be named `yes` or `no`, as
+  those words begin the answer. hansa serve runs the
   command only then, and only while the base branch and the command are still
   what the principal saw (else the request is void and the coordinator asks
   again): in the lane's repository at that commit, as the desk's account,
@@ -619,7 +675,9 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), and when
   its own rounds have stopped for 15 minutes; not for ordinary task events,
   which go to the coordinator. It runs as the desk's account, outside the
-  sandbox, in the desk's folder, with hansa's own environment (not a lane's),
+  sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
+  coordinator, workers, verifiers and design sessions; removed when the command ends, and what a stopped or killed
+  `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
   the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
   `release_stopped`, `ask`, `server_stuck`, `test`; comma-separated when several go out together)
   and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
@@ -630,7 +688,8 @@ the top of the worktree (the first 3, and how many more), in at most 14 lines.
   run when the hour frees a run, with a line saying how many were held back
   (the page's test button is not held). A run that fails or times out is recorded
   (event `alert_failed`) and `hansa status` shows the last failure with its exit
-  code and last lines; there is no retry: the next alert tries again. The page
+  code and last lines (none for an alert that held a release's one-time code:
+  then only how it ended is kept); there is no retry: the next alert tries again. The page
   has a button that sends a test alert; no coordinator command sends one.
   `hansa explain` says whether a command is set and what it is.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
@@ -659,6 +718,34 @@ inside the sandbox, after the lane's env is set:
 What was already in `MAVEN_ARGS` and `JAVA_TOOL_OPTIONS` (the sandbox's, or the
 lane's env) is kept. The prelude prints nothing, never the proxy's password, and
 skips what it cannot do instead of failing the run.
+
+**What this changes for a build script.**
+- Every JVM that finds `JAVA_TOOL_OPTIONS` set prints `Picked up
+  JAVA_TOOL_OPTIONS: ...` on stderr before anything else. `java -version` and
+  `java -XshowSettings` print on stderr, so their output starts with that line;
+  `javac -version` and `mvn -v` print on stdout, so theirs starts with it only
+  when stderr is read with it (`2>&1`). A script that reads the version from
+  the first line (`java -version 2>&1 | sed -n '1s/.*version "\([0-9]*\).*/\1/p'`)
+  reads nothing and fails as if java were missing: look for the line holding
+  `version "` instead (`sed -n '/version "/{s/.*version "\([0-9]*\).*/\1/p;q;}'`).
+- A build script that sets `MAVEN_ARGS` itself drops the `-gs <file>` hansa put
+  there, and Maven then gets `407 Proxy Authentication Required` for anything
+  its local repository lacks (on a machine whose local repository holds
+  everything, nothing shows). In bash, `MAVEN_ARGS=(-B)` makes it an array,
+  which is not exported, and `mvn "${MAVEN_ARGS[@]}"` passes only `-B`. Keep
+  hansa's: `MAVEN_ARGS=(-B ${MAVEN_ARGS:-})`. A failed step whose output holds
+  Maven's 407 (a line with `407` and `proxy authentication` along with Maven's
+  own words, such as `Could not transfer artifact`) gets a line saying so.
+- On macOS, `mktemp -d`, `mktemp -t PREFIX` and a bare `mktemp` ignore `TMPDIR`:
+  they write to the account's own temporary folder under `/var/folders`, which
+  a lane may not write (other programs of the account, `hansa serve` among
+  them, keep files there), and fail with `mktemp: mkdtemp failed on
+  /var/folders/...: Operation not permitted`. Give mktemp a template in
+  `TMPDIR`: `mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p
+  "$TMPDIR"`. Linux's mktemp reads `TMPDIR`. A failed step whose output holds
+  that refusal (`Operation not permitted`, on macOS or under `/var/folders`)
+  gets a line saying so; Linux's mktemp refused gets a plainer one, that its
+  folder is outside what the lane may write. This holds for any lane, not only Java's.
 
 **What a project should do.** Mockito's inline mock maker attaches itself to the
 running JVM, and cannot in the sandbox: the JVM's attach files and socket live in

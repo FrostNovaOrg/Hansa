@@ -41,8 +41,22 @@ import unicodedata
 from pathlib import Path
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+ANSWER_WORDS = ("yes", "no")  # hansa release yes|no ID CODE is an answer, so no lane takes these names
+
+
+def answer_name(name) -> bool:
+    return isinstance(name, str) and name.strip().lower() in ANSWER_WORDS
+
+
+def answer_names(old: dict, new: dict) -> list:
+    """A lane newly named yes or no (any case): refused; one a desk had before is left for the principal to remove."""
+    had = old.get("lanes") if isinstance(old.get("lanes"), dict) else {}
+    lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
+    return [f"lane {n}: yes and no (in any case) are not lane names, as hansa release yes|no ID CODE answers a "
+            "release" for n in lanes if answer_name(n) and n not in had]
+
+
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # either case: npm_config_cache and http_proxy are ordinary names
-RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\(.+\))?$")
 # A host a lane's workers may reach during a task: registry.npmjs.org, *.pypi.org, localhost:3000
 LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
@@ -204,9 +218,9 @@ CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_
              "COURSIER_CACHE")
 XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
-# Bash commands a lane's design sessions may run without asking, for every lane: none. A lane's
-# allowed commands matter only to its design sessions, which run outside the sandbox: workers run
-# any command inside their sandbox and need none. A lane lists only its own, such as its tests.
+# Rules every lane's workers, verifiers and design sessions are given without asking: none. A lane's allowed
+# commands go to all three; workers run any command inside their sandbox and need no Bash rule, so a lane lists
+# what its design sessions run (its tests, say) and the web tools its runs may use (refused_rule).
 DEFAULT_ALLOW: list = []
 
 
@@ -292,9 +306,10 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def validate(s: dict, root=None) -> list:
+def validate(s: dict, root=None, page: bool = False) -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
-    which no lane's write list may reach into."""
+    which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
+    rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings)."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
@@ -392,11 +407,10 @@ def validate(s: dict, root=None) -> list:
         else:
             p += [f"{at}: unknown provider {x}" for x in order if x not in provs]
         allow = ln.get("allow", [])
-        if not isinstance(allow, list) or not all(isinstance(r, str) and RULE.match(r) for r in allow):
+        if not isinstance(allow, list):
             p.append(f"{at}: allow must be a list of rules such as Bash(pnpm test:*)")
-        elif any(is_git_rule(r) for r in allow):
-            p.append(f"{at}: git is handled by hansa (workers can already look at status, diffs and history, "
-                     "and hansa commits for them); remove the rules that run git")
+        elif not page:  # one saved before it was refused is left out of runs; the page shows it as a warning
+            p += allow_problems(name, ln)
         hosts = ln.get("network", [])
         if not isinstance(hosts, list) or len(hosts) > MAX_HOSTS or not all(is_host(h) for h in hosts):
             p.append(f"{at}: network must be a list of up to {MAX_HOSTS} host names such as registry.npmjs.org, "
@@ -1622,15 +1636,25 @@ BREW_FOLDERS = tuple(f"{top}/{d}" for top in ("/opt/homebrew", "/usr/local", "/h
 HOME_TOOL_FOLDERS = (".config", ".local", ".cache")
 
 
-@_one_look
 def deny_split(paths, root=None, lanes=None) -> tuple:
+    """deny_parts without telling apart the entries that stop runs: (those kept, a line for each of the others)."""
+    return deny_parts(paths, root, lanes)[:2]
+
+
+@_one_look
+def deny_parts(paths, root=None, lanes=None) -> tuple:
     """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
-    wrong with the others, one line each). None may close what a worker needs in order to run: the home folder
-    or a folder above it, the desk or above it, a lane's repository or above it, a folder on the PATH or above
-    it. Each is compared as the disk sees it (_above). One that does not exist yet is accepted, and so is one
-    whose links cannot be followed (unresolved_why): it is denied as given, in every form hansa can work out."""
+    wrong with the others, one line each, the lines of those among them that stop every run). None may close
+    what a worker needs in order to run: the home folder or a folder above it, the desk or above it, a lane's
+    repository or above it, a folder on the PATH or above it. Each is compared as the disk sees it (_above).
+    One that does not exist yet is accepted, and so is one whose links cannot be followed (unresolved_why): it
+    is denied as given, in every form hansa can work out. Left out of a run, rather than stopping it, is only an
+    entry that would close a lane's repository, a worktree or a folder on the PATH, and nothing else: a
+    contradiction the coordinator and the principal settle (a lane may be added, a worktree made, the PATH differ
+    from where the page was saved). Any other that does not hold now (a pattern character in a name or where a
+    link leads, say) was closed by the principal and cannot be applied: no run starts until it is changed."""
     if not isinstance(paths, list) or len(paths) > MAX_DENY:
-        return [], [DENY_LIST_WHY]
+        return [], [DENY_LIST_WHY], [DENY_LIST_WHY]
     home = account_home()
     fenced = [("/", _above, "it is the whole machine"),
               (home, _above, f"it is {home}, the home folder of the user hansa runs as, or a folder above it")]
@@ -1638,9 +1662,11 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         fenced.append((DATA, _above, f"it is {DATA}, the volume macOS keeps everything on, or a folder above it"))
     if root:
         fenced.append((str(root), _above, f"it is {root}, the desk, or a folder above it"))
+    settled = set()  # the reasons for which an entry is left out of runs rather than stopping them
     for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
             fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
+            settled.add(fenced[-1][2])
     # said along with any other reason, as which folders are on the PATH differs from machine to machine
     path_fenced = [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers "
                                 "could not run their tools")
@@ -1664,15 +1690,18 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         own |= set(wts.iterdir()) if wts.is_dir() else set()
         fenced += [(str(d), _above, f"it is {d}, the desk's worktrees folder or a lane's worktree in it, or a folder "
                                     "above it: workers work there") for d in [wts, *sorted(own)]]
-    good, p, seen = [], [], set()
+        settled |= {f[2] for f in fenced[-1 - len(own):]}
+    good, p, stops, seen = [], [], [], set()
     for x in paths:
         if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
             p.append(f"{DENY_AT}{x if isinstance(x, str) and not _has_control(x) else json.dumps(x)}: it must be a "
                      "full path starting with /, such as /Users/me/.config/myproject/keys, with no line break or "
                      "other control character")
+            stops.append(p[-1])
             continue
         if _has_format(x):
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
+            stops.append(p[-1])
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
         hits = [(f, why) for f, hit, why in fenced if hit(x, f)]
@@ -1684,20 +1713,251 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
         on_path = "" if said else next((why for _, why in paths_in), "")
         said = said or next(iter(hits), None)
         why = "; and ".join(w for w in (said[1] if said else "", on_path) if w)
-        if not why and _breaks(x):
-            why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
+        breaks = _breaks(x)  # said first: it is what keeps the entry from being written, whatever else it would close
+        if breaks:
+            why = "; and ".join(w for w in (f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a "
+                                            "pattern", why) if w)
         if why:
             p.append(f"{DENY_AT}{x}: {why}")
+            if breaks or any(w not in settled for _, w in hits):
+                stops.append(p[-1])
         elif _seen(x) not in seen:  # one path once, however it is spelled
             seen.add(_seen(x))
             good.append(stored(x))
-    return good, p
+    return good, p, stops
 
 
 def kept_from_workers(s: dict, root=None) -> tuple:
     """deny_split for a desk's settings: (what the principal keeps workers from reading, a line for each entry
     of the list that is not applied)."""
     return deny_split(s.get("workers_may_not_read", []), root, s.get("lanes"))
+
+
+def no_read_parts(s: dict, root=None) -> tuple:
+    """deny_parts for a desk's settings: (what the principal keeps workers from reading, a line for each entry
+    left out of runs, a line for each entry that stops them)."""
+    good, said, stops = deny_parts(s.get("workers_may_not_read", []), root, s.get("lanes"))
+    return good, [x + LEFT_OUT_NOTE for x in said if x not in stops], stops
+
+
+LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to the runs of that lane and every other (workers, "
+                 "verifiers, setups, checks, design sessions, the coordinator) until the principal and the coordinator "
+                 "settle it")
+
+
+NO_READ_STOP = ("hansa starts no worker, verifier, design session or coordinator while an entry of what workers may "
+                "not read cannot be applied, as that folder would be open to them: {lines}. The principal changes "
+                "or removes it on the web page, Settings")
+
+
+def no_read_stop(s: dict, root=None) -> str:
+    """'' when every entry of what workers may not read can be applied or is only left out (no_read_parts);
+    otherwise what to say when hansa refuses to start a run, naming each entry and why."""
+    return stop_text(no_read_parts(s, root)[2])
+
+
+def stop_text(stops: list) -> str:
+    """What hansa says when it refuses to start a run for these entries of what workers may not read."""
+    return NO_READ_STOP.format(lines="; ".join(x.removeprefix(DENY_AT) for x in stops)) if stops else ""
+# Claude Code's own tools that reach the network from its own process, outside the sandbox's network list:
+# WebFetch only as WebFetch(domain:HOST), WebSearch as it is. The MCP tools reach servers that run outside the
+# sandbox too, and no rule holds them to listed sites: no lane lists them (hansa gives a task its browser itself).
+MCP_TOOLS = ("ListMcpResourcesTool", "ReadMcpResourceTool")
+WEB_FETCH_HOW = ("list each site as WebFetch(domain:HOST), with HOST a public site's name as the network list writes "
+                 "it, such as WebFetch(domain:docs.python.org) or WebFetch(domain:*.python.org)")
+# Names meant for this machine or a local or private network: WebFetch, outside the sandbox, would reach them
+LOCAL_SUFFIXES = ("localhost", "local", "internal", "lan", "home.arpa", "arpa", "test", "invalid", "example",
+                  "localdomain")
+# Well-known names that come back as an address written in them (127.0.0.1.nip.io) or as this machine (lvh.me),
+# with every name under them
+LOOPBACK_NAMES = ("nip.io", "sslip.io", "xip.io", "traefik.me", "localtest.me", "lvh.me", "vcap.me", "lacolhost.com")
+# Common suffixes under which every name belongs to someone else: a wildcard over one opens all of them
+SHARED_SUFFIXES = frozenset((
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au", "co.jp", "ne.jp", "or.jp",
+    "com.cn", "net.cn", "org.cn", "com.hk", "com.tw", "com.sg", "co.kr", "co.nz", "co.in", "co.za", "com.br",
+    "com.mx", "com.ar", "com.tr", "co.il", "co.id", "com.my", "com.ph", "com.vn", "com.ru",
+    "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app", "netlify.app", "herokuapp.com",
+    "appspot.com", "web.app", "firebaseapp.com", "blogspot.com", "cloudfront.net", "amazonaws.com",
+    "azurewebsites.net", "ngrok.io", "ngrok-free.app", "onrender.com", "fly.dev", "glitch.me", "repl.co",
+    "s3.amazonaws.com", "r2.dev", "surge.sh", "readthedocs.io"))
+
+
+def split_rules(text: str) -> list:
+    """The rules Claude Code reads out of one value of --allowedTools or --disallowedTools, split as it splits
+    them: on commas and spaces outside parentheses, where being inside is an on/off flag that every ( turns on and
+    every ) turns off, not a depth. So Bash(echo $(true) WebFetch ok) reaches it as Bash(echo $(true), WebFetch
+    and ok); Bash(echo $(date):*) and Read(//x/Application Support/**) as themselves."""
+    out, cur, inside = [], "", False
+    for c in text:
+        if c in "()":
+            inside, cur = c == "(", cur + c
+        elif c in ", " and inside:
+            cur += c
+        elif c == ",":
+            out, cur = out + [cur.strip()] if cur.strip() else out, ""
+        elif c == " ":
+            if cur.strip():
+                out, cur = out + [cur.strip()], ""
+        elif cur or c.strip():
+            cur += c
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def one_rule(rule) -> bool:
+    """Whether a rule reaches Claude Code as itself and nothing else (split_rules): a tool name, then at most one
+    parenthesised part that closes at the rule's last character, and no control characters."""
+    if not isinstance(rule, str) or _has_control(rule):
+        return False
+    m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", rule)
+    rest = rule[m.end():] if m else None
+    if rest is None or rest and (len(rest) < 3 or rest[0] != "(" or rest[-1] != ")"):
+        return False
+    return split_rules(rule) == [rule]
+
+
+def path_rule_problem(path) -> str:
+    """Why a folder cannot be closed or opened to Claude Code's tools by a rule hansa writes for it
+    (Read(//PATH/**), Read(//PATH)): the rule would reach Claude Code as several (split_rules), and a deny rule
+    split so leaves the folder open; '' for a path that makes one rule. Such a path must move: hansa never drops
+    the rule and runs on."""
+    p = str(path)
+    if all(one_rule(f"Read(//{p.lstrip('/')}{end})") for end in ("", "/**")):
+        return ""
+    return (f"the path {p} would make rules for Claude Code's tools (such as Read(//{p.lstrip('/')}/**)) that it "
+            f"reads as more than one, as after a ')' it splits them on commas and spaces, so a rule closing that "
+            f"folder would not close it: move it to a path with no ')' followed later by a space or a comma")
+
+
+def rules_problem(rules) -> str:
+    """Why hansa may not start Claude Code with these rules: one would reach it as several (one_rule), named with
+    the path it was made for (path_rule_problem); '' when each reaches it as itself."""
+    for r in rules:
+        if one_rule(r):
+            continue
+        m = re.match(r"^[A-Za-z_]+\(//(.*?)(/\*\*)?\)$", r) if isinstance(r, str) else None
+        if m and path_rule_problem("/" + m.group(1)):
+            return path_rule_problem("/" + m.group(1))
+        return f"the rule {r} would reach Claude Code as more than one rule, as it splits them on commas and spaces"
+    return ""
+
+
+def argv_rules_problem(argv) -> str:
+    """rules_problem for the rules of a Claude Code command line: the values after --allowedTools and
+    --disallowedTools, up to the next option."""
+    rules, on = [], False
+    for x in argv:
+        if x in ("--allowedTools", "--disallowedTools"):
+            on = True
+        elif x.startswith("--"):
+            on = False
+        elif on:
+            rules.append(x)
+    return rules_problem(rules)
+
+
+ONE_RULE_WHY = ("would reach Claude Code as more than one rule, as it splits the list on commas and spaces outside "
+                "parentheses, and every ')' closes them: give each rule as its own value, a tool name with at most "
+                "one (...) part that closes at the end, with no ')' before a later space or comma")
+
+
+def web_host_problem(host: str) -> str:
+    """Why WebFetch may not be held to host, as it is not one public site's name: an address, this machine, a
+    local or private network, or a wildcard over a suffix others share; '' for one it may."""
+    name = host.lower()
+    wild = name.startswith("*.")
+    bare = name[2:] if wild else name
+    last = bare.rstrip(".").rsplit(".", 1)[-1]
+    if ("[" in name or ":" in name and re.fullmatch(r"[0-9a-f:.*]+", name)
+            or re.fullmatch(r"0x[0-9a-f]*|[0-9]+", last.split(":")[0])):  # as a URL reads an IP address
+        return ("is an address, not a site's name: WebFetch runs in Claude Code's own process, outside the sandbox, "
+                "where an address can reach this machine or a private network; " + WEB_FETCH_HOW)
+    if not is_host(host) or name.endswith(".") or ":" in name:
+        return "is not a site's name alone; " + WEB_FETCH_HOW + " (no port)"
+    local = next((x for x in LOCAL_SUFFIXES if bare == x or bare.endswith("." + x)), "")
+    if local == "localhost":
+        return ("names this machine, which WebFetch would reach from Claude Code's own process, outside the "
+                "sandbox; " + WEB_FETCH_HOW)
+    if local:
+        return (f"is a name under .{local}, meant for a local or private network, which WebFetch would reach from "
+                f"Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
+    back = next((x for x in LOOPBACK_NAMES if bare == x or bare.endswith("." + x)), "")
+    if back:
+        return (f"is a name under {back}, which comes back as the address written in it or as this machine, which "
+                f"WebFetch would reach from Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
+    if not wild and "." not in bare:
+        return ("is a name with no dot, which a resolver may complete to one on a local or private network, which "
+                "WebFetch would reach from Claude Code's own process, outside the sandbox; " + WEB_FETCH_HOW)
+    if wild and ("." not in bare or bare in SHARED_SUFFIXES):
+        return (f"is a wildcard over the shared suffix .{bare}: every name under it belongs to someone else; "
+                + WEB_FETCH_HOW)
+    return ""
+
+
+def web_rule_problem(rule: str) -> str:
+    """Why an allowed-command rule cannot be on a lane's list, as it reaches the network outside the sandbox
+    without being held to listed public sites; '' for one that may."""
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$", rule.strip())
+    tool, arg = (m.group(1), m.group(2)) if m else ("", None)
+    if tool == "WebFetch":
+        host = arg[len("domain:"):] if arg and arg.startswith("domain:") else None
+        if host is None or not host.strip("*.") or host in ("*", "*.*"):
+            return ("lets a worker fetch any site from Claude Code's own process, outside the sandbox's network "
+                    "list; " + WEB_FETCH_HOW)
+        return web_host_problem(host)
+    if tool.startswith("mcp__") or tool in MCP_TOOLS:
+        return ("reaches an MCP server, which runs outside the sandbox and is not held to listed sites; a task that "
+                "needs a browser gets one with hansa add --browser")
+    return ""
+
+
+GIT_RULE_WHY = ("runs git, and git is handled by hansa (workers can already look at status, diffs and history, and "
+                "hansa commits for them)")
+
+
+def refused_rule(rule) -> str:
+    """Why a rule cannot be on a lane's allowed commands: it is not one rule (one_rule), runs git, or reaches the
+    network unheld (web_rule_problem); '' for one that may. Runs leave out one saved before it was refused."""
+    if not isinstance(rule, str) or not one_rule(rule):
+        return ONE_RULE_WHY
+    return GIT_RULE_WHY if is_git_rule(rule) else web_rule_problem(rule)
+
+
+def allow_fix(name: str, allow: list) -> str:
+    """The coordinator's command that leaves a lane's allowed commands without the rules refused_rule refuses."""
+    rest = [r for r in dict.fromkeys(r for r in allow if isinstance(r, str)) if not refused_rule(r)]
+    return f"hansa lane set {name} allow " + (" ".join(shlex.quote(r) for r in rest) or "none")
+
+
+def allow_problems(name: str, ln: dict) -> list:
+    """The refused rules a lane's allowed commands hold (refused_rule), as one line naming each and the coordinator's
+    command that removes them; [] for none. On the page it is a warning: only the coordinator changes lanes."""
+    allow = ln.get("allow", []) if isinstance(ln, dict) else []
+    if not isinstance(allow, list):
+        return []
+    bad = [(r, refused_rule(r)) for r in allow if refused_rule(r)]
+    if not bad:
+        return []
+    fix = allow_fix(name, allow)
+    return [f"lane {name}: " + "; ".join(f"allow {r if isinstance(r, str) else json.dumps(r)} {why}" for r, why in bad)
+            + f"; runs leave {'it' if len(bad) == 1 else 'them'} out, and the coordinator removes "
+            f"{'it' if len(bad) == 1 else 'them'} with: {fix}"]
+
+
+def lane_warnings(s: dict) -> list:
+    """What the page shows of the lanes' refused rules (allow_problems): it saves the rest all the same."""
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
+    return [x for name, ln in lanes.items() for x in allow_problems(name, ln)]
+
+
+def web_sites(allow: list) -> tuple:
+    """What a lane's allowed commands give of Claude Code's web tools: (the sites WebFetch reaches, whether
+    WebSearch is given). Rules refused_rule refuses give nothing."""
+    sites = [r[len("WebFetch(domain:"):-1] for r in allow
+             if isinstance(r, str) and r.startswith("WebFetch(domain:") and not refused_rule(r)]
+    return sites, any(isinstance(r, str) and re.match(r"^WebSearch(\(.*\))?$", r) and not refused_rule(r)
+                      for r in allow)
 
 
 def is_git_rule(rule: str) -> bool:
@@ -1772,7 +2032,10 @@ class Desk:
                 new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes,
                                                                        old.get("releases_without_asking")),
                        "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
-            problems = validate(new, self.root) + self.keys_in_release(old, new) + self.keys_in_alert(old, new)
+            # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
+            page = by == "page" and new.get("lanes") == old.get("lanes")
+            problems = (validate(new, self.root, page=page) + self.keys_in_release(old, new)
+                        + self.keys_in_alert(old, new) + answer_names(old, new))
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -1852,10 +2115,12 @@ class Desk:
 
     def scrub(self, key: str, provider: str) -> None:
         """Take a newly saved key out of what hansa has already written down (text that was not a key
-        when it was written): the task folders and the requests. The event log only ever grows, so
-        it keeps it."""
+        when it was written): the task folders, the requests and the lanes' kept try output. The event
+        log only ever grows, so it keeps it."""
         tasks = self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []
-        for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED)]:
+        lanes = list(self.lanes_dir.iterdir()) if self.lanes_dir.is_dir() else []
+        for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED),
+                  *(d / name for d in lanes for name in ("try.log", "merge-check-try.log"))]:
             try:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
@@ -2090,7 +2355,7 @@ def public_settings(desk: Desk) -> dict:
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
     # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
-    kept, not_kept = kept_from_workers(s, desk.root)
+    kept, not_kept, stops = no_read_parts(s, desk.root)
     skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)[1]
     # saved entries of what workers may not read that no run applies now (a lane's repository under one, say)
     # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:
@@ -2099,5 +2364,6 @@ def public_settings(desk: Desk) -> dict:
     unmatched = [{"lane": listed_key(x)[0], "target": listed_key(x)[1], "why": why,
                   "why_zh": listed_mismatch(s, x, True)}
                  for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why]
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root), "rev": rev, "read_skipped": skipped,
-            "deny_skipped": not_kept, "release_unmatched": unmatched}
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
+            "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
+            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}

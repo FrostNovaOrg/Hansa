@@ -27,8 +27,8 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import (DENY_AT, HANSA_IDENTITY, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   is_git_rule, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+from .desk import (DENY_AT, HANSA_IDENTITY, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+                   one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
 
@@ -2298,8 +2298,12 @@ def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
 def no_read(desk: Desk) -> tuple:
     """What the principal keeps workers from reading (settings, workers_may_not_read), as a run may be given
     it: (the paths that pass the checks now, a line for each left out). The list is checked on saving, but a
-    lane's repository or a folder on the PATH may have come under one since."""
-    good, said = kept_from_workers(desk.settings(), desk.root)
+    lane's repository, a worktree or a folder on the PATH may have come under one since: that one is left out.
+    One that cannot be applied for any other reason (a pattern character in a name, or where a link now leads)
+    stops the run: RuntimeError, saying which entry and why (no_read_stop)."""
+    good, said, stops = no_read_parts(desk.settings(), desk.root)
+    if stops:
+        raise RuntimeError(stop_text(stops))
     return good, [f"left out of this run: {x.removeprefix(DENY_AT)} (the principal changes the list on the web "
                   "page, Settings)" for x in said]
 
@@ -2309,6 +2313,17 @@ def desk_private(desk: Desk) -> list:
     coordinator's notes (notes/) and card (CLAUDE.md), the project's and the principal's working knowledge,
     which a task does not need."""
     return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md"]
+
+
+def paths_problem(desk: Desk, wt) -> str:
+    """path_rule_problem for the folders hansa writes rules for when it starts a worker, verifier or design
+    session: the desk's private ones (desk_private), the worktree, what the principal keeps from workers; '' for
+    none. One that would split is never dropped: nothing starts until it moves."""
+    for x in full_paths([*desk_private(desk), wt, *no_read(desk)[0]]):
+        why = path_rule_problem(x)
+        if why:
+            return why
+    return ""
 
 
 def desk_read_rules(desk: Desk) -> list:
@@ -2453,10 +2468,12 @@ def commands_tmp(tmp: str) -> str:
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
-    """The worktree's files plus the lane's own commands. Git rules a lane still lists from before
-    are left out: hansa does the committing, and read-only git needs no rule."""
+    """The worktree's files plus the lane's own commands, for its workers, verifiers and design sessions alike.
+    Git rules a lane still lists from before are left out: hansa does the committing, and read-only git needs
+    no rule. So are the other rules saved before they were refused (refused_rule): a bare WebFetch, one that would
+    reach Claude Code as several."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
-    return files + ["TodoWrite"] + [r for r in lane.get("allow", []) if not is_git_rule(r)]
+    return files + ["TodoWrite"] + list(dict.fromkeys(r for r in lane.get("allow", []) if not refused_rule(r)))
 
 
 def command_rules(command: str) -> list:
@@ -2558,6 +2575,52 @@ def read_bounded(path: Path, head: int, tail: int) -> str:
     return (first.decode("utf-8", errors="surrogateescape")
             + f"\n[hansa: {size - len(first) - len(last)} bytes left out here{margin_said(a < 0 or b < 0)}]\n"
             + last.decode("utf-8", errors="surrogateescape"))
+
+
+# What a failed step's output says about the machine or the build script rather than the change: (the pattern,
+# the line hansa adds). Matched line by line, so the words must be on one line.
+# mktemp refused where it may not write: macOS's (mkdtemp failed on /var/folders/...) or Linux's (failed to create
+# ...), only for Operation not permitted, not for a full disk or other errors.
+MKTEMP_REFUSED = re.compile(r"(mkdtemp failed on|mktemp:).*Operation not permitted")
+# Maven's own words for a download that failed, on the line that says 407: Maven 3.9's Apache binary prints
+# "status code: 407, reason phrase: Proxy Authentication Required (407)", a distribution's "proxy authentication
+# failed for ..., status: 407 Proxy Authentication Required". A 407 or the words inside a path do not count.
+MAVEN_407 = re.compile(r"(?<![\w/.-])407(?![\w/.-])")
+PROXY_AUTH = re.compile(r"(?<![\w/.-])proxy\s+authentication(?![\w/-])", re.I)
+MAVEN_WORDS = re.compile(r"Could not transfer artifact|Could not resolve|Failed to read artifact descriptor"
+                         r"|Plugin \S+ .*could not be resolved")
+NOT_MAVEN = re.compile(r"npm ERR!|npm error|^\s*curl:|Received status code|Could not (GET|HEAD) '")  # npm, curl, Gradle
+MKTEMP_HINT = ("mktemp was refused: macOS's mktemp -d, mktemp -t PREFIX and a bare mktemp ignore TMPDIR and write "
+               "under /var/folders, which a lane may not write; give it a template in TMPDIR instead: "
+               "mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\"")
+MKTEMP_OUTSIDE_HINT = ("mktemp was refused: the folder it writes in is outside what the lane may write; give it a "
+                       "template in TMPDIR: mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\"")
+MAVEN_407_HINT = ("Maven got 407 Proxy Authentication Required: hansa gives Maven the sandbox's proxy through "
+                  "MAVEN_ARGS (-gs <file>), and a build script that sets MAVEN_ARGS itself drops it (in bash "
+                  "MAVEN_ARGS=(-B) makes an array, which is not exported); keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-})")
+
+
+def maven_407(line: str) -> bool:
+    """Whether the line is Maven saying a download got 407 from the proxy."""
+    return bool(MAVEN_407.search(line) and PROXY_AUTH.search(line) and MAVEN_WORDS.search(line)
+                and not NOT_MAVEN.search(line))
+
+
+def output_hints(text: str, platform: str = "") -> list:
+    """The lines hansa adds to a failed check's, merge check's or try step's report when its output shows a
+    known cause that is not the change itself: mktemp refused (macOS's, on macOS or under /var/folders), or Maven
+    without the sandbox's proxy. platform: sys.platform's word for the machine the step ran on."""
+    lines = text.splitlines()
+    mac = (platform or sys.platform) == "darwin"
+    out = []
+    refused = [x for x in lines if MKTEMP_REFUSED.search(x)]
+    if any(mac or "/var/folders/" in x for x in refused):
+        out.append(MKTEMP_HINT)
+    elif refused:
+        out.append(MKTEMP_OUTSIDE_HINT)
+    if any(maven_407(x) for x in lines):
+        out.append(MAVEN_407_HINT)
+    return out
 
 
 def cut_redacted(data: bytes, most: int) -> bytes:
@@ -3454,6 +3517,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                            cancel=False, held=None, sandbox_failed=None)
     if not meta:
         return None
+    no_read(desk)  # before anything is prepared: an entry that cannot be applied fails the run (not_started)
     s = desk.settings()
     lane, p = s["lanes"][lane_name], s["providers"][pname]
     wt, base = prepare(desk, lane_name, lane, meta)
@@ -3508,6 +3572,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
+    unsplit = argv_rules_problem(argv)
+    if unsplit:  # a deny rule Claude Code would split leaves its folder open: no worker starts with one
+        raise RuntimeError(f"hansa started no {'verifier' if verifying else 'worker'}: {unsplit}")
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
     # no key in it: keys are in env only. Without the preview around it: a resume starts its own (resume)
@@ -3636,6 +3703,7 @@ def design_command(desk: Desk, tid: str):
     Built inside the session's own terminal (hansa.session), so no key is on a command line."""
     if account.LINUX:
         raise RuntimeError(DESIGN_ON_LINUX)
+    no_read(desk)  # an entry that cannot be applied: the session does not start
     s, meta = desk.settings(), desk.meta(tid)
     lane_name = meta["lane"]
     lane, pname = s["lanes"][lane_name], meta["provider"]
@@ -3663,6 +3731,7 @@ def design_command(desk: Desk, tid: str):
         extra.append(f"Bash({lane['preview']}:*)")
     if lane.get("check"):  # it is told to keep the checks passing, so it may run them
         extra += command_rules(lane["check"])
+    extra = [r for r in extra if one_rule(r)]  # a command whose rule Claude Code would read as several gets none
     try:
         check_git_file(desk, wt)  # design_sandbox asks git in the worktree
     except GitFileChanged as e:
@@ -3675,6 +3744,9 @@ def design_command(desk: Desk, tid: str):
              "--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
              "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
+    unsplit = argv_rules_problem(argv)
+    if unsplit:  # as for workers (start)
+        raise RuntimeError(f"hansa started no design session: {unsplit}")
     env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane, DESIGN_GIT_CONFIG),
            **git_config_env(sandbox_env(desk, lane), DESIGN_GIT_CONFIG), "HANSA_TASK": tid,
            "CLAUDE_CODE_TMPDIR": tmp,
@@ -3711,12 +3783,16 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None)
     if not meta:
         return
+    no_read(desk)  # as a worker's start
     wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
     desk.update(tid, base=base, branch=f"task/{tid}", worktree=str(wt), session_id=str(uuid.uuid4()))
     try:
         check_git_file(desk, wt)  # design_sandbox asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    unsplit = paths_problem(desk, wt)
+    if unsplit:  # found before the session starts, as design_command would find it too late (in tmux)
+        raise RuntimeError(f"hansa started no design session: {unsplit}")
     sandbox_guard(desk, lane_name, "design session", design_sandbox(desk, lane, pname, p, wt, f"task/{tid}")["sandbox"], wt,
                   f"task/{tid}")
     if cancelled_before_start(desk, tid):
@@ -4596,6 +4672,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
 # detached at the base's tip, and puts the worktree back clean at that tip after. .hansa/tries/<lane>.json holds
 # the try: {id, phase: queued | running | done, ...}, and when done its result, which the command waits for.
 TRY_STEPS = ("setup", "check", "merge_check")
+TRY_KEEP = PREVIEW_KEEP  # bytes of each step's output kept, its first and last half (try_log)
 
 
 def try_file(desk: Desk, lane_name: str) -> Path:
@@ -4624,7 +4701,7 @@ def lane_holder(desk: Desk, lane_name: str):
 
 
 def end_try(desk: Desk, lane_name: str, result: dict) -> dict:
-    t = {**read_try(desk, lane_name), "phase": "done", "at": now(), **result}
+    t = {**read_try(desk, lane_name), "phase": "done", "ended": now(), **result}  # at: the commit --at asked for
     for k in ("pid", "pid_start", "tmp", "launch"):
         t.pop(k, None)
     write_try(desk, lane_name, t)
@@ -4651,6 +4728,12 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
         repo, name = Path(lane["repo"]), lane.get("base") or "main"
         wt = desk.worktrees_dir / lane_name
         tip = git("rev-parse", name, cwd=repo)
+        if t.get("at") and t["at"] != tip:  # asked with --at: it answers for that commit only
+            shutil.rmtree(d, ignore_errors=True)
+            end_try(desk, lane_name, {"ok": False, "moved": True, "steps": {}, "onto": tip,
+                                      "note": f"{name}'s tip moved from {t['at'][:10]} to {tip[:10]} before the try "
+                                              f"started; nothing was run"})
+            return None
         ready_worktree(desk, repo, wt, tid, tip)
         try:
             wgit(desk, wt, "checkout", "-q", "--detach", tip)
@@ -4695,7 +4778,7 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
     the base's tip it ran on."""
     t = read_try(desk, lane_name)
     d = desk.state_dir / "tries" / lane_name
-    steps, failed = {}, ""
+    steps, failed, whole = {}, "", []
     for step in TRY_STEPS:
         if not t.get(step):
             continue
@@ -4703,10 +4786,16 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
             code, secs = map(int, (d / f"{step}.exit").read_text().split())
         except (OSError, ValueError):
             code = secs = None
-        log = (d / f"{step}.log").read_text(encoding="utf-8", errors="replace") if (d / f"{step}.log").exists() else ""
-        ran = code is not None or (d / f"{step}.log").exists()
+        f = d / f"{step}.log"
+        log = desk.redact(read_bounded(f, TRY_KEEP // 2, TRY_KEEP // 2)).encode("utf-8", errors="replace").decode(
+            "utf-8") if f.exists() else ""  # a byte that is not UTF-8 is one "?"
+        ran = code is not None or f.exists()
         steps[step] = {"command": t[step], "ran": ran, "exit": code, "seconds": secs,
-                       "tail": desk.redact(log).strip().splitlines()[-15:]}
+                       "tail": log.strip().splitlines()[-15:]}
+        if ran and code != 0:
+            steps[step]["hints"] = output_hints(log)
+        if ran:
+            whole.append((step, steps[step], log))
         if ran and code != 0 and not failed:
             failed = step
     for x in t.get("tmp", []):
@@ -4724,7 +4813,38 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
         note = note or desk.redact(f"the worktree could not be put back clean: {e}")[:300]
     shutil.rmtree(d, ignore_errors=True)
     ok = bool(steps) and all(x["exit"] == 0 for x in steps.values()) and not note
-    return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean})
+    log = keep_try_log(desk, lane_name, t, whole)
+    return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean,
+                                     **({"log": str(log)} if log else {})})
+
+
+def try_log(desk: Desk, lane_name: str, merge: bool = False) -> Path:
+    """Where the whole output of the lane's last try is kept (of its last --merge-check try: merge)."""
+    return desk.lanes_dir / lane_name / ("merge-check-try.log" if merge else "try.log")
+
+
+def keep_try_log(desk: Desk, lane_name: str, t: dict, whole: list):
+    """Write each step's output (read_bounded: its first and last TRY_KEEP / 2 bytes, keys removed) in place of
+    the last try's; its path, or None when no step ran or it could not be written."""
+    if not whole:
+        return None
+    out = [f"hansa lane try {lane_name}{' --merge-check' if t.get('merge') else ''} at {(t.get('onto') or '')[:12]}, "
+           f"started {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.get('started') or time.time()))}; "
+           f"each step's whole output, keys removed\n"]
+    for step, x, log in whole:
+        how = "interrupted" if x["exit"] is None else f"exit {x['exit']}"
+        out.append(f"\n===== {step.replace('_', ' ')}: {x['command']} ({how}"
+                   + (f" in {x['seconds']}s" if x["seconds"] is not None else "") + ") =====\n")
+        out.append(log if not log or log.endswith("\n") else log + "\n")
+    f = try_log(desk, lane_name, bool(t.get("merge")))
+    with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
+        data = desk.redact("".join(out)).encode("utf-8", errors="replace")
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(cut_redacted(data, TRY_KEEP * len(whole) + 4096))
+        except OSError:
+            return None
+    return f
 
 
 def proc_start(pid) -> str:
