@@ -2094,6 +2094,103 @@ class DeskTest(unittest.TestCase):
         self.assertIn("A lane whose release goes to a public repository usually leaves {task} out",
                       " ".join(out.getvalue().split()))
 
+    def identities_written(self, forms: dict, env=None) -> dict:
+        """messages_written, then the author and committer of each commit hansa wrote on main, by its message:
+        {message: (author, committer)}, each Name <email>."""
+        with unittest.mock.patch.dict(os.environ, env or {}):
+            self.messages_written(forms)
+        rows = self.git_out("log", "-z", "--format=%B%x1f%an <%ae>%x1f%cn <%ce>", "main").split("\0")
+        return {x.split("\x1f")[0].strip(): tuple(x.split("\x1f")[1:]) for x in rows
+                if x and x.split("\x1f")[0].strip() not in ("init", "moved")}
+
+    def test_a_lanes_identity_is_the_author_and_committer_of_every_commit_and_merge_hansa_writes(self):
+        got = self.identities_written({"a": {"identity": "Ada Lane <ada@example.org>"},
+                                       "b": {"identity": "  Bo Lane   <bo@example.org> "}})
+        self.assertEqual(len(got), 6, got)  # t1, its merge; t2; the update merge, t3, its merge after a merge check
+        ada, bo = ("Ada Lane <ada@example.org>",) * 2, ("Bo Lane <bo@example.org>",) * 2
+        self.assertEqual({k: v for k, v in got.items() if "Add a.txt" in k}, {k: ada for k in got if "Add a.txt" in k})
+        self.assertEqual(sorted(v for k, v in got.items() if "Add a.txt" not in k), [bo] * 4, got)
+        self.assertNotIn("hansa", " ".join(a + c for a, c in got.values()))
+        shown = self.hansa("explain", "lane", "b")
+        self.assertIn("Bo Lane <bo@example.org>, from the lane's identity", shown)
+        self.assertIn("design sessions' commits, the commit hansa lane remove --keep makes)", shown)
+
+    def test_without_a_lane_identity_hansa_takes_the_repositorys_own_and_never_the_accounts_global_one(self):
+        globl = self.tmp / "global-gitconfig"
+        globl.write_text("[user]\n\tname = Global Person\n\temail = global@example.org\n")
+        sh("git", "config", "--local", "user.name", "Repo Person", cwd=self.repo)
+        sh("git", "config", "--local", "user.email", "repo@example.org", cwd=self.repo)
+        got = self.identities_written({}, {"GIT_CONFIG_GLOBAL": str(globl)})
+        self.assertEqual(set(got.values()), {("Repo Person <repo@example.org>",) * 2}, got)
+        self.assertIn("Repo Person <repo@example.org>, from the repository's own config",
+                      self.hansa("explain", "lane", "a"))
+
+    def test_a_repository_identity_git_could_not_write_is_said_to_be_not_usable_and_why(self):
+        from hansa.run import lane_identity
+        globl = self.tmp / "global-gitconfig"
+        globl.write_text("[user]\n\tname = Global Person\n\temail = global@example.org\n")
+        sh("git", "config", "--local", "user.name", "Bad <x> Name", cwd=self.repo)
+        sh("git", "config", "--local", "user.email", "repo@example.org", cwd=self.repo)
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(globl)}):
+            shown = " ".join(self.hansa("explain", "lane", "a").split())
+            self.assertIn('hansa <repo@example.org>, from the repository\'s own config (git config --local user.name '
+                          'and user.email); hansa\'s own name for what it cannot use (its user.name "Bad <x> Name" is '
+                          'not usable: it cannot hold < or >)', shown)
+            self.assertNotIn("leaves out", shown)
+            sh("git", "config", "--local", "user.email", "re>po@example.org", cwd=self.repo)
+            name, email, where = lane_identity(self.desk.settings()["lanes"]["a"])
+        self.assertEqual((name, email), ("hansa", "hansa@localhost"))  # never the global one
+        self.assertIn("the repository's config sets none that is usable", where)
+        self.assertIn('its user.name "Bad <x> Name" is not usable', where)
+        self.assertIn('its user.email "re>po@example.org" is not usable: it cannot hold < or >', where)
+
+    def test_hansas_own_name_is_written_only_when_neither_the_lane_nor_the_repository_sets_one(self):
+        globl = self.tmp / "global-gitconfig"
+        globl.write_text("[user]\n\tname = Global Person\n\temail = global@example.org\n")
+        got = self.identities_written({}, {"GIT_CONFIG_GLOBAL": str(globl)})
+        self.assertEqual(set(got.values()), {("hansa <hansa@localhost>",) * 2}, got)
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(globl)}):
+            shown = self.hansa("explain", "lane", "a")
+        self.assertIn("hansa <hansa@localhost>, from hansa's own", shown)
+        self.assertIn("should have one: hansa lane set a identity", shown)
+        self.assertNotIn("Global Person", shown)
+
+    def test_an_identity_git_could_not_write_is_refused_and_like_copies_one(self):
+        before = self.desk.settings()["lanes"]["a"]
+        for bad, why in (("Ada Lane", "a name and an email in angle brackets"),
+                         ("<ada@example.org>", "needs a name"),
+                         ("Ada <>", "needs an email"),
+                         ("Ada <ada@example.org", "a name and an email in angle brackets"),
+                         ("Ada <x> <ada@example.org>", "cannot hold < or >"),
+                         ("Ada > Lane <ada@example.org>", "cannot hold < or >"),
+                         ("Ada\nLane <ada@example.org>", "must be one line")):
+            for args in (("lane", "set", "a", "identity", bad), ("lane", "add", "c", "--like", "a", "--identity", bad)):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa(*args)
+                said = str(e.exception.code)
+                self.assertTrue(why in said and "Nothing was changed" in said, (bad, said))
+                self.assertEqual(len(said.splitlines()), 1, said)
+            self.assertEqual(self.desk.settings()["lanes"], {"a": before})
+            s = self.desk.settings()  # the page's save is checked the same way
+            s["lanes"]["a"]["identity"] = bad
+            self.assertTrue(any("lane a: identity " in x and why in x for x in self.desk.save_settings(s)), bad)
+        self.assertIn('-> "Ada Lane <ada@example.org>"', self.hansa("lane", "set", "a", "identity", "Ada Lane <ada@example.org>"))
+        self.hansa("lane", "add", "c", "--like", "a")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["identity"], "Ada Lane <ada@example.org>")
+        self.hansa("lane", "add", "d", "--like", "a", "--identity", "Dee <dee@example.org>")
+        self.assertEqual(self.desk.settings()["lanes"]["d"]["identity"], "Dee <dee@example.org>")
+        self.hansa("lane", "add", "e", "--like", "a", "--identity", "none")
+        self.assertNotIn("identity", self.desk.settings()["lanes"]["e"])
+        self.hansa("lane", "add", "f", "--repo", str(self.repo), "--identity", "Eff <f@example.org>")
+        self.assertEqual(self.desk.settings()["lanes"]["f"]["identity"], "Eff <f@example.org>")
+        self.hansa("lane", "set", "a", "identity", "none")
+        self.assertNotIn("identity", self.desk.settings()["lanes"]["a"])
+        with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
+            main(["lane", "set", "--help"])
+        said = " ".join(helped.getvalue().split())
+        self.assertIn("identity is Name <email>, the author and committer of every commit hansa makes", said)
+        self.assertIn("never the account's global one", said)
+
     def move_main(self, repo=None):
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved",
            cwd=repo or self.repo)
@@ -2191,6 +2288,7 @@ class DeskTest(unittest.TestCase):
         s["concurrency"] = 2
         self.assertEqual(self.desk.save_settings(s), [])
         self.hansa("lane", "set", "b", "merge_message", "Merge {task} ({lane}): {title}")
+        self.hansa("lane", "set", "b", "identity", "Bo Lane <bo@example.org>")
         self.move_main()  # so t1 needs a merge check
         self.hansa("merge", t1)
         d.tick()
@@ -2201,6 +2299,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m1["state"], m2["state"]), ("merged", "merged"), (m1, m2))
         self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])  # none ran for t2
         self.assertEqual(self.git_out("log", "-1", "--format=%s", m2["merge_commit"]), f"Merge {t2} (b): Add b.txt")
+        self.assertEqual(self.git_out("log", "-1", "--format=%an <%ae>|%cn <%ce>", m2["merge_commit"]),
+                         "Bo Lane <bo@example.org>|Bo Lane <bo@example.org>")  # the lane's identity, plain merge too
         self.assertEqual(self.git_out("log", "-1", "--format=%s", m1["merge_commit"]), f"Merge {t1}: Add a.txt")
         self.assertEqual(self.git_out("rev-parse", "main"), m2["merge_commit"])
 
@@ -2633,7 +2733,8 @@ class DeskTest(unittest.TestCase):
             main(["lane", "add", "--help"])
         said = " ".join(helped.getvalue().split())
         for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
-                      "preview_wait_s", "commit_message", "merge_message", "release targets", "note"):  # all it copies, said
+                      "preview_wait_s", "commit_message", "merge_message", "identity", "release targets",
+                      "note"):  # all it copies, said
             self.assertIn(field, row)
             self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
@@ -2736,9 +2837,13 @@ class DeskTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "lane", "remove", "a", "--keep", "--discard"])
         self.assertIn("choose one", str(e.exception.code))
+        self.hansa("lane", "set", "a", "identity", "Kip Keep <kip@example.org>")
         out = self.hansa("lane", "remove", "a", "--keep")
         self.assertFalse(wt.exists())
         branch = re.search(r"on branch (hansa-kept/a-\S+) there", out).group(1)
+        # the lane is gone from the settings by then, but the kept commit is still made as it
+        self.assertEqual(self.git_out("log", "-1", "--format=%an <%ae>|%cn <%ce>", branch),
+                         "Kip Keep <kip@example.org>|Kip Keep <kip@example.org>")
         files = subprocess.run(["git", "show", "--format=", "--name-only", branch], cwd=self.repo,
                                capture_output=True, text=True).stdout.split()
         self.assertEqual(sorted(files), ["README.md", "new.txt"])
@@ -8499,6 +8604,37 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(on_linux, worker["network"])
 
     @design_as_on_mac
+    def test_a_design_sessions_own_commits_and_its_end_commit_carry_the_lanes_identity(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+        wt = Path(self.design_worktree(tid))
+        base = self.git_out("rev-parse", "main")
+        self.desk.update(tid, lane="a", provider="claude", worktree=str(wt), session_id="sid-d", model_asked="sonnet",
+                         branch=f"task/{tid}", base=base)
+        _, env, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        ada = "Ada Lane <ada@example.org>"
+        self.assertEqual({k: env[k] for k in env if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))},
+                         {"GIT_AUTHOR_NAME": "Ada Lane", "GIT_AUTHOR_EMAIL": "ada@example.org",
+                          "GIT_COMMITTER_NAME": "Ada Lane", "GIT_COMMITTER_EMAIL": "ada@example.org"})
+        # the session's own commit, as git in it writes one with what it is given; then hansa's at its end
+        (wt / "own.txt").write_text("the session's own commit\n")
+        sh("git", "add", "own.txt", cwd=wt)
+        subprocess.run(["git", "commit", "-q", "-m", "own"], cwd=wt, check=True, capture_output=True,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                            **{k: v for k, v in env.items() if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}})
+        (wt / "left.txt").write_text("left uncommitted\n")
+        self.desk.update(tid, state="running")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["commits"], 2, m)
+        self.assertEqual(self.git_out("log", "--format=%an <%ae>|%cn <%ce>", f"main..{m['head']}").splitlines(),
+                         [f"{ada}|{ada}"] * 2)
+
+    @design_as_on_mac
     def test_a_design_session_may_write_in_git_only_what_its_own_commits_and_merges_take(self):
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))  # lane a's worktree
@@ -9406,12 +9542,18 @@ class DeskTest(unittest.TestCase):
         ref = self.repo / ".git" / "refs" / "heads" / "task" / tid
         tip = ref.read_text().strip()
         (wt / "left.txt").write_text("left uncommitted\n")
-        order, wgit = [], run.wgit
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
+        self.assertEqual(self.desk.save_settings(s), [])
+        order, wgit, written = [], run.wgit, []
 
-        def linked_in_the_window(desk, w, *args):  # the link is made after the check, before the ref is moved
+        def linked_in_the_window(desk, w, *args, **kw):  # the link is made after the check, before the ref is moved
             if args[:1] == ("write-tree",):
                 ref.write_text("ref: refs/heads/main\n")
-            return wgit(desk, w, *args)
+            out = wgit(desk, w, *args, **kw)
+            if args[:1] == ("commit-tree",):
+                written.append(wgit(desk, w, "log", "-1", "--format=%an <%ae>|%cn <%ce>", out))
+            return out
         sweep, commit_work = run.sweep, run.commit_work
         with unittest.mock.patch.object(run, "wgit", linked_in_the_window), \
                 unittest.mock.patch.object(run, "sweep", lambda d, t: order.append("sweep") or sweep(d, t)), \
@@ -9427,6 +9569,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.*")).read_text(),
                          "ref: refs/heads/main\n")
         self.assertEqual(order[:2], ["sweep", "commit"])  # what the session left running is stopped first
+        self.assertEqual(written, ["Ada Lane <ada@example.org>|Ada Lane <ada@example.org>"])  # the lane's identity
 
     def test_the_commit_hansa_made_is_the_tasks_work_whatever_its_branch_ref_says_after(self):
         # a leftover the sweep cannot find (on macOS a /bin/sh loop: hansa cannot read a system program's environment)
@@ -9436,6 +9579,9 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual(first["state"], "done", first)
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
+        self.assertEqual(self.desk.save_settings(s), [])
         lane = self.desk.settings()["lanes"]["a"]
         for when in ("next git", "last step"):
             tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
@@ -9454,10 +9600,10 @@ class DeskTest(unittest.TestCase):
                 if not ref.read_text().startswith("ref:"):
                     ref.write_text("ref: refs/heads/main\n")
 
-            def after_the_commit(desk, w, *args):  # the first git hansa runs once its commit is checked and made
+            def after_the_commit(desk, w, *args, **kw):  # the first git hansa runs once its commit is checked and made
                 if made and when == "next git":
                     link()
-                return wgit(desk, w, *args)
+                return wgit(desk, w, *args, **kw)
 
             def committed(*a, **k):
                 out = commit_work(*a, **k)
@@ -9479,6 +9625,8 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(m["commits"], 2, when)  # the session's own commit and hansa's
             self.assertEqual(ref.read_text(), m["head"] + "\n", when)  # put back to it: the work is kept
             self.assertEqual(self.git_out("rev-list", "--count", f"main..task/{tid}"), "2", when)
+            self.assertEqual(self.git_out("log", "-1", "--format=%an <%ae>|%cn <%ce>", made[0]),
+                             "Ada Lane <ada@example.org>|Ada Lane <ada@example.org>", when)  # the lane's identity
             self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.*")).read_text(),
                              "ref: refs/heads/main\n")
         # a finished task's branch that no longer holds the recorded commit: verify, merge (and its merge check),
@@ -12211,6 +12359,24 @@ class DeskTest(unittest.TestCase):
         self.hansa("resume")
         self.assertEqual(self.settle_release(d, 2)["state"], "done")
         self.assertEqual(out.read_text(), "x\nx\n")
+
+    def test_a_forbidden_word_in_an_authors_email_or_a_committers_name_refuses_a_release(self):
+        from hansa import release
+        self.with_release("true")
+        (self.repo / "x.txt").write_text("clean\n")
+        sh("git", "add", "x.txt", cwd=self.repo)
+        who = {"GIT_AUTHOR_NAME": "Ada", "GIT_AUTHOR_EMAIL": "ada@falcon.example", "GIT_COMMITTER_NAME": "Osprey Bot",
+               "GIT_COMMITTER_EMAIL": "bot@example.org"}
+        subprocess.run(["git", "commit", "-q", "-m", "Clean"], cwd=self.repo, check=True, env={**os.environ, **who})
+        sha = self.git_out("rev-parse", "HEAD")
+        self.commit_in_repo("y.txt", "clean too\n")  # by t <t@t>: nothing to find
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["FALCON", "osprey"])),
+                         {"ok": True, "problems": []})
+        said = self.refused("release", "a")
+        self.assertIn(f"{sha[:10]} author: Ada <ada@falcon.example>", said)
+        self.assertIn(f"{sha[:10]} committer: Osprey Bot <bot@example.org>", said)
+        self.assertEqual(sorted((h["commit"], h["where"]) for h in release.get(self.desk, 1)["hits"]),
+                         [(sha, "author"), (sha, "committer")])
 
     def test_a_release_command_set_with_a_forbidden_word_is_said_at_once_and_kept(self):
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["maplebox"])), {"ok": True, "problems": []})

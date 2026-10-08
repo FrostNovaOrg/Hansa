@@ -27,9 +27,9 @@ import uuid
 from pathlib import Path
 
 from . import account, build, installed, installed_text
-from .desk import (DENY_AT, other_envs, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
-                   merge_message, message_fallback, program_candidates, read_json, resolved, task_message, update_message, write_json,
-                   write_problems)
+from .desk import (DENY_AT, HANSA_IDENTITY, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+                   is_git_rule, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   read_json, resolved, task_message, update_message, write_json, write_problems)
 from .desk import lane_env as checked_env
 
 # Only the wording providers use for "out of quota", so a task that is itself
@@ -992,6 +992,54 @@ def git(*args, cwd, env=None) -> str:
     return r.stdout.strip()
 
 
+def repo_identity(repo) -> tuple:
+    """(user.name, user.email, why not) as the repository's own config sets them: '' for each it does not or that git
+    could not write, and for each of those it sets, why it is not usable. Read from its local config alone (git
+    config --local, nothing it includes, no global or system config), never the account's own identity."""
+    out, bad = [], []
+    for key in ("user.name", "user.email"):
+        try:
+            v = git("config", "--local", "--no-includes", "--get", key, cwd=repo,
+                    env={"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        except (RuntimeError, OSError):
+            v = ""
+        why = identity_problem(f"{v} <x>" if key == "user.name" else f"x <{v}>") if v else ""
+        if why:
+            # the problem of the whole Name <email> form, said of the one part
+            why = why.replace(" inside the name or the email: Name <email>", "").replace(": Name <email>", "")
+            bad.append(f"its {key} {json.dumps(v[:80], ensure_ascii=False)} is not usable: it {why}")
+        out.append("" if why else v)
+    return (*out, "; ".join(bad))
+
+
+def lane_identity(lane) -> tuple:
+    """(name, email, where it comes from) of the author and committer of the commits hansa makes for a lane: the
+    lane's identity, else the repository's own user.name and user.email (each hansa's own where it sets only the
+    other, or sets one git could not write), else hansa's own."""
+    lane = lane or {}
+    own = parse_identity(lane.get("identity"))
+    if own:
+        return (*own, "the lane's identity")
+    name, email, bad = repo_identity(lane["repo"]) if lane.get("repo") else ("", "", "")
+    bad = f" ({bad})" if bad else ""
+    if name or email:
+        missing = "name" if not name else "email" if not email else ""
+        return (name or HANSA_IDENTITY[0], email or HANSA_IDENTITY[1],
+                "the repository's own config (git config --local user.name and user.email)"
+                + (f"; hansa's own {missing} for what it {'cannot use' if bad else 'leaves out'}{bad}"
+                   if missing else ""))
+    if bad:
+        return (*HANSA_IDENTITY, f"hansa's own: the lane sets none and the repository's config sets none that is "
+                                 f"usable{bad}")
+    return (*HANSA_IDENTITY, "hansa's own: neither the lane nor the repository's config sets one")
+
+
+def identity_env(lane) -> dict:
+    """lane_identity as git's author and committer variables, for a command that writes a commit."""
+    name, email, _ = lane_identity(lane)
+    return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email, "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+
+
 def rule(tool: str, path: Path) -> str:
     return f"{tool}(//{str(path).lstrip('/')}/**)"
 
@@ -1933,10 +1981,10 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
             f"so the lane's next task runs normally")
 
 
-def wgit(desk: Desk, wt: Path, *args) -> str:
+def wgit(desk: Desk, wt: Path, *args, env=None) -> str:
     """git in a worktree, run only after its .git file is checked."""
     check_git_file(desk, wt)
-    return git(*args, cwd=wt)
+    return git(*args, cwd=wt, env=env)
 
 
 def sandbox_leftovers(desk: Desk, wt: Path) -> list:
@@ -1950,7 +1998,7 @@ def sandbox_leftovers(desk: Desk, wt: Path) -> list:
                  and (wt / f).stat().st_size == 0)]
 
 
-def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> str:
+def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=(), ident=None) -> str:
     """Commit everything changed in the worktree but what a sandbox left there on `branch`, the one hansa made for
     the run; nothing when that is all and nothing is `merged`. The commit is made from the index with the branch's
     tip (and `merged`, a merge hansa made there) for parents, never with a MERGE_HEAD git would take from the
@@ -1959,7 +2007,8 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> s
     check_branch_ref, never through a link: one made in the meantime fails update-ref's check. Afterwards the ref
     must hold the new commit, whose first parent is that tip; otherwise GitFolderChanged, the ref is put back to
     the tip (git_file_changed) and the work is left staged. What a merge left there is cleared then. Returns the
-    commit the branch then holds: the new one, or the tip when nothing was committed (finish records it)."""
+    commit the branch then holds: the new one, or the tip when nothing was committed (finish records it). ident:
+    the author and committer (identity_env of the lane)."""
     old = check_branch_ref(desk, wt, branch)
     left = sandbox_leftovers(desk, wt)  # untracked until the add
     wgit(desk, wt, "add", "-A")
@@ -1969,7 +2018,7 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> s
         return old
     ref = f"refs/heads/{branch}"
     new = wgit(desk, wt, "commit-tree", wgit(desk, wt, "write-tree"), "-p", old,
-               *(a for m in merged for a in ("-p", m)), "-m", message.strip())
+               *(a for m in merged for a in ("-p", m)), "-m", message.strip(), env=ident)
     common = own_git_folder(desk, wt).resolve().parent.parent
     path = common / "refs" / "heads" / branch
     try:
@@ -2988,7 +3037,7 @@ def conflict_advice(tid: str, base: str, places: str, error: str = "") -> str:
             f"or, to redo the whole change: hansa retry {tid} --fresh \"<the same change on the current {base}>\"")
 
 
-def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: str = "") -> list:
+def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: str = "", ident=None) -> list:
     """For `hansa retry --update`: merge the base's current tip into the task's fresh branch. Merged at once
     when it merges cleanly; else aborted here and merged again just before the worker starts, after the
     lane's setup (UPDATE_SCRIPT). Returns the files that conflict."""
@@ -2996,7 +3045,8 @@ def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: 
         check_head(desk, wt, f"task/{tid}")
         check_branch_ref(desk, wt, f"task/{tid}")
         check_no_operation(desk, wt)
-        wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", message or f"Merge {name} into task/{tid}", tip)
+        wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", message or f"Merge {name} into task/{tid}", tip,
+             env=ident)
         return []
     except GitFileChanged:
         raise
@@ -3032,7 +3082,8 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     if updating:
         desk.update(tid, update_conflicts=update_branch(
             desk, wt, tid, lane.get("base") or "main", base,
-            update_message(lane, lane_name, tid, meta.get("title") or "", lane.get("base") or "main")))
+            update_message(lane, lane_name, tid, meta.get("title") or "", lane.get("base") or "main"),
+            identity_env(lane)))
     return wt, base
 
 
@@ -3424,8 +3475,7 @@ def design_command(desk: Desk, tid: str):
            **git_config_env(sandbox_env(desk, lane), DESIGN_GIT_CONFIG), "HANSA_TASK": tid,
            "CLAUDE_CODE_TMPDIR": tmp,
            "TMPDIR": tmp, "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
-           "GIT_AUTHOR_NAME": f"hansa design {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
-           "GIT_COMMITTER_NAME": f"hansa design {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
+           **identity_env(lane)}  # its own commits are the lane's, as hansa's are
     return with_setup(desk, tid, argv, lane, pname, p, wt), env, wt
 
 
@@ -3699,7 +3749,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             else:
                 ln = desk.settings()["lanes"].get(meta.get("lane"))
                 head = commit_work(desk, wt, task_message(ln, meta.get("lane") or "", tid, meta.get("title") or ""),
-                                   branch, [merged] if merged else [])
+                                   branch, [merged] if merged else [], identity_env(ln))
                 fields["commit_message_note"] = message_fallback(ln, meta.get("lane") or "", "commit_message") or None
         # the task's work is the commit read or made here, by its id: the branch is never read again through a
         # link (a leftover the sweep could not find may still write there), and from now on hansa verifies,
@@ -4146,7 +4196,8 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "note": f"{why}; nothing was merged"})
             return None
         try:
-            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], tid, m["title"]), m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
+            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], tid, m["title"]), m["head"], cwd=repo,
+                env={"HANSA_MERGING": "1", **identity_env(lane)})
         except RuntimeError as e:
             files = conflicted_files(lambda *x: git(*x, cwd=repo))
             places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
@@ -4193,7 +4244,8 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         ready_worktree(desk, repo, wt, tid, tip)
         try:
             wgit(desk, wt, "checkout", "-q", "--detach", tip)
-            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", merge_message(lane, lane_name, tid, m["title"]), m["head"])
+            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", merge_message(lane, lane_name, tid, m["title"]), m["head"],
+                 env=identity_env(lane))
         except GitFileChanged as e:
             raise RuntimeError(git_file_changed(desk, tid, e)) from None
         except RuntimeError as e:

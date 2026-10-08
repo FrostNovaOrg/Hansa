@@ -85,6 +85,10 @@ TARGET_FIELDS = ("command", "timeout_min", "after", "fixed")
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
 MAX_MESSAGE = 200
+# the author and committer of the commits hansa makes for a lane: the lane's identity, else the repository's own
+# user.name and user.email (its local config), else hansa's own (run.lane_identity)
+HANSA_IDENTITY = ("hansa", "hansa@localhost")
+MAX_IDENTITY = 200
 RETRY_OF = " (retry of t"  # what hansa retry adds to a task's title
 # Files and folders under the home folder of the user hansa runs as that no worker command may read: logins,
 # keys and tokens for other services, browsing data and messages. Nothing a build or test tool needs to read
@@ -377,7 +381,7 @@ def validate(s: dict, root=None) -> list:
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
                            "preview", "preview_wait_s", "setup", "release", "targets", "release_files", "max_turns",
-                           "timeout_min", "merge_timeout_min", "note", *MESSAGE_FIELDS}
+                           "timeout_min", "merge_timeout_min", "note", "identity", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -412,6 +416,8 @@ def validate(s: dict, root=None) -> list:
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
         p += [f"{at}: {f} {message_problem(ln[f])}" for f in MESSAGE_FIELDS if message_problem(ln.get(f, ""))]
+        if identity_problem(ln.get("identity", "")):
+            p.append(f"{at}: identity {identity_problem(ln['identity'])}")
         p += [f"{at}: {x}" for x in target_problems(ln)]
         files = ln.get("release_files", [])
         if not isinstance(files, list) or len(files) > MAX_RELEASE_FILES or not all(
@@ -1080,6 +1086,38 @@ def message_problem(form) -> str:
             why = ("gives every task the same message, or an empty one: it needs {task} or {title}"
                    if form.strip() else "gives an empty message")
     return f"{why}; the placeholders are {MESSAGE_PLACES}" if why else ""
+
+
+def identity_problem(v) -> str:
+    """'' for an identity git can write as a commit's author and committer, Name <email> ('' is unset); otherwise
+    why not, in a few words: a name and an email in angle brackets, with no newline and no < or > inside either."""
+    if v == "":
+        return ""
+    if not isinstance(v, str):
+        return "must be text: Name <email>"
+    if len(v) > MAX_IDENTITY:
+        return f"must be up to {MAX_IDENTITY} characters"
+    if _has_control(v):
+        return "must be one line: it cannot hold a newline or another control character"
+    m = re.fullmatch(r"\s*(.*?)\s*<(.*)>\s*", v)
+    if not m:
+        return "must be a name and an email in angle brackets: Name <email>"
+    name, email = m[1], m[2].strip()
+    if "<" in name or ">" in name or "<" in email or ">" in email:
+        return "cannot hold < or > inside the name or the email: Name <email>"
+    if not name:
+        return "needs a name before the <email>"
+    if not email:
+        return "needs an email inside the angle brackets"
+    return ""
+
+
+def parse_identity(v) -> tuple | None:
+    """(name, email) of an identity identity_problem passes; None for one unset or bad."""
+    if not v or identity_problem(v):
+        return None
+    m = re.fullmatch(r"\s*(.*?)\s*<(.*)>\s*", v)
+    return m[1], m[2].strip()
 
 
 def own_title(title: str) -> str:

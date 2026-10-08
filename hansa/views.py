@@ -12,7 +12,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (LINUX_TRY_NOTE, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+from .run import (LINUX_TRY_NOTE, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -1091,11 +1091,18 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         brief = desk.lanes_dir / name / "brief.md"
         may_write, left_out = write_list(desk, ln)  # as a run is given it: a fence may have come since it was saved
         env, env_left = lane_env(desk, ln)
+        who, email, where = lane_identity(ln)
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             f"  read them with hansa git {name} log|show|diff|grep ... (--worktree: the worktree), git commands that"
             " read only, run as the desk's account",
+            f"  author and committer of every commit hansa makes for the lane (its tasks' commits, their merges into"
+            f" the base, merges of the base into a task's branch, design sessions' commits,"
+            f" the commit hansa lane remove --keep makes): {who} <{email}>, from"
+            f" {where}" + ("" if ln.get("identity") else f"; a lane whose release goes to a public repository should"
+                           f" have one: hansa lane set {name} identity \"Name <email>\", or user.name and user.email"
+                           f" in the repository's own config (an account's global identity is never taken)"),
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
             f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
             " (check included); set high, so reaching it means something went wrong",

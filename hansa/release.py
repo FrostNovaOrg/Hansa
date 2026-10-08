@@ -271,7 +271,8 @@ def _added(lines):
 
 def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") -> tuple:
     """Where what goes out holds one of the principal's forbidden words (any case, within one line, in text read as
-    UTF-8): the release command line, and every outgoing commit's message, the names of the files it adds or
+    UTF-8): the release command line, and every outgoing commit's message, its author's and committer's names and
+    emails (where: author or committer; line: Name <email>), the names of the files it adds or
     changes (a renamed one by its new name) and the lines it adds. Each commit's own change is read once: a merge's
     is what it adds beyond all its parents (git's dense combined diff, --cc), not its diff against each parent, so
     what a merge brings in from a branch is read in that branch's commits when they go out, and not at all when
@@ -300,6 +301,11 @@ def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") 
             look(sha, "commit message", line)
     if not folded:
         return [], checked
+    for line in _git_lines(repo, "log", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce", *rng):
+        sha, *who = line.split("\x1f")
+        if len(who) == 4:
+            look(sha, "author", f"{who[0]} <{who[1]}>")
+            look(sha, "committer", f"{who[2]} <{who[3]}>")
     for line in _git_lines(repo, "log", "--cc", "--format=%x00%H", "--name-only", "--no-renames", "--diff-filter=d", *rng):
         if line.startswith("\0"):
             sha = line[1:].strip()
@@ -371,7 +377,9 @@ def scan_key(repo, since: str, commit: str, words: list, command: str) -> str:
     made with the same key finds the same."""
     remotes = _git_bytes(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes")
     words = sorted(w for w in words if isinstance(w, str) and w.strip())
-    return hashlib.sha256(json.dumps([repo_key(repo), commit, since, remotes, words, command]).encode()).hexdigest()
+    # "identities": a scan from before authors and committers were read does not count for one that reads them
+    return hashlib.sha256(json.dumps([repo_key(repo), commit, since, remotes, words, command, "identities"])
+                          .encode()).hexdigest()
 
 
 def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:

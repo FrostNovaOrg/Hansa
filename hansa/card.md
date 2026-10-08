@@ -31,6 +31,15 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    wrapper in any folder: `./mvnw`, `../gradlew`) from your own shell, written
    plainly or with options, goals or subcommands before them (`git -C DIR push`,
    `git subtree push`, `mvn clean deploy`, `./gradlew :sub:publishToMavenLocal`).
+   They stop the plain forms only: a goal named in full
+   (`org.apache.maven.plugins:maven-deploy-plugin:3.1.1:deploy-file`),
+   `mvn release:perform` or `site:deploy`, a plugin's own publishing goal
+   (`nexus-staging:deploy`), or Gradle's abbreviated task names (`./gradlew pTML`)
+   are not caught; the principal's yes on a release is what stands between you
+   and an outside server. They also refuse, in your own shell, a Gradle command
+   with a word starting with `publish` (`--tests publishing.X`, `:publishing:build`,
+   `-p publishing`) and Maven's `-pl deploy`: run such a build through the lane's
+   check.
    So a git command with `push` among its arguments is denied even when it only
    reads (`git log --grep push`, `git grep push`): read a repository through
    `hansa git`.
@@ -61,8 +70,9 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa explain [lane L [--all] \| provider P \| task ID \| states \| server]` | what a setting or state means and where it comes from; alone, also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--allow RULE ...] [--release-files "PATH ..."]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one. A lane without a check has its tasks merged untested |
-| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, release_files, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below), `release_files` (paths or globs, separated by spaces, whose changes merge only once verified: see Releasing) |
+| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release targets, release_files, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below), `identity` (below), `release_files` (paths or globs, separated by spaces, whose changes merge only once verified: see Releasing) |
+| `hansa lane set L identity "Name <email>"` | the author and committer of every commit hansa makes for the lane: a task's commit, its merge into the base (the merge check's too), the merge of the base into a task's branch, a design session's commits, the commit `hansa lane remove --keep` makes. A name and an email in angle brackets, one line, no `<` or `>` inside either; also `hansa lane add --identity`, copied by `--like`. None: unset, and then hansa takes the repository's own `user.name` and `user.email` from its local config (`git config --local`), never the account's global one, and with neither writes `hansa <hansa@localhost>`. `hansa explain lane L` shows which is in use |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out |
 | `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. Refused while a task holds the lane |
@@ -216,6 +226,11 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
 ## Releasing
 hansa merges into a lane's base branch and stops there. Sending it out (a push
 to a public repository, a deploy to production) waits for the principal:
+- Commits by hansa carry the lane's identity, else the repository's own (its
+  local config), else `hansa <hansa@localhost>`: a lane whose release goes to
+  a public repository should have one set, on the lane (`hansa lane set L
+  identity "Name <email>"`) or in the repository's config; an account's
+  personal identity is never taken up by itself.
 - Set the lane's release command once: `hansa lane set L release "<command>"`,
   one shell command line, such as `git push origin main`, or a push, a wait
   for CI (`gh run watch --exit-status ...`) and a deploy script. The change is
@@ -270,9 +285,11 @@ to a public repository, a deploy to production) waits for the principal:
   when the repository has no remote-tracking branch) and the files they
   change. If the
   command line, or a line those commits add, the name of a file they add or
-  change, or one of their messages holds a word the principal keeps from going
-  out, the release is refused at once, with the places found: take them out of
-  the base branch's history (a task) or of the command, or ask the principal.
+  change, one of their messages, or the name or email of one's author or
+  committer holds a word the principal keeps from going out, the release is
+  refused at once, with the places found (the commit, and `author` or
+  `committer` for an identity): take them out of the base branch's history (a
+  task) or of the command, or ask the principal.
   All the outgoing commits are checked (the page shows at most 200, and says
   how many were checked). A word is matched within one line only (a phrase
   split over a line break is not found), and only in text hansa can read as

@@ -15,11 +15,12 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
-from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
+from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
                    kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
-                  conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
+                  conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
+                  lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
                   quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
@@ -457,7 +458,8 @@ def cmd_merge(a):
                      if note else ""))
             return
         try:
-            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], a.id, m["title"]), m["head"], cwd=repo, env={"HANSA_MERGING": "1"})
+            git("merge", "--no-ff", "-m", merge_message(lane, m["lane"], a.id, m["title"]), m["head"], cwd=repo,
+                env={"HANSA_MERGING": "1", **identity_env(lane)})
         except RuntimeError as e:
             files = conflicted_files(lambda *x: git(*x, cwd=repo))
             places = desk.redact(conflict_places(Path(repo), files)) if files else ""  # read before the abort
@@ -1314,9 +1316,11 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 LANE_LISTS = ("providers", "allow", "network", "write", "release_files")
 LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "release_files", "max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s", "note", *MESSAGE_FIELDS)
-# empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait
-LANE_UNSET = ("merge_check", "merge_timeout_min", "preview_wait_s", *MESSAGE_FIELDS)
+               "release", "release_files", "max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s", "note",
+               *MESSAGE_FIELDS, "identity")
+# empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait,
+# the identity of hansa's commits (then the repository's own, or hansa's)
+LANE_UNSET = ("merge_check", "merge_timeout_min", "preview_wait_s", *MESSAGE_FIELDS, "identity")
 OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -1352,6 +1356,11 @@ def _lane_value(field: str, values: list):
         raise SystemExit(f"hansa: {field} takes one value; quote it if it has spaces. Nothing was changed")
     if field in MESSAGE_FIELDS and values and message_problem(values[0]):
         raise SystemExit(f"hansa: {field} {_shown(values[0])} {message_problem(values[0])}. Nothing was changed")
+    if field == "identity" and values and identity_problem(values[0].strip()):
+        raise SystemExit(f"hansa: identity {_shown(values[0])} {identity_problem(values[0].strip())}. "
+                         f"Nothing was changed")
+    if field == "identity" and values:
+        values = [values[0].strip()]
     if field in LANE_UNSET and not "".join(values).strip():
         return None
     if field in LANE_NUMBERS:
@@ -1443,7 +1452,7 @@ def cmd_lane(a):
             given = {f: _lane_value(f, v if isinstance(v, list) else [v]) for f, v in (
                 ("providers", a.providers), ("check", a.check), ("setup", a.setup), ("allow", a.allow),
                 ("network", a.network), ("merge_check", a.merge_check), ("merge_timeout_min", a.merge_timeout),
-                ("release_files", a.release_files))
+                ("release_files", a.release_files), ("identity", a.identity))
                 if v is not None}
             if a.base is not None:
                 _lane_value("base", [a.base])
@@ -1459,7 +1468,7 @@ def cmd_lane(a):
                 like = s["lanes"][a.like]
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
-                for f in ("check", "setup", "merge_check", "merge_timeout_min"):
+                for f in ("check", "setup", "merge_check", "merge_timeout_min", "identity"):
                     if ln.get(f) in ("", None):  # none: unset, as hansa lane set leaves it
                         ln.pop(f, None)
                 repo, base = ln["repo"], ln.get("base", "main")
@@ -1497,7 +1506,7 @@ def cmd_lane(a):
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
                   + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check", "release_files",
-                                                              "merge_timeout_min") if ln.get(f)))
+                                                              "merge_timeout_min", "identity") if ln.get(f)))
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
                       f"{a.like}'s, and the earlier ones are kept in {aside}")
@@ -1670,14 +1679,16 @@ def _held_text(wt: Path, st: dict) -> str:
     return "\n".join(lines)
 
 
-def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool) -> str:
-    """git worktree remove, after putting what it holds on a new branch when keep; the branch's name or ''."""
-    from .run import _remember_git_file, commit_work, wgit
+def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool, ln: dict | None = None) -> str:
+    """git worktree remove, after putting what it holds on a new branch when keep; the branch's name or ''. ln: the
+    lane's settings as they were before it was removed, whose identity the kept commit carries."""
+    from .run import _remember_git_file, commit_work, identity_env, wgit
     kept = ""
     if keep and (st["changes"] or st["commits"]):
         kept = f"hansa-kept/{wt.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wgit(desk, wt, "checkout", "-q", "-b", kept)
-        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed", kept)
+        commit_work(desk, wt, f"Left in worktree {wt.name} when lane {lane} was removed", kept,
+                    ident=identity_env({**(ln or {}), "repo": st["repo"]}))
     # --force: what a worker's sandbox left there is nobody's work, and git would refuse for it
     git("worktree", "remove", "--force", str(wt), cwd=st["repo"])
     _remember_git_file(desk, wt, None)
@@ -1831,6 +1842,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
             + f"\nTo keep it on a new branch (hansa-kept/{name}-DATE) of its repository and then remove "
               f"{'the lane and ' if known else ''}the worktree: hansa lane remove {name} --keep. To drop it: "
               f"hansa lane remove {name} --discard. Nothing was changed")
+    ln = dict(lanes[name]) if known else None  # its identity, for the commit --keep makes after it is gone
     if known:
         del new["lanes"][name]
         _save(desk, new)
@@ -1841,7 +1853,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
                   f"repository still lists it, git worktree prune there clears that")
             continue
         try:
-            kept = _remove_worktree(desk, name, wt, st, a.keep)
+            kept = _remove_worktree(desk, name, wt, st, a.keep, ln)
         except RuntimeError as e:
             print(f"Its worktree {wt} stays: {e}. hansa lane remove {name} tries again")
             continue
@@ -2165,8 +2177,8 @@ def main(argv=None):
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
                    "providers, setup, check, merge_check, preview, network, folders it may write, env, allow, limits "
-                   "with merge_timeout_min and preview_wait_s, commit_message, merge_message, release targets, release_files, "
-                   "note) "
+                   "with merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release "
+                   "targets, release_files, note) "
                    "and standing instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Not with --repo")
@@ -2181,6 +2193,8 @@ def main(argv=None):
                    "lane's timeout_min)")
     q.add_argument("--network", nargs="+", metavar="HOST", help="the hosts its workers, setup and check may reach "
                    "(default: none)")
+    q.add_argument("--identity", metavar='"NAME <EMAIL>"', help="the author and committer of every commit hansa "
+                   "makes for the lane (default: the repository's own user.name and user.email, else hansa's)")
     q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
                    "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
     q.add_argument("--release-files", nargs="+", metavar="PATH", help="the files the lane's releases build and run "
@@ -2190,7 +2204,8 @@ def main(argv=None):
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; base, check, merge_check, preview, setup, release, note, commit_message and merge_message take "
+        "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
+        "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
         "preview is the command that starts the app (npm run dev, say). A design session starts it itself. For a task "
         "or verification with a browser (hansa add --browser), hansa starts it on macOS before the worker: in the "
@@ -2214,7 +2229,12 @@ def main(argv=None):
         "merge_message is the form of the message of a task's merge into the base (unset: Merge t0001: <title>). "
         "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
         "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
-        "preview_wait_s, commit_message or merge_message out again. release is the command line that sends the base branch out (git push "
+        "preview_wait_s, commit_message, merge_message or identity out again. identity is Name <email>, the author "
+        "and committer of every commit hansa makes for the lane: a task's commit, its merge into the base (the merge "
+        "check's merge too), the merge of the base into a task's branch, and a design session's commits. Unset, "
+        "hansa takes the repository's own user.name and user.email from its local config (git config --local), "
+        "never the account's global one; with neither it writes hansa <hansa@localhost>. A lane whose release goes "
+        "to a public repository should have one, on the lane or in the repository's config. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). It is the lane's one "
         "unnamed release target; a lane that sends its base branch out in more than one way names its targets "
         "instead (hansa lane target L NAME ...), and then has no release. A release command (or a target's, with hansa "
