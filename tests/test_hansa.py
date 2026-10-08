@@ -10638,6 +10638,10 @@ class DeskTest(unittest.TestCase):
         tid = self.settle(Dispatcher(self.desk), self.desk.new_task("Add docs/conf.py"))["id"]
         self.assertIn(f"note: nothing verified this change: {tid} changed docs/conf.py", self.hansa("merge", tid))
 
+    # The session runs in tmux as a process of its own, which imports hansa afresh: design_as_on_mac patches
+    # only this process, so on Linux the session refuses (test_a_design_session_does_not_start_on_linux).
+    @unittest.skipIf(account.LINUX, "design sessions do not run on Linux, and the session's own process (in tmux) "
+                                    "cannot be patched from the test to run as on a Mac")
     @design_as_on_mac
     def test_design_session_opens_for_the_principal_and_comes_back_for_review(self):
         try:
