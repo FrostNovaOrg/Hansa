@@ -612,6 +612,16 @@ def plain_code(code: str) -> str:
     return re.sub(r"[\s-]", "", str(code or "")).upper()
 
 
+def hide_codes(text: str, codes) -> str:
+    """text with each of codes replaced by [code], in any case and with the spaces or dashes answers accept; called
+    before any cut, so that no part of a code is left."""
+    for c in codes:
+        c = plain_code(c)
+        if c:
+            text = re.sub(r"[\s-]*".join(re.escape(x) for x in c), "[code]", text, flags=re.IGNORECASE)
+    return text
+
+
 def new_code(desk: Desk, rid) -> str:
     """A new one-time code for a release waiting for the principal (one made before is void); '' when it does not
     wait. Only its HMAC is kept."""
@@ -702,7 +712,7 @@ def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: 
                 "answers it now" if gone else
                 f"that is not the code of release #{rid} ({wrong} of {CODE_TRIES} wrong; at {CODE_TRIES} it is void "
                 "and only the page answers it)"]}
-        return _answered(desk, r, yes, reason, by, channel="code")
+        return _answered(desk, r, yes, hide_codes(reason, [code]), by, channel="code")
 
 
 def code_text(r: dict, zh: bool = False) -> str:

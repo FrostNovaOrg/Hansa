@@ -13816,7 +13816,8 @@ class DeskTest(unittest.TestCase):
         [a] = self.alerted(out)
         self.assertEqual(a["kind"], "ask")
         self.assertIn(f"request #{n} waits for you on the page: Please renew the deploy login", a["text"])
-        self.assertEqual((a["cwd"], a["task"], a["mine"]), (str(self.desk.root), None, "yes"))
+        self.assertEqual((a["task"], a["mine"]), (None, "yes"))
+        self.assertNotEqual(a["cwd"], str(self.desk.root))  # a folder of its own
         os.environ.pop("HANSA_TASK")
         # a release waits for the yes, and ends void
         self.hansa("lane", "set", "a", "release", "true")
@@ -14130,7 +14131,7 @@ class DeskTest(unittest.TestCase):
         code = self.queued_code(1)
         result = alert.send_due(self.desk, gather=0)
         self.assertFalse(result["ok"])
-        self.assertIn("[code]", " ".join(result["tail"]))
+        self.assertEqual(result["tail"], [])  # none of what it printed is kept
         self.assertNotIn(code, json.dumps(result))
         self.assertEqual(alert.queued(self.desk), [])
         self.assertTrue(release.page_rows(self.desk, self.desk.settings())[0]["code_sent"])
@@ -14274,6 +14275,89 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((e["yes"], e["channel"]), (False, "code"))
         self.assertIn("refused by the principal", release.state_text(self.desk, r))
         self.assertIn("with the one-time code", release.state_text(self.desk, r))
+
+    def test_an_alert_command_echoing_a_code_in_title_case_after_a_long_prefix_leaves_none_of_it(self):
+        from hansa import alert, release, web
+        cmd = (f"{shlex.quote(sys.executable)} -c \"import sys; t = sys.stdin.read(); "
+               f"print('x' * 190 + t.title()); print(t.title().replace(' ', '-'))\"; exit 1")
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        result = alert.send_due(self.desk, gather=0)
+        self.assertEqual((result["ok"], result["exit"], result["tail"]), (False, 1, []))
+        self.assertIn("not kept, as the alert held a one-time code", result["withheld"])
+        [e] = self.events("alert_failed")
+        self.assertEqual((e["exit"], e["tail"]), (1, []))
+        self.assertIn("one-time code", e["withheld"])
+        status = self.hansa("status")
+        self.assertIn("alert command FAILED", status)
+        self.assertIn("its output was not kept, as the alert held a one-time code", status)
+        said = "\n".join([status, json.dumps(views.status(self.desk)), json.dumps(web._events(self.desk, 200, "")),
+                          self.desk.events_path.read_text(), alert.last_file(self.desk).read_text()]).lower()
+        self.assertNotIn(code.lower(), said)
+        self.assertNotIn("xxxxxxxxxx", said)  # nothing of the output at all, so no cut part of a code
+        # an alert without a code keeps its output as before
+        self.desk.add_ask("hello there")
+        result = alert.send_due(self.desk, gather=0)
+        self.assertNotIn("withheld", result)
+        self.assertIn("Hello-There", " ".join(result["tail"]))
+        # where a code passes through text hansa keeps, it is hidden in any case and with spaces or dashes, before
+        # any cut
+        self.assertEqual(release.hide_codes("say Ab3-d e9 now", ["AB3DE9"]), "say [code] now")
+
+    def test_the_alert_command_runs_in_a_folder_of_its_own_not_the_desk(self):
+        from hansa import alert
+        cmd = "pwd; echo kept > alert-log.txt; exit 1"
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        result = alert.test(self.desk)
+        where = Path(result["tail"][0])
+        self.assertNotEqual(where.resolve(), self.desk.root.resolve())
+        self.assertNotIn(self.desk.root.resolve(), where.resolve().parents)
+        self.assertFalse(where.exists())  # removed afterwards
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")  # with a code too
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(list(self.desk.root.rglob("alert-log.txt")), [])
+
+    def test_yes_and_no_are_not_lane_names(self):
+        from hansa import release
+        for name in ("yes", "NO", "No"):
+            with self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "add", name, "--like", "a")
+            self.assertIn("cannot name a lane", str(e.exception.code))
+        self.assertEqual(sorted(self.desk.settings()["lanes"]), ["a"])
+        s = self.desk.settings()
+        s["lanes"]["yes"] = s["lanes"]["a"]  # wherever a lane is named: the settings refuse it too
+        self.assertIn("yes and no (in any case) are not lane names", " ".join(self.desk.save_settings(s)))
+        # a desk that already has such a lane: the answer form records nothing, and says to remove it first
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        s = json.loads(self.desk.settings_path.read_text())
+        s["lanes"]["yes"] = s["lanes"]["a"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        before = self.desk.events_path.read_text()
+        refused = self.code_answer("yes", "1", code)[1]
+        self.assertIn("lane named yes: that lane must be removed first", refused)
+        self.assertEqual(self.desk.events_path.read_text(), before)
+        self.assertIsNone(release.get(self.desk, 2))
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertIn("lane named yes", self.code_answer("NO", "1", code)[1])
+        # once it is gone, the code answers
+        del s["lanes"]["yes"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(self.code_answer("Yes", "1", code)[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+
+    def test_the_readme_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
+        root = Path(__file__).resolve().parent.parent
+        readme = " ".join((root / "README.md").read_text().split())
+        self.assertIn("Your alert command must not keep the alert's text anywhere the coordinator can read it (a "
+                      "file, a log, a chat history): the code in it approves a release.", readme)
+        self.assertIn("must not keep the alert's text anywhere the coordinator can read it",
+                      (root / "hansa" / "ui.html").read_text())
 
     # -- small fixes from earlier verifications --
 

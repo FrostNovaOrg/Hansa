@@ -490,15 +490,20 @@ page gives.
   release (6 characters, no look-alikes), which the coordinator passes on
   with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only
   in the principal's alert: hansa keeps only a keyed hash of it (the key is in
-  the desk's `secrets/`, which no agent may read), takes it out of what it
-  keeps of the alert's run, and never writes it in events, the release's
+  the desk's `secrets/`, which no agent may read), keeps none of what the
+  alert command prints for such an alert (only how it ended), runs the command
+  in a temporary folder of its own rather than the desk's, and never writes
+  the code in events, the release's
   record, `hansa status`, `hansa release` or the page, which says only whether
   a code went out and when. It answers that release only, once, and is
   recorded as the principal's answer given through the coordinator (channel
   `code`); three wrong codes void it, and it lapses when the release is
   answered, stopped or no longer what was asked, after 24 hours, or when a new
   alert for the release brings a new one. With no alert command there is no
-  code: the page alone answers. hansa serve runs the
+  code: the page alone answers. Your alert command must not keep the alert's
+  text anywhere the coordinator can read it (a file, a log, a chat history):
+  the code in it approves a release. No lane may be named `yes` or `no`, as
+  those words begin the answer. hansa serve runs the
   command only then, and only while the base branch and the command are still
   what the principal saw (else the request is void and the coordinator asks
   again): in the lane's repository at that commit, as the desk's account,
@@ -563,7 +568,7 @@ page gives.
   forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), and when
   its own rounds have stopped for 15 minutes; not for ordinary task events,
   which go to the coordinator. It runs as the desk's account, outside the
-  sandbox, in the desk's folder, with hansa's own environment (not a lane's),
+  sandbox, in a temporary folder of its own (removed after), with hansa's own environment (not a lane's),
   the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
   `release_stopped`, `ask`, `server_stuck`, `test`; comma-separated when several go out together)
   and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
@@ -574,7 +579,8 @@ page gives.
   run when the hour frees a run, with a line saying how many were held back
   (the page's test button is not held). A run that fails or times out is recorded
   (event `alert_failed`) and `hansa status` shows the last failure with its exit
-  code and last lines; there is no retry: the next alert tries again. The page
+  code and last lines (none for an alert that held a release's one-time code:
+  then only how it ended is kept); there is no retry: the next alert tries again. The page
   has a button that sends a test alert; no coordinator command sends one.
   `hansa explain` says whether a command is set and what it is.
 - Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,

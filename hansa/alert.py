@@ -20,7 +20,8 @@ only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
 there is no retry: the next alert tries again. A
 release_waiting alert carries the release's one-time code (release.new_code), which goes nowhere else: its queue
-entry is gone once sent, and the code is taken out of what is kept of the run. The text is in English: the page has no language setting (it
+entry is gone once sent, and none of what the command printed for such an alert is kept (only how it ended).
+The command runs in a temporary folder of its own, not the desk's. The text is in English: the page has no language setting (it
 follows the browser's language, which hansa does not know when it sends).
 """
 from __future__ import annotations
@@ -45,6 +46,7 @@ MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
 MOST_TEXT = 1000  # characters on the command's standard input
 TAIL = 5  # lines of a failed run's output kept
+WITHHELD = "its output was not kept, as the alert held a one-time code"  # nor any part of it, in any form
 MOST_RUNS = 20  # runs an hour at most; beyond it, alerts are held and go out together
 HOUR = 3600
 STUCK_ALERT = 15 * 60  # seconds hansa serve finishes no round before the principal is alerted
@@ -103,7 +105,7 @@ def _clean(desk: Desk) -> list:
 def add(desk: Desk, kind: str, text: str, code: str = "", release=None) -> bool:
     """Queue an alert for the next run; False (nothing queued) when no alert command is set. code: the one-time
     code of release `release` the text holds (it replaces one queued before for that release, now void); the entry
-    goes once it is sent, and the code is taken out of what is kept of the run."""
+    goes once it is sent, and none of what the command prints for it is kept."""
     if not command(desk.settings()):
         return False
     with desk.lock():
@@ -174,19 +176,23 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     return text if len(text) <= MOST_TEXT else text[:MOST_TEXT - 1] + "…"
 
 
-def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT) -> dict:
-    """Run the alert command once: {ok, exit, timed_out, tail, at}."""
+def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, codes=()) -> dict:
+    """Run the alert command once: {ok, exit, timed_out, tail, at}. It runs in a folder of its own, removed after,
+    so that what it writes to a relative path lands nowhere hansa keeps. codes: the one-time codes the text holds;
+    then none of what the command printed is kept (tail is empty, withheld says why), as it may echo a code in any
+    form."""
     env = {**os.environ, "HANSA_ALERT_KIND": kinds}
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
     timed_out, code, out = False, None, b""
     # stdin and output are files, not pipes: the command's own exit ends the run, even when a child it left behind
     # still holds them; only at the time limit is its whole group killed
-    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said:
+    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said, \
+            tempfile.TemporaryDirectory(prefix="hansa-alert-") as here:
         given.write(text.encode("utf-8"))
         given.seek(0)
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=str(desk.root), env=env, stdin=given,
+            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=here, env=env, stdin=given,
                                     stdout=said, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 code = proc.wait(timeout=timeout)
@@ -200,10 +206,12 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT) -
             out = said.read()
         except OSError as e:
             out = str(e).encode()
+    result = {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "tail": [], "at": now(),
+              "kinds": kinds}
+    if codes:
+        return {**result, "withheld": WITHHELD}
     said = desk.redact(out.decode("utf-8", errors="replace")).strip().splitlines()[-TAIL:]
-    tail = [x[:200] for x in said]
-    return {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "tail": tail, "at": now(),
-            "kinds": kinds}
+    return {**result, "tail": [x[:200] for x in said]}
 
 
 @contextlib.contextmanager
@@ -246,7 +254,8 @@ def _record(desk: Desk, result: dict, count: int, began: float) -> None:
         desk.event("alert_sent", kinds=result["kinds"], alerts=count)
     else:
         desk.event("alert_failed", kinds=result["kinds"], alerts=count, exit=result["exit"],
-                   timed_out=result["timed_out"], tail=result["tail"])
+                   timed_out=result["timed_out"], tail=result["tail"],
+                   **({"withheld": result["withheld"]} if result.get("withheld") else {}))
 
 
 def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, timeout: float = TIMEOUT,
@@ -286,17 +295,10 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
         text = text_of(desk, q, held)
-        result = run(desk, cmd, kinds, text, timeout)
-        result["tail"] = [_hide(x, codes) for x in result["tail"]]  # what the command wrote back may echo a code
+        result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes])
         _codes_went(desk, codes, text, result["ok"])
         _record(desk, result, len(q), t)
         return result
-
-
-def _hide(line: str, codes: list) -> str:
-    for x in codes:
-        line = line.replace(x["code"], "[code]").replace(x["code"].lower(), "[code]")
-    return line
 
 
 def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
@@ -363,7 +365,7 @@ def failure_line(desk: Desk) -> str:
     if not isinstance(f, dict):
         return ""
     how = f"timed out after {TIMEOUT} s" if f.get("timed_out") else f"exit {f.get('exit')}"
-    tail = " | ".join(f.get("tail") or [])
+    tail = " | ".join(f.get("tail") or []) or (WITHHELD if f.get("withheld") else "")
     last = rec.get("last") or {}
     later = (f"; a later one went out {_when(last.get('at'))}" if last.get("ok") and (last.get("at") or 0) > (f.get("at") or 0)
              else "")

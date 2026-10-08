@@ -17,7 +17,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
                    kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
-                   PROJECT_INTRO)
+                   PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
                   lane_identity,
@@ -904,8 +904,13 @@ def cmd_release(a):
     if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
         raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
                          "cannot. Say in your report that it may be ready to go out")
-    if a.lane in ("yes", "no") and a.note and a.note[0].lstrip("#").isdigit() \
-            and a.lane not in desk.settings()["lanes"]:
+    if answer_name(a.lane) and a.note and a.note[0].lstrip("#").isdigit():  # always an answer, never a request
+        taken = [n for n in desk.settings()["lanes"] if answer_name(n)]
+        if taken:
+            raise SystemExit(f"hansa: hansa release {a.lane} ID CODE is the principal's answer, but this desk has a "
+                             f"lane named {', '.join(taken)}: that lane must be removed first (hansa lane remove), "
+                             "then pass the code again. Nothing was recorded")
+        a.lane = a.lane.strip().lower()
         _answer_by_code(desk, a)
         return
     note, target = list(a.note), None
@@ -1471,6 +1476,9 @@ def cmd_lane(a):
         s = desk.settings()
         new = json.loads(json.dumps(s))
         if a.action == "add":
+            if answer_name(a.name):
+                raise SystemExit(f"hansa: {a.name} cannot name a lane: yes and no (in any case) are kept for hansa "
+                                 "release yes|no ID CODE, the principal's answer; nothing was changed")
             if a.name in s["lanes"]:
                 raise SystemExit(f"hansa: there is already a lane {a.name}; change it with hansa lane set {a.name} ...")
             # none as lane set takes it: alone it means empty, with other values it is refused
@@ -2162,8 +2170,8 @@ def main(argv=None):
                 f"refused and counted, and after {release.CODE_TRIES} the code is void and only the page answers. A "
                 f"code lapses when the release is answered (on the page too), stopped or no longer what was asked, after "
                 f"{release.CODE_LIFE // 3600} hours, and when a new waiting alert for it gives a new one. With no alert "
-                "command there is no code: the principal answers on the page. Never guess a code, nor ask the "
-                "principal to send it anywhere else")
+                "command there is no code: the principal answers on the page. yes and no are not lane names, so this "
+                "form is always an answer. Never guess a code, nor ask the principal to send it anywhere else")
     p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("lane", nargs="?")

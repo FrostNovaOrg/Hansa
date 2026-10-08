@@ -120,6 +120,7 @@ const T = ZH ? {
   laneRelease:"发布命令：你在这页点头后由 hansa 运行，把基础分支发出去（空＝没有）", f_release:"发布命令",
   alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮）由 hansa 运行，以这台机器的账号在沙箱外、在桌面文件夹里运行；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
+  alertKeep:"提醒命令不要把提醒的文字留在协调者能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
 } : {
@@ -188,6 +189,7 @@ const T = ZH ? {
   laneRelease:"Release command: hansa runs it after your yes on this page, to send the base branch out (blank = none)", f_release:"release",
   alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time), as this machine's account, outside the sandbox, in the desk's folder; the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
+  alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
@@ -403,12 +405,12 @@ function alertSection() {
   const test = h("button", {onclick: async () => { test.disabled = true; said.textContent = T.alertTesting; said.className = "muted";
     try { const r = await api("/api/alert/test", {});
       said.textContent = r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ")
-        || (r.timed_out ? "timeout" : `exit ${r.exit}`) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : ""));
+        || (r.timed_out ? "timeout" : `exit ${r.exit}`) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
     test.disabled = false; }}, T.alertTest);
   return section(T.alerts, h("div", {class:"grid"},
     T.alertCmd, h("div", {}, bind(S.alert, "command"), S.alert.at ? h("div", {class:"muted"}, T.alertSavedAt(when(S.alert.at))) : null,
-      h("div", {class:"row"}, test, said))));
+      h("div", {class:"muted"}, T.alertKeep), h("div", {class:"row"}, test, said))));
 }
 /* an entry of the releases without asking: [lane, target]; a lane name alone, or no target, is the lane's unnamed one */
 const listedKey = x => typeof x === "string" ? [x, ""] : [x.lane, x.target || ""];
