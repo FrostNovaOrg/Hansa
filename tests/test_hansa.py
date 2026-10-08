@@ -14313,7 +14313,7 @@ class DeskTest(unittest.TestCase):
         result = alert.test(self.desk)
         where = Path(result["tail"][0])
         self.assertNotEqual(where.resolve(), self.desk.root.resolve())
-        self.assertNotIn(self.desk.root.resolve(), where.resolve().parents)
+        self.assertEqual(where.resolve().parent, alert.runs_dir(self.desk).resolve())  # in secrets/, closed to agents
         self.assertFalse(where.exists())  # removed afterwards
         self.hansa("lane", "set", "a", "release", "true")
         self.hansa("release", "a")  # with a code too
@@ -14358,6 +14358,88 @@ class DeskTest(unittest.TestCase):
                       "file, a log, a chat history): the code in it approves a release.", readme)
         self.assertIn("must not keep the alert's text anywhere the coordinator can read it",
                       (root / "hansa" / "ui.html").read_text())
+
+    def test_a_killed_servers_alert_folder_is_closed_to_agents_and_swept_at_the_next_start(self):
+        from hansa import alert, run
+        root = Path(__file__).resolve().parent.parent
+        here = self.tmp / "where.txt"
+        cmd = f"pwd > {shlex.quote(str(here))}; cat > here.txt; sleep 60"
+        child = subprocess.Popen([sys.executable, "-c", "import sys; from hansa import alert; from hansa.desk import Desk; "
+                                  "alert.run(Desk(sys.argv[1]), sys.argv[2], 'release_waiting', 'say code AB3DE9')",
+                                  str(self.desk.root), cmd], cwd=root, start_new_session=True)
+        try:
+            for _ in range(200):
+                if here.exists() and here.read_text().strip():
+                    break
+                time.sleep(0.05)
+            folder = Path(here.read_text().strip())
+            for _ in range(200):
+                if (folder / "here.txt").exists() and (folder / "here.txt").read_text():
+                    break
+                time.sleep(0.05)
+        finally:  # the server killed: its alert thread removes nothing
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        self.assertEqual((folder / "here.txt").read_text(), "say code AB3DE9")
+        self.assertEqual(folder.resolve().parent, alert.runs_dir(self.desk).resolve())
+        # in secrets/: the coordinator's rules deny reading it, and workers, verifiers and design sessions too
+        self.assertIn(self.desk.secrets_dir.resolve(), folder.resolve().parents)
+        self.assertIn(self.desk.secrets_dir, run.desk_private(self.desk))
+        self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", cli.permissions(self.desk)["deny"])
+        self.assertEqual(stat.S_IMODE(self.desk.secrets_dir.stat().st_mode), 0o700)
+        # the next hansa serve sweeps it as it starts
+        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaises(RuntimeError):
+            main(["--desk", str(self.desk.root), "serve", "--port", "0"])
+        self.assertFalse(folder.exists())
+        self.assertEqual(list(alert.runs_dir(self.desk).iterdir()), [])
+
+    def test_init_refuses_a_lane_named_yes_or_no(self):
+        for name in ("yes", "NO"):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                main(["init", str(self.tmp / f"new-{name}"), "--repo", str(self.repo), "--lane", name])
+            self.assertIn(f"{name} cannot name a lane: yes and no (in any case) are kept for hansa release yes|no ID "
+                          "CODE", str(e.exception.code))
+            self.assertFalse((self.tmp / f"new-{name}").exists())
+
+    def test_the_page_says_where_the_alert_command_runs(self):
+        root = Path(__file__).resolve().parent.parent
+        page = (root / "hansa" / "ui.html").read_text()
+        self.assertNotIn("in the desk's folder", page)
+        self.assertNotIn("在桌面文件夹里运行", page)
+        self.assertIn("in a temporary folder of its own under the desk's secrets/alert-runs", page)
+        self.assertIn("在桌面 secrets/alert-runs 下它自己的临时文件夹里运行", page)
+        self.assertNotIn("in the desk's folder", (root / "hansa" / "alert.py").read_text())
+
+    def test_a_code_given_as_two_words_is_refused_without_counting_a_wrong_code(self):
+        from hansa import release
+        self.alert_fake()
+        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        refused = self.code_answer("yes", "1", code[:3], code[3:])[1]
+        self.assertIn("takes the code as one word", refused)
+        self.assertIn("Nothing was checked or counted", refused)
+        self.assertEqual(self.events("release_code_wrong"), [])
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
+        self.assertEqual(self.code_answer("yes", "1", f"{code[:3]}-{code[3:]}")[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["release", "--help"])
+        self.assertIn("given as one word (dashes allowed, no spaces", " ".join(out.getvalue().split()))
+        card = " ".join((Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text().split())
+        self.assertIn("The code is one word (dashes allowed, no spaces)", card)
+
+    def test_a_timed_out_alert_names_its_real_time_limit(self):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "sleep 5"})), {"ok": True, "problems": []})
+        self.desk.add_ask("hello")
+        result = alert.send_due(self.desk, gather=0, timeout=0.5)
+        self.assertTrue(result["timed_out"])
+        status = self.hansa("status")
+        self.assertIn("(timed out after 0.5 s)", status)
+        self.assertNotIn(f"after {alert.TIMEOUT} s", status)
 
     # -- small fixes from earlier verifications --
 

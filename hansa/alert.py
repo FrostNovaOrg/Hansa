@@ -9,7 +9,8 @@ when hansa serve has finished no round for STUCK_ALERT seconds; not for ordinary
 coordinator. The coordinator sends none: no hansa command does.
 
 Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
-as the desk's account, outside the sandbox, in the desk's folder, with hansa's own environment (not a lane's env),
+as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
+with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together) and the text on standard input (UTF-8,
 keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alerts that come within GATHER seconds
 of each other go out in one run (none waits more than MOST_WAIT); one run at a time (.hansa/alert.lock), and at
@@ -21,7 +22,9 @@ that fails or times out is recorded (event alert_failed, and .hansa/alert-last.j
 there is no retry: the next alert tries again. A
 release_waiting alert carries the release's one-time code (release.new_code), which goes nowhere else: its queue
 entry is gone once sent, and none of what the command printed for such an alert is kept (only how it ended).
-The command runs in a temporary folder of its own, not the desk's. The text is in English: the page has no language setting (it
+That folder is removed when the command ends, and what a stopped
+or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
+verifiers and design sessions, so a leftover that holds the alert's text is never theirs to read. The text is in English: the page has no language setting (it
 follows the browser's language, which hansa does not know when it sends).
 """
 from __future__ import annotations
@@ -31,6 +34,7 @@ import fcntl
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -59,6 +63,25 @@ def queue_file(desk: Desk) -> Path:
 
 def last_file(desk: Desk) -> Path:
     return desk.state_dir / "alert-last.json"
+
+
+def runs_dir(desk: Desk) -> Path:
+    """Where each run's own folder is made: in secrets/, which the coordinator, workers, verifiers and design sessions
+    may not read, as what the command writes there may hold the alert's text and its code."""
+    return desk.secrets_dir / "alert-runs"
+
+
+def sweep_runs(desk: Desk) -> None:
+    """Remove the folders of runs that a stopped or killed hansa serve left (hansa serve calls this as it starts,
+    before its alert thread runs)."""
+    d = runs_dir(desk)
+    if d.is_dir():
+        for x in d.iterdir():
+            if x.is_dir() and not x.is_symlink():
+                shutil.rmtree(x, ignore_errors=True)
+            else:
+                with contextlib.suppress(OSError):
+                    x.unlink()
 
 
 def command(s: dict) -> str:
@@ -177,8 +200,9 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
 
 
 def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, codes=()) -> dict:
-    """Run the alert command once: {ok, exit, timed_out, tail, at}. It runs in a folder of its own, removed after,
-    so that what it writes to a relative path lands nowhere hansa keeps. codes: the one-time codes the text holds;
+    """Run the alert command once: {ok, exit, timed_out, limit, tail, at}. It runs in a folder of its own under
+    runs_dir, removed after however the command ends (what a killed server left, sweep_runs removes), so that what it
+    writes to a relative path lands nowhere hansa keeps or anyone but the principal reads. codes: the one-time codes the text holds;
     then none of what the command printed is kept (tail is empty, withheld says why), as it may echo a code in any
     form."""
     env = {**os.environ, "HANSA_ALERT_KIND": kinds}
@@ -187,8 +211,11 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, c
     timed_out, code, out = False, None, b""
     # stdin and output are files, not pipes: the command's own exit ends the run, even when a child it left behind
     # still holds them; only at the time limit is its whole group killed
+    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(desk.secrets_dir, 0o700)
+    runs_dir(desk).mkdir(mode=0o700, exist_ok=True)
     with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said, \
-            tempfile.TemporaryDirectory(prefix="hansa-alert-") as here:
+            tempfile.TemporaryDirectory(prefix="run-", dir=runs_dir(desk)) as here:
         given.write(text.encode("utf-8"))
         given.seek(0)
         try:
@@ -206,7 +233,8 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, c
             out = said.read()
         except OSError as e:
             out = str(e).encode()
-    result = {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "tail": [], "at": now(),
+    result = {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "limit": timeout, "tail": [],
+              "at": now(),
               "kinds": kinds}
     if codes:
         return {**result, "withheld": WITHHELD}
@@ -254,7 +282,7 @@ def _record(desk: Desk, result: dict, count: int, began: float) -> None:
         desk.event("alert_sent", kinds=result["kinds"], alerts=count)
     else:
         desk.event("alert_failed", kinds=result["kinds"], alerts=count, exit=result["exit"],
-                   timed_out=result["timed_out"], tail=result["tail"],
+                   timed_out=result["timed_out"], limit=result.get("limit"), tail=result["tail"],
                    **({"withheld": result["withheld"]} if result.get("withheld") else {}))
 
 
@@ -364,7 +392,9 @@ def failure_line(desk: Desk) -> str:
     f = rec.get("failed")
     if not isinstance(f, dict):
         return ""
-    how = f"timed out after {TIMEOUT} s" if f.get("timed_out") else f"exit {f.get('exit')}"
+    limit = f.get("limit") if isinstance(f.get("limit"), (int, float)) and not isinstance(f.get("limit"), bool) \
+        else TIMEOUT  # recorded before the limit was: the default
+    how = f"timed out after {limit:g} s" if f.get("timed_out") else f"exit {f.get('exit')}"
     tail = " | ".join(f.get("tail") or []) or (WITHHELD if f.get("withheld") else "")
     last = rec.get("last") or {}
     later = (f"; a later one went out {_when(last.get('at'))}" if last.get("ok") and (last.get("at") or 0) > (f.get("at") or 0)

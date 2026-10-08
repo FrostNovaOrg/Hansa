@@ -492,7 +492,8 @@ page gives.
   in the principal's alert: hansa keeps only a keyed hash of it (the key is in
   the desk's `secrets/`, which no agent may read), keeps none of what the
   alert command prints for such an alert (only how it ended), runs the command
-  in a temporary folder of its own rather than the desk's, and never writes
+  in a temporary folder of its own under the desk's `secrets/alert-runs`
+  (closed to every agent, removed when it ends), and never writes
   the code in events, the release's
   record, `hansa status`, `hansa release` or the page, which says only whether
   a code went out and when. It answers that release only, once, and is
@@ -568,7 +569,9 @@ page gives.
   forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), and when
   its own rounds have stopped for 15 minutes; not for ordinary task events,
   which go to the coordinator. It runs as the desk's account, outside the
-  sandbox, in a temporary folder of its own (removed after), with hansa's own environment (not a lane's),
+  sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
+  coordinator, workers, verifiers and design sessions; removed when the command ends, and what a stopped or killed
+  `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
   the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
   `release_stopped`, `ask`, `server_stuck`, `test`; comma-separated when several go out together)
   and the text on standard input: UTF-8, in English, keys removed, cut at 1,000

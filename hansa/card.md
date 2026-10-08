@@ -316,7 +316,8 @@ to a public repository, a deploy to production) waits for the principal:
   alert command: without one, the page alone answers, and `hansa status` and
   `hansa explain` say which). When the principal gives you a code, pass it:
   `hansa release yes ID CODE`, or `hansa release no ID CODE [reason]` to
-  refuse. It answers that release only, once; a wrong one is refused and
+  refuse. The code is one word (dashes allowed, no spaces): a yes with a
+  word too many is refused, and nothing is counted. It answers that release only, once; a wrong one is refused and
   counted, and after 3 the code is void and only the page answers. It lapses
   when the release is answered, stopped or no longer what was asked, after
   24 hours, or when a new alert for it brings a new one. Never guess a code,
