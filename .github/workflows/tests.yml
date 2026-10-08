@@ -1,6 +1,10 @@
 # hansa's test suite on GitHub's machines. Unlike a sandboxed run, ports on the loopback work here, so the
 # tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not.
 # No secrets: the suite uses stand-ins for claude and srt, and needs no login.
+# On macOS the real srt is installed too, and one test runs it with the sandbox settings hansa gives a worker,
+# a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip without it): the
+# stand-in cannot show that the operating system accepts them. Not on Linux: bubblewrap needs unprivileged
+# user namespaces, which GitHub's Ubuntu machines restrict (AppArmor) unless the machine's settings are changed.
 name: tests
 
 on:
@@ -27,6 +31,7 @@ jobs:
         python: ["3.9", "3.x"]  # the lowest hansa supports, and the newest
     env:
       HANSA_TESTS_NEED_PORTS: "1"
+      HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -34,5 +39,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      - name: Install srt, the sandbox runtime (macOS)
+        if: runner.os == 'macOS'
+        run: npm install -g @anthropic-ai/sandbox-runtime
       - name: Run the tests
         run: python3 -m unittest -v tests.test_hansa

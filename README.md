@@ -211,6 +211,29 @@ page gives.
   could make there reaches nothing outside the sandbox: git obeys a new
   `commondir` or a worktree's folder only through the checks below, and hansa
   commits nothing while a merge or the like it did not start is under way.
+  Before it starts a worker, a verifier or a design session, hansa serve tries
+  that run's sandbox: `srt` with the same filesystem and network settings
+  Claude Code is given, on `/usr/bin/true`, once for each set of settings
+  while it runs (a lane's tasks do not each pay for it; a restart tries
+  again). When srt refuses them, the run does not start: its task is held,
+  not failed and without using a try, and `hansa status` shows the lane as
+  unable to run, with srt's first line and the part of the settings it
+  refuses (the exact deny-write paths, the deny-write patterns, the deny-read
+  list, the write list or the network, each tried alone); the principal's
+  alert is told once for each reason. Held tasks start by themselves once a
+  try passes: after a fix, restart `hansa serve` (a change of the settings
+  tries again too). Without srt, or with an srt that cannot run at all, the
+  run starts as before, in Claude Code's own sandbox, which is set to fail
+  rather than run a command outside it (`failIfUnavailable`). Claude Code
+  carries its own copy of the sandbox library, which may differ from the srt
+  installed, so the try is a guard, not proof: hansa also reads each run's
+  session record while it runs, and when a Bash result begins with
+  `sandbox-exec: ` (macOS) or `bwrap: ` (Linux) before any Bash call of the
+  run succeeded, it stops the run and holds its task the same way ("the
+  sandbox could not start: ..."), not counting it as a try. The deny patterns
+  write their character classes as ranges (`[0-9A-Za-np-z._-]`): macOS refuses
+  a sandbox with two or more classes that list some sixty characters one by
+  one, and a negated class cannot stand in, since srt escapes its `^`.
   Before hansa runs git in a worktree, it checks the worktree's `.git` file;
   that the git folder it leads to still points back to the repository
   (`commondir`) and to the worktree (`gitdir`) as git wrote them; that its

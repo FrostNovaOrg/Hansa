@@ -3,7 +3,8 @@
 The principal sets one command line on the page (settings `alert`, which only the page saves: desk.PRINCIPAL_ONLY);
 the page records that it saved it, and when. hansa runs it when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
-own Stop on the page sends none), when a request to the principal is filed (hansa ask), and
+own Stop on the page sends none), when a request to the principal is filed (hansa ask), when a lane's runs cannot
+start because their sandbox cannot (once for each reason: run.hold), and
 when hansa serve has finished no round for STUCK_ALERT seconds; not for ordinary task events, which go to the
 coordinator. The coordinator sends none: no hansa command does.
 
@@ -36,7 +37,7 @@ from pathlib import Path
 
 from .desk import Desk, now, read_json, write_json
 
-KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "test")
+KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "test")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
@@ -135,6 +136,11 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     elif kind == "ask":
         a = next((x for x in desk.asks() if x.get("id") == fields.get("id")), {})
         add(desk, "ask", f"request #{fields.get('id')} waits for you on the page: {a.get('text', '')}")
+    elif kind == "sandbox_held" and fields.get("alert"):  # once for each reason (run.hold)
+        from .run import sandbox_held_text
+        why = sandbox_held_text({**fields, "kind": fields.get("run")})
+        add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; task "
+                             f"{fields.get('task')} is held, not failed")
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
@@ -335,4 +341,5 @@ def explain_line(s: dict) -> str:
                 "release waits for the principal or ends, or a request is filed; you send no alerts and cannot set it.")
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
-            "filed (hansa ask), or hansa serve finishes no round for a long time. You send no alerts and cannot set it.")
+            "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, or hansa serve finishes no "
+            "round for a long time. You send no alerts and cannot set it.")

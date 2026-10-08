@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -305,7 +306,7 @@ DESIGN_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.e
 DESIGN_ON_LINUX = ("design sessions do not run on Linux: there the sandbox cannot keep a session that commits from "
                    "making or moving other branches in git's shared folder (the base among them), so hansa does not "
                    "start one; work on the lane with tasks, or open the design session on a Mac")
-# The characters a deny pattern lists in a [...] class (others_than), with - last: those of the names hansa and
+# The characters a deny pattern keeps in a [...] class (others_than, as ranges: name_class), with -: those of the names hansa and
 # git give branches, worktrees' folders and git's own files. A name made later with another character is not
 # kept by the patterns (one there when the run starts is, by name), and hansa never uses one.
 NAME_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
@@ -512,6 +513,196 @@ def try_srt_at_start(desk: Desk) -> dict:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return srt_record(desk)
+
+
+# Before hansa starts a worker, a verifier or a design session it tries the run's sandbox: srt with the same
+# filesystem and network settings Claude Code is given, on /usr/bin/true (sandbox_guard). Claude Code carries its
+# own copy of the sandbox library, which may differ from the srt installed, so a try that passes is a guard, not
+# proof: hansa also watches the run's first Bash calls (sandbox_start_failure). A try that fails holds the task
+# (not failed, no try used) and the lane: hansa status says why. Kept by a fingerprint of the settings in this
+# process alone, so a lane's tasks do not each pay for it, and a restart tries again.
+SANDBOX_HELD = "sandbox-held.json"  # in the desk's state: {"lanes": {lane: {why, part, kind, at}}, "told": [why]}
+SANDBOX_TRIES = {}  # fingerprint of the settings: what the try found (try_sandbox)
+# Each part of the settings, tried alone when the whole is refused, to name what the sandbox refuses
+SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x for x in fs["denyWrite"] if not _glob(x)]}),
+                 ("the deny-write patterns", lambda fs, net: {"denyWrite": [x for x in fs["denyWrite"] if _glob(x)]}),
+                 ("the deny-read list", lambda fs, net: {"denyRead": fs["denyRead"]}),
+                 ("the write list", lambda fs, net: {"allowWrite": fs["allowWrite"]}),
+                 ("the network", lambda fs, net: {"network": net}))
+# What a Bash result begins with when the sandbox could not start: macOS's sandbox-exec, Linux's bubblewrap
+SANDBOX_START_FAILED = ("sandbox-exec: ", "bwrap: ")
+
+
+def _glob(x: str) -> bool:
+    return any(c in x for c in "*?[")
+
+
+class SandboxRefused(RuntimeError):
+    """srt ran, and refused a run's sandbox settings: the run does not start, and its task is held.
+    str(): what the principal is told."""
+
+    def __init__(self, said: str, part: str = "", kind: str = "") -> None:
+        self.said, self.part, self.kind = said, part, kind
+        super().__init__(f"the sandbox could not start: {said}" + (f" (refused: {part})" if part else ""))
+
+
+def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
+    """srt's settings for a try of the sandbox Claude Code gets (`box`, the "sandbox" of sandbox_settings or
+    design_sandbox): its filesystem and network, the worktree and the temporary folder `tmp` written, and, in a
+    linked worktree, the common git folder, which Claude Code opens for writing too."""
+    fs, net = box["filesystem"], box["network"]
+    common, own = git_folders(wt)
+    opened = [common] if own.resolve() != common.resolve() else []
+    network = {"allowedDomains": list(net.get("allowedDomains", [])), "deniedDomains": []}
+    if net.get("allowLocalBinding"):
+        network["allowLocalBinding"] = True
+    return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp, *opened]) + list(fs.get("allowWrite", [])),
+                                               "denyRead": list(fs.get("denyRead", [])),
+                                               "denyWrite": list(fs.get("denyWrite", []))}}
+
+
+def _srt_true(path: str, settings: dict, tmp: str, cwd) -> tuple:
+    """srt with these settings on /usr/bin/true: (whether it ran, srt's first line, or why it did not)."""
+    f = Path(tmp) / "try-settings.json"
+    write_json(f, settings)
+    try:
+        r = subprocess.run([path, "--settings", str(f), "--", "/usr/bin/true"], cwd=str(cwd),
+                           env={**base_env(), "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False, f"no answer in {SRT_TRY_SECONDS} s"
+    except OSError as e:
+        return False, str(e)[:300]
+    if r.returncode == 0:
+        return True, ""
+    lines = [x.strip() for x in (r.stderr + "\n" + r.stdout).splitlines() if x.strip()]
+    return False, f"{lines[0][:300] if lines else 'nothing'} (exit {r.returncode})"
+
+
+def try_sandbox(box: dict, wt: Path) -> dict:
+    """Try the sandbox `box` (sandbox_try_settings) with srt, once for each fingerprint of its settings in this
+    process: {"ok": True}; {"ok": False, "said": srt's first line, "part": what of the settings it refuses, found
+    by trying each part alone (SANDBOX_PARTS)}; or {"ok": None, "said": why} when srt is not there or does not run
+    even with nothing in its settings: then Claude Code's own sandbox (failIfUnavailable) is all there is."""
+    path = shutil.which("srt")
+    if not path:
+        return {"ok": None, "said": SRT_MISSING}
+    tmp = tempfile.mkdtemp(prefix="hansa-try-")
+    try:
+        full = sandbox_try_settings(box, wt, tmp)
+        key = hashlib.sha256(json.dumps([path, full], sort_keys=True).replace(tmp, "\0tmp").encode()).hexdigest()
+        if key in SANDBOX_TRIES:
+            return SANDBOX_TRIES[key]
+        ran, said = _srt_true(path, full, tmp, wt)
+        bare = {"network": {"allowedDomains": [], "deniedDomains": []},
+                "filesystem": {"allowWrite": full_paths([tmp]), "denyRead": [], "denyWrite": []}}
+        if ran:
+            out = {"ok": True}
+        elif not _srt_true(path, bare, tmp, wt)[0]:
+            out = {"ok": None, "said": said}  # srt does not run at all: not these settings' doing
+        else:
+            part = ""
+            for name, pick in SANDBOX_PARTS:
+                alone = pick(full["filesystem"], full["network"])
+                if not any(alone.values()):
+                    continue
+                fs = {**bare["filesystem"], **{k: v for k, v in alone.items() if k != "network"}}
+                if "allowWrite" in alone:
+                    fs["allowWrite"] = bare["filesystem"]["allowWrite"] + alone["allowWrite"]
+                if not _srt_true(path, {"network": alone.get("network", bare["network"]), "filesystem": fs}, tmp, wt)[0]:
+                    part = name
+                    break
+            out = {"ok": False, "said": said, "part": part or "the settings as a whole (no part alone)"}
+        SANDBOX_TRIES[key] = out
+        return out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path) -> None:
+    """Try the sandbox a worker, a verifier or a design session (`kind`) of this lane is about to get (try_sandbox):
+    raise SandboxRefused when srt refuses it. A try that passes clears what an earlier one held the lane for."""
+    r = try_sandbox(box, wt)
+    if r["ok"] is False:
+        raise SandboxRefused(r["said"], r["part"], kind)
+    if r["ok"]:
+        sandbox_clear(desk, lane_name)
+
+
+def sandbox_held(desk: Desk) -> dict:
+    """The lanes whose runs' sandbox could not start, as last tried: {lane: {why, part, kind, at}}."""
+    rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
+    return rec.get("lanes") or {} if isinstance(rec, dict) else {}
+
+
+def sandbox_held_text(h: dict) -> str:
+    """Why a lane's runs are held (sandbox_held), and what starts them again, in a clause."""
+    return (f"its {h.get('kind') or 'run'}'s sandbox could not start: "
+            + str(h.get("why") or "?").removeprefix("the sandbox could not start: ")
+            + "; its tasks start by themselves once a try of the sandbox passes (after a fix, restart hansa serve; "
+              "hansa explain server)")
+
+
+def sandbox_clear(desk: Desk, lane_name: str) -> None:
+    with desk.lock():
+        rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
+        was = lane_name in (rec.get("lanes") or {})
+        if was:
+            rec["lanes"].pop(lane_name)
+            write_json(desk.state_dir / SANDBOX_HELD, rec)
+    if was:
+        desk.event("sandbox_ready", lane=lane_name)
+
+
+def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: str = "") -> None:
+    """A run whose sandbox could not start: its task goes back to the queue, held (no try used), and its lane is
+    recorded as unable to run, for hansa status. The principal's alert is told once for each reason."""
+    why = desk.redact(why)[:600]
+    held = {"why": why, "part": part, "kind": kind, "lane": lane_name, "at": now()}
+    desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
+                {"state": "cancelled", "phase": "", "error": "cancelled before it started", "finished": now()}
+                if m.get("cancel") else
+                {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None, "held": held,
+                 "error": why, "sandbox_failed": None})
+    remove_sandbox_tmp(desk, tid)
+    with desk.lock():
+        rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
+        told = list(rec.get("told") or [])
+        new = why not in told
+        desk.state_dir.mkdir(exist_ok=True)
+        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": {**(rec.get("lanes") or {}), lane_name: {
+            k: held[k] for k in ("why", "part", "kind", "at")}}, "told": [*told, why] if new else told})
+    desk.event("sandbox_held", task=tid, lane=lane_name, run=kind, why=why, part=part, alert=new)
+
+
+def _bash_says(c: dict, d: dict) -> list:
+    """What a Bash call's result said, as texts to look at the start of: its stderr and stdout where the row
+    has them, and the result's text without the "Exit code N" line Claude Code puts first."""
+    result = d.get("toolUseResult") if isinstance(d.get("toolUseResult"), dict) else {}
+    said = "\n".join(_strings(c.get("content"))).lstrip()
+    said = re.sub(r"^(Error: )?Exit code \d+\s*\n", "", said).lstrip()
+    return [x.lstrip() for x in (result.get("stderr"), result.get("stdout"), said) if isinstance(x, str)]
+
+
+def sandbox_start_failure(home: Path, sid: str):
+    """From a run's session record: (the line, None) when a Bash result says the sandbox could not start
+    (SANDBOX_START_FAILED) before any Bash call succeeded; (None, True) once one has succeeded, after which
+    there is nothing to look for; (None, False) while neither is in the record yet."""
+    calls = set()
+    for d in _rows(home, sid) or []:
+        content = (d.get("message") or {}).get("content")
+        for c in content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use" and c.get("name") == "Bash":
+                calls.add(c.get("id"))
+            elif c.get("type") == "tool_result" and c.get("tool_use_id") in calls:
+                if not c.get("is_error"):
+                    return None, True
+                for x in _bash_says(c, d):
+                    if x.startswith(SANDBOX_START_FAILED):
+                        return x.splitlines()[0][:300], None
+    return None, False
 
 
 def srt_when(rec: dict) -> str:
@@ -1066,13 +1257,34 @@ def others_than(folder: Path, names) -> list:
 
     def walk(start, rest):
         nexts = sorted({s[0] for s in rest if s})
-        out.append(f"{folder}/{start}[{''.join(c for c in NAME_CHARS if c not in nexts)}{'' if '-' in nexts else '-'}]*")
+        out.append(f"{folder}/{start}[{name_class(nexts)}]*")
         if start and "" not in rest:
             out.append(f"{folder}/{start}")
         for c in nexts:
             walk(start + c, [s[1:] for s in rest if s and s[0] == c])
     walk("", list(names))
     return out
+
+
+def name_class(left_out) -> str:
+    """What goes between [ and ] for the characters of NAME_CHARS and - but `left_out`, written as ranges: digits,
+    capitals and small letters each as runs (0-9A-Za-np-z), then . and _ when kept, - last. macOS refuses a
+    sandbox whose profile holds two or more classes listing some sixty characters one by one; ranges it takes. A
+    negated class cannot stand in: srt escapes ^ (so [^w] holds ^ and w), and [!w] holds ! and w."""
+    out = ""
+    for group in ("0123456789", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"):
+        kept = [c in NAME_CHARS and c not in left_out for c in group]
+        i = 0
+        while i < len(group):
+            if not kept[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < len(group) and kept[j + 1]:
+                j += 1
+            out += group[i] if i == j else f"{group[i]}{group[j]}" if j == i + 1 else f"{group[i]}-{group[j]}"
+            i = j + 1
+    return out + "".join(c for c in "._" if c in NAME_CHARS and c not in left_out) + ("" if "-" in left_out else "-")
 
 
 def _git_patterns(wt: Path, committing: str = "") -> list:
@@ -2599,7 +2811,10 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     if wgit(desk, wt, "branch", "--list", branch):
         # an earlier try of this task: keep its commits under another name
         n = len(meta.get("attempts", []))
-        wgit(desk, wt, "branch", "-m", branch, f"{branch}-try{n}")
+        name, k = f"{branch}-try{n}", 2
+        while wgit(desk, wt, "branch", "--list", name):  # a try that did not count (hold) kept one under it
+            name, k = f"{branch}-try{n}-{k}", k + 1
+        wgit(desk, wt, "branch", "-m", branch, name)
     wgit(desk, wt, "checkout", "-q", "-B", branch, start)
     if updating:
         desk.update(tid, update_conflicts=update_branch(
@@ -2768,7 +2983,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     cancelled while hansa prepared it."""
     meta = desk.transition(tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname,
                            started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False,
-                           cancel=False)
+                           cancel=False, held=None, sandbox_failed=None)
     if not meta:
         return None
     s = desk.settings()
@@ -2806,7 +3021,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    argv += isolated(wt, sandbox_settings(desk, lane, pname, p, wt))
+    box = sandbox_settings(desk, lane, pname, p, wt)
+    sandbox_guard(desk, lane_name, "verifier" if verifying else "worker", box["sandbox"], wt)  # else held (hold)
+    argv += isolated(wt, box)
     left = write_list(desk, lane)[1]  # what the sandbox (the setup's and the check's too) was not given
     desk.update(tid, write_left_out=left)
     for line in left:
@@ -3024,11 +3241,16 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname, model_asked=model,
         effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
         started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False, cancel=False,
-        tmux=[sock, name], setup_ran=bool(lane.get("setup")))
+        tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None)
     if not meta:
         return
     wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
     desk.update(tid, base=base, branch=f"task/{tid}", worktree=str(wt), session_id=str(uuid.uuid4()))
+    try:
+        check_git_file(desk, wt)  # design_sandbox asks git in the worktree
+    except GitFileChanged as e:
+        raise RuntimeError(git_file_changed(desk, tid, e)) from None
+    sandbox_guard(desk, lane_name, "design session", design_sandbox(desk, lane, pname, p, wt, f"task/{tid}")["sandbox"], wt)
     if cancelled_before_start(desk, tid):
         return
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
@@ -3302,6 +3524,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state, error = "failed", changed
     elif meta.get("cancel"):
         state, error = "cancelled", "cancelled"
+    elif meta.get("sandbox_failed"):  # stopped by sandbox_watch: held, without using a try
+        state, error = "queued", f"the sandbox could not start: {meta['sandbox_failed']}"
     elif setup:
         state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
                                   f"started; hansa show {tid} has the setup's last lines")
@@ -3370,9 +3594,17 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             tries = [*attempts[:-1], {**attempts[-1], **run_numbers(meta, fields)}]
             kept = {"usage": {}, "turns": None}
         again = {"resumed": None} if final == "queued" else {}
+        if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
+            kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
+                "provider": meta.get("provider", ""), "at": now(), **run_numbers(meta, fields),
+                "why": f"stopped: the sandbox could not start ({meta['sandbox_failed']}); the task was held"}]}
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
                 "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
+    if meta["state"] == "queued" and meta.get("sandbox_failed"):
+        hold(desk, tid, meta.get("lane") or "", meta["error"], "",
+             {"verify": "verifier", "design": "design session"}.get(meta.get("kind"), "worker"))
+        meta = desk.meta(tid)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
     if meta.get("phase") != "checking":  # else after its check, which carries the same id
@@ -4124,6 +4356,39 @@ class Dispatcher:
         self.try_procs = {}  # tries (hansa lane try) this server started, by lane
         self.release_procs = {}  # releases (hansa release) this server started, by id
         self.resting = None  # the providers resting at the last round; None before the first
+        self.held = {}  # lanes whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
+        self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
+
+    def sandbox_waits(self, ln: str, s: dict) -> bool:
+        """Whether a lane's tasks wait for its sandbox: held by this server (hold) with the settings as they are.
+        Changed settings, or a restart, try it again: the task starts once a try passes."""
+        return ln in self.held and self.held[ln] == json.dumps(s, sort_keys=True, default=str)
+
+    def hold(self, tid: str, ln: str, s: dict, e: SandboxRefused) -> None:
+        hold(self.desk, tid, ln, str(e), e.part, e.kind)
+        self.held[ln] = json.dumps(s, sort_keys=True, default=str)
+
+    def sandbox_watch(self, s: dict) -> None:
+        """Stop a run whose session record says its sandbox could not start before any of its Bash calls succeeded
+        (sandbox_start_failure): Claude Code's own copy of the sandbox can refuse what srt's try let through. Its
+        task is held when it ends (finish), without using a try."""
+        for m in self.desk.tasks():
+            sid = m.get("session_id") or ""
+            if m["state"] != "running" or m.get("phase") or not m.get("pid") or m.get("sandbox_failed") \
+                    or not sid or sid in self.sandbox_seen or m.get("cancel"):
+                continue
+            p = s["providers"].get(m.get("provider") or "")
+            if not p:
+                continue
+            line, settled = sandbox_start_failure(config_home(self.desk, m["provider"], p), sid)
+            if settled:
+                self.sandbox_seen.add(sid)
+            if not line:
+                continue
+            self.desk.update(m["id"], sandbox_failed=self.desk.redact(line))
+            self.held[m.get("lane")] = json.dumps(s, sort_keys=True, default=str)
+            self.desk.event("sandbox_failed", task=m["id"], lane=m.get("lane"), line=self.desk.redact(line))
+            stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
 
     def ended(self, tid: str, returncode) -> None:
         if self.desk.meta(tid).get("phase") == "checking":
@@ -4416,6 +4681,7 @@ class Dispatcher:
                 if not m.get("cancel"):
                     desk.update(m["id"], timed_out=True)
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
+        self.sandbox_watch(s)
         self.tries(s)
         from .release import tick as releases
         releases(desk, s, self.release_procs)  # before merge checks: a yes waits for none that is only queued
@@ -4426,9 +4692,11 @@ class Dispatcher:
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
         for m in desk.tasks():  # a design session has its own worktree and waits on the principal
             if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
-                    and m["lane"] not in designing:
+                    and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s):
                 try:
                     start_design(desk, m["id"], m["lane"])
+                except SandboxRefused as e:  # held, not failed: it starts once a try passes
+                    self.hold(m["id"], m["lane"], s, e)
                 except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
                     not_started(desk, m["id"], e)
                 else:
@@ -4442,7 +4710,7 @@ class Dispatcher:
             if m["state"] != "queued" or m.get("kind") == "design":
                 continue
             for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
-                if ln in busy or ln not in s["lanes"]:
+                if ln in busy or ln not in s["lanes"] or self.sandbox_waits(ln, s):
                     continue
                 pname = next((p for p in s["lanes"][ln]["providers"]
                               if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
@@ -4450,6 +4718,8 @@ class Dispatcher:
                     continue
                 try:
                     proc = start(desk, m["id"], ln, pname)
+                except SandboxRefused as e:  # held, not failed: it starts once a try passes
+                    self.hold(m["id"], ln, s, e)
                 except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
                     not_started(desk, m["id"], e)
                 else:
@@ -4639,9 +4909,13 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
     if not lanes:
         return "no lanes in settings"
     why = []
+    held = sandbox_held(desk)
     for ln in lanes:
         if ln not in s["lanes"]:
             why.append(f"lane {ln} is not in settings")
+            continue
+        if ln in held:
+            why.append(f"HELD: lane {ln} cannot run, {sandbox_held_text(held[ln])}")
             continue
         if ln in busy:
             why.append(f"lane {ln} is busy")

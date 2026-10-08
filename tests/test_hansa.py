@@ -251,6 +251,25 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
                       "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
                       **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
     sys.exit(0)
+if os.environ.get("FAKE_SANDBOX_START"):  # "first", "after-ok": a Bash call whose sandbox could not start
+    sid = sys.argv[sys.argv.index("--session-id") + 1]
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+    os.makedirs(os.path.dirname(rec), exist_ok=True)
+    def call(i, cmd, said, err, result):
+        return [{"type": "assistant", "message": {"id": "s" + i, "content": [
+                    {"type": "tool_use", "id": "toolu_s" + i, "name": "Bash", "input": {"command": cmd}}]}},
+                {"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_s" + i, "is_error": err, "content": said}]},
+                 "toolUseResult": result}]
+    rows = []
+    if os.environ["FAKE_SANDBOX_START"] == "after-ok":  # a command whose own output names the words succeeded first
+        rows += call("0", "cat notes.txt", "sandbox-exec: noted in a file", False,
+                     {"stdout": "sandbox-exec: noted in a file", "stderr": "", "interrupted": False})
+    failed = "sandbox-exec: sandbox_apply: Invalid argument"
+    rows += call("1", "git status", "Exit code 71\n" + failed, True, "Error: Exit code 71\n" + failed)
+    with open(rec, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    time.sleep(float(os.environ.get("FAKE_SANDBOX_WAIT", "0")))
 if os.environ.get("FAKE_STOP_AT_TURNS"):
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -472,9 +491,13 @@ class DeskTest(unittest.TestCase):
             root.start()
             self.addCleanup(root.stop)
 
-    def srt_calls(self, tries=False) -> list:
-        """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts."""
+    def srt_calls(self, tries=False, sandbox=False) -> list:
+        """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts; sandbox: only its
+        tries of a worker's, a verifier's or a design session's sandbox, on /usr/bin/true (run.try_sandbox)."""
         calls = [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
+        if sandbox:
+            return [c for c in calls if c["argv"][-2:] == ["--", "/usr/bin/true"]]
+        calls = [c for c in calls if c["argv"][-2:] != ["--", "/usr/bin/true"]]
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
 
     @staticmethod
@@ -8429,6 +8452,217 @@ class DeskTest(unittest.TestCase):
             folder = stat.S_ISDIR((after.get(p) or before[p])[0])
             self.assertTrue(may_write({}, p, rules) or folder and p in holders, p)
         self.assertNotIn(str(Path(rules[0][0]).resolve() / "HEAD"), changed)  # git commits and merges without it
+
+    def test_the_git_deny_patterns_write_their_classes_as_ranges_and_keep_the_same_names(self):
+        from hansa import run
+
+        def listed(folder, names):  # others_than as it was: each class listing every character it keeps
+            out = []
+
+            def walk(start, rest):
+                nexts = sorted({s[0] for s in rest if s})
+                out.append(f"{folder}/{start}[{''.join(c for c in run.NAME_CHARS if c not in nexts)}"
+                           f"{'' if '-' in nexts else '-'}]*")
+                if start and "" not in rest:
+                    out.append(f"{folder}/{start}")
+                for c in nexts:
+                    walk(start + c, [s[1:] for s in rest if s and s[0] == c])
+            walk("", list(names))
+            return out
+        for i, name in enumerate(("o0", "a-x", "ab")):  # other worktrees, two whose names start as the lane's does
+            sh("git", "worktree", "add", "-q", "-b", f"task/t09{i}", str(self.tmp / name), cwd=self.repo)
+        lane = self.desk.settings()["lanes"]["a"]
+        wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
+        cases = [*run._git_open(wt), *run._git_open(dwt, "task/t0002")]
+        common = run.git_folders(wt)[0]
+        self.assertIn((common, ("worktrees",)), cases)  # the common folder with worktrees open
+        self.assertIn((common / "worktrees", (wt.name,)), cases)  # the worktree's folder among the others
+        self.assertIn((common / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)  # the session's branch
+        self.assertIn((common / "logs" / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)
+        chars = run.NAME_CHARS + "-" + "^!/ ~@é"  # and a few outside them
+        for folder, names in cases:
+            old, new = listed(folder, names), run.others_than(folder, names)
+            self.assertEqual(len(old), len(new), folder)
+            for a, b in zip(old, new):
+                if "[" not in a:
+                    self.assertEqual(a, b)
+                    continue
+                cls = b[b.rindex("[") + 1:b.rindex("]")]
+                self.assertNotRegex(cls, "012|ABC|abc|xyz", b)  # runs, not every character one by one
+                self.assertTrue(re.fullmatch(r"([0-9A-Za-z](-[0-9A-Za-z])?)*\.?_?-?", cls), b)  # ranges, . _, - last
+                self.assertLess(len(cls), 30, b)  # some sixty, listed one by one
+                starts = {n[:k] for n in names for k in range(len(n) + 1)}
+                for start in starts:
+                    for c in chars:
+                        for name in (start + c, start + c + "x"):
+                            p = f"{folder}/{name}"
+                            self.assertEqual(bool(re.match(sandbox_glob(a), p)), bool(re.match(sandbox_glob(b), p)),
+                                             (a, b, name))
+        self.assertIn("[0-9A-Za-su-z._-]*", " ".join(run.others_than(common / "refs" / "heads", ("task",))))
+
+    def refusing_srt(self, rule: str) -> None:
+        """The stand-in srt, refusing a try of a run's sandbox (on /usr/bin/true) whose `settings` hold for this
+        rule, as macOS refused one: with sandbox-exec's line and exit 71."""
+        srt = self.tmp / "bin" / "srt"
+        srt.write_text(srt.read_text().replace("os.execvp(", (
+            f"if args[-1] == '/usr/bin/true' and ({rule}):\n"
+            "    sys.stderr.write('sandbox-exec: sandbox_apply: Invalid argument\\n')\n"
+            "    sys.exit(71)\nos.execvp("), 1))
+
+    def test_a_worker_whose_sandbox_srt_refuses_does_not_start_and_its_task_is_held(self):
+        from hansa import alert, run
+        self.refusing_srt("settings['filesystem']['denyRead']")
+        with unittest.mock.patch("hansa.alert.command", lambda s: "true"):
+            tid = self.desk.new_task("Add hello.txt")
+            d = Dispatcher(self.desk)
+            d.tick()
+            m = self.desk.meta(tid)
+            self.assertEqual(m["state"], "queued", m)  # held, not failed
+            self.assertEqual(m["held"]["part"], "the deny-read list")
+            self.assertIn("sandbox-exec: sandbox_apply: Invalid argument (exit 71)", m["held"]["why"])
+            self.assertEqual(m.get("attempts", []), [])
+            self.assertFalse(m.get("launch"))
+            self.assertFalse((self.desk.worktrees_dir / "a" / "hello.txt").exists())  # the worker never ran
+            self.assertEqual(self.events("task_started"), [])
+            shown = views.status_text(views.status(self.desk))
+            self.assertIn("UNABLE TO RUN", shown)
+            self.assertIn("the deny-read list", shown)
+            self.assertIn("HELD: lane a cannot run", waiting_reason(self.desk, self.desk.settings(), m, set()))
+            self.assertIn("the deny-read list", self.hansa("explain", "server"))
+            tried = len(self.srt_calls(sandbox=True))
+            d.tick()  # the same settings: not tried again, and the task waits
+            self.assertEqual(len(self.srt_calls(sandbox=True)), tried)
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            run.SANDBOX_TRIES.clear()  # as a restart: tried again, held again, and not alerted again
+            Dispatcher(self.desk).tick()
+            self.assertGreater(len(self.srt_calls(sandbox=True)), tried)
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            said = [x["text"] for x in alert.queued(self.desk) if x["kind"] == "sandbox"]
+            self.assertEqual(len(said), 1, said)
+            self.assertIn("lane a cannot run", said[0])
+            self.assertIn("the deny-read list", said[0])
+
+    def test_a_sandbox_refused_for_its_patterns_names_the_deny_write_patterns(self):
+        self.refusing_srt("any('[' in x for x in settings['filesystem']['denyWrite'])")
+        tid = self.desk.new_task("Add hello.txt")
+        Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["held"]["part"]), ("queued", "the deny-write patterns"), m)
+
+    def test_the_sandbox_try_is_kept_by_its_settings_and_a_held_task_starts_once_one_passes(self):
+        from hansa import run
+        flag = self.tmp / "refuse"
+        flag.write_text("")
+        self.refusing_srt(f"os.path.exists({str(flag)!r}) and settings['filesystem']['denyRead']")
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        tried = len(self.srt_calls(sandbox=True))
+        self.assertGreater(tried, 0)
+        d.tick()
+        self.assertEqual(len(self.srt_calls(sandbox=True)), tried)  # the same settings: not tried again
+        s = self.desk.settings()
+        s["lanes"]["a"]["network"] = ["example.org"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        d.tick()  # changed: tried again
+        self.assertGreater(len(self.srt_calls(sandbox=True)), tried)
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        flag.unlink()  # fixed; then a restart tries again, and the held task starts by itself
+        run.SANDBOX_TRIES.clear()
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(run.sandbox_held(self.desk), {})
+        self.assertIn("free", views.status_text(views.status(self.desk)))
+        tried = len(self.srt_calls(sandbox=True))
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt again"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(len(self.srt_calls(sandbox=True)), tried)  # the lane's next task: the same settings
+
+    def sandbox_start_run(self, how: str, wait: str):
+        """A worker on mimo whose session record shows a Bash call whose sandbox could not start (FAKE_SANDBOX_START)."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_SANDBOX_START": how, "FAKE_SANDBOX_WAIT": wait}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        return self.desk.new_task("Add hello.txt")
+
+    def test_a_run_whose_sandbox_cannot_start_is_stopped_and_its_task_held_without_a_try(self):
+        from hansa import alert, run
+        with unittest.mock.patch("hansa.alert.command", lambda s: "true"):
+            tid = self.sandbox_start_run("first", "30")
+            d = Dispatcher(self.desk)
+            end = time.time() + 20
+            while time.time() < end:
+                d.tick()
+                m = self.desk.meta(tid)
+                if m["state"] == "queued" and m.get("held"):
+                    break
+                time.sleep(0.1)
+            self.assertEqual(m["state"], "queued", m)
+            self.assertEqual(m["held"]["why"], "the sandbox could not start: sandbox-exec: sandbox_apply: Invalid argument")
+            self.assertEqual(m.get("attempts", []), [])  # not counted as a try
+            self.assertEqual(len(m.get("earlier_runs") or []), 1)  # but what it used still counts
+            self.assertFalse(run.alive(m.get("pid")))
+            self.assertIn("a", run.sandbox_held(self.desk))
+            d.tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not started again while held
+            self.assertEqual(len([x for x in alert.queued(self.desk) if x["kind"] == "sandbox"]), 1)
+
+    def test_a_run_whose_sandbox_fails_after_a_call_that_succeeded_is_left_running(self):
+        tid = self.sandbox_start_run("after-ok", "1.5")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(m.get("held"))
+
+    def test_the_real_sandbox_starts_with_the_settings_hansa_gives(self):
+        # srt itself (installed on GitHub's macOS machines, with HANSA_TESTS_NEED_SRT=1); elsewhere it skips
+        from hansa import run
+        need = os.environ.get("HANSA_TESTS_NEED_SRT") == "1"
+
+        def skip(why):
+            if need:
+                self.fail(f"{why}, and HANSA_TESTS_NEED_SRT=1 says the real sandbox must be tried")
+            self.skipTest(why)
+        path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
+                               if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
+        srt = shutil.which("srt", path=path)
+        if not srt:
+            skip("srt is not installed")
+
+        def in_srt(make, *argv):  # make: the settings, given the temporary folder of the run
+            t = tempfile.mkdtemp(dir=self.tmp)
+            f = Path(t) / "settings.json"
+            f.write_text(json.dumps(make(t)))
+            return subprocess.run([srt, "--settings", str(f), "--", *argv], cwd=t, capture_output=True, text=True,
+                                  env={**os.environ, "PATH": path, "TMPDIR": t, "CLAUDE_CODE_TMPDIR": t}, timeout=120)
+        r = in_srt(lambda t: {"network": {"allowedDomains": [], "deniedDomains": []},
+                              "filesystem": {"allowWrite": run.full_paths([t]), "denyRead": [], "denyWrite": []}},
+                   "/usr/bin/true")
+        if r.returncode:
+            skip(f"no sandbox can be applied here (inside one already?): srt said {(r.stderr or r.stdout).strip()[:200]}")
+        for i in range(3):  # several linked worktrees
+            sh("git", "worktree", "add", "-q", "-b", f"task/t09{i}", str(self.tmp / f"other{i}"), cwd=self.repo)
+        s = self.desk.settings()
+        lane = s["lanes"]["a"]
+        p = s["providers"][lane["providers"][0]]
+        wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
+        dwt = Path(self.design_worktree(self.desk.new_task("Design")))  # its branch, task/t0002, has a folder
+        worker = run.sandbox_settings(self.desk, lane, "claude", p, wt)["sandbox"]
+        common = run.git_folders(wt)[0].resolve()
+        for name, box, w in (("worker", worker, wt), ("verifier", worker, wt),
+                             ("design session", run.design_sandbox(self.desk, lane, "claude", p, dwt, "task/t0002",
+                                                                   mac=True)["sandbox"], dwt)):
+            settings = functools.partial(run.sandbox_try_settings, box, w)
+            r = in_srt(settings, "/usr/bin/true")
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stderr or r.stdout}")
+            intruder = common / "refs" / "heads" / "intruder"
+            r = in_srt(settings, "/bin/sh", "-c", 'echo x > "$1"', "sh", str(intruder))
+            self.assertNotEqual(r.returncode, 0, name)
+            self.assertFalse(intruder.exists(), name)
         # what git wrote outside the session's own folder: objects, the branch's ref and log
         self.assertEqual({str(Path(p).relative_to(common)).split("/")[0] for p in changed
                           if not Path(p).is_relative_to(Path(rules[0][0]).resolve())}, {"objects", "refs", "logs"})
