@@ -175,8 +175,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if path == "/api/alert/test":  # the principal's test of the alert command; no command sends one
                     return self._send(200, alert.test(desk))
                 if path == "/api/ask/close":
-                    desk.close_ask(int(body["id"]), body.get("answer", ""), by="page")
-                    return self._send(200, {"ok": True})
+                    refused = desk.close_ask(int(body["id"]), body.get("answer", ""), by="page")
+                    return self._send(200, {"ok": False, "problems": [refused]} if refused else {"ok": True})
                 return self._send(404, {"error": "not found"})
             except (KeyError, ValueError, TypeError) as e:
                 return self._send(400, {"ok": False, "problems": [str(e)]})

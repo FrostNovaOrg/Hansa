@@ -313,6 +313,8 @@ def turns(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     rows = sorted((t for t in out if t["steps"]), key=lambda t: t["start"])
     for t in rows:
         t["usd"] = round(t["usd"], 6)
+        # started before the window: its steps, worth and length count from its first step inside it
+        t["before_window"] = 0 < t["start"] < since
         t["tools"] = dict(sorted(t["tools"].items(), key=lambda kv: (-kv[1], kv[0])))
     total = sum(t["usd"] for t in rows)
     by = {}

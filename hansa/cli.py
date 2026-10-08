@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, json_text,
-                   kept_from_workers, lane_targets, merge_message, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
+                   kept_from_workers, lane_targets, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
 from .run import (VERIFY_TASK, Dispatcher, base_moved, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, keys_in_change, lane_holder,
@@ -78,6 +78,17 @@ def lane_base(repo: str, base: str, nothing: str) -> str:
         raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); {nothing}")
 
 
+def desk_spellings(desk: Desk) -> list:
+    """The desk's path, and the other spellings that lead to it the coordinator may write: as it was given, and on
+    macOS without /private in front (/tmp/desk for /private/tmp/desk), when they lead to the same folder."""
+    out = [str(desk.root)]
+    short = str(desk.root).removeprefix("/private") if str(desk.root).startswith("/private/") else ""
+    for x in (str(desk.given), short):
+        if x and x not in out and (resolved(x) or x) == str(desk.root):
+            out.append(x)
+    return out
+
+
 def permissions(desk: Desk) -> dict:
     """The coordinator's Claude Code permission rules in the desk."""
     r = str(desk.root).lstrip("/")
@@ -85,8 +96,10 @@ def permissions(desk: Desk) -> dict:
     guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl",
                f"//{r}/lanes/**"]
     # an Edit rule covers every file-editing tool (Write too); //path is absolute. Claude Code allows a write only
-    # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win
-    return {"allow": ["Bash(hansa:*)", f"Edit(//{r}/notes/**)"],
+    # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win.
+    # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
+    # the short way matches only with both
+    return {"allow": ["Bash(hansa:*)", *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
             "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]
             + [f"Bash({c}:*)" for c in NO_PUBLISH] + [f"Bash({r})" for r in no_publish_with_options()]}
 
@@ -102,8 +115,9 @@ NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish",
 def no_publish_with_options() -> list:
     """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
     reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
-    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. They stop
-    nothing run through another program or shell (bash -c, xargs, a script)."""
+    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. Claude Code
+    matches them after a plain xargs and wrappers such as env, nice or timeout too; they stop nothing run
+    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push)."""
     return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
 
 
@@ -441,8 +455,9 @@ def cmd_merge(a):
                 pass
             raise SystemExit(desk.redact(conflict_advice(a.id, base, places, str(e)[:300])))
         note = unverified_note(desk, m)  # before its verification is closed
+        said = message_fallback(lane, m["lane"], "merge_message")
         desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
-                    unverified=note or None)
+                    unverified=note or None, merge_message_note=said or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
     desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}),
@@ -453,6 +468,8 @@ def cmd_merge(a):
                                                      f"{merge_command(lane)})" if unchecked else ""))
     if note:
         print(f"note: {note}. It is merged: this is a note, not a stop")
+    if said:
+        print(f"note: {said}")
 
 
 def _unverified_later(desk: Desk, m: dict) -> str:
@@ -653,7 +670,9 @@ def _verify(desk: Desk, a) -> None:
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
     lane = m.get("lane", "")
-    if (a.lane and a.lane != lane) or lane not in desk.settings()["lanes"]:
+    own = desk.settings()["lanes"].get(lane)
+    moved = own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"])
+    if (a.lane and a.lane != lane) or own is None or moved:
         _lane_reaches(desk, a.lane or lane, m)
         lane = a.lane or lane
     d = desk.tasks_dir / a.id
@@ -676,12 +695,22 @@ def _verify(desk: Desk, a) -> None:
           + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
 
 
+def _same_repo(x: str, y: str) -> bool:
+    return (resolved(x) or x) == (resolved(y) or y)
+
+
 def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
     """Refuses, queueing nothing, a lane that cannot reach the task's change: one that is not on the desk, or not on
     the repository of the task's own lane, where the task's branch is."""
     lanes = desk.settings()["lanes"]
     nothing = "; nothing was queued"
     own = lanes.get(m.get("lane"))
+    if own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"]):
+        if name == m["lane"]:  # removed and made again on another repository: not where the task's branch is
+            raise SystemExit(f"hansa: {m['id']}'s lane {name} is now on {own['repo']}, not on {m['repo']}, where "
+                             f"{m['id']} ran and its branch is (the lane was removed and made again); verify it "
+                             f"with --lane L, a lane on {m['repo']}{nothing}")
+        own = {**own, "repo": m["repo"]}
     if own is None and name == m.get("lane"):
         raise SystemExit(f"hansa: {m['id']}'s lane {name or '(none)'} is no longer on the desk; verify it with --lane L, "
                          f"a lane on the repository where its branch {m.get('branch') or 'task/' + m['id']} is"
@@ -700,8 +729,7 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
                              f"({m['head'][:12]}), so lane {name} cannot be shown to reach it. Verify it on a lane on "
                              f"the repository where that branch is{nothing}")
         return
-    same = lambda x, y: (resolved(x) or x) == (resolved(y) or y)
-    if not same(lanes[name]["repo"], own["repo"]):
+    if not _same_repo(lanes[name]["repo"], own["repo"]):
         raise SystemExit(f"hansa: lane {name} cannot reach {m['id']}'s change: it is on {lanes[name]['repo']}, and "
                          f"{m['id']}'s branch is in {own['repo']}, the repository of its lane {m['lane']}. Verify it "
                          f"on a lane on that repository{nothing}")
@@ -888,6 +916,10 @@ def _since(text: str) -> float:
 
 
 def cmd_cost(a):
+    if a.turns and a.by:
+        raise SystemExit("hansa: --turns lists the coordinator's turns session by session, with totals by what "
+                         "started them; it has no --by. For totals by day, seat, lane, task, model or provider: "
+                         "hansa cost --by ...")
     if a.turns:
         rep = cost.turns(Desk.find(a.desk), a.days, _since(a.since) if a.since else None)
         print(json.dumps(rep, ensure_ascii=False, indent=1) if a.json else views.cost_turns_text(rep))
@@ -897,7 +929,7 @@ def cmd_cost(a):
         rep = {k: v for k, v in rep.items() if k != "rows"} if not a.rows else rep
         print(json.dumps(rep, ensure_ascii=False, indent=1))
     else:
-        print(views.cost_text(rep, a.by))
+        print(views.cost_text(rep, a.by or "day"))
 
 
 def cmd_check(a):
@@ -1363,7 +1395,8 @@ def cmd_lane(a):
             # none as lane set takes it: alone it means empty, with other values it is refused
             given = {f: _lane_value(f, v if isinstance(v, list) else [v]) for f, v in (
                 ("providers", a.providers), ("check", a.check), ("setup", a.setup), ("allow", a.allow),
-                ("network", a.network)) if v is not None}
+                ("network", a.network), ("merge_check", a.merge_check), ("merge_timeout_min", a.merge_timeout))
+                if v is not None}
             if a.base is not None:
                 _lane_value("base", [a.base])
             if a.like:
@@ -1378,9 +1411,9 @@ def cmd_lane(a):
                 like = s["lanes"][a.like]
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
-                for f in ("check", "setup", "merge_check"):
-                    if ln.get(f) == "":
-                        del ln[f]
+                for f in ("check", "setup", "merge_check", "merge_timeout_min"):
+                    if ln.get(f) in ("", None):  # none: unset, as hansa lane set leaves it
+                        ln.pop(f, None)
                 repo, base = ln["repo"], ln.get("base", "main")
             elif not a.repo:
                 raise SystemExit("hansa: say which git checkout the lane works on (--repo PATH), or which lane to "
@@ -1396,7 +1429,7 @@ def cmd_lane(a):
             if not a.like:
                 base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
-                ln.update({k: v for k, v in given.items() if v})
+                ln.update({k: v for k, v in given.items() if v or isinstance(v, int)})
             new["lanes"][a.name] = ln
             _save(desk, new)
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
@@ -2082,6 +2115,10 @@ def main(argv=None):
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
                    "unless the lane has a merge_check (/bin/sh -c)")
     q.add_argument("--setup", help="the command that installs dependencies before each task (/bin/sh -c)")
+    q.add_argument("--merge-check", metavar="COMMAND", help="the command the merge check runs before each merge in "
+                   "place of the check, on the task merged with the base (/bin/sh -c; default: the check)")
+    q.add_argument("--merge-timeout", metavar="MIN", help="the merge check's time limit in minutes (default: the "
+                   "lane's timeout_min)")
     q.add_argument("--network", nargs="+", metavar="HOST", help="the hosts its workers, setup and check may reach "
                    "(default: none)")
     q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
@@ -2206,7 +2243,8 @@ def main(argv=None):
                      "every view the rows add up to the total.")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--since", help="HH:MM today, or YYYY-MM-DD HH:MM: count from then instead of --days")
-    p.add_argument("--by", default="day", choices=["day", "seat", "lane", "task", "model", "provider"])
+    p.add_argument("--by", choices=["day", "seat", "lane", "task", "model", "provider"], help="the totals by "
+                   "(default: day); not with --turns")
     p.add_argument("--json", action="store_true")
     p.add_argument("--rows", action="store_true", help="with --json: include every row")
     p.add_argument("--turns", action="store_true", help="the coordinator's own usage turn by turn: what started "

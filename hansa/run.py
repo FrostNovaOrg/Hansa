@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text
 from .desk import (DENY_AT, other_envs, Desk, account_home, claude_home, home_secrets, is_git_rule, kept_from_workers, now,
-                   merge_message, program_candidates, read_json, resolved, task_message, update_message, write_json,
+                   merge_message, message_fallback, program_candidates, read_json, resolved, task_message, update_message, write_json,
                    write_problems)
 from .desk import lane_env as checked_env
 
@@ -2096,6 +2096,7 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     A follow-up made with --update gets the base's current tip merged into it (update_branch)."""
     repo = Path(lane["repo"])
     tid = meta["id"]
+    desk.update(tid, repo=resolved(str(repo)) or str(repo))  # where its branch is, whatever the lane is later
     updating = bool(meta.get("update") and meta.get("start_from"))
     base = git("rev-parse", lane.get("base") or "main", cwd=repo) if updating or not meta.get("base") else meta["base"]
     start = meta.get("start_from") or base
@@ -2747,8 +2748,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
-                commit_work(desk, wt, task_message(desk.settings()["lanes"].get(meta.get("lane")), meta.get("lane") or "",
-                                                  tid, meta.get("title") or ""))
+                ln = desk.settings()["lanes"].get(meta.get("lane"))
+                commit_work(desk, wt, task_message(ln, meta.get("lane") or "", tid, meta.get("title") or ""))
+                fields["commit_message_note"] = message_fallback(ln, meta.get("lane") or "", "commit_message") or None
         head = wgit(desk, wt, "rev-parse", "HEAD")
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
                       files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),
@@ -3061,7 +3063,7 @@ def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
         desk.update(v["id"], state="cancelled", error=why, cancel_by=by)
     elif v["state"] == "running":  # hansa serve stops it within seconds
         desk.update(v["id"], cancel=True, cancel_by=by)
-    else:
+    elif not v.get("closed"):  # closed already (hansa cancel of the verification itself): the first note stays
         desk.update(v["id"], closed=why)
 
 
@@ -3186,7 +3188,8 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
-                        merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None)
+                        merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None,
+                        merge_message_note=message_fallback(lane, m["lane"], "merge_message") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", task=tid, into=name, waited=True, onto=tip,
                **({"despite_check": True} if mc.get("despite_check") or unchecked else {}),
@@ -3227,10 +3230,11 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         commit = wgit(desk, wt, "rev-parse", "HEAD")
+        said = message_fallback(lane, lane_name, "merge_message")  # the message this merge commit was given
         command = merge_command(lane)
         if not command:  # the check and merge check were taken away meanwhile: nothing to run
             land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
-                                   "at": now(), "seconds": 0, "tail": []})
+                                   "at": now(), "seconds": 0, "tail": [], "message_note": said})
             return None
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
@@ -3244,7 +3248,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                     stmp, ssrt, ssettings, *argv]
         env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
-              "own": own_merge_check(lane),
+              "own": own_merge_check(lane), "message_note": said,
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
         desk.update(tid, merge_check=mc)
         with open(raw / "merge-check.log", "wb") as out:
@@ -3343,7 +3347,8 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
             return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
                                                                               "nothing was merged"})
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
-                        merge_check_result=result, unverified=unverified_note(desk, m) or None)
+                        merge_check_result=result, unverified=unverified_note(desk, m) or None,
+                        merge_message_note=result.get("message_note") or mc.get("message_note") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
                **({"command": result["command"]} if result.get("command") else {}),

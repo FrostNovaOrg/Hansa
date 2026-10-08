@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import alert, build, cost, installed, installed_text, notify, release
-from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
+from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, is_git_rule, kept_from_workers, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, is_local, join_command, lane_occupied, last_round, markers_in_change,
                   markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of, provider_problem,
@@ -514,6 +514,7 @@ def status(desk: Desk) -> dict:
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
+        "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "concurrency": s["concurrency"],
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
@@ -579,6 +580,7 @@ def status_text(st: dict) -> str:
     out += [st["serve_code"]] if st.get("serve_code") else []  # what asks for action first, then information
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
+    out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
     out += [page_text(st["page"])] if st.get("page") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
@@ -801,6 +803,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     if m.get("error"):
         out.append(f"error: {m['error']}")
+    out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
     if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
         out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":
@@ -859,7 +862,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
             first, *more = x.splitlines() or [""]
             why = reasons[i] if i < len(reasons) else ""
             if full:  # whole, so that which part was refused can be seen
-                out.append("  " + "\n    ".join([first, *more]) + (f"\n    Claude Code said: {plain(why)}" if why else ""))
+                out.append("  " + "\n    ".join([first, *more]) + (f"\n    Claude Code said: {plain(why, None)}" if why else ""))
                 continue
             out.append(f"  {first[:160]}" + (f"  (+{len(more)} more lines)" if more else "")
                        + (f"; Claude Code said: {plain(why)[:200]}" if why else ""))
@@ -1200,8 +1203,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "(hansa release), a release that ended (done, or failed with its exit code and last lines) or became void, "
             "a provider that an open request names "
             "becoming ready when it was not as the request was made (once; the request may be done; looked at when a "
-            "key, the settings or a check change it, so one ready again only because its rest ran out gets the note "
-            "in hansa status but no post), hansa serve stopping or "
+            "key, the settings or a check change it, and when its rest after a usage limit runs out, which hansa "
+            "serve sees), hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
             "line per event and the next command; events seconds apart come in one message.",
@@ -1337,14 +1340,18 @@ def cost_turns_text(rep: dict) -> str:
     """hansa cost --turns: one line per turn of the coordinator, then totals by what started them."""
     t = rep["total"]
     out = [f"the coordinator's turns, {rep['window']}: {t['turns']} turn(s), {t['steps']} step(s), worth ${t['usd']:.2f}"]
-    session = None
+    sessions = {}  # each session once, in the order of its first turn: two sessions' turns may alternate
     for r in rep["turns"]:
-        if r["session"] != session:
-            session = r["session"]
-            out.append(f"session {session[:8]}")
-        tools = ", ".join(f"{k} {n}" for k, n in r["tools"].items())
-        out.append(f"  {time.strftime('%m-%d %H:%M', time.localtime(r['start']))}  {r['kind']:<13} "
-                   f"{r['steps']:>4} step(s)  length {r['length']:>9,}  {'$%.2f' % r['usd']:>8}" + (f"  {tools}" if tools else ""))
+        sessions.setdefault(r["session"], []).append(r)
+    for session, rows in sessions.items():
+        out.append(f"session {session[:8]}")
+        for r in rows:
+            tools = ", ".join(f"{k} {n}" for k, n in r["tools"].items())
+            out.append(f"  {time.strftime('%m-%d %H:%M', time.localtime(r['start']))}  {r['kind']:<13} "
+                       f"{r['steps']:>4} step(s)  length {r['length']:>9,}  {'$%.2f' % r['usd']:>8}"
+                       + (f"  {tools}" if tools else "")
+                       + ("  (from before the window: its steps, worth and length from its first step in it)"
+                          if r.get("before_window") else ""))
     if rep["by_kind"]:
         out.append("by what started the turns:")
         for k, v in rep["by_kind"].items():
