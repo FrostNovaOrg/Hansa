@@ -2701,11 +2701,11 @@ def process_table() -> dict:
     return out
 
 
-def record_descendants(top: int, seen: dict) -> bool:
+def record_descendants(top: int, seen: dict, table: dict | None = None) -> bool:
     """Add to `seen` ({pid: start}) the processes now running below `top` (a process hansa started), or below one
     seen before: whatever their process group, session or environment, so long as their parent is still known
-    at a look. Whether anything was added."""
-    table, added = process_table(), False
+    at a look. `table`: process_table() read already. Whether anything was added."""
+    table, added = process_table() if table is None else table, False
     if top in table and seen.get(top) != table[top][1]:
         seen[top], added = table[top][1], True
     grew = True
@@ -2778,11 +2778,61 @@ def stop_recorded(found: dict, grace: float = 5) -> list:
 SWEEP_GRACE = 5  # seconds between the polite signal and the one that cannot be refused
 
 
+def stop_group(pgid) -> None:
+    """Stop what still runs in this process group, politely and then for good. A group with a process in it
+    keeps its number, so one that still runs is the one recorded."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            break
+        end = time.time() + SWEEP_GRACE
+        while group_running(pgid) and time.time() < end:
+            time.sleep(0.1)
+        if not group_running(pgid):
+            break
+
+
+def run_recorded(m: dict) -> dict:
+    """What a task's runs started, as hansa serve recorded it while they ran (record_run): {pid: start}."""
+    return {int(p): st for p, st in (m.get("started_procs") or {}).items() if str(p).isdigit()}
+
+
+def record_run(desk: Desk, m: dict, table: dict) -> None:
+    """Record on a running task what its run (worker, verifier, design session, or its check) now runs below
+    it, also what left its process group, cleared its environment or works in another folder (as a preview's
+    is: record_descendants), and the run's own process, whose group it leads: on the task, so that a restarted
+    hansa serve still stops them at the run's end (sweep). One that ended is let go, so the record stays as long
+    as what runs. `table`: process_table() read for this round."""
+    pid, was = m.get("pid"), run_recorded(m)
+    if not pid or not table:  # a list that could not be read lets nothing go
+        return
+    seen = {p: st for p, st in was.items() if table.get(p, (0, ""))[1] == st}
+    if not record_descendants(pid, seen, table) and seen == was:
+        return
+    desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("pid") != pid else
+                {"started_procs": {str(p): st for p, st in seen.items()},
+                 "run_groups": sorted({*(x.get("run_groups") or []), pid})})
+
+
+def _args(pid) -> list:
+    """A process's arguments; [] when they cannot be read."""
+    try:
+        return [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")]
+    except OSError:
+        pass
+    got = _mac_procargs(pid) if _ON_MAC else None
+    return [a.decode(errors="replace") for a in got[0]] if got else []
+
+
 def sweep(desk: Desk, tid: str) -> list:
     """Stop what a task's processes left running once nothing of the task should run any more: a server or
     watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor
-    the command doing this. Found by HANSA_TASK in their environment, or by one of the task's run folders
-    (worker_tmps) in their arguments or TMPDIR: a process started without HANSA_TASK still names its run's folder.
+    the command doing this. First what hansa serve recorded below the task's runs while they ran (record_run):
+    each run's process group, then each recorded process that still runs and is still the same process (its
+    start); then what it finds now by HANSA_TASK in their environment, or by one of the task's run folders
+    (worker_tmps) in their arguments or TMPDIR: a process started without HANSA_TASK still names its run's
+    folder, and one started between two recordings is found so. The record is cleared.
     What was stopped goes on the task (left_running) and in the event log."""
     keep = {os.getpid(), os.getppid()}
     try:
@@ -2792,9 +2842,18 @@ def sweep(desk: Desk, tid: str) -> list:
 
     def running(p, start):
         return alive(p, start) and _state(p) != "Z"
-    folders = [r["path"] for r in desk.meta(tid).get("worker_tmps") or [] if r.get("path")]
-    found = [(p, args, proc_start(p)) for p, args in task_processes(tid, folders) if p not in keep]
+    m = desk.meta(tid)
+    seen = {p: st for p, st in run_recorded(m).items() if p not in keep}
+    for g in m.get("run_groups") or []:  # its leader gone, or still the one recorded: not a later one's group
+        if g not in keep and group_running(g) and (not alive(g) or bool(seen.get(g)) and alive(g, seen[g])):
+            stop_group(g)
+    found = [(p, _args(p), st) for p, st in seen.items() if st and running(p, st)]
+    folders = [r["path"] for r in m.get("worker_tmps") or [] if r.get("path")]
+    found += [(p, args, proc_start(p)) for p, args in task_processes(tid, folders)
+              if p not in keep and p not in {x[0] for x in found}]
     found = [(p, args, s) for p, args, s in found if running(p, s)]
+    if m.get("started_procs") or m.get("run_groups"):
+        desk.change(tid, lambda x: {"started_procs": {}, "run_groups": []})
     if not found:
         return []
     for sig, grace in ((signal.SIGTERM, SWEEP_GRACE), (signal.SIGKILL, 2)):
@@ -2995,16 +3054,7 @@ def end_preview(desk: Desk, tid: str) -> None:
     rec = read_json(raw / "preview.json", {}) or {}
     pgid = rec.get("pgid")
     if pgid and group_running(pgid):  # a group with a process in it keeps its number, so it is still the preview's
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(pgid, sig)
-            except OSError:
-                break
-            end = time.time() + SWEEP_GRACE
-            while group_running(pgid) and time.time() < end:
-                time.sleep(0.1)
-            if not group_running(pgid):
-                break
+        stop_group(pgid)
     left, seen = [], rec.get("seen") or {}
     if pgid:  # what left the group: each process preview.py saw below it, and the orphans working in its folders since
         left = stop_recorded({**working_in([rec.get("cwd"), rec.get("tmp")], rec.get("started") or time.time()),
@@ -4770,12 +4820,21 @@ class Dispatcher:
             self.desk.ready_news()
         self.resting = resting
 
+    def record(self, tasks: list) -> None:
+        """Record what each running worker, verifier, design session and check runs below it (record_run), once
+        each round: what it starts that leaves every marker sweep finds is still stopped at its end."""
+        running = [m for m in tasks if m["state"] == "running" and m.get("pid") and m.get("phase") != "starting"]
+        table = process_table() if running else {}
+        for m in running:
+            record_run(self.desk, m, table)
+
     def tick(self) -> None:
         desk = self.desk
         s = desk.settings()
         desk.state_dir.mkdir(exist_ok=True)
         beat(desk)
         self.rests(s)
+        self.record(desk.tasks())
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
                 del self.procs[tid]
