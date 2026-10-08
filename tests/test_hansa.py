@@ -8899,6 +8899,100 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not started again while held
             self.assertEqual(len([x for x in alert.queued(self.desk) if x["kind"] == "sandbox"]), 1)
 
+    def test_a_restart_tries_each_held_lanes_sandbox_again_and_clears_or_renews_the_hold(self):
+        from hansa import account, run
+        self.assertEqual(self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))["state"], "done")
+        stale = {"why": "the sandbox could not start: from earlier code", "part": "", "kind": "worker", "at": 1}
+        held = self.desk.state_dir / run.SANDBOX_HELD
+        run.write_json(held, {"lanes": {"a": stale}, "told": ["the sandbox could not start: from earlier code"]})
+        self.assertIn("from earlier code", views.status_text(views.status(self.desk)))
+        run.SANDBOX_TRIES.clear()  # a restart on fixed code, with no task queued in the lane: the try passes
+        Dispatcher(self.desk).tick()
+        self.assertEqual(run.sandbox_held(self.desk), {})
+        shown = views.status_text(views.status(self.desk))
+        self.assertNotIn("UNABLE TO RUN", shown)
+        self.assertNotIn("from earlier code", shown)
+        # a try that fails keeps the hold, with the new reason, on the record and on the held task
+        run.write_json(held, {"lanes": {"a": stale}})
+        tid = self.desk.new_task("Add hello.txt again")
+        self.desk.update(tid, held={**stale, "lane": "a"}, error=stale["why"])
+        self.refusing_srt("settings['filesystem']['denyRead']")
+        run.SANDBOX_TRIES.clear()
+        Dispatcher(self.desk).tick()
+        h = run.sandbox_held(self.desk)["a"]["work"]
+        self.assertEqual(h["part"], "the deny-read list")
+        self.assertIn("sandbox-exec: sandbox_apply: Invalid argument", h["why"])
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertEqual(self.desk.meta(tid)["held"]["part"], "the deny-read list")
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("UNABLE TO RUN", shown)
+        self.assertNotIn("from earlier code", shown)
+        self.desk.update(tid, state="cancelled")
+        # a design session's hold is tried with the sandbox a design session gets, in the lane's design worktree
+        self.design_worktree(tid)
+        run.write_json(held, {"lanes": {"a": {"design": {**stale, "kind": "design session", "task": tid}}}})
+        run.SANDBOX_TRIES.clear()
+        with unittest.mock.patch.object(account, "LINUX", False):
+            self.assertEqual(run.sandbox_retry(self.desk, self.desk.settings()), [("a", "design")])
+        h = run.sandbox_held(self.desk)["a"]["design"]
+        self.assertEqual((h["kind"], h["part"]), ("design session", "the deny-read list"))
+        self.assertEqual(Path(self.srt_calls(sandbox=True)[-1]["cwd"]).resolve(), (self.desk.worktrees_dir / "a-design").resolve())
+
+    def test_two_lanes_held_for_the_same_reason_each_alert_once(self):
+        from hansa import alert, run
+        s = self.desk.settings()
+        s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.refusing_srt("settings['filesystem']['denyRead']")
+        with unittest.mock.patch("hansa.alert.command", lambda s: "true"):
+            ta, tb = self.desk.new_task("Add a.txt", lane="a"), self.desk.new_task("Add b.txt", lane="b")
+            Dispatcher(self.desk).tick()
+            self.assertEqual([self.desk.meta(t)["state"] for t in (ta, tb)], ["queued", "queued"])
+            self.assertEqual(set(run.sandbox_held(self.desk)), {"a", "b"})
+            run.SANDBOX_TRIES.clear()  # a restart: held again for the same reason, and not alerted again
+            Dispatcher(self.desk).tick()
+            said = sorted(x["text"] for x in alert.queued(self.desk) if x["kind"] == "sandbox")
+        self.assertEqual(len(said), 2, said)
+        self.assertIn("lane a cannot run", said[0])
+        self.assertIn("lane b cannot run", said[1])
+
+    def test_a_refused_design_sessions_sandbox_holds_only_the_lanes_design_sessions(self):
+        from hansa import run
+        refused = run.SandboxRefused("sandbox-exec: sandbox_apply: Invalid argument", "the network", "design session")
+        did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+        tid = self.desk.new_task("Add hello.txt")
+        with unittest.mock.patch("hansa.run.start_design", side_effect=refused):
+            d = Dispatcher(self.desk)
+            m = self.settle(d, tid)  # the lane's worker runs: its sandbox is another, with its own try
+            self.assertEqual(m["state"], "done", m)
+        self.assertEqual(self.desk.meta(did)["state"], "queued")
+        self.assertEqual(self.desk.meta(did)["held"]["kind"], "design session")
+        self.assertEqual(list(run.sandbox_held(self.desk)["a"]), ["design"])
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("free; its design sessions UNABLE TO RUN", shown)
+        self.assertIn("this holds its design sessions", shown)
+        self.assertIn("HELD: lane a cannot open a design session",
+                      waiting_reason(self.desk, self.desk.settings(), self.desk.meta(did), set()))
+        # a worker's refusal holds the workers and verifiers, and says so
+        run.hold(self.desk, self.desk.new_task("Add more"), "a", "the sandbox could not start: x", "", "worker")
+        self.assertEqual(sorted(run.sandbox_held(self.desk)["a"]), ["design", "work"])
+        self.assertIn("this holds its workers and verifiers", views.status_text(views.status(self.desk)))
+
+    def test_a_bash_result_as_text_blocks_is_read_for_a_sandbox_that_could_not_start(self):
+        from hansa import run
+        failed = "sandbox-exec: sandbox_apply: Invalid argument"
+        home = self.tmp / "record-home"
+        for i, content in enumerate(["Exit code 71\n" + failed, [{"type": "text", "text": "Exit code 71\n" + failed}]]):
+            rec = home / "projects" / "-work" / f"s{i}.jsonl"
+            rec.parent.mkdir(parents=True, exist_ok=True)
+            rec.write_text("".join(json.dumps(r) + "\n" for r in [
+                {"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "git status"}}]}},
+                {"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True, "content": content}]},
+                 "toolUseResult": "Error: Exit code 71\n" + failed}]))
+            self.assertEqual(run.sandbox_start_failure(home, f"s{i}"), (failed, None), content)
+
     def test_a_run_whose_sandbox_fails_after_a_call_that_succeeded_is_left_running(self):
         tid = self.sandbox_start_run("after-ok", "1.5")
         m = self.settle(Dispatcher(self.desk), tid)

@@ -235,9 +235,13 @@ page gives.
   patterns keep what git needs open" or "the deny-write patterns do not
   keep" with the path; a sandbox that does not keep what it should runs no
   one); the principal's
-  alert is told once for each reason. Held tasks start by themselves once a
-  try passes: after a fix, restart `hansa serve` (a change of the settings
-  tries again too). Without srt, or with an srt that cannot run at all, the
+  alert is told once for each lane and reason. Only what was refused is
+  held: a design session's refusal holds the lane's design sessions, a
+  worker's or a verifier's its workers and verifiers, and `hansa status` says
+  which. Held tasks start by themselves once a try passes: after a fix,
+  restart `hansa serve`, which as it starts tries the sandbox of each held
+  lane again, clearing the hold when the try passes and keeping it with the
+  new reason when it fails (a change of the settings tries again too). Without srt, or with an srt that cannot run at all, the
   run starts as before, in Claude Code's own sandbox, which is set to fail
   rather than run a command outside it (`failIfUnavailable`). Claude Code
   carries its own copy of the sandbox library, which may differ from the srt

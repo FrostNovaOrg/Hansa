@@ -532,9 +532,11 @@ def try_srt_at_start(desk: Desk) -> dict:
 # sandbox_guard. Claude Code carries its
 # own copy of the sandbox library, which may differ from the srt installed, so a try that passes is a guard, not
 # proof: hansa also watches the run's first Bash calls (sandbox_start_failure). A try that fails holds the task
-# (not failed, no try used) and the lane: hansa status says why. Kept by a fingerprint of the settings in this
-# process alone, so a lane's tasks do not each pay for it, and a restart tries again.
-SANDBOX_HELD = "sandbox-held.json"  # in the desk's state: {"lanes": {lane: {why, part, kind, at}}, "told": [why]}
+# (not failed, no try used) and the lane's runs of that kind (sandbox_group): hansa status says why. Kept by a
+# fingerprint of the settings in this process alone, so a lane's tasks do not each pay for it; a restart tries
+# again, the held lanes' at once (sandbox_retry).
+SANDBOX_HELD = "sandbox-held.json"  # in the desk's state: {"lanes": {lane: {group: {why, part, kind, at, task}}},
+#                                     "told": [[lane, why]]} (sandbox_held)
 SANDBOX_TRIES = {}  # fingerprint of the settings: what the try found (try_sandbox)
 # Each part of the settings, tried alone when the whole is refused, to name what the sandbox refuses
 SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x for x in fs["denyWrite"] if not _glob(x)]}),
@@ -723,44 +725,86 @@ def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
 def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path, branch: str = "") -> None:
     """Try the sandbox a worker, a verifier or a design session (`kind`, committing to `branch`) of this lane is
     about to get (try_sandbox): raise SandboxRefused when srt refuses it. A try that passes clears what an
-    earlier one held the lane for."""
+    earlier one held the lane's runs of that kind for (sandbox_group)."""
     r = try_sandbox(box, wt, branch)
     if r["ok"] is False:
         raise SandboxRefused(r["said"], r["part"], kind, r.get("why", ""))
     if r["ok"]:
-        sandbox_clear(desk, lane_name)
+        sandbox_clear(desk, lane_name, sandbox_group(kind))
+
+
+# What a refused sandbox holds of its lane, by the kind of run refused: a design session's sandbox is another than
+# its lane's workers' (design_sandbox), so its refusal holds the lane's design sessions only, and a worker's or a
+# verifier's holds its workers and verifiers only
+SANDBOX_GROUPS = {"work": "its workers and verifiers", "design": "its design sessions"}
+
+
+def sandbox_group(kind: str) -> str:
+    """The group of runs (SANDBOX_GROUPS) a refused sandbox of a run of this kind holds."""
+    return "design" if kind in ("design session", "design") else "work"
 
 
 def sandbox_held(desk: Desk) -> dict:
-    """The lanes whose runs' sandbox could not start, as last tried: {lane: {why, part, kind, at}}."""
+    """The lanes whose runs' sandbox could not start, as last tried: {lane: {group: {why, part, kind, at, task}}},
+    a group as in SANDBOX_GROUPS. A record written before groups ({lane: {why, ...}}) is read by its kind."""
     rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
-    return rec.get("lanes") or {} if isinstance(rec, dict) else {}
+    lanes = rec.get("lanes") or {} if isinstance(rec, dict) else {}
+    out = {}
+    for ln, v in lanes.items() if isinstance(lanes, dict) else []:
+        if not isinstance(v, dict):
+            continue
+        groups = {sandbox_group(v.get("kind") or ""): v} if "why" in v else \
+            {g: h for g, h in v.items() if g in SANDBOX_GROUPS and isinstance(h, dict)}
+        if groups:
+            out[ln] = groups
+    return out
 
 
 def sandbox_held_text(h: dict) -> str:
-    """Why a lane's runs are held (sandbox_held), and what starts them again, in a clause."""
+    """Why a lane's runs are held (an entry of sandbox_held), which of them, and what starts them again, in a
+    clause."""
     why = str(h.get("why") or "?")
     return (f"its {h.get('kind') or 'run'}'s "
             + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
                "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
-            + "; its tasks start by themselves once a try of the sandbox passes (after a fix, restart hansa serve; "
-              "hansa explain server)")
+            + f"; this holds {SANDBOX_GROUPS[sandbox_group(h.get('kind') or '')]}, which start by themselves once a "
+              "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server)")
 
 
-def sandbox_clear(desk: Desk, lane_name: str) -> None:
+def sandbox_clear(desk: Desk, lane_name: str, group: str) -> None:
+    """A try of the sandbox of a lane's runs of this group passed: they are no longer held."""
+    with desk.lock():
+        held = sandbox_held(desk)
+        was = group in held.get(lane_name, {})
+        if was:
+            held[lane_name].pop(group)
+            if not held[lane_name]:
+                held.pop(lane_name)
+            rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
+            write_json(desk.state_dir / SANDBOX_HELD, {**(rec if isinstance(rec, dict) else {}), "lanes": held})
+    if was:
+        desk.event("sandbox_ready", lane=lane_name, group=group)
+
+
+def _hold_lane(desk: Desk, lane_name: str, entry: dict) -> bool:
+    """Record a lane's runs of the entry's kind as held (sandbox_held); whether the principal's alert is to be
+    told, once for each lane and reason."""
     with desk.lock():
         rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
-        was = lane_name in (rec.get("lanes") or {})
-        if was:
-            rec["lanes"].pop(lane_name)
-            write_json(desk.state_dir / SANDBOX_HELD, rec)
-    if was:
-        desk.event("sandbox_ready", lane=lane_name)
+        rec = rec if isinstance(rec, dict) else {}
+        told = [x for x in rec.get("told") or [] if isinstance(x, list)]  # [lane, why]; a reason alone was before lanes
+        new = [lane_name, entry["why"]] not in told
+        held = sandbox_held(desk)
+        held.setdefault(lane_name, {})[sandbox_group(entry.get("kind") or "")] = entry
+        desk.state_dir.mkdir(exist_ok=True)
+        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, [lane_name, entry["why"]]] if new else told})
+    return new
 
 
 def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: str = "") -> None:
-    """A run whose sandbox could not start: its task goes back to the queue, held (no try used), and its lane is
-    recorded as unable to run, for hansa status. The principal's alert is told once for each reason."""
+    """A run whose sandbox could not start: its task goes back to the queue, held (no try used), and its lane's
+    runs of that kind (sandbox_group) are recorded as unable to run, for hansa status. The principal's alert is
+    told once for each lane and reason."""
     why = desk.redact(why)[:600]
     held = {"why": why, "part": part, "kind": kind, "lane": lane_name, "at": now()}
     desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
@@ -769,21 +813,72 @@ def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: s
                 {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None, "held": held,
                  "error": why, "sandbox_failed": None})
     remove_sandbox_tmp(desk, tid)
-    with desk.lock():
-        rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
-        told = list(rec.get("told") or [])
-        new = why not in told
-        desk.state_dir.mkdir(exist_ok=True)
-        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": {**(rec.get("lanes") or {}), lane_name: {
-            k: held[k] for k in ("why", "part", "kind", "at")}}, "told": [*told, why] if new else told})
+    new = _hold_lane(desk, lane_name, {**{k: held[k] for k in ("why", "part", "kind", "at")}, "task": tid})
     desk.event("sandbox_held", task=tid, lane=lane_name, run=kind, why=why, part=part, alert=new)
+
+
+def sandbox_retry(desk: Desk, s: dict) -> list:
+    """As hansa serve starts: try again the sandbox of each lane's held runs (sandbox_held), a worker's in the
+    lane's worktree or a design session's in its design worktree, so a hold made by earlier code or settings
+    does not stay until a task of the lane makes a new try. A try that passes clears the hold; one that fails
+    keeps it with the new reason, on the record and on the held tasks. What cannot be tried now (no worktree,
+    no srt) is left as it is: a task's start tries it. Returns the (lane, group) still held by a try made here."""
+    out = []
+    for ln, groups in sandbox_held(desk).items():
+        lane = s["lanes"].get(ln)
+        for g, h in groups.items() if lane else []:
+            kind = h.get("kind") or ("design session" if g == "design" else "worker")
+            branch = ""
+            try:
+                if g == "design":
+                    if account.LINUX:
+                        continue
+                    pname = (s.get("design") or {}).get("provider") or s["coordinator"]["provider"]
+                    wt, branch = desk.worktrees_dir / f"{ln}-design", f"task/{h.get('task') or 'design'}"
+                else:
+                    pname = next((x for x in lane["providers"] if x in s["providers"]), "")
+                    wt = desk.worktrees_dir / ln
+                p = s["providers"].get(pname)
+                if not p or not wt.is_dir():
+                    continue
+                check_git_file(desk, wt)  # the sandbox's settings ask git in the worktree
+                box = (design_sandbox(desk, lane, pname, p, wt, branch) if g == "design"
+                       else sandbox_settings(desk, lane, pname, p, wt))["sandbox"]
+                r = try_sandbox(box, wt, branch)
+            except Exception as e:  # noqa: BLE001 - left held as it is: the next start of a task tries it
+                desk.event("sandbox_retry_failed", lane=ln, group=g, error=desk.redact(str(e))[:300])
+                continue
+            if r["ok"]:
+                sandbox_clear(desk, ln, g)
+            elif r["ok"] is False:
+                e = SandboxRefused(r["said"], r["part"], kind, r.get("why", ""))
+                why = desk.redact(str(e))[:600]
+                entry = {"why": why, "part": e.part, "kind": kind, "at": now(), "task": h.get("task", "")}
+                new = _hold_lane(desk, ln, entry)
+                for m in desk.tasks():
+                    if m["state"] == "queued" and m.get("held") and (m["held"].get("lane") or m.get("lane")) == ln \
+                            and sandbox_group(m.get("kind") or "") == g:
+                        desk.change(m["id"], lambda x: None if x["state"] != "queued" or not x.get("held") else
+                                    {"held": {**x["held"], **{k: entry[k] for k in ("why", "part", "at")}},
+                                     "error": why})
+                desk.event("sandbox_held", task="", lane=ln, run=kind, why=why, part=e.part, alert=new)
+                out.append((ln, g))
+    return out
+
+
+def _result_text(content) -> str:
+    """The text of a tool result's content: a string, or a list of blocks, each {"type": "text", "text": ...}."""
+    if isinstance(content, str):
+        return content
+    texts = [c.get("text") if isinstance(c, dict) else c for c in content] if isinstance(content, list) else []
+    return "\n".join(x for x in texts if isinstance(x, str))
 
 
 def _bash_says(c: dict, d: dict) -> list:
     """What a Bash call's result said, as texts to look at the start of: its stderr and stdout where the row
-    has them, and the result's text without the "Exit code N" line Claude Code puts first."""
+    has them, and the result's text (_result_text) without the "Exit code N" line Claude Code puts first."""
     result = d.get("toolUseResult") if isinstance(d.get("toolUseResult"), dict) else {}
-    said = "\n".join(_strings(c.get("content"))).lstrip()
+    said = _result_text(c.get("content")).lstrip()
     said = re.sub(r"^(Error: )?Exit code \d+\s*\n", "", said).lstrip()
     return [x.lstrip() for x in (result.get("stderr"), result.get("stdout"), said) if isinstance(x, str)]
 
@@ -4475,17 +4570,19 @@ class Dispatcher:
         self.try_procs = {}  # tries (hansa lane try) this server started, by lane
         self.release_procs = {}  # releases (hansa release) this server started, by id
         self.resting = None  # the providers resting at the last round; None before the first
-        self.held = {}  # lanes whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
+        self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
+        self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
 
-    def sandbox_waits(self, ln: str, s: dict) -> bool:
-        """Whether a lane's tasks wait for its sandbox: held by this server (hold) with the settings as they are.
-        Changed settings, or a restart, try it again: the task starts once a try passes."""
-        return ln in self.held and self.held[ln] == json.dumps(s, sort_keys=True, default=str)
+    def sandbox_waits(self, ln: str, s: dict, group: str = "work") -> bool:
+        """Whether a lane's tasks of this group (sandbox_group) wait for their sandbox: held by this server (hold)
+        with the settings as they are. Changed settings, or a restart, try it again: the task starts once a try
+        passes."""
+        return self.held.get((ln, group)) == json.dumps(s, sort_keys=True, default=str)
 
     def hold(self, tid: str, ln: str, s: dict, e: SandboxRefused) -> None:
         hold(self.desk, tid, ln, str(e), e.part, e.kind)
-        self.held[ln] = json.dumps(s, sort_keys=True, default=str)
+        self.held[(ln, sandbox_group(e.kind))] = json.dumps(s, sort_keys=True, default=str)
 
     def sandbox_watch(self, s: dict) -> None:
         """Stop a run whose session record says its sandbox could not start before any of its Bash calls succeeded
@@ -4505,7 +4602,7 @@ class Dispatcher:
             if not line:
                 continue
             self.desk.update(m["id"], sandbox_failed=self.desk.redact(line))
-            self.held[m.get("lane")] = json.dumps(s, sort_keys=True, default=str)
+            self.held[(m.get("lane"), sandbox_group(m.get("kind") or ""))] = json.dumps(s, sort_keys=True, default=str)
             self.desk.event("sandbox_failed", task=m["id"], lane=m.get("lane"), line=self.desk.redact(line))
             stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
 
@@ -4776,6 +4873,11 @@ class Dispatcher:
         desk.state_dir.mkdir(exist_ok=True)
         beat(desk)
         self.rests(s)
+        if not self.retried:  # a hold an earlier server made, perhaps on earlier code: tried again, once
+            self.retried = True
+            for key in sandbox_retry(desk, s):
+                self.held[key] = json.dumps(s, sort_keys=True, default=str)
+            beat(desk)
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
                 del self.procs[tid]
@@ -4811,7 +4913,7 @@ class Dispatcher:
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
         for m in desk.tasks():  # a design session has its own worktree and waits on the principal
             if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
-                    and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s):
+                    and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s, "design"):
                 try:
                     start_design(desk, m["id"], m["lane"])
                 except SandboxRefused as e:  # held, not failed: it starts once a try passes
@@ -5018,8 +5120,10 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
     if m.get("kind") == "design":
         other = [x["id"] for x in desk.tasks() if x.get("kind") == "design" and x["state"] == "running"
                  and x.get("lane") == m.get("lane")]
+        held = sandbox_held(desk).get(m.get("lane"), {}).get("design")
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
+                else f"HELD: lane {m.get('lane')} cannot open a design session, {sandbox_held_text(held)}" if held
                 else "opens when `hansa serve` next looks (within seconds)" if not not_looking(desk)
                 else f"opens once `hansa serve` gets through its rounds; {not_looking(desk)}")
     if desk.paused():
@@ -5033,8 +5137,8 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
         if ln not in s["lanes"]:
             why.append(f"lane {ln} is not in settings")
             continue
-        if ln in held:
-            why.append(f"HELD: lane {ln} cannot run, {sandbox_held_text(held[ln])}")
+        if "work" in held.get(ln, {}):
+            why.append(f"HELD: lane {ln} cannot run, {sandbox_held_text(held[ln]['work'])}")
             continue
         if ln in busy:
             why.append(f"lane {ln} is busy")
