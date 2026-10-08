@@ -1029,24 +1029,26 @@ def own_git_folder(desk: Desk, wt: Path) -> Path:
     return admin if admin.is_absolute() else Path(wt) / admin
 
 
-def check_branch_ref(desk: Desk, wt: Path, branch: str) -> None:
-    """Raise GitFolderChanged unless `branch`'s ref is a plain commit id, or there is none and packed-refs (which
-    nothing sandboxed may write) holds it: a ref holding 'ref: refs/heads/main' would lead git, which follows it,
-    from the run's branch onto the base, while HEAD still names the run's branch (check_head). A design session may
-    write its branch's ref. Read as a plain file, after check_git_file. Put right (git_file_changed) to the last id
-    the branch's log names, where it names one."""
+def check_branch_ref(desk: Desk, wt: Path, branch: str) -> str:
+    """The id `branch`'s ref holds, read as a plain file and never through a link: a plain commit id, or, when there
+    is none, the one packed-refs (which nothing sandboxed may write) holds. Raise GitFolderChanged otherwise: a ref
+    holding 'ref: refs/heads/main' would lead git, which follows it, from the run's branch onto the base, while HEAD
+    still names the run's branch (check_head). A design session may write its branch's ref. After check_git_file.
+    Put right (git_file_changed) to the last id the branch's log names, where it names one."""
     check_git_file(desk, wt)
     common = own_git_folder(desk, wt).resolve().parent.parent
     ref = common / "refs" / "heads" / branch
     if os.path.lexists(ref):
         text, what = _plain_text(ref)
         if text is not None and OID.fullmatch(text):
-            return
+            return text
         raise GitFolderChanged(wt, ref, what or f"now holds {text[:200]!r}, not a commit id",
                                _last_logged(common, branch), aside=True)
-    if not _packed(common, f"refs/heads/{branch}"):
+    packed = _packed(common, f"refs/heads/{branch}")
+    if not packed:
         raise GitFolderChanged(wt, ref, "is gone, and packed-refs does not hold it either",
                                _last_logged(common, branch), aside=True)
+    return packed
 
 
 def _packed(common: Path, ref: str) -> str:
@@ -1282,8 +1284,11 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> N
     the run; nothing when that is all and nothing is `merged`. The commit is made from the index with the branch's
     tip (and `merged`, a merge hansa made there) for parents, never with a MERGE_HEAD git would take from the
     worktree's folder, and exactly that branch is moved, from that tip to it, with update-ref's check of the old id
-    and without following a link (check_branch_ref runs first). What a merge left there is cleared then."""
-    check_branch_ref(desk, wt, branch)
+    and without following a link. The tip is the id the branch's ref file (or packed-refs) holds, read by
+    check_branch_ref, never through a link: one made in the meantime fails update-ref's check. Afterwards the ref
+    must hold the new commit, whose first parent is that tip; otherwise GitFolderChanged, the ref is put back to
+    the tip (git_file_changed) and the work is left staged. What a merge left there is cleared then."""
+    old = check_branch_ref(desk, wt, branch)
     left = sandbox_leftovers(desk, wt)  # untracked until the add
     wgit(desk, wt, "add", "-A")
     if left:
@@ -1291,10 +1296,24 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> N
     if not wgit(desk, wt, "diff", "--cached", "--name-only") and not merged:
         return
     ref = f"refs/heads/{branch}"
-    old = wgit(desk, wt, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
     new = wgit(desk, wt, "commit-tree", wgit(desk, wt, "write-tree"), "-p", old,
                *(a for m in merged for a in ("-p", m)), "-m", message.strip())
-    wgit(desk, wt, "update-ref", "--no-deref", "-m", f"commit: {(message.strip().splitlines() or [''])[0]}", ref, new, old)
+    common = own_git_folder(desk, wt).resolve().parent.parent
+    path = common / "refs" / "heads" / branch
+    try:
+        wgit(desk, wt, "update-ref", "--no-deref", "-m", f"commit: {(message.strip().splitlines() or [''])[0]}",
+             ref, new, old)
+    except RuntimeError as e:
+        text, what = _plain_text(path)
+        if text == old or what == "is gone" and _packed(common, ref) == old:
+            raise  # the ref is as hansa read it: git failed for another reason
+        raise GitFolderChanged(wt, path, f"changed while hansa committed: it {what or 'now holds ' + repr(text[:200])}"
+                                         f", not {old}; the work is left staged", old, aside=True) from e
+    text, what = _plain_text(path)
+    parent = wgit(desk, wt, "rev-list", "--parents", "-n", "1", new).split()[1:2]
+    if text != new or parent != [old]:
+        raise GitFolderChanged(wt, path, f"changed while hansa committed: it {what or 'now holds ' + repr(text[:200])}"
+                                         f", not {new}, a commit on {old}; the work is left staged", old, aside=True)
     own = own_git_folder(desk, wt)
     for name in GIT_MERGE_LEFT:
         if os.path.isfile(own / name) and not os.path.islink(own / name):
@@ -2621,6 +2640,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
         fields["verdict"] = found[-1].lower() if found else ""
+    sweep(desk, tid)  # nothing the run left running may write in the worktree or its branch while hansa commits
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     changed = ""  # what the principal is told when the worktree's .git was changed: then the task fails
     try:

@@ -7974,11 +7974,51 @@ class DeskTest(unittest.TestCase):
         sh("git", "checkout", "-q", "-B", f"task/{tid}", base, cwd=wt)
         (common / "refs" / "heads" / "task" / tid).write_text("ref: refs/heads/main\n")
         (wt / "more.txt").write_text("more\n")
-        with unittest.mock.patch.object(run, "check_branch_ref"):
+        with unittest.mock.patch.object(run, "check_branch_ref", return_value=base):  # the id it read
             run.commit_work(self.desk, wt, "a commit", f"task/{tid}")
         self.assertEqual(self.git_out("rev-parse", "main"), base)
         self.assertEqual(self.git_out("rev-parse", f"task/{tid}^"), base)
         self.assertNotIn("ref:", (common / "refs" / "heads" / "task" / tid).read_text())
+
+    def test_hansas_commit_refuses_a_branch_ref_made_a_link_while_it_commits(self):
+        # something a design session left running could make its branch's ref 'ref: refs/heads/main' after hansa
+        # checked it: read through the link, the base's tip would pass for the branch's, and hansa's commit would
+        # rewrite the branch as one commit on the base, dropping its own history
+        from hansa import run
+        first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(first["state"], "done", first)
+        tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+        wt = Path(self.design_worktree(tid))
+        base = self.git_out("rev-parse", "main")
+        self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
+                         model_asked="sonnet", branch=f"task/{tid}", base=base)
+        (wt / "own.txt").write_text("the session's own commit\n")
+        sh("git", "add", "own.txt", cwd=wt)
+        sh("git", "commit", "-q", "-m", "own", cwd=wt)
+        ref = self.repo / ".git" / "refs" / "heads" / "task" / tid
+        tip = ref.read_text().strip()
+        (wt / "left.txt").write_text("left uncommitted\n")
+        order, wgit = [], run.wgit
+
+        def linked_in_the_window(desk, w, *args):  # the link is made after the check, before the ref is moved
+            if args[:1] == ("write-tree",):
+                ref.write_text("ref: refs/heads/main\n")
+            return wgit(desk, w, *args)
+        sweep, commit_work = run.sweep, run.commit_work
+        with unittest.mock.patch.object(run, "wgit", linked_in_the_window), \
+                unittest.mock.patch.object(run, "sweep", lambda d, t: order.append("sweep") or sweep(d, t)), \
+                unittest.mock.patch.object(run, "commit_work",
+                                           lambda *a, **k: order.append("commit") or commit_work(*a, **k)):
+            m = run.finish(self.desk, tid, 0)
+        self.assertEqual(self.git_out("rev-parse", "main"), base)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("changed while hansa committed", m["error"])
+        self.assertEqual(ref.read_text(), tip + "\n")  # put back: the branch keeps its own commit
+        self.assertEqual(self.git_out("rev-list", "--count", f"main..task/{tid}"), "1")
+        self.assertIn("left.txt", self.git_out("diff", "--cached", "--name-only", cwd=wt))  # left staged
+        self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.*")).read_text(),
+                         "ref: refs/heads/main\n")
+        self.assertEqual(order[:2], ["sweep", "commit"])  # what the session left running is stopped first
 
     def test_a_worker_cannot_put_a_merge_into_hansas_commit(self):
         # a MERGE_HEAD a worker wrote would make hansa's commit a merge with a commit nobody reviewed as a parent

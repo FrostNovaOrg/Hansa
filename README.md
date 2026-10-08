@@ -217,7 +217,12 @@ page gives.
   with the branch's tip (and, after that merge, the base's tip it merged) for
   parents, never from a `MERGE_HEAD` git would find there, and moves exactly
   the run's branch from the old id to the new one (`git update-ref` with the
-  old id, without following a link). At the end of a design session that
+  old id, without following a link). The old id is what the branch's ref file
+  (or `packed-refs`) holds, read as a plain file, and what the run left running
+  is stopped before hansa commits, so nothing can change the ref meanwhile; if
+  it changed all the same (a link made, another id), or the branch does not end
+  on the new commit with the old id as its parent, the task fails, the ref is
+  put back to the old id and the work is left staged. At the end of a design session that
   commit is always a plain one on its branch: a merge the session left under
   way is committed as the changes it made, without the merged commit as a
   parent (the session's own merge commits stay as they are). In the lane's own checkout, a `commondir` in its `.git`
