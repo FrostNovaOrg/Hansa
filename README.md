@@ -235,9 +235,13 @@ page gives.
   patterns keep what git needs open" or "the deny-write patterns do not
   keep" with the path; a sandbox that does not keep what it should runs no
   one); the principal's
-  alert is told once for each reason. Held tasks start by themselves once a
-  try passes: after a fix, restart `hansa serve` (a change of the settings
-  tries again too). Without srt, or with an srt that cannot run at all, the
+  alert is told once for each lane and reason. Only what was refused is
+  held: a design session's refusal holds the lane's design sessions, a
+  worker's or a verifier's its workers and verifiers, and `hansa status` says
+  which. Held tasks start by themselves once a try passes: after a fix,
+  restart `hansa serve`, which as it starts tries the sandbox of each held
+  lane again, clearing the hold when the try passes and keeping it with the
+  new reason when it fails (a change of the settings tries again too). Without srt, or with an srt that cannot run at all, the
   run starts as before, in Claude Code's own sandbox, which is set to fail
   rather than run a command outside it (`failIfUnavailable`). Claude Code
   carries its own copy of the sandbox library, which may differ from the srt
@@ -360,7 +364,9 @@ page gives.
   `npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
   `YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
   gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
-  `CCACHE_DIR`. A lane's env reaches the lane's commands, in the sandbox
+  `CCACHE_DIR`, uv `UV_CACHE_DIR`, poetry `POETRY_CACHE_DIR`, pipenv
+  `PIPENV_CACHE_DIR`, bun `BUN_INSTALL_CACHE_DIR`, deno `DENO_DIR`, NuGet
+  `NUGET_PACKAGES`, coursier `COURSIER_CACHE`. A lane's env reaches the lane's commands, in the sandbox
   (setup, check, preview, `hansa lane try` and the worker's Bash commands),
   not Claude Code and not hansa's own programs: srt, the scripts around a
   setup or check and Claude Code run with the server's environment, and the
@@ -446,7 +452,10 @@ page gives.
   (such as `./deploy.sh`) marked. A word from the principal's list of words no
   release may send out, in the command line or in a line, a file name or a
   message of any outgoing commit (all are checked; matched within one line,
-  in text read as UTF-8), refuses it. A command that holds a known key is
+  in text read as UTF-8), refuses it. A command that holds one of those words
+  is kept when it is set (`hansa lane set L release`, `hansa lane target`,
+  `hansa lane add --like`), and hansa says the word and where at once, before
+  any release is asked. A command that holds a known key is
   refused when it is set. A target that must follow another is asked only for
   a commit the other one already sent out, and looked at again before it
   starts. Otherwise the page shows it, with its target, with Release and
@@ -486,6 +495,17 @@ page gives.
   the words or the command changed. The coordinator hears when the principal answers
   and when the release ends. `hansa release` lists them; `hansa explain lane L`
   shows each target's command and its last release.
+- A release builds and starts what is on the base branch outside the sandbox,
+  so a change to its build files (a Maven pom's plugins, a build script, the
+  release script itself) is worker-written code a release runs unsandboxed. A
+  lane lists such files as `release_files`, paths or globs relative to the
+  repository (`**/` for any folders): `hansa lane set L release_files
+  "pom.xml **/pom.xml build.sh tools/release.sh"`, `hansa lane add
+  --release-files ...`, copied by `--like`. `hansa merge` refuses a change
+  touching one of them until a verification of that change holds (`hansa
+  verify ID`), naming the files; `--despite-check` does not let it through,
+  nor does anything else. `hansa explain lane L` shows the list, and advises
+  one for a lane with release targets and none.
 - A release can be stopped: the coordinator with `hansa release --stop ID
   [reason]`, the principal with Stop on the page. One that has not started yet
   (waiting for the principal's answer, or approved and waiting its turn) is

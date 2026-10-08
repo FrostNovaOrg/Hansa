@@ -4,7 +4,7 @@ The principal sets one command line on the page (settings `alert`, which only th
 the page records that it saved it, and when. hansa runs it when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a request to the principal is filed (hansa ask), when a lane's runs cannot
-start because their sandbox cannot (once for each reason: run.hold), and
+start because their sandbox cannot (once for each lane and reason: run.hold), and
 when hansa serve has finished no round for STUCK_ALERT seconds; not for ordinary task events, which go to the
 coordinator. The coordinator sends none: no hansa command does.
 
@@ -136,11 +136,12 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     elif kind == "ask":
         a = next((x for x in desk.asks() if x.get("id") == fields.get("id")), {})
         add(desk, "ask", f"request #{fields.get('id')} waits for you on the page: {a.get('text', '')}")
-    elif kind == "sandbox_held" and fields.get("alert"):  # once for each reason (run.hold)
+    elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason (run.hold)
         from .run import sandbox_held_text
         why = sandbox_held_text({**fields, "kind": fields.get("run")})
-        add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; task "
-                             f"{fields.get('task')} is held, not failed")
+        add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
+                             + (f"task {fields['task']} is held" if fields.get("task") else "its tasks are held")
+                             + ", not failed")
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
