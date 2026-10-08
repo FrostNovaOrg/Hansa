@@ -170,10 +170,9 @@ PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in th
 on branch task/{tid}, which was made for this task.
 - Do not commit: when you end, hansa commits everything you changed here. To look at your
   work, git status, git diff, git log and git show are allowed.
-- On Linux the sandbox puts empty files where the paths it protects are missing, so while you work git
-  status may list untracked .bashrc, .bash_profile, .zshrc, .zprofile, .profile, .gitconfig, .gitmodules,
-  .ripgreprc, .mcp.json, .vscode, .idea or .claude/ that you did not make. Leave them: do not delete them
-  or report them as a change. The sandbox removes them and hansa never commits them.
+- On Linux the sandbox puts empty files where the paths it protects under .claude/ are missing, so
+  while you work git status may list untracked files there that you did not make. Leave them: do not delete
+  them or report them as a change. The sandbox removes them and hansa never commits them.
 - Do not push, do not switch branches, do not touch other directories.
 - You work in a sandbox; inside it any command runs. Your temporary folder, {tmp}, is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
@@ -197,10 +196,9 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
 - Change files as your checks need (undo code, add a throwaway test), but do not commit; hansa sets
   your changes aside when you end. For undoing, `git checkout <commit> -- <path>` and
   `git restore` are allowed here.
-- On Linux the sandbox puts empty files where the paths it protects are missing, so while you work git
-  status may list untracked .bashrc, .bash_profile, .zshrc, .zprofile, .profile, .gitconfig, .gitmodules,
-  .ripgreprc, .mcp.json, .vscode, .idea or .claude/ that nobody made. Leave them: do not delete them
-  or report them as a change. The sandbox removes them and hansa never commits them.
+- On Linux the sandbox puts empty files where the paths it protects under .claude/ are missing, so
+  while you work git status may list untracked files there that nobody made. Leave them: do not delete
+  them or report them as a change. The sandbox removes them and hansa never commits them.
 - Do not push, do not switch branches, do not touch other directories.
 - You work in a sandbox; inside it any command runs. Your temporary folder, {tmp}, is yours
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
@@ -323,8 +321,8 @@ CLASS_MAX = 15
 # What a worker's sandbox on Linux (bubblewrap, in Claude Code and srt alike) mounts an empty file over at the top
 # of the worktree when it is missing, so it cannot be made: its fixed list of files a program may run or obey
 # (.gitconfig to .mcp.json) and the folders .vscode and .idea. It removes them once no sandbox of its run is
-# still up, so a worker can see them in git status. Under .claude/ it does the same for the settings, skills,
-# hooks and the like it protects there. The macOS sandbox (Seatbelt) makes none; Claude Code's own
+# still up; while one is, git in the sandbox does not list them (LINUX_PRELUDE). Under .claude/ it does the same
+# for the settings, skills, hooks and the like it protects there, which git in the sandbox still lists. The macOS sandbox (Seatbelt) makes none; Claude Code's own
 # .claude/.cc-writes there is an empty folder, which git does not list. sandbox_leftovers keeps them all out.
 SANDBOX_PLACEHOLDERS = (".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
                         ".ripgreprc", ".mcp.json", ".vscode", ".idea")
@@ -550,6 +548,17 @@ LINUX_TRY_NOTE = ("on Linux, new names in git's shared folder are left to hansa'
                   ".git file, the main checkout, no merge or rebase under way, commondir and config.worktree): srt "
                   "there keeps only paths that are there when a command starts, so the sandbox try checks only what "
                   "stays open for git and the paths there it must keep (the shared config, other worktrees' HEAD)")
+# What a lane's commands find in the sandbox on Linux, said in hansa explain lane there (README, "On a Linux server").
+LINUX_SANDBOX_NOTES = (
+    "on Linux, inside the sandbox, what the mount table says (Java's FileStore.isReadOnly, findmnt, df) can call a "
+    "writable folder read-only: the worktree, the lane's write list and a worker's temporary folder are writable "
+    "binds inside the read-only / (or /tmp) of the same file system, and Java takes the mount of the folder above "
+    "them; trust the error of the write itself. The TMPDIR of the setup, check, merge check and preview is a tmpfs "
+    "of its own (in memory, gone when the command ends), which Java reads as writable",
+    "git in the sandbox (the setup, check, merge check, preview and workers' commands) does not list the empty "
+    "files the sandbox puts at the top of the worktree for what it protects (" + ", ".join(SANDBOX_PLACEHOLDERS)
+    + "): its excludes file there adds them, anchored at the top, to the account's own; a tracked file of such a "
+    "name is still listed, and what hansa commits does not change")
 # The name of the script a try runs in srt to write what git needs open and what it must keep (_srt_writes)
 GIT_OPEN_TRY = "hansa-git-open-try.sh"
 # What a Bash result begins with when the sandbox could not start: macOS's sandbox-exec, Linux's bubblewrap
@@ -2140,17 +2149,62 @@ if [ -n "$hansa_t" ] && [ -n "$hansa_p" ] && [ -n "$hansa_h" ]; then
 fi
 unset hansa_t hansa_p hansa_r hansa_c hansa_u hansa_w hansa_h hansa_o hansa_f hansa_q; unset -f hansa_x
 """
+# The folder in a setup's, check's, merge check's or preview's temporary folder that srt on Linux mounts a tmpfs
+# of its own over: srt_settings makes it and lists it in denyRead, and srt hides a read-denied folder that is
+# there under an empty tmpfs, writable inside (bubblewrap's --tmpfs, in the user namespace srt always makes).
+# Bound from the same file system as its parent, the run's folder would be read-only to Java: FileStore finds a
+# folder's mount by walking up while the device stays the same, so it takes the read-only /tmp or / that the
+# writable bind sits in. A tmpfs is a device of its own, with a writable entry of its own in the mount table.
+SANDBOX_TMPFS = "hansa-tmpfs"
+# What runs in the sandbox on Linux before JAVA_PRELUDE (sandbox_prelude). First, the command's TMPDIR moves to
+# the run folder's SANDBOX_TMPFS when srt mounted a tmpfs there (another device than the folder's, and writable);
+# otherwise it stays the run's folder. Then git there is given an excludes file in $TMPDIR (GIT_CONFIG_COUNT and
+# the GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n after those set already): the excludes git would read (core.excludesFile,
+# else $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore), then each of SANDBOX_PLACEHOLDERS anchored at the top,
+# so git status there does not list the empty files the sandbox mounts (a build script that refuses a tree with
+# untracked files would refuse every one). It is only an ignore: a tracked file of such a name is still listed,
+# and git outside the sandbox (what hansa commits, the main checkout) reads none of it. Not the repository's
+# info/exclude, which every worktree and the main checkout share, and which is git's own folder, kept from
+# workers. Not on macOS, whose sandbox mounts no such files. Nothing is added twice (HANSA_GIT_EXCLUDES), what
+# cannot be done is skipped, and nothing is printed; POSIX sh, as JAVA_PRELUDE.
+LINUX_PRELUDE = r"""hansa_t=${TMPDIR:-}
+if [ -n "$hansa_t" ] && [ -d "$hansa_t/""" + SANDBOX_TMPFS + r"""" ] && [ -w "$hansa_t/""" + SANDBOX_TMPFS + r"""" ] \
+   && [ "$(stat -c %d "$hansa_t/""" + SANDBOX_TMPFS + r"""" 2>/dev/null)" != "$(stat -c %d "$hansa_t" 2>/dev/null)" ]; then
+  TMPDIR=${hansa_t%/}/""" + SANDBOX_TMPFS + r"""; export TMPDIR
+fi
+hansa_t=${TMPDIR:-}
+hansa_e=${hansa_t%/}/hansa-git-excludes
+if [ -n "$hansa_t" ] && [ -d "$hansa_t" ] && [ "${HANSA_GIT_EXCLUDES:-}" != "$hansa_e" ]; then
+  hansa_g=$(git config --path --get core.excludesFile 2>/dev/null) || hansa_g=
+  [ -n "$hansa_g" ] || hansa_g=${XDG_CONFIG_HOME:-${HOME:-}/.config}/git/ignore
+  if [ "$hansa_g" != "$hansa_e" ] && (umask 077
+      { cat -- "$hansa_g" 2>/dev/null; printf '\n'; printf '/%s\n' """ + " ".join(SANDBOX_PLACEHOLDERS) + r"""; } >"$hansa_e") 2>/dev/null; then
+    hansa_n=${GIT_CONFIG_COUNT:-0}
+    case $hansa_n in ''|*[!0-9]*) hansa_n=0 ;; esac
+    eval "GIT_CONFIG_KEY_$hansa_n=core.excludesFile GIT_CONFIG_VALUE_$hansa_n=\$hansa_e"
+    export "GIT_CONFIG_KEY_$hansa_n" "GIT_CONFIG_VALUE_$hansa_n"
+    GIT_CONFIG_COUNT=$((hansa_n + 1)) HANSA_GIT_EXCLUDES=$hansa_e; export GIT_CONFIG_COUNT HANSA_GIT_EXCLUDES
+  fi
+fi
+unset hansa_t hansa_e hansa_g hansa_n
+"""
+
+
+def sandbox_prelude(linux: bool | None = None) -> str:
+    """What runs in the sandbox before a lane's commands and in front of each of a worker's Bash commands:
+    LINUX_PRELUDE on Linux (`linux`, by default this machine's), then JAVA_PRELUDE."""
+    return (LINUX_PRELUDE if (account.LINUX if linux is None else linux) else "") + JAVA_PRELUDE
 
 
 def with_prelude(command: str) -> str:
-    """A command for /bin/sh -c with JAVA_PRELUDE run first, in the same sandbox: the command itself then runs
+    """A command for /bin/sh -c with sandbox_prelude run first, in the same sandbox: the command itself then runs
     in a shell of its own, as it would alone, with what the prelude exported."""
-    return JAVA_PRELUDE + "exec /bin/sh -c " + shlex.quote(command)
+    return sandbox_prelude() + "exec /bin/sh -c " + shlex.quote(command)
 
 
 def in_sandbox(desk: Desk, lane: dict, command: str) -> str:
     """A lane's command (setup, check) as srt is given it to run with /bin/sh -c: with the lane's env set
-    inside the sandbox, by env there (`exec /usr/bin/env K=V ... /bin/sh -c COMMAND`), then JAVA_PRELUDE
+    inside the sandbox, by env there (`exec /usr/bin/env K=V ... /bin/sh -c COMMAND`), then sandbox_prelude
     (with_prelude). srt itself, the script around it and the git it runs get hansa's environment, so nothing a
     lane's env names is looked up, loaded or read outside the sandbox."""
     env = sandbox_env(desk, lane)
@@ -2175,7 +2229,7 @@ DESIGN_GIT_ENV = git_config_env({}, DESIGN_GIT_CONFIG)  # as a session gets them
 
 
 def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
-    """How a worker's Bash commands get the lane's env and JAVA_PRELUDE: {"CLAUDE_ENV_FILE": a file of
+    """How a worker's Bash commands get the lane's env and sandbox_prelude: {"CLAUDE_ENV_FILE": a file of
     `export K='V'` lines, then the prelude}. Claude Code reads the file itself (it is in the task's raw folder,
     .hansa, which no worker can write or read) and runs its content in front of each Bash command, in the same
     shell, inside its sandbox, where the sandbox's proxy variables and the command's TMPDIR are set. Claude
@@ -2189,7 +2243,7 @@ def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
     fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # only the desk's account reads it
     os.fchmod(fd, 0o600)  # one written before was made with the umask's mode
     with os.fdopen(fd, "w", encoding="utf-8") as out:
-        out.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + JAVA_PRELUDE)
+        out.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + sandbox_prelude())
     return {"CLAUDE_ENV_FILE": str(f)}
 
 
@@ -2277,13 +2331,19 @@ def design_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, branch
 def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str, local: bool = False) -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
     worktree, the temporary folder `tmp` and the lane's write list. local: with local binding whatever the
-    lane's network list says (a preview hansa starts, and nothing else)."""
+    lane's network list says (a preview hansa starts, and nothing else). On Linux the folder SANDBOX_TMPFS is
+    made in `tmp` and read-denied, so srt mounts a tmpfs of its own there, the command's TMPDIR (LINUX_PRELUDE):
+    what it writes there stays in memory and goes when the command ends."""
     hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
     if local or any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True
+    tmpfs = []
+    if account.LINUX:
+        (Path(tmp) / SANDBOX_TMPFS).mkdir(mode=0o700, parents=True, exist_ok=True)  # srt mounts a tmpfs only over one that is there
+        tmpfs = full_paths([Path(tmp) / SANDBOX_TMPFS])
     return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp]) + fs["allowWrite"],
-                                               "denyRead": fs["denyRead"], "denyWrite": fs["denyWrite"]}}
+                                               "denyRead": fs["denyRead"] + tmpfs, "denyWrite": fs["denyWrite"]}}
 
 
 def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path, local: bool = False) -> tuple:

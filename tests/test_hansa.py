@@ -580,7 +580,7 @@ class DeskTest(unittest.TestCase):
         cmd = call["argv"][-1]
 
         def bare(x):
-            head = run.JAVA_PRELUDE + "exec /bin/sh -c "
+            head = run.sandbox_prelude() + "exec /bin/sh -c "
             assert x.startswith(head), x[:200]
             [inner] = shlex.split(x[len(head):])
             return inner
@@ -727,11 +727,12 @@ class DeskTest(unittest.TestCase):
         run.commit_work(self.desk, wt, "a real one", f"task/{m['id']}")
         self.assertEqual(sorted(self.git_out("show", "--name-only", "--format=", "HEAD", cwd=wt).split()),
                          [".gitconfig", "sub/.bashrc"])
-        for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):  # workers are told each name, and to leave them
+        for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):  # workers are told of those under .claude/, and to leave them
             flat = " ".join(text.split())
-            for name in (*run.SANDBOX_PLACEHOLDERS, ".claude/"):
-                self.assertIn(name, flat)
+            self.assertIn(".claude/", flat)
             self.assertIn("hansa never commits them", flat)
+            for name in run.SANDBOX_PLACEHOLDERS:  # git in the sandbox does not list these (LINUX_PRELUDE)
+                self.assertNotIn(name, flat)
 
     def test_workers_are_told_git_stash_is_refused_and_background_work_ends_in_its_command(self):
         from hansa import run
@@ -7908,7 +7909,7 @@ class DeskTest(unittest.TestCase):
         [(path, text)] = files
         self.assertTrue(Path(path).resolve().is_relative_to(self.desk.state_dir.resolve()), path)  # no worker writes there
         self.assertEqual(text, f"export LANE_VAR={shlex.quote(value)}\nexport npm_config_cache=/srv/x/cache\n"
-                               "export FAKE_WRITE='from the file'\n" + run.JAVA_PRELUDE)  # quoted; the temporary folder stays the run's
+                               "export FAKE_WRITE='from the file'\n" + run.sandbox_prelude())  # quoted; the temporary folder stays the run's
         r = subprocess.run(["/bin/sh", "-c", text + 'printf %s "$LANE_VAR"'], capture_output=True, text=True,
                            env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(r.stdout, value)  # as a shell reads it back
@@ -7919,7 +7920,7 @@ class DeskTest(unittest.TestCase):
         patch, envs, files = self.popens()
         with patch:
             self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
-        self.assertEqual([t for _, t in files], [run.JAVA_PRELUDE])
+        self.assertEqual([t for _, t in files], [run.sandbox_prelude()])
 
     def test_the_setup_and_check_hansa_runs_get_the_java_prelude_in_the_sandbox(self):
         password = "s3cr%40t-pass"
@@ -8460,7 +8461,8 @@ class DeskTest(unittest.TestCase):
                 lane = self.desk.settings()["lanes"]["a"]
                 deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
                 srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
-            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            # a setup's and a check's, as a worker's, and on Linux the tmpfs for their TMPDIR (srt_settings)
+            self.assertEqual(deny, [x for x in srt if Path(x).name != run.SANDBOX_TMPFS])
             for f in everywhere:
                 self.assertIn(str(home / f), deny, (system, f))
             for f in mac:
@@ -8502,7 +8504,8 @@ class DeskTest(unittest.TestCase):
                 lane = self.desk.settings()["lanes"]["a"]
                 deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
                 srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
-            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
+            # a setup's and a check's, as a worker's, and on Linux the tmpfs for their TMPDIR (srt_settings)
+            self.assertEqual(deny, [x for x in srt if Path(x).name != run.SANDBOX_TMPFS])
             for f in everywhere:
                 self.assertIn(str(home / f), deny, (system, f))
             for f in mac:
@@ -14336,6 +14339,152 @@ class DeskTest(unittest.TestCase):
         self.assertIn(".m2/settings-security.xml", home_secrets())
         for kept in (".m2/settings.xml", ".m2", ".gradle/gradle.properties", ".gradle"):  # mirrors, proxies a build needs
             self.assertNotIn(kept, home_secrets())
+
+    def test_on_linux_srt_mounts_a_tmpfs_of_its_own_for_the_commands_temporary_folder(self):
+        from hansa import run
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        got = {}
+        for linux in (False, True):
+            t = self.tmp / f"run-{linux}"
+            t.mkdir()
+            with unittest.mock.patch.object(account, "LINUX", linux):
+                got[linux] = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(t))["filesystem"]
+                prelude = run.with_prelude("true")
+            self.assertEqual((t / run.SANDBOX_TMPFS).is_dir(), linux)  # srt mounts a tmpfs only over one that is there
+            self.assertEqual(run.LINUX_PRELUDE in prelude, linux)
+            self.assertTrue(prelude.startswith(run.sandbox_prelude(linux)))
+        fs, mac = got[True], got[False]
+        tmpfs = run.full_paths([self.tmp / "run-True" / run.SANDBOX_TMPFS])
+        self.assertEqual(fs["denyRead"][-len(tmpfs):], tmpfs)  # read-denied: srt hides it under an empty tmpfs
+        self.assertEqual(fs["denyRead"][:-len(tmpfs)], mac["denyRead"])
+        self.assertIn(str(self.tmp / "run-True"), fs["allowWrite"])  # the run's folder, srt's sockets in it, as before
+        self.assertFalse([x for x in fs["allowWrite"] + fs["denyWrite"] if run.SANDBOX_TMPFS in x])
+        self.assertFalse([x for x in mac["denyRead"] if run.SANDBOX_TMPFS in x])
+
+    def test_explain_lane_on_linux_says_the_mount_table_can_call_a_writable_folder_read_only(self):
+        for linux in (False, True):
+            with unittest.mock.patch.object(account, "LINUX", linux):
+                text = views.explain_text(self.desk, "lane", "a")
+            for said in ("FileStore.isReadOnly", "findmnt", "trust the error of the write itself",
+                         "TMPDIR of the setup, check, merge check and preview is a tmpfs of its own",
+                         "does not list the empty files the sandbox puts at the top of the worktree"):
+                (self.assertIn if linux else self.assertNotIn)(said, text)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the sandbox mounts placeholders on Linux only")
+    def test_git_status_in_a_linux_lanes_check_lists_none_of_the_sandboxs_placeholders(self):
+        # srt itself, as a lane's check runs in it (in_srt, CHECK_SCRIPT); skipped where it is not installed
+        from hansa import run
+        path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
+                               if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
+        srt = shutil.which("srt", path=path)
+        if not srt:
+            self.skipTest("srt is not installed")
+        (self.repo / ".vscode").mkdir()
+        (self.repo / ".vscode" / "settings.json").write_text("{}\n")
+        sh("git", "add", ".vscode", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "editor", cwd=self.repo)
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        t = tempfile.mkdtemp(dir=self.tmp)
+        f = Path(t) / "settings.json"
+        write_json(f, run.srt_settings(self.desk, lane, "claude", p, self.repo, t))
+        check = ('printf "\\n" >> .vscode/settings.json && echo made > new.txt && git status --porcelain -uall'
+                 ' && echo "tmp=$TMPDIR" && : > "$TMPDIR/w" && echo wrote')
+        r = subprocess.run([srt, "--settings", str(f), "--", "sh", "-c", run.in_sandbox(self.desk, lane, check)],
+                           cwd=self.repo, capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "PATH": path, "TMPDIR": t, "CLAUDE_CODE_TMPDIR": t})
+        if r.returncode and "tmp=" not in r.stdout:
+            self.skipTest(f"no sandbox can be applied here (inside one already?): srt said {(r.stderr or r.stdout).strip()[:200]}")
+        lines = r.stdout.splitlines()
+        self.assertIn(" M .vscode/settings.json", lines)  # tracked: still listed
+        self.assertIn("?? new.txt", lines)
+        self.assertFalse([x for x in lines if x.startswith("??") and x[3:].split("/")[0] in run.SANDBOX_PLACEHOLDERS], lines)
+        self.assertIn(f"tmp={Path(t) / run.SANDBOX_TMPFS}", lines)  # srt's tmpfs, another device than the folder
+        self.assertIn("wrote", lines)
+        self.assertFalse((Path(t) / run.SANDBOX_TMPFS / "w").exists())  # in memory, not on the host
+
+
+class LinuxPreludeTest(unittest.TestCase):
+    """run.LINUX_PRELUDE, run in the sandbox on Linux before a lane's commands and a worker's: the run's tmpfs as
+    TMPDIR, and git told to leave out the sandbox's placeholders. Run here without a sandbox, as sh reads it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo, self.run_tmp, self.home = self.tmp / "repo", self.tmp / "run", self.tmp / "home"
+        for d in (self.repo, self.run_tmp, self.home / ".config" / "git"):
+            d.mkdir(parents=True)
+        (self.home / ".config" / "git" / "ignore").write_text("*.log\n")  # the account's own excludes
+        sh("git", "init", "-q", "-b", "main", cwd=self.repo)
+        (self.repo / ".vscode").mkdir()
+        (self.repo / ".vscode" / "settings.json").write_text("{}\n")
+        (self.repo / ".bashrc").write_text("# the project's own, tracked\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=self.repo)
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "TMPDIR": str(self.run_tmp)}
+
+    def git_status(self, before="", **env) -> list:
+        from hansa import run
+        r = subprocess.run(["/bin/sh", "-eu", "-c", run.sandbox_prelude(True) + before + "git status --porcelain -uall"],
+                           cwd=self.repo, env={**self.env, **env}, capture_output=True, text=True, check=True)
+        return r.stdout.splitlines()
+
+    def test_git_lists_no_placeholder_but_tracked_files_of_their_names_and_the_accounts_excludes_hold(self):
+        from hansa import run
+        (self.repo / ".bashrc").write_text("changed\n")
+        (self.repo / ".vscode" / "settings.json").write_text("{\"changed\": 1}\n")
+        for n in run.SANDBOX_PLACEHOLDERS:
+            if not (self.repo / n).exists():
+                (self.repo / n).write_text("")  # as the sandbox mounts them
+        (self.repo / "sub").mkdir()
+        for f in ("sub/.zshrc", "new.txt", "build.log"):
+            (self.repo / f).write_text("x\n")
+        bare = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=self.repo, env=self.env,
+                              capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertIn("?? .mcp.json", bare)  # outside the sandbox, as hansa and the main checkout see it: unchanged
+        self.assertEqual(sorted(self.git_status()), [" M .bashrc", " M .vscode/settings.json", "?? new.txt",
+                                                     "?? sub/.zshrc"])  # anchored at the top; *.log kept out
+        excludes = (self.run_tmp / "hansa-git-excludes").read_text()
+        self.assertTrue(excludes.startswith("*.log\n"), excludes)
+        # core.excludesFile, from the repository's config or a lane's GIT_CONFIG_*, is what is kept
+        (self.tmp / "mine").write_text("new.txt\n")
+        self.assertEqual(sorted(self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile",
+                                                GIT_CONFIG_VALUE_0=str(self.tmp / "mine"))),
+                         [" M .bashrc", " M .vscode/settings.json", "?? build.log", "?? sub/.zshrc"])
+
+    def test_it_adds_its_excludes_once_after_what_is_set_and_uses_srts_tmpfs_only_when_there(self):
+        from hansa import run
+        show = 'echo "$TMPDIR $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_0:-} ${GIT_CONFIG_KEY_1:-} ${GIT_CONFIG_VALUE_1:-}"'
+        twice = run.sandbox_prelude(True) + "exec /bin/sh -c " + shlex.quote(run.sandbox_prelude(True) + show)
+        r = subprocess.run(["/bin/sh", "-c", twice], env={**self.env, "GIT_CONFIG_COUNT": "1",
+                                                          "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x"},
+                           capture_output=True, text=True, check=True)
+        self.assertEqual(r.stdout.split(), [str(self.run_tmp), "2", "user.name", "core.excludesFile",
+                                            str(self.run_tmp / "hansa-git-excludes")])
+        tmpfs = self.run_tmp / run.SANDBOX_TMPFS
+        tmpfs.mkdir()
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=self.env, capture_output=True,
+                           text=True, check=True)
+        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))  # the same device: srt mounted nothing there
+        fake = self.tmp / "bin"
+        fake.mkdir()
+        (fake / "stat").write_text('#!/bin/sh\ncase $3 in */%s) echo 2 ;; *) echo 1 ;; esac\n' % run.SANDBOX_TMPFS)
+        (fake / "stat").chmod(0o755)
+        env = {**self.env, "PATH": f"{fake}{os.pathsep}{self.env['PATH']}"}  # a device of its own, as srt's tmpfs
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+                           text=True, check=True)
+        self.assertEqual(r.stdout.split()[:2], [str(tmpfs), "1"])
+        self.assertTrue((tmpfs / "hansa-git-excludes").is_file())
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + 'echo "$JAVA_TOOL_OPTIONS"'], env=env,
+                           capture_output=True, text=True, check=True)
+        self.assertEqual(r.stdout.strip(), f"-Djava.io.tmpdir={tmpfs}")  # Java's temporary folder too
+        tmpfs.chmod(0o500)  # a tmpfs the command cannot write: the run's folder stays
+        self.addCleanup(tmpfs.chmod, 0o700)
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+                           text=True, check=True)
+        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))
+        # a worker's TMPDIR (Claude Code's own folder) has no such folder, and macOS gets none of it
+        self.assertEqual(run.sandbox_prelude(False), run.JAVA_PRELUDE)
+
 
 class GitOpenTryTest(unittest.TestCase):
     """The sandbox try's script (run.git_open_try) run by the real /bin/sh outside any sandbox: a read-only folder
