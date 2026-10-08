@@ -9269,8 +9269,13 @@ class DeskTest(unittest.TestCase):
             shown = views.show_text(self.desk, tid)
             for path, why in left.items():
                 lines = [x for x in shown.splitlines() if why in x and x.startswith(
-                    f"what workers may not read: left out of this run: {path}: ") and "open to the runs" in x]
+                    f"what workers may not read: left out of this run: {path}: ")]
                 self.assertEqual(len(lines), 1, (path, shown))
+                if why == "a folder on the PATH":  # open to every run, not one lane's
+                    self.assertIn("open to every run", lines[0])
+                    self.assertNotIn("open to the runs of that lane", lines[0])
+                else:
+                    self.assertIn("open to the runs of that lane and every other", lines[0])
             self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(left))
             told = self.hansa("explain", "lane", "a")
             self.assertIn(f"not applied: {self.repo.resolve()}: it is {self.repo.resolve()}, lane a's repository", told)
