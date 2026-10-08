@@ -299,6 +299,8 @@ def _release_item(desk: Desk, e: dict):
                 f"{head} FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                 + (f": {e.get('problem')}" if e.get("problem") else "") + (f" · last lines: {tail}" if tail else "")
                 + " · next: hansa release; fix what failed, then ask again: " + release.ask_again(r))
+        if e.get("stop_late"):
+            line += " · the stop came after its command had ended, so it ended as its exit says"
     elif kind == "release_stopped":
         key = ("release", rid)
         who = "the principal" if e.get("by") == "page" else e.get("by") or "?"

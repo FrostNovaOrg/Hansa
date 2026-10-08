@@ -30,7 +30,10 @@ ssh -L 8765:127.0.0.1:8765 HOST /path/to/bin/hansa --desk /path/to/desk web
 It prints an address with a token; open it in the browser and keep the
 terminal open. More than one desk on a machine: each desk's `hansa serve` needs
 its own port (`hansa serve --port 8766`), and that desk's `hansa web` finds it
-(tunnel that port instead). On the page: add providers (a Claude Code login, or any
+(tunnel that port instead); `hansa status` and `hansa explain` say the address and
+port the page is served on, and whether `hansa serve` serves it now. A repository
+for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one
+without, in one line. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and
@@ -154,6 +157,37 @@ page gives.
   `srt`): the lane's network and write lists hold for them too, so a setup that
   downloads needs its registry on the network list. Design sessions, which the
   principal works in directly, and the coordinator run outside it.
+- One Bash call of a task or verification worker may run as long as the lane's
+  check may, plus 5 minutes, but never past the worker's own limit: hansa sets
+  Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most
+  10 minutes). The check's limit is the lane's `merge_timeout_min`, else its
+  `timeout_min`; the worker's is `timeout_min`. A call that asks for no timeout
+  still stops after 10 minutes (`BASH_DEFAULT_TIMEOUT_MS`; less when the most is
+  less), so a command that hangs does not hold it for the whole limit. Workers
+  are told these limits in minutes, to give the Bash tool's timeout (in
+  milliseconds, up to the most) for a long build or suite, and to run it in the
+  foreground, in one Bash call, never in the background while they end their
+  turn. A worker that does end its turn while
+  background work it started still runs is resumed once, in the same session,
+  with a short message: that work was stopped with it, so it runs it again in the
+  foreground, waits for it, then reports. A second time it is not resumed; `hansa
+  show` then says what was still running. The time limit counts from the task's
+  start, across both runs. When the task is queued again for a new try (after a
+  dropped connection, say), that try starts with nothing of the earlier try's
+  resume: it may be resumed once in its own right, and the earlier try's turns
+  and tokens stay in its attempt record. For a browser task whose lane has a
+  preview, the first run's preview is stopped when that run ends, before hansa
+  decides on the resume, and the resumed run gets one started again from the same
+  worktree: never two at once. The first one's output is kept beside the second's
+  (`preview-before-resume.log`, which `hansa show` names).
+- A run that ended on a dropped connection is tried once more by itself. hansa
+  reads only Claude Code's own error lines for this: one that begins `API Error`
+  (a 5xx, a connection error or reset, a request that timed out, an overloaded
+  provider, unable to connect, but not a certificate error), one that begins
+  with a connection reset, refused or closed, a socket hang up, a fetch that failed or "Connection lost while your
+  computer was asleep", one that ends `(ENETUNREACH)`, and the API's
+  `overloaded_error`. A test that
+  timed out, or a log line saying "overloaded", is the task's own failure.
   A write list holds a build or test tool's cache folders. The rule, in two
   lines: in the home folder of the account (whatever `HOME` says), only a
   plain folder (no name between the home folder and the entry starts with a
@@ -278,7 +312,9 @@ page gives.
   target's command, the target it must follow (its `--after`, or none) and
   whether it is `--fixed` are what they were when the list was saved, and while the desk is not paused: a
   change to any of them, `--after` dropped or changed included, unticks it
-  until the principal saves the list again; `--minutes` alone does not, and a
+  until the principal takes it back in (the page's button that takes changed
+  entries back in as they are now, or unticking and ticking it again, then
+  Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
   target taken out and set again with the same command and `--after` keeps its
   tick. hansa serve runs the
   command only then, and only while the base branch and the command are still
@@ -317,8 +353,13 @@ page gives.
   release went out for no `--after`: a target that must follow it is not let
   through. A stopped install may leave the server half-switched, so a release
   command for which that matters should handle TERM: finish or undo the step it
-  is in. The principal's alert command is told when the coordinator stops one
-  (`release_stopped`); the coordinator hears when the principal does.
+  is in. A stop that comes after the command has already ended is not a stop:
+  the release is recorded done or failed, as its exit says, with a note that the
+  stop came after it ended. What a release's command starts is recorded while
+  it runs, also what leaves its process group, and what of it still runs is
+  stopped at any end (a stop, the time limit, a failure, done). The principal's
+  alert command is told when the coordinator stops one (`release_stopped`); the
+  coordinator hears when the principal does.
 - Alerts reach the principal away from the page. The principal may set one
   alert command line on the page (Settings, Alerts), such as a script that
   sends a phone message; the page records that it saved it, and when. Only the
@@ -435,8 +476,9 @@ lane, or waits for one.
 - **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
   dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on its
   attempt record; a run an earlier `hansa serve` started and lost track of is read from its session record
-  as the task goes back. `hansa cost` (also `--by task`, which shows each task's runs and turns) and the
-  page's cost count every try once, by when each run ended.
+  as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
+  the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
+  and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
 
 ## Files
 Everything is under the desk directory; see the top of `hansa/desk.py`. Keys live
@@ -458,7 +500,8 @@ go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
 loads it with the card at every start, after `/clear` and after compaction, and the
 import survives every card refresh. `hansa init` makes the file once, holding only
 an HTML comment that says what it is for (Claude Code drops such comments, so it
-costs nothing until something is written there); hansa never writes it again. A
+costs nothing until something is written there); after that hansa rewrites it
+only when the coordinator asks, with `hansa notes archive PROJECT.md HEADING`. A
 missing file loads nothing and stops nothing. The coordinator and you keep it; the
 coordinator edits it without asking, as anything under `notes/`. Workers do not
 see it: rules for a lane's workers go in its brief. `hansa status` shows its size,

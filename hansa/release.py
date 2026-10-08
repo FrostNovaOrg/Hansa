@@ -52,8 +52,8 @@ import uuid
 from pathlib import Path
 
 from .desk import Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json
-from .run import (LOOK_LIMIT, CannotLook, alive, git, group_running, has_ended, leader, merge_target, pids_with_arg,
-                  proc_start, stop)
+from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
+                  merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
 OPEN = ("waiting", "approved", "starting", "running")
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
@@ -571,17 +571,60 @@ def _signal_group(r: dict, sig, proc=None) -> None:
         pass
 
 
+def _seen(r: dict) -> dict:
+    """What a release's command started, as recorded while it ran (_record_started): {pid: start}."""
+    return {int(p): st for p, st in (r.get("started_procs") or {}).items() if str(p).isdigit()}
+
+
+def _record_started(desk: Desk, r: dict) -> dict:
+    """Record what a running release's command has started, also what left its process group (as a preview's
+    is: run.record_descendants), so that it is stopped at the release's end; the record as it is now."""
+    seen = _seen(r)
+    if r.get("pid") and record_descendants(r["pid"], seen):
+        r = change(desk, r["id"], lambda x: {"started_procs": {**(x.get("started_procs") or {}),
+                                                               **{str(p): st for p, st in seen.items()}}}
+                   if x.get("state") in ("starting", "running") else None) or r
+    return r
+
+
+def _left(r: dict) -> dict:
+    """What the release's command started that still runs outside its process group (the group is
+    group_running's): {pid: start}."""
+    return {p: st for p, st in _seen(r).items() if p != r.get("pid") and alive(p, st) and _state(p) != "Z"}
+
+
+def _running(r: dict, pid=None) -> bool:
+    """Whether anything of a release's command still runs: its process group, or what it started that left it."""
+    return group_running(pid or r.get("pid")) or bool(_left(r))
+
+
 def _stopping(desk: Desk, r: dict, proc=None) -> None:
-    """hansa serve's round for a running release asked to stop: TERM to its command's process group once, then
-    KILL to what still runs there STOP_GRACE seconds later. A starting one has no command yet: the next round."""
-    if not r.get("pid"):
+    """hansa serve's round for a running release asked to stop: TERM to its command's process group (and to what it
+    started that left the group) once, then KILL to what still runs STOP_GRACE seconds later. A starting one has no
+    command yet: the next round. One whose command had already ended (its exit file is written) gets no signal:
+    finish records how it ended, and that the stop came after."""
+    if not r.get("pid") or r.get("stop_late"):
         return
     if not r.get("termed"):
+        if (log_dir(desk) / f"{r['id']}.exit").exists():
+            change(desk, r["id"], lambda x: {"stop_late": now()} if x.get("state") in ("starting", "running") else None)
+            return
+        r = _record_started(desk, r)
         _signal_group(r, signal.SIGTERM, proc)
+        _signal_each(_left(r), signal.SIGTERM)
         change(desk, r["id"], lambda x: {"termed": now()} if x.get("state") in ("starting", "running") else None)
-    elif not r.get("killed") and time.time() - r["termed"] >= STOP_GRACE and group_running(r["pid"]):
+    elif not r.get("killed") and time.time() - r["termed"] >= STOP_GRACE and _running(r):
         _signal_group(r, signal.SIGKILL, proc)
+        _signal_each(_left(r), signal.SIGKILL)
         change(desk, r["id"], lambda x: {"killed": now()} if x.get("state") in ("starting", "running") else None)
+
+
+def _signal_each(procs: dict, sig) -> None:
+    for p in procs:
+        try:
+            os.kill(p, sig)
+        except OSError:
+            pass
 
 
 # -- running -------------------------------------------------------------------------------------------------------
@@ -711,7 +754,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         path.parent.mkdir(parents=True, exist_ok=True)
         git("worktree", "add", "--detach", str(path), r["commit"], cwd=r["repo"])
         if (get(desk, rid) or {}).get("stop_asked"):  # stopped meanwhile: its command never runs
-            finish(desk, rid)
+            finish(desk, rid, ran=False)
             return None
         proc = _launch(desk, r, token, path)
     desk.event("release_started", id=rid, lane=r["lane"], target=target, commit=r["commit"])
@@ -736,11 +779,16 @@ def _launch(desk: Desk, r: dict, token: str, cwd) -> subprocess.Popen:
     return proc
 
 
-def finish(desk: Desk, rid) -> dict | None:
-    """After a release's command ended: its exit code and its output, keys removed; done or failed."""
+def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
+    """After a release's command ended (ran False: a release stopped before its command ran): its exit code and its
+    output, keys removed; done or failed, or stopped when it was stopped before its command ended. What its command
+    started that still runs (also outside its process group) is stopped first."""
     r = get(desk, rid)
     if not r or r.get("state") not in ("starting", "running"):
         return None
+    left = stop_recorded(_left(r), SWEEP_GRACE)
+    if left:
+        desk.event("release_left_running_stopped", id=rid, pids=left)
     if r.get("fixed"):  # its command ended: its own checkout goes, whatever the ending
         drop_checkout(desk, rid, r.get("repo"))
     d = log_dir(desk)
@@ -762,18 +810,23 @@ def finish(desk: Desk, rid) -> dict | None:
     def ending(x):
         if x.get("state") not in ("starting", "running"):
             return None
-        stopped = bool(x.get("stop_asked"))  # called off: stopped, however its command ended
-        return {"state": "stopped" if stopped else "done" if ok else "failed", "exit": code,
+        # called off before its command ended (it got TERM), or before it ran: stopped, however it then ended. A stop
+        # that came after its command had ended ends it as its exit says (stop_late)
+        stopped = bool(x.get("stop_asked")) and (bool(x.get("termed")) or not ran)
+        late = bool(x.get("stop_asked")) and not stopped
+        return {"state": "stopped" if stopped else "done" if ok else "failed", "exit": code, "ran": ran,
                 "problem": "" if stopped else problem, "ended": now(), "tail": text.strip().splitlines()[-TAIL:],
-                "seconds": round(now() - (x.get("started") or now())), "pid": None, "pid_start": ""}
+                "seconds": round(now() - (x.get("started") or now())), "pid": None, "pid_start": "",
+                **({"stop_late": x.get("stop_late") or now()} if late else {})}
     r = change(desk, rid, ending)
     if r and r["state"] == "stopped":
         desk.event("release_stopped", id=rid, lane=r.get("lane"), target=r.get("target") or "", commit=r.get("commit"),
-                   by=r.get("stopped_by") or "", reason=r.get("stop_reason") or "", ran=True, exit=code,
+                   by=r.get("stopped_by") or "", reason=r.get("stop_reason") or "", ran=ran, exit=code,
                    killed=bool(r.get("killed")))
     elif r:
         desk.event("release_ended", id=rid, lane=r.get("lane"), target=r.get("target") or "", commit=r.get("commit"),
-                   ok=ok, exit=code, problem=problem)
+                   ok=ok, exit=code, problem=problem,
+                   **({"stop_late": True, "stopped_by": r.get("stopped_by") or ""} if r.get("stop_late") else {}))
     return r
 
 
@@ -802,13 +855,17 @@ def tick(desk: Desk, s: dict, procs: dict) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider). A release
-    asked to stop gets TERM, then KILL after STOP_GRACE seconds, and is finished once nothing of its group runs."""
+    asked to stop gets TERM, then KILL after STOP_GRACE seconds, and is finished once nothing of it runs. What a
+    running release's command starts is recorded each round, and what of it still runs is stopped at its end."""
     for r in releases(desk):
+        if r.get("state") == "running":
+            r = _record_started(desk, r)
         if r.get("state") in ("starting", "running") and r.get("stop_asked"):
             _stopping(desk, r, procs.get(r["id"]))
     for rid, proc in list(procs.items()):
         if has_ended(proc):
-            if (get(desk, rid) or {}).get("stop_asked") and group_running(proc.pid):
+            r = get(desk, rid) or {}
+            if r.get("stop_asked") and r.get("termed") and _running(r, proc.pid):
                 continue  # what it started still ends its step: KILL after the grace
             del procs[rid]
             stop(proc.pid, "", proc)  # what it left running in its group ends with it
@@ -817,7 +874,7 @@ def tick(desk: Desk, s: dict, procs: dict) -> None:
         if r["id"] in procs:
             continue
         if r.get("state") == "running" and not alive(r.get("pid"), r.get("pid_start", "")):
-            if r.get("stop_asked") and group_running(r.get("pid")):
+            if r.get("stop_asked") and r.get("termed") and _running(r):
                 continue
             finish(desk, r["id"])
         elif r.get("state") == "starting":
@@ -901,22 +958,25 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
                     + f": TERM to its command, KILL {STOP_GRACE} s later to what still runs")
         return f"从 {when(r.get('started'))} 起在运行" if zh else f"running since {when(r.get('started'))}"
     if st == "stopped":
-        ran = r.get("started")
+        ran = r.get("ran", bool(r.get("started")))  # one stopped as its fixed checkout was made never ran
         if zh:
             return (f"{_who(r, zh)}在 {when(r.get('ended'))} 叫停了" + (f"：{r['stop_reason']}" if r.get("stop_reason") else "")
                     + ("（命令已运行，留下了到那时的输出；服务器可能停在半路）" if ran else "；什么都没运行"))
         return (f"stopped by {_who(r)} {when(r.get('ended'))}" + (f": {r['stop_reason']}" if r.get("stop_reason") else "")
                 + ("; its command had run (its output so far is kept; the server may be half-switched)" if ran
                    else "; nothing was run"))
+    late = ((f"；{_who(r, zh)}在 {when(r.get('stop_asked'))} 叫停时，它的命令已经结束了" if zh else
+             f"; the stop {_who(r)} asked at {when(r.get('stop_asked'))} came after its command had ended")
+            if r.get("stop_late") else "")
     if st == "done":
-        return (f"{when(r.get('ended'))} 完成（退出码 0，{r.get('seconds', 0)} 秒）" if zh else
-                f"done {when(r.get('ended'))} (exit 0, {r.get('seconds', 0)} s)")
+        return (f"{when(r.get('ended'))} 完成（退出码 0，{r.get('seconds', 0)} 秒）{late}" if zh else
+                f"done {when(r.get('ended'))} (exit 0, {r.get('seconds', 0)} s){late}")
     if st == "failed":
         if zh:
             return (f"{when(r.get('ended'))} 失败" + (f"（退出码 {r['exit']}）" if r.get("exit") is not None else "")
-                    + (f"：{r['problem']}" if r.get("problem") else ""))
+                    + (f"：{r['problem']}" if r.get("problem") else "") + late)
         return (f"FAILED {when(r.get('ended'))}" + (f" (exit {r['exit']})" if r.get("exit") is not None else "")
-                + (f": {r['problem']}" if r.get("problem") else ""))
+                + (f": {r['problem']}" if r.get("problem") else "") + late)
     if st == "refused":
         if zh:
             return f"你在 {when(r.get('answered'))} 拒绝了" + (f"：{r['reason']}" if r.get("reason") else "")
@@ -1014,7 +1074,8 @@ def unlisted(s: dict, name: str, target: str = "") -> str:
     why = next((listed_mismatch(s, x) for x in s.get("releases_without_asking") or []
                 if listed_key(x) == (name, target)), "")
     return (f": it is on the principal's list of releases without asking, but {why}, so its releases wait for the "
-            "yes until the principal saves the list again") if why else ""
+            "yes until the principal takes it back in on the page (its button for that, or unticking and ticking "
+            "it again, then Save; a plain Save keeps the old entry)") if why else ""
 
 
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:
