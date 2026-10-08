@@ -4049,7 +4049,9 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
                                           "deniedDomains": [], "allowLocalBinding": True})
         worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
-        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])  # the same lists as the worker's
+        # the same lists as the worker's; on Linux, and the run's own folder srt mounts a tmpfs over (srt_settings)
+        tmpfs = run.full_paths([Path(call["tmpdir"]) / run.SANDBOX_TMPFS]) if account.LINUX else []
+        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"] + tmpfs)
         self.assertEqual(got["filesystem"]["denyWrite"], worker["denyWrite"])
         self.assertIn(str(self.desk.secrets_dir), got["filesystem"]["denyRead"])
         self.assertIn(str(Path.home() / ".ssh"), got["filesystem"]["denyRead"])
@@ -7309,7 +7311,8 @@ class DeskTest(unittest.TestCase):
         tid = self.desk.new_task("Design it", kind="design")
         self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
                          model_asked="sonnet")
-        argv, _, _ = run.design_command(self.desk, tid)
+        with unittest.mock.patch.object(account, "LINUX", False):  # as on a Mac: none runs on Linux
+            argv, _, _ = run.design_command(self.desk, tid)
         self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
         for r in [*self.denied_by(argv), *self.allowed_by(argv)]:
             self.assertEqual(split_rules(r), [r])
@@ -7348,9 +7351,12 @@ class DeskTest(unittest.TestCase):
         self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
                          model_asked="sonnet")
         self.addCleanup(run.remove_sandbox_tmp, self.desk, did)
-        with self.assertRaises(RuntimeError) as e:
-            run.design_command(self.desk, did)
+        with unittest.mock.patch.object(account, "LINUX", False), self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)  # as on a Mac
         self.assertIn("hansa started no design session", str(e.exception))
+        with unittest.mock.patch.object(account, "LINUX", True), self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)  # on Linux: refused for being there, first
+        self.assertEqual(str(e.exception), run.DESIGN_ON_LINUX)
         echo = self.tmp / "echo-claude"
         echo.write_text("#!/bin/sh\necho \"$@\"\n")
         echo.chmod(0o755)
@@ -7418,9 +7424,12 @@ class DeskTest(unittest.TestCase):
         did = self.desk.new_task("Design it", kind="design")
         self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
                          session_id="sid-d", model_asked="sonnet")
-        with self.assertRaises(RuntimeError) as e:
-            run.design_command(self.desk, did)
+        with unittest.mock.patch.object(account, "LINUX", False), self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)  # as on a Mac
         self.assertIn(f"the desk {moved}", str(e.exception))
+        with unittest.mock.patch.object(account, "LINUX", True), self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)  # on Linux: refused for being there, first
+        self.assertEqual(str(e.exception), run.DESIGN_ON_LINUX)
         r = self.echo_coordinator()
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertEqual(r.stdout, "")  # Claude Code never started
@@ -15484,7 +15493,7 @@ class DeskTest(unittest.TestCase):
             with unittest.mock.patch.object(account, "LINUX", linux):
                 text = views.explain_text(self.desk, "lane", "a")
             for said in ("FileStore.isReadOnly", "findmnt", "trust the error of the write itself",
-                         "TMPDIR of the setup, check, merge check and preview is a tmpfs of its own",
+                         "TMPDIR of each of the lane's commands hansa runs in srt is a tmpfs of its own",
                          "does not list the empty files the sandbox puts at the top of the worktree"):
                 (self.assertIn if linux else self.assertNotIn)(said, text)
 

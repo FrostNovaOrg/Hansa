@@ -553,9 +553,9 @@ LINUX_SANDBOX_NOTES = (
     "on Linux, inside the sandbox, what the mount table says (Java's FileStore.isReadOnly, findmnt, df) can call a "
     "writable folder read-only: the worktree, the lane's write list and a worker's temporary folder are writable "
     "binds inside the read-only / (or /tmp) of the same file system, and Java takes the mount of the folder above "
-    "them; trust the error of the write itself. The TMPDIR of the setup, check, merge check and preview is a tmpfs "
-    "of its own (in memory, gone when the command ends), which Java reads as writable",
-    "git in the sandbox (the setup, check, merge check, preview and workers' commands) does not list the empty "
+    "them; trust the error of the write itself. The TMPDIR of each of the lane's commands hansa runs in srt is a "
+    "tmpfs of its own (in memory, gone when the command ends), which Java reads as writable",
+    "git in the sandbox (in the lane's commands and the workers') does not list the empty "
     "files the sandbox puts at the top of the worktree for what it protects (" + ", ".join(SANDBOX_PLACEHOLDERS)
     + "): its excludes file there adds them, anchored at the top, to the account's own, through a global config "
     "that includes the account's (git 2.32 or later); a tracked file of such a name is still listed, and what hansa "
