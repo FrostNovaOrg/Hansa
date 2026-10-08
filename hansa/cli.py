@@ -16,8 +16,9 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
-from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
-                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
+from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
+                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, refused_rule, resolved, stored, write_json,
+                   argv_rules_problem, path_rule_problem,
                    PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
@@ -49,6 +50,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
+    for x in dict.fromkeys([str(desk.root), str(desk.given)]):  # every rule for the desk's folders starts with it
+        if path_rule_problem(x):
+            raise SystemExit(f"hansa: {path_rule_problem(x)}; no desk was made")
     if repo:  # looked at before anything is made, so a refusal leaves no half-made desk
         if not resolved(repo):
             raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
@@ -56,6 +60,8 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
+        if path_rule_problem(repo):
+            raise SystemExit(f"hansa: {path_rule_problem(repo)}; no desk was made")
         base = lane_base(repo, base, "no desk was made")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -1182,6 +1188,9 @@ def cmd_coordinator(a):
     if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
         env["DISABLE_AUTOUPDATER"] = "1"
     argv = [claude] + (["--add-dir", *dirs] if dirs else []) + ["--disallowedTools", *no_edit, *no_builtin, *no_read]
+    unsplit = argv_rules_problem(argv)
+    if unsplit:  # a deny rule Claude Code would split leaves its folder open: the session never starts with one
+        raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
@@ -1392,6 +1401,8 @@ def _lane_value(field: str, values: list):
     elif "none" in [x for v in values for x in (v.split(",") if field == "providers" else [v])]:
         raise SystemExit(f"hansa: none means an empty {field}, so it cannot come with other values "
                          f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
+    if field == "allow":  # a rule given twice is kept once
+        return list(dict.fromkeys(x for x in values if x))
     if field in LANE_LISTS:
         return [x for v in values for x in (v.split(",") if field == "providers" else v.split()
                                             if field == "release_files" else [v]) if x]
@@ -1519,6 +1530,12 @@ def cmd_lane(a):
                 if given.get("providers") == []:
                     raise SystemExit("hansa: a lane needs a provider; nothing was changed")
                 like = s["lanes"][a.like]
+                bad = [r for r in like.get("allow", []) if refused_rule(r)]
+                if bad:  # copied or not, they are refused in that lane
+                    raise SystemExit(f"hansa: lane {a.like}'s allowed commands hold rules no longer accepted: "
+                                     + "; ".join(f"{r} {refused_rule(r)}" for r in bad)
+                                     + f". Remove them with: {allow_fix(a.like, like.get('allow', []))}. Nothing was "
+                                     f"changed")
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
                 ln.update(given, **({"base": a.base} if a.base else {}))
                 for f in ("check", "setup", "merge_check", "merge_timeout_min", "identity"):
@@ -1536,6 +1553,9 @@ def cmd_lane(a):
             theirs = account.foreign_repo(repo)
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
+            for x in dict.fromkeys([repo, *([a.repo] if a.repo else [])]):  # the coordinator's rules name it
+                if path_rule_problem(x):
+                    raise SystemExit(f"hansa: {path_rule_problem(x)}; nothing was changed")
             if not a.like:
                 base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
@@ -1573,6 +1593,11 @@ def cmd_lane(a):
                 warning = _loopback_warning(a.name, ln["network"])
                 if warning:
                     print(desk.redact(warning))
+            if ln.get("allow"):
+                desk.event("lane_allow_changed", lane=a.name, old=[], new=ln["allow"])
+                print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, are "
+                      f"recorded: {_shown(ln['allow'])}. Tell the principal, in the conversation, what you listed "
+                      f"and why.")
             if ln.get("setup") or ln.get("check") or ln.get("merge_check"):
                 print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
                       "in the conversation, what they run and why.")
@@ -1647,6 +1672,11 @@ def cmd_lane(a):
         warning = _loopback_warning(a.name, value)
         if warning:
             print(desk.redact(warning))
+    if a.field == "allow" and set(old) != set(value):
+        desk.event("lane_allow_changed", lane=a.name, old=old, new=value)
+        print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, changed: "
+              f"{_shown(old)} -> {_shown(value)}, so this change is recorded. Tell the principal, in the "
+              f"conversation, what you changed and why.")
     if a.field == "write" and set(old) != set(value):
         desk.event("lane_write_changed", lane=a.name, old=old, new=value)
         print(f"The folders the lane's workers may write besides the worktree changed: {_shown(old)} -> "
@@ -2258,15 +2288,25 @@ def main(argv=None):
                    "(default: none)")
     q.add_argument("--identity", metavar='"NAME <EMAIL>"', help="the author and committer of every commit hansa "
                    "makes for the lane (default: the repository's own user.name and user.email, else hansa's)")
-    q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
-                   "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
+    q.add_argument("--allow", nargs="+", metavar="RULE", help="rules the lane's workers, verifiers and design "
+                   "sessions are given without asking: commands such as 'Bash(pnpm test:*)' (workers run any command "
+                   "in their sandbox and need none; design sessions do), and web tools: "
+                   "'WebFetch(domain:docs.python.org)' or 'WebFetch(domain:*.python.org)' for each public site (a "
+                   "bare WebFetch, an address, a local or private name or a wildcard over a shared suffix is "
+                   "refused), WebSearch (it sends search queries out of the machine); each rule its own value")
     q.add_argument("--release-files", nargs="+", metavar="PATH", help="the files the lane's releases build and run "
                    "outside the sandbox, as paths or globs relative to the repository, separated by spaces (\"pom.xml "
                    "**/pom.xml build.sh tools/release.sh\"): hansa merge refuses a change touching one of them until "
                    "a verification of it holds (hansa verify ID), and no flag overrides that")
     q = lane.add_parser("set", help="change one field of a lane", description=(
-        "allow is the commands a design session may run without asking (workers run any command in their "
-        "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "allow is the rules the lane's workers, verifiers and design sessions are given without asking: commands "
+        "such as Bash(pnpm test:*) (workers run any command in their sandbox and need none; design sessions do), "
+        "and Claude Code's web tools, which reach the network from its own process, outside the sandbox's network "
+        "list: WebFetch only as WebFetch(domain:HOST) for each site, HOST a public site's name as the network list "
+        "writes it (*. in front allowed, and it opens every name under it; a bare WebFetch, one for every site, an IP "
+        "address, localhost, a name for a local or private network such as .internal or .local, or a wildcard over "
+        "a shared suffix such as *.co.uk or *.github.io is refused, as are names with no dot and names such as nip.io or lvh.me that come back as this machine; any listed name can still be pointed at any address, so list only sites you know), and WebSearch, which sends search queries out "
+        "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
         "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
