@@ -23,11 +23,17 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 6. Releasing is the last step: `hansa release L` asks for the lane's base branch
    to go out, the principal says yes on the page, and only then does hansa run
    the lane's release command (see Releasing). You never push or deploy yourself:
-   your settings deny `git push`, `gh release`, `gh pr merge`, `gh repo`, and
-   publishing to a package or image registry (`npm`, `pnpm` and `yarn publish`,
-   `twine upload`, `uv` and `poetry publish`, `cargo publish`, `gem push`,
-   `docker` and `podman push`, `mvn deploy`) from your own shell, written plainly
-   or with options before the subcommand (`git -C DIR push`, `mvn -B deploy`).
+   your settings deny `git push`, `git send-email`, `git svn dcommit`,
+   `gh release`, `gh pr merge`, `gh repo`, and publishing to a package or image
+   registry (`npm`, `pnpm` and `yarn publish`, `twine upload`, `uv` and `poetry publish`,
+   `cargo publish`, `gem push`, `docker` and `podman push`, Maven's `deploy` and
+   `deploy:` goals, Gradle's `publish` tasks, through `mvn`, `gradle` or a
+   wrapper in any folder: `./mvnw`, `../gradlew`) from your own shell, written
+   plainly or with options, goals or subcommands before them (`git -C DIR push`,
+   `git subtree push`, `mvn clean deploy`, `./gradlew :sub:publishToMavenLocal`).
+   So a git command with `push` among its arguments is denied even when it only
+   reads (`git log --grep push`, `git grep push`): read a repository through
+   `hansa git`.
    Claude Code also catches them after a plain `xargs` and after wrappers such
    as `env`, `nice` or `timeout` (`xargs git push` is denied); run through
    another shell (`bash -c "git push"`), a script, or an `xargs` given options
@@ -41,7 +47,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `hansa show <id> [--full \| --report \| --check]` | the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; for a check or merge check that failed, the failing tests (names and tracebacks, by the markers of unittest, pytest, JUnit/Surefire, go test, jest and Gradle) or the errors that kept them from running (Maven's compile errors, go's build errors) lifted out of its output, then always its last 15 lines; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report); `--check`: the whole output of its last check and merge check, keys removed |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
-| `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
+| `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. Use it to read; a git command of your own with `push` in it is refused. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
 | `hansa release --stop ID ["<reason>"]` | call release ID off: one not started yet is closed as stopped; a running one's command gets TERM, then KILL 30 s later, and is recorded as stopped (the server may be left half-switched) |
 | `hansa release L [TARGET] ["<note>"]` | ask for a release of lane L's base branch as it is now, by one of its release targets (TARGET is needed when the lane has more than one): hansa runs that target's command after the principal's yes on the page (see Releasing). `hansa release` alone lists the open and recent releases |

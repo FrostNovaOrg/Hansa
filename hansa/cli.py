@@ -107,18 +107,28 @@ def permissions(desk: Desk) -> dict:
 # What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
 # and publishing. A release goes out through hansa release, which runs the lane's command itself after the
 # principal's yes; the coordinator reads a repository through hansa git.
-NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
-              "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
-              "docker push", "podman push", "mvn deploy")
+NO_PUBLISH = ("git push", "git send-email", "git svn dcommit", "gh release", "gh pr merge", "gh repo", "npm publish",
+              "pnpm publish", "yarn publish", "yarn npm publish", "twine upload", "uv publish", "poetry publish",
+              "cargo publish", "gem push", "docker push", "podman push")
+# Maven's and Gradle's publishing, run by the tool or by a wrapper in any folder (../mvnw, sub/gradlew), with goals,
+# tasks or options before it: deploy and the deploy plugin's goals (deploy:deploy-file); publish, publishTo... and a
+# project's own (:sub:publish)
+BUILD_PUBLISH = {("mvn", "mvnw", "*/mvnw"): ("deploy", "deploy *", "deploy:d*"),
+                 ("gradle", "gradlew", "*/gradlew"): ("publish*", "*:publish*")}
 
 
 def no_publish_with_options() -> list:
-    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
-    reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
-    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. Claude Code
-    matches them after a plain xargs and wrappers such as env, nice or timeout too; they stop nothing run
-    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push)."""
-    return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
+    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy), and
+    BUILD_PUBLISH: Claude Code reads a * anywhere in a Bash rule as any text, the whole command matched. Only a
+    lone trailing " *" may also match nothing, so `git * push *` needs `git * push` beside it for a push without
+    arguments. The text between may be a subcommand too, so `git * push` denies git subtree push, git submodule
+    foreach git push and git lfs push, and a read with push among its arguments as well (git log --grep push):
+    the coordinator reads a repository through hansa git. Claude Code matches them after a plain xargs and
+    wrappers such as env, nice or timeout too; they stop nothing run through another shell (bash -c), a script,
+    or an xargs with options of its own (xargs -n1 git push)."""
+    return ([r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
+            + [f"{p}{between}{g}" for ps, gs in BUILD_PUBLISH.items() for p in ps for g in gs
+               for between in (" ", " * ")])
 
 
 def _text(args) -> str:
@@ -897,12 +907,13 @@ def cmd_release(a):
         paused = desk.paused()
         listed = (f"{who} is on the principal's list of releases without asking" if r.get("target") else
                   f"lane {a.lane} is on the principal's list of lanes released without asking")
+        gone = not_looking(desk)  # as the release's waiting text says it (release.waits_text)
         print(desk.redact(f"{head}\n{listed}, but the "
                           f"desk is paused ({paused}): while it is, only a release the principal said yes to runs, so "
                           f"this one waits until the desk is resumed. {after}" if paused else
                           f"{head}\n{listed}: hansa "
                           f"serve runs the command {'from a checkout of ' + r['commit'][:10] + ' made for it' if r.get('fixed') else 'in ' + r['repo']} "
-                          f"within seconds. {after}"))
+                          + (f"once it gets through its rounds; {gone}. {after}" if gone else f"within seconds. {after}")))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
     print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "

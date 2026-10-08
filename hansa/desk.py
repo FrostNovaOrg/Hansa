@@ -1611,9 +1611,11 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
                            "their tools") for d in BREW_FOLDERS]
     fenced.append(("/dev", _overlaps, "it is /dev or inside it, the system's devices: workers' commands need /dev/null, "
                                       "/dev/tty and /dev/urandom"))
-    fenced += [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
-                "caches in the home folder, or a folder above it: name the files in it instead")
-               for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    # these leave what is inside them open to listing, so a folder on the PATH inside them is said as well
+    in_parts = [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
+                 "caches in the home folder, or a folder above it: name the files in it instead")
+                for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    fenced += in_parts
     fenced += [(d, _above, f"it is {d}, the temporary folder, or a folder above it: workers' commands and tools "
                            "write and read there") for d in dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir()))]
     if root:
@@ -1633,8 +1635,15 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
-        why = "; and ".join(w for w in (next((why for f, hit, why in fence if hit(x, f)), "")
-                                        for fence in (fenced, path_fenced)) if w)
+        hits = [(f, why) for f, hit, why in fenced if hit(x, f)]
+        paths_in = [(d, why) for d, hit, why in path_fenced if hit(x, d)]
+        # the reason said is one that covers every folder on the PATH the entry holds (/, the home folder, /usr/bin
+        # for /usr), which is then not said; else the first, and the folder on the PATH with it
+        said = next(((f, why) for f, why in hits if paths_in and all(_above(f, d) for d, _ in paths_in)
+                     and why not in (w for _, _, w in in_parts)), None)
+        on_path = "" if said else next((why for _, why in paths_in), "")
+        said = said or next(iter(hits), None)
+        why = "; and ".join(w for w in (said[1] if said else "", on_path) if w)
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:
