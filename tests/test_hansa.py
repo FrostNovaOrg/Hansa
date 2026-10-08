@@ -6826,12 +6826,20 @@ class DeskTest(unittest.TestCase):
                     "gh repo delete x", "npm publish", "twine upload dist/*", "cargo publish", "docker push img:1",
                     "git -C /some/repo push", "git -C /some/repo push origin main", "git --no-pager push",
                     "git -c http.extraHeader=x push --force", "npm --prefix pkg publish", "mvn -B deploy",
-                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img"):
+                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img",
+                    "git --git-dir=/r/.git --work-tree /r push -f", "mvn deploy", "mvn clean deploy",
+                    "./mvnw deploy", "./mvnw clean deploy", "./mvnw -B -DskipTests deploy", "mvnw deploy",
+                    "mvnw -q clean deploy", "gradle publish", "gradle clean publish", "gradle --no-daemon publish",
+                    "./gradlew publish", "./gradlew build publish --info", "gradlew publish", "gradlew -q publish",
+                    "docker image push img"):
             self.assertTrue(denied(cmd), cmd)
         for cmd in ("hansa status", "hansa git a log --oneline", "hansa git a show HEAD", "hansa release a",
                     "hansa lane set a release \"git push origin main\"", "hansa merge t0001", "git status",
                     "gh pr view 3", "git -C /some/repo status", "git -C /some/repo log --oneline",
-                    "hansa git a -C x push", "npm --prefix pkg test"):
+                    "hansa git a -C x push", "npm --prefix pkg test", "git log --grep push",
+                    "git log --grep push --oneline", "git grep push", "git grep -n push -- hansa",
+                    "git show HEAD:push.sh", "./mvnw verify", "./mvnw clean install", "gradle build",
+                    "./gradlew test", "gradlew assemble"):
             self.assertFalse(denied(cmd), cmd)
         self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
 
@@ -6918,6 +6926,16 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(told["problems"]), 1, told)
         self.assertIn("settings and caches in the home folder", told["problems"][0])
         self.assertIn(f"it is {tool}, a folder on the PATH hansa runs with", told["problems"][0])
+        # a reason that refuses the whole entry, and every folder on the PATH in it, is said alone
+        on_path = home / ".local" / "bin"
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"/usr/bin:/bin:{on_path}"}):
+            for path, why in (("/", "the whole machine"), (str(home), "the home folder"),
+                              ("/usr/bin", "where the system keeps its programs"),
+                              ("/usr", "where the system keeps its programs")):
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                self.assertEqual(len(told["problems"]), 1, (path, told))
+                self.assertIn(why, told["problems"][0], path)
+                self.assertNotIn("a folder on the PATH", told["problems"][0], path)
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
         from hansa import run
@@ -10914,6 +10932,27 @@ class DeskTest(unittest.TestCase):
                       "not running. Then it asks the principal to join it.", out)
         self.assertNotIn("in seconds", out)
 
+    def test_a_release_without_asking_says_what_its_waiting_text_says_when_the_server_does_not_look(self):
+        from hansa import release, run
+        self.with_targets(test=f"touch {self.tmp / 'installed.txt'}")
+        self.tick_targets("test")
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        for n, quiet, said in ((1, 0, f"serve runs the command in {self.repo.resolve()} within seconds. "),
+                               (2, run.STUCK_AFTER + 60, "serve runs the command in "
+                                f"{self.repo.resolve()} once it gets through its rounds; `hansa serve` is busy or "
+                                "stuck: no round finished for 6 minutes. ")):
+            self.round_at(quiet)
+            out = self.hansa("release", "a", "test")
+            self.assertIn(said, out)
+            self.assertEqual("within seconds" in out, not quiet, out)
+            release.change(self.desk, n, lambda x: {"state": "stopped"})  # ended: the next may be asked
+        held.close()
+        out = self.hansa("release", "a", "test")
+        self.assertIn("once it gets through its rounds; `hansa serve` is not running. ", out)
+        self.assertIn(release.waits_text(self.desk, self.desk.settings(), release.get(self.desk, 3)), out)
+        self.assertNotIn("within seconds", out)
+
     def test_add_retry_and_verify_say_when_no_provider_of_the_lane_can_start_the_task(self):
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
@@ -13710,7 +13749,8 @@ class DeskTest(unittest.TestCase):
         own = subprocess.run(["git", "ls-files", "hansa"], cwd=here.parent, capture_output=True, text=True).stdout
         for f in own.split():  # every file the repository has under hansa/
             self.assertTrue(hansa.shipped(Path(f).relative_to("hansa")), f)
-        for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py"):
+        for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py",
+                  "._cli.py", "._card.md", "agents/._worker.md"):  # macOS's AppleDouble files, left by a copy
             self.assertFalse(hansa.shipped(Path(f)), f)
 
     def test_the_coordinators_notes_rule_is_given_for_each_spelling_of_the_desk(self):

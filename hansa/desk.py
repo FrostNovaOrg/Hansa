@@ -1611,9 +1611,11 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
                            "their tools") for d in BREW_FOLDERS]
     fenced.append(("/dev", _overlaps, "it is /dev or inside it, the system's devices: workers' commands need /dev/null, "
                                       "/dev/tty and /dev/urandom"))
-    fenced += [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
-                "caches in the home folder, or a folder above it: name the files in it instead")
-               for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    # these leave what is inside them open to listing, so a folder on the PATH inside them is said as well
+    in_parts = [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
+                 "caches in the home folder, or a folder above it: name the files in it instead")
+                for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    fenced += in_parts
     fenced += [(d, _above, f"it is {d}, the temporary folder, or a folder above it: workers' commands and tools "
                            "write and read there") for d in dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir()))]
     if root:
@@ -1633,8 +1635,11 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
-        why = "; and ".join(w for w in (next((why for f, hit, why in fence if hit(x, f)), "")
-                                        for fence in (fenced, path_fenced)) if w)
+        hits = [(f, hit, why) for f, hit, why in fenced if hit(x, f)]
+        # a folder on the PATH is said too unless a reason that refuses all of it already holds (/, the home folder)
+        on_path = next((why for d, hit, why in path_fenced if hit(x, d) and not any(
+            _above(f, d) for f, h, w in hits if (f, h, w) not in in_parts)), "")
+        why = "; and ".join(w for w in (hits[0][2] if hits else "", on_path) if w)
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:

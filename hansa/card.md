@@ -26,8 +26,13 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
    your settings deny `git push`, `gh release`, `gh pr merge`, `gh repo`, and
    publishing to a package or image registry (`npm`, `pnpm` and `yarn publish`,
    `twine upload`, `uv` and `poetry publish`, `cargo publish`, `gem push`,
-   `docker` and `podman push`, `mvn deploy`) from your own shell, written plainly
-   or with options before the subcommand (`git -C DIR push`, `mvn -B deploy`).
+   `docker` and `podman push`, `mvn deploy`, `./mvnw` and `mvnw deploy`, `gradle`,
+   `./gradlew` and `gradlew publish`) from your own shell, written plainly or
+   with options or goals before the subcommand (`git -C DIR push`, `mvn clean
+   deploy`, `./gradlew build publish`). A git command that reads with push as
+   an argument (`git log --grep push`, `git grep push`) passes, unless options
+   come before its subcommand (`git -C DIR log --grep push` is denied): read a
+   repository through `hansa git`.
    Claude Code also catches them after a plain `xargs` and after wrappers such
    as `env`, `nice` or `timeout` (`xargs git push` is denied); run through
    another shell (`bash -c "git push"`), a script, or an `xargs` given options

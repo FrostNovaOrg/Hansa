@@ -40,7 +40,7 @@ SHIPPED = ("card.md", "ui.html", "no-signature")  # hansa's own files besides it
 
 def shipped(rel: Path) -> bool:
     """Whether a file at this path inside hansa/ is one of hansa's own: what an install puts in place."""
-    if "__pycache__" in rel.parts:
+    if "__pycache__" in rel.parts or rel.name.startswith("._"):  # ._name: macOS's AppleDouble file beside a copy
         return False
     if len(rel.parts) == 1:
         return rel.suffix == ".py" or rel.name in SHIPPED

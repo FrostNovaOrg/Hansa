@@ -109,7 +109,11 @@ def permissions(desk: Desk) -> dict:
 # principal's yes; the coordinator reads a repository through hansa git.
 NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
               "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
-              "docker push", "podman push", "mvn deploy")
+              "docker push", "podman push", "mvn deploy", "./mvnw deploy", "mvnw deploy", "gradle publish",
+              "./gradlew publish", "gradlew publish")
+# git's options before a subcommand all start with -, and git has no other way to push: so a read with push as an
+# argument (git log --grep push, git grep push) passes while git -C DIR push is denied
+OPTIONS_START_WITH_DASH = ("git push",)
 
 
 def no_publish_with_options() -> list:
@@ -117,8 +121,12 @@ def no_publish_with_options() -> list:
     reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
     match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. Claude Code
     matches them after a plain xargs and wrappers such as env, nice or timeout too; they stop nothing run
-    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push)."""
-    return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
+    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push). For
+    git the text between must start with - (OPTIONS_START_WITH_DASH); for the others it may be a goal or a
+    subcommand group too (mvn clean deploy, docker image push)."""
+    def between(c):
+        return c.replace(" ", " -* " if c in OPTIONS_START_WITH_DASH else " * ", 1)
+    return [r for c in NO_PUBLISH for r in (between(c), between(c) + " *")]
 
 
 def _text(args) -> str:
@@ -897,12 +905,13 @@ def cmd_release(a):
         paused = desk.paused()
         listed = (f"{who} is on the principal's list of releases without asking" if r.get("target") else
                   f"lane {a.lane} is on the principal's list of lanes released without asking")
+        gone = not_looking(desk)  # as the release's waiting text says it (release.waits_text)
         print(desk.redact(f"{head}\n{listed}, but the "
                           f"desk is paused ({paused}): while it is, only a release the principal said yes to runs, so "
                           f"this one waits until the desk is resumed. {after}" if paused else
                           f"{head}\n{listed}: hansa "
                           f"serve runs the command {'from a checkout of ' + r['commit'][:10] + ' made for it' if r.get('fixed') else 'in ' + r['repo']} "
-                          f"within seconds. {after}"))
+                          + (f"once it gets through its rounds; {gone}. {after}" if gone else f"within seconds. {after}")))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
     print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
