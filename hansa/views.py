@@ -521,7 +521,7 @@ def status(desk: Desk) -> dict:
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
                    "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
-                   "held": held.get(n)}  # its runs' sandbox could not start (run.hold)
+                   "held": held.get(n)}  # its runs whose sandbox could not start, by group (run.sandbox_held)
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": rest_minutes(s, n), "rest_own": own_rest_minutes(s, n) is not None,
@@ -595,8 +595,9 @@ def status_text(st: dict) -> str:
     for ln in lanes:
         out.append(f"  {ln['name']:<{wn}}  {' > '.join(ln['providers']):<{wp}}  "
                    + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else
-                                     "UNABLE TO RUN" if ln.get("held") else "free"))
-                   + (f"\n      {sandbox_held_text(ln['held'])}" if ln.get("held") else ""))
+                                     "UNABLE TO RUN" if "work" in (ln.get("held") or {}) else "free"))
+                   + ("; its design sessions UNABLE TO RUN" if "design" in (ln.get("held") or {}) else "")
+                   + "".join(f"\n      {sandbox_held_text(h)}" for h in (ln.get("held") or {}).values()))
     if st["running"]:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
@@ -1218,15 +1219,21 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "while it runs. When srt refuses them, keeps what git needs or lets through what it must keep (a "
             "sandbox that does not keep what it should runs no one), the run does not start: its task is held (queued, no try used) and its "
             "lane shows as unable to run in hansa status, with srt's first line and the part of the settings it "
-            "refuses (found by trying each part alone, or the path written); the principal's alert is told once for each reason. Held "
-            "tasks start by themselves once a try passes: after a fix, restart hansa serve, which tries again (so "
-            "does a change of the settings). Without srt the run starts as before, in Claude Code's own sandbox, "
+            "refuses (found by trying each part alone, or the path written); the principal's alert is told once for each lane "
+            "and reason. Only what was refused is held: a design session's sandbox is another than its lane's "
+            "workers', so its refusal holds the lane's design sessions, and a worker's or a verifier's holds the "
+            "lane's workers and verifiers; hansa status says which. Held tasks start by themselves once a try "
+            "passes: after a fix, restart hansa serve, which as it starts tries again the sandbox of each held lane "
+            "(a worker's in the lane's worktree, a design session's in its design worktree), clears the hold when "
+            "the try passes and keeps it with the new reason when it fails (so does a change of the settings, at "
+            "the next task's start). Without srt the run starts as before, in Claude Code's own sandbox, "
             "which never runs a command outside it. Claude Code carries its own copy of the sandbox library, which "
             "may differ from the srt installed, so the try is a guard, not proof: when a run's first Bash calls "
             "say the sandbox could not start (sandbox-exec: or bwrap: before any call succeeded), hansa stops the "
             "run and holds its task the same way.",
             *([f"  {LINUX_TRY_NOTE[0].upper()}{LINUX_TRY_NOTE[1:]}."] if account.LINUX else []),
-            *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, h in sorted(sandbox_held(desk).items())]])
+            *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, groups in sorted(sandbox_held(desk).items())
+              for h in groups.values()]])
     if what == "notify":
         who = notify.names(desk)
         return "\n".join([
