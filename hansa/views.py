@@ -12,7 +12,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed, installed_text, notify, release
 from .desk import (HOME_SECRETS, MAC_SECRETS, Desk, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (LINUX_TRY_NOTE, lane_identity, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+from .run import (LINUX_TRY_NOTE, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -1156,6 +1156,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
               if ln.get("setup") or ln.get("check") or ln.get("merge_check") else []),
             *preview_text(sys.platform == "darwin", ln),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
+            f"  locale of its setup, check, merge check, preview and workers: {lane_locale(desk, ln)}"
+            + ("" if "LC_ALL" in env else f"; a lane whose results must not depend on who started hansa sets"
+               f" its own: hansa lane set {name} env ... LC_ALL=C.UTF-8"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
             "  what a worker may use (it runs in Claude Code's sandbox, which the operating system enforces;"
             " what it refuses shows up in hansa show):",

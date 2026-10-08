@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
-                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, refused_rule, resolved, stored, write_json,
+                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
                    argv_rules_problem, path_rule_problem,
                    PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
@@ -25,7 +25,7 @@ from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_h
                   lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, server_state, stop, try_file, try_srt_at_start, unverified_note, waiting_reason, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -242,6 +242,13 @@ def cmd_add(a):
     if a.model:
         print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
               f" their own model. Which provider runs it follows the lane's order: hansa explain lane {a.lane or 'L'}")
+    first = (desk.tasks_dir / tid / "task.md").read_text(encoding="utf-8").splitlines()[0]
+    forms = title_forms(s["lanes"].get(a.lane)) if not a.title and len(first) > 80 else []
+    if forms:  # the title a form puts in commits, which a public repository shows
+        print(f"note: lane {a.lane}'s {' and '.join(forms)} put the task's title in its commits; with no --title it"
+              f" is the first line of the text, here cut at 80 characters: {json.dumps(desk.meta(tid)['title'])}."
+              f" To give one, cancel it (hansa cancel {tid}) and add it again with"
+              f" --title \"...\"")
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "")
           + (f". {_wait_for(desk, tid)}; hansa show {tid} says where it is" if notify.hears_of(desk, tid)
              else f". Follow it with: hansa show {tid}") + _waits(desk, tid))
@@ -1070,6 +1077,7 @@ def cmd_serve(a):
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
+    record_serve_locale(desk)  # the locale its lanes' commands get, for hansa explain lane to say
     alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
