@@ -36,7 +36,14 @@ for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one
 without, in one line. They also refuse a desk or repository whose path holds a
 `)` followed later by a space or a comma (`Work (2024) x/desk`): Claude Code
 would split the rules hansa writes for it, and a rule meant to close a folder
-would leave it open. No run starts while such a rule would come out. On the page: add providers (a Claude Code login, or any
+would leave it open. No run starts while such a rule would come out. Nor may
+the desk, the home folder or a lane's repository or worktree have one of
+`[ ] * ? \` in its path (or where its links lead): the sandbox's deny list and
+Claude Code's Read rules read those as a pattern, so a rule for `a[1]/desk/secrets`
+would close `a1/desk/secrets` and leave the real folder open. `hansa init`,
+`hansa lane add`, `hansa serve`, `hansa coordinator` and every run (worker,
+verifier, design session, setup, check, merge check, `hansa lane try`) refuse
+such a path and name it; move it. `{ }` match as themselves there. On the page: add providers (a Claude Code login, or any
 endpoint that speaks the Anthropic API, with its key), models, effort
 defaults, prices. Then start the coordinator with `hansa coordinator`; it sets
 up the lanes and how many tasks run at once with `hansa lane` and

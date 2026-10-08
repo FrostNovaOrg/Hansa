@@ -1649,7 +1649,7 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
 
 
 @_one_look
-def deny_parts(paths, root=None, lanes=None) -> tuple:
+def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
     """The folders and files the principal keeps workers from reading: (those that are kept from them, what is
     wrong with the others, one line each, the lines of those among them that stop every run). None may close
     what a worker needs in order to run: the home folder or a folder above it, the desk or above it, a lane's
@@ -1659,7 +1659,9 @@ def deny_parts(paths, root=None, lanes=None) -> tuple:
     entry that would close a lane's repository, a worktree or a folder on the PATH, and nothing else: a
     contradiction the coordinator and the principal settle (a lane may be added, a worktree made, the PATH differ
     from where the page was saved). Any other that does not hold now (a pattern character in a name or where a
-    link leads, say) was closed by the principal and cannot be applied: no run starts until it is changed."""
+    link leads, say) was closed by the principal and cannot be applied: no run starts until it is changed.
+    `for_lanes`, a list: given the lines of those left out for a lane's repository or worktree (the others are
+    left out only for a folder on the PATH)."""
     if not isinstance(paths, list) or len(paths) > MAX_DENY:
         return [], [DENY_LIST_WHY], [DENY_LIST_WHY]
     home = account_home()
@@ -1728,6 +1730,8 @@ def deny_parts(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{x}: {why}")
             if breaks or any(w not in settled for _, w in hits):
                 stops.append(p[-1])
+            elif hits and for_lanes is not None:  # left out for a lane's repository or worktree, not the PATH alone
+                for_lanes.append(p[-1])
         elif _seen(x) not in seen:  # one path once, however it is spelled
             seen.add(_seen(x))
             good.append(stored(x))
@@ -1743,13 +1747,17 @@ def kept_from_workers(s: dict, root=None) -> tuple:
 def no_read_parts(s: dict, root=None) -> tuple:
     """deny_parts for a desk's settings: (what the principal keeps workers from reading, a line for each entry
     left out of runs, a line for each entry that stops them)."""
-    good, said, stops = deny_parts(s.get("workers_may_not_read", []), root, s.get("lanes"))
-    return good, [x + LEFT_OUT_NOTE for x in said if x not in stops], stops
+    lane_held = []
+    good, said, stops = deny_parts(s.get("workers_may_not_read", []), root, s.get("lanes"), lane_held)
+    return good, [x + (LEFT_OUT_NOTE if x in lane_held else PATH_LEFT_OUT_NOTE) for x in said if x not in stops], stops
 
 
 LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to the runs of that lane and every other (workers, "
                  "verifiers, setups, checks, design sessions, the coordinator) until the principal and the coordinator "
                  "settle it")
+# for one left out only as it covers a folder on the PATH: no lane is nearer to it than another
+PATH_LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to every run (workers, verifiers, setups, "
+                      "checks, design sessions, the coordinator) until the principal and the coordinator settle it")
 
 
 NO_READ_STOP = ("hansa starts no worker, verifier, design session or coordinator while an entry of what workers may "
@@ -1835,6 +1843,64 @@ def path_rule_problem(path) -> str:
     return (f"the path {p} would make rules for Claude Code's tools (such as Read(//{p.lstrip('/')}/**)) that it "
             f"reads as more than one, as after a ')' it splits them on commas and spaces, so a rule closing that "
             f"folder would not close it: move it to a path with no ')' followed later by a space or a comma")
+
+
+# Characters srt's denyRead and Claude Code's Read rules read as a pattern in a path, not as themselves: a rule for
+# a/[1]/desk/secrets matches a/1/desk/secrets and leaves the real folder open. { } and ( ) match as themselves
+# there (a ')' that would split a rule is path_rule_problem's)
+PATTERN_CHARS = "[]*?\\"
+
+
+def pattern_chars(path) -> str:
+    """The PATTERN_CHARS a full path has, as given or where its links lead, or as a look-alike of one (the wide
+    brackets, star and question mark, the look-alike backslashes); '' for none."""
+    forms = [w for v in _forms(str(path)) for w in (v, unicodedata.normalize("NFKC", v))]
+    return "".join(c for c in PATTERN_CHARS if any(c in w for w in forms))
+
+
+def pattern_path_problem(path, what: str, closes: str) -> str:
+    """Why hansa may not write rules under `path` (`what` it is, the rules that would then close nothing:
+    `closes`): it has one of PATTERN_CHARS (pattern_chars); '' for a path with none. Such a path must move: hansa
+    escapes nothing and starts nothing with such a rule."""
+    found = pattern_chars(path)
+    if not found:
+        return ""
+    real = resolved(str(path)) or str(path)
+    at = str(path) if real == str(path) else f"{path} (where its links lead: {real})"
+    return (f"{what} {at} has {' '.join(found)} in it, which the sandbox's deny list and Claude Code's Read rules "
+            f"read as a pattern, not as itself, so the rules that close {closes} would match another folder and "
+            f"leave it open: move it to a path with none of {' '.join(PATTERN_CHARS)}")
+
+
+def desk_paths_problem(desk, homes=(), repos=()) -> str:
+    """pattern_path_problem for the folders hansa writes deny rules under for every run and the coordinator: the
+    desk's (as given and where its links lead), each home folder the logins list is made in, and the lanes'
+    repositories (`repos`: (lane, path)); '' for none."""
+    for x in dict.fromkeys([str(desk.given), str(desk.root)]):  # as given first: it says where its links lead
+        why = pattern_path_problem(x, "the desk", "its secrets/, .hansa/, notes/ and CLAUDE.md")
+        if why:
+            return why
+    for h in dict.fromkeys(str(h) for h in homes if h):
+        why = pattern_path_problem(h, "the home folder", "the logins and keys in it that no run may read")
+        if why:
+            return why
+    for name, r in repos:
+        why = pattern_path_problem(r, f"lane {name}'s repository", "git's data in it")
+        if why:
+            return why
+    return ""
+
+
+def lane_repos(s: dict) -> list:
+    """(lane, repository) for each lane of a desk's settings that names one."""
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
+    return [(n, ln["repo"]) for n, ln in lanes.items() if isinstance(ln, dict) and isinstance(ln.get("repo"), str)]
+
+
+def run_homes(env=None) -> list:
+    """The home folders hansa makes the logins list in: the account's (account_home) and $HOME."""
+    env = os.environ if env is None else env
+    return list(dict.fromkeys(h for h in (account_home(), env.get("HOME") or os.path.expanduser("~")) if h))
 
 
 def rules_problem(rules) -> str:

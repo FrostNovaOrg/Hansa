@@ -7362,6 +7362,122 @@ class DeskTest(unittest.TestCase):
         self.assertIn("move it to a path", r.stderr)
         self.assertIn("move it to a path", run.paths_problem(self.desk, self.repo))
 
+    def test_a_desk_whose_path_has_a_pattern_character_is_refused_at_init(self):
+        out = io.StringIO()
+        for part in ("a[1]", "a]1", "a*", "a?", "a\\1", "a［1］"):  # the last: wide brackets, a look-alike
+            bad = self.tmp / part / "desk"
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                main(["init", str(bad)])
+            self.assertIn("the desk ", str(e.exception.code), part)
+            self.assertIn(os.path.realpath(bad), str(e.exception.code), part)
+            self.assertIn("read as a pattern", str(e.exception.code))
+            self.assertIn("move it to a path with none of [ ] * ? \\", str(e.exception.code))
+            self.assertIn("no desk was made", str(e.exception.code))
+            self.assertFalse(bad.exists(), part)
+        # through a link, as where it leads
+        (self.tmp / "b[1]").mkdir()
+        (self.tmp / "plain").symlink_to(self.tmp / "b[1]")
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            main(["init", str(self.tmp / "plain" / "desk")])
+        self.assertIn(f"where its links lead: {os.path.realpath(self.tmp / 'b[1]')}", str(e.exception.code))
+        # { } and ( ) match as themselves in those rules: such a desk is made
+        ok = self.tmp / "c{1}" / "desk"
+        with contextlib.redirect_stdout(out):
+            main(["init", str(ok)])
+        self.assertTrue((ok / "settings.json").is_file())
+        # a lane's repository, at init and at lane add
+        repo = self.tmp / "r[1]" / "repo"
+        shutil.copytree(self.repo, repo)
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            main(["init", str(self.tmp / "d2"), "--repo", str(repo)])
+        self.assertIn("lane a's repository", str(e.exception.code))
+        self.assertFalse((self.tmp / "d2").exists())
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(repo)])
+        self.assertIn("lane b's repository", str(e.exception.code))
+        self.assertIn("move it to a path", str(e.exception.code))
+        self.assertNotIn("b", self.desk.settings()["lanes"])
+
+    def test_a_desk_moved_under_a_pattern_character_starts_no_run_and_no_coordinator(self):
+        from hansa import run
+        moved = (self.tmp / "a[1]").resolve() / "desk"
+        moved.parent.mkdir()
+        shutil.move(str(self.desk.root), str(moved))
+        self.desk = Desk(moved)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn(f"the desk {moved}", m["error"])
+        self.assertIn("read as a pattern", m["error"])
+        self.assertIn("move it to a path", m["error"])
+        self.assertFalse(self.srt_log.exists() and self.srt_log.read_text().strip())  # no setup ran either
+        with self.assertRaises(RuntimeError) as e:  # every run's sandbox: setups, checks, merge checks, tries
+            run.lane_sandbox(self.desk, self.desk.settings()["lanes"]["a"], "claude",
+                             self.desk.settings()["providers"]["claude"], self.repo)
+        self.assertIn("hansa starts no run", str(e.exception))
+        did = self.desk.new_task("Design it", kind="design")
+        self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
+                         session_id="sid-d", model_asked="sonnet")
+        with self.assertRaises(RuntimeError) as e:
+            run.design_command(self.desk, did)
+        self.assertIn(f"the desk {moved}", str(e.exception))
+        r = self.echo_coordinator()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout, "")  # Claude Code never started
+        self.assertIn("the coordinator's session was not started", r.stderr)
+        self.assertIn(f"the desk {moved}", r.stderr)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(moved),
+                            "serve", "--port", "0"], capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("hansa serve did not start", r.stderr)
+        self.assertIn(f"the desk {moved}", r.stderr)
+
+    def test_a_worktree_or_lane_repository_under_a_pattern_character_starts_no_run(self):
+        from hansa import run
+        s = self.desk.settings()
+        lane, p = s["lanes"]["a"], s["providers"]["claude"]
+        for wt, what in ((self.tmp / "w[1]" / "wt", "the worktree"), (self.repo, "the lane's repository")):
+            ln = dict(lane, repo=str(self.tmp / "r*" / "repo")) if wt == self.repo else lane
+            with self.assertRaises(RuntimeError) as e:
+                run.lane_sandbox(self.desk, ln, "claude", p, wt)
+            self.assertIn(what, str(e.exception))
+            self.assertIn("hansa starts no run", str(e.exception))
+
+    def test_a_home_folder_with_a_pattern_character_is_refused(self):
+        from hansa import run
+        home = (self.tmp / "h[1]").resolve()
+        home.mkdir()
+        out = io.StringIO()
+        for patch in (unittest.mock.patch.dict(os.environ, {"HOME": str(home)}),
+                      unittest.mock.patch("hansa.desk.account_home", return_value=str(home))):
+            with patch:
+                with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                    main(["init", str(self.tmp / "d3")])
+                self.assertIn(f"the home folder {home}", str(e.exception.code))
+                self.assertIn("move it to a path", str(e.exception.code))
+                self.assertFalse((self.tmp / "d3").exists())
+                with self.assertRaises(RuntimeError) as e:
+                    run.no_read(self.desk)
+                self.assertIn(f"the home folder {home}", str(e.exception))
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
+            r = self.echo_coordinator()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout, "")
+        self.assertIn(f"the home folder {home}", r.stderr)
+        self.assertEqual(run.no_read(self.desk), ([], []))  # as it was
+
+    def test_an_entry_left_out_only_for_a_folder_on_the_path_is_open_to_every_run(self):
+        tools = (self.tmp / "tools").resolve()
+        (tools / "bin").mkdir(parents=True)
+        os.environ["PATH"] = f"{tools / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [str(tools)]
+        write_json(self.desk.settings_path, s)
+        [line] = views.status(self.desk)["no_read_left_out"]
+        self.assertIn("a folder on the PATH hansa runs with", line)
+        self.assertIn("that folder is open to every run", line)
+        self.assertNotIn("runs of that lane", line)
+
     def test_webfetch_refuses_names_that_come_back_as_this_machine(self):
         s = self.desk.settings()
         for host, why in (("metadata", "no dot"), ("router", "no dot"), ("instance-data", "no dot"),
@@ -9156,8 +9272,13 @@ class DeskTest(unittest.TestCase):
             shown = views.show_text(self.desk, tid)
             for path, why in left.items():
                 lines = [x for x in shown.splitlines() if why in x and x.startswith(
-                    f"what workers may not read: left out of this run: {path}: ") and "open to the runs" in x]
+                    f"what workers may not read: left out of this run: {path}: ")]
                 self.assertEqual(len(lines), 1, (path, shown))
+                if why == "a folder on the PATH":  # open to every run, not one lane's
+                    self.assertIn("open to every run", lines[0])
+                    self.assertNotIn("open to the runs of that lane", lines[0])
+                else:
+                    self.assertIn("open to the runs of that lane and every other", lines[0])
             self.assertEqual([e["task"] for e in self.events("no_read_left_out")], [tid] * len(left))
             told = self.hansa("explain", "lane", "a")
             self.assertIn(f"not applied: {self.repo.resolve()}: it is {self.repo.resolve()}, lane a's repository", told)
