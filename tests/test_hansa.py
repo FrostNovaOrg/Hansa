@@ -7862,6 +7862,32 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(run.write_list(self.desk, self.desk.settings()["lanes"]["a"]), ([str(v) for v in caches.values()], []))
             self.assertEqual(run.lane_env(self.desk, self.desk.settings()["lanes"]["a"]), (env, []))
 
+    def test_uv_and_other_tools_cache_variables_point_at_the_lanes_own_folder(self):
+        from hansa import run
+        home = (self.tmp / "home").resolve()
+        own = home / "hansa-cache" / "a"
+        own.mkdir(parents=True)
+        names = ("UV_CACHE_DIR", "POETRY_CACHE_DIR", "PIPENV_CACHE_DIR", "BUN_INSTALL_CACHE_DIR", "DENO_DIR",
+                 "NUGET_PACKAGES", "COURSIER_CACHE")
+        with as_home(home):
+            for name in names:
+                at = own / name.lower()
+                self.assertEqual(self.lane_problems({name: str(at)}, [at]), [], name)
+                self.hansa("lane", "set", "a", "env", f"{name}={at}")
+                self.hansa("lane", "set", "a", "write", str(at))
+                lane = self.desk.settings()["lanes"]["a"]
+                self.assertEqual((lane["env"], lane["write"]), ({name: str(at)}, [str(at)]), name)
+                self.assertEqual(run.write_list(self.desk, lane), ([str(at)], []), name)
+                # the other fences stay: a hidden folder of the home folder is still refused
+                hidden = home / f".{name.lower()}"
+                told = self.lane_problems({name: str(hidden)}, [hidden])
+                self.assertTrue(len(told) == 1 and "it is inside" in told[0] and "the home folder" in told[0],
+                                (name, told))
+            # a variable not on the list still closes what it names
+            told = self.lane_problems({"UV_TOOL_DIR": str(own / "tools")}, [own / "tools"])
+            self.assertTrue(len(told) == 1 and "which the lane's env names in UV_TOOL_DIR" in told[0], told)
+            self.assertIn("UV_CACHE_DIR", told[0])  # and says uv's cache variable may point at the lane's folder
+
     def test_the_xdg_folders_of_a_lane_may_be_listed_but_not_claude_codes_own_files_in_them(self):
         tools = (self.tmp / "srv" / "tools").resolve()
         tools.mkdir(parents=True)

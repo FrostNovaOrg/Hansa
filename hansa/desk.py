@@ -195,7 +195,9 @@ RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Cla
 # The variables that exist to point a tool in the sandbox at the lane's own folder: what these name may be on
 # the lane's write list (the card names the cache ones)
 CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_CACHE_FOLDER", "CARGO_HOME",
-             "GOMODCACHE", "GOCACHE", "GRADLE_USER_HOME", "MAVEN_OPTS", "CCACHE_DIR")
+             "GOMODCACHE", "GOCACHE", "GRADLE_USER_HOME", "MAVEN_OPTS", "CCACHE_DIR", "UV_CACHE_DIR",
+             "POETRY_CACHE_DIR", "PIPENV_CACHE_DIR", "BUN_INSTALL_CACHE_DIR", "DENO_DIR", "NUGET_PACKAGES",
+             "COURSIER_CACHE")
 XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
 # Bash commands a lane's design sessions may run without asking, for every lane: none. A lane's
@@ -725,7 +727,7 @@ SYSTEM_TOPS = ("/System", "/dev", "/proc", "/sys")
 # What a refusal of a cache folder says to list instead
 ELSEWHERE = "a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or /tmp"
 OWN_FOLDER = ("give the lane a folder of its own, such as ~/hansa-cache/<lane>/<tool>, and point the tool there with "
-              "the lane's env: PIP_CACHE_DIR, npm_config_cache, CARGO_HOME, GRADLE_USER_HOME and the like")
+              "the lane's env: PIP_CACHE_DIR, npm_config_cache, UV_CACHE_DIR, CARGO_HOME, GRADLE_USER_HOME and the like")
 
 
 def _top_hidden(path: str, _=None) -> bool:
@@ -1489,7 +1491,7 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
     # every path the lane's env names, but those of the variables that point a tool at the lane's own folder
     fenced += [(d, _on_path, f"it would open {d}, which {whose} env names in {k} (or it is inside it): what a "
                              "lane's env names is where the lane's commands look, so it is closed to workers "
-                             f"(but a cache variable such as {CACHE_ENV[2]} or {CACHE_ENV[0]}, which "
+                             f"(but a cache variable such as {CACHE_ENV[2]}, {CACHE_ENV[0]} or UV_CACHE_DIR, which "
                              "may point at the lane's own folder; set the other inside the check or setup command)")
                for whose, e in envs for k, v in e.items() if k != "PATH" and k not in CACHE_ENV and k not in XDG_OPEN
                for d in env_paths(v, home)]
