@@ -107,26 +107,28 @@ def permissions(desk: Desk) -> dict:
 # What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
 # and publishing. A release goes out through hansa release, which runs the lane's command itself after the
 # principal's yes; the coordinator reads a repository through hansa git.
-NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
-              "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
-              "docker push", "podman push", "mvn deploy", "./mvnw deploy", "mvnw deploy", "gradle publish",
-              "./gradlew publish", "gradlew publish")
-# git's options before a subcommand all start with -, and git has no other way to push: so a read with push as an
-# argument (git log --grep push, git grep push) passes while git -C DIR push is denied
-OPTIONS_START_WITH_DASH = ("git push",)
+NO_PUBLISH = ("git push", "git send-email", "git svn dcommit", "gh release", "gh pr merge", "gh repo", "npm publish",
+              "pnpm publish", "yarn publish", "yarn npm publish", "twine upload", "uv publish", "poetry publish",
+              "cargo publish", "gem push", "docker push", "podman push")
+# Maven's and Gradle's publishing, run by the tool or by a wrapper in any folder (../mvnw, sub/gradlew), with goals,
+# tasks or options before it: deploy and the deploy plugin's goals (deploy:deploy-file); publish, publishTo... and a
+# project's own (:sub:publish)
+BUILD_PUBLISH = {("mvn", "mvnw", "*/mvnw"): ("deploy", "deploy *", "deploy:d*"),
+                 ("gradle", "gradlew", "*/gradlew"): ("publish*", "*:publish*")}
 
 
 def no_publish_with_options() -> list:
-    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
-    reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
-    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. Claude Code
-    matches them after a plain xargs and wrappers such as env, nice or timeout too; they stop nothing run
-    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push). For
-    git the text between must start with - (OPTIONS_START_WITH_DASH); for the others it may be a goal or a
-    subcommand group too (mvn clean deploy, docker image push)."""
-    def between(c):
-        return c.replace(" ", " -* " if c in OPTIONS_START_WITH_DASH else " * ", 1)
-    return [r for c in NO_PUBLISH for r in (between(c), between(c) + " *")]
+    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy), and
+    BUILD_PUBLISH: Claude Code reads a * anywhere in a Bash rule as any text, the whole command matched. Only a
+    lone trailing " *" may also match nothing, so `git * push *` needs `git * push` beside it for a push without
+    arguments. The text between may be a subcommand too, so `git * push` denies git subtree push, git submodule
+    foreach git push and git lfs push, and a read with push among its arguments as well (git log --grep push):
+    the coordinator reads a repository through hansa git. Claude Code matches them after a plain xargs and
+    wrappers such as env, nice or timeout too; they stop nothing run through another shell (bash -c), a script,
+    or an xargs with options of its own (xargs -n1 git push)."""
+    return ([r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
+            + [f"{p}{between}{g}" for ps, gs in BUILD_PUBLISH.items() for p in ps for g in gs
+               for between in (" ", " * ")])
 
 
 def _text(args) -> str:

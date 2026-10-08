@@ -1635,11 +1635,15 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
-        hits = [(f, hit, why) for f, hit, why in fenced if hit(x, f)]
-        # a folder on the PATH is said too unless a reason that refuses all of it already holds (/, the home folder)
-        on_path = next((why for d, hit, why in path_fenced if hit(x, d) and not any(
-            _above(f, d) for f, h, w in hits if (f, h, w) not in in_parts)), "")
-        why = "; and ".join(w for w in (hits[0][2] if hits else "", on_path) if w)
+        hits = [(f, why) for f, hit, why in fenced if hit(x, f)]
+        paths_in = [(d, why) for d, hit, why in path_fenced if hit(x, d)]
+        # the reason said is one that covers every folder on the PATH the entry holds (/, the home folder, /usr/bin
+        # for /usr), which is then not said; else the first, and the folder on the PATH with it
+        said = next(((f, why) for f, why in hits if paths_in and all(_above(f, d) for d, _ in paths_in)
+                     and why not in (w for _, _, w in in_parts)), None)
+        on_path = "" if said else next((why for _, why in paths_in), "")
+        said = said or next(iter(hits), None)
+        why = "; and ".join(w for w in (said[1] if said else "", on_path) if w)
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:

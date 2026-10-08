@@ -6815,9 +6815,8 @@ class DeskTest(unittest.TestCase):
         def matches(rule, cmd):  # as Claude Code matches a Bash rule: a prefix before :*, else * as any text
             if rule.endswith(":*") and "*" not in rule[:-2]:
                 return cmd == rule[:-2] or cmd.startswith(rule[:-2] + " ")
-            pattern = ".*".join(re.escape(x) for x in rule.split("*"))
-            if rule.endswith(" *") and rule.count("*") == 1:
-                pattern = pattern[:-3] + "( .*)?"
+            lone = rule.endswith(" *") and rule.count("*") == 1
+            pattern = ".*".join(re.escape(x) for x in (rule[:-2] if lone else rule).split("*")) + ("( .*)?" if lone else "")
             return re.fullmatch(pattern, cmd, re.S) is not None
 
         def denied(cmd):
@@ -6831,16 +6830,25 @@ class DeskTest(unittest.TestCase):
                     "./mvnw deploy", "./mvnw clean deploy", "./mvnw -B -DskipTests deploy", "mvnw deploy",
                     "mvnw -q clean deploy", "gradle publish", "gradle clean publish", "gradle --no-daemon publish",
                     "./gradlew publish", "./gradlew build publish --info", "gradlew publish", "gradlew -q publish",
-                    "docker image push img"):
+                    "docker image push img", "git subtree push --prefix=d origin main", "git lfs push origin main",
+                    "git submodule foreach git push", "git -C /r subtree push --prefix=d origin main",
+                    "git send-email --to=x@y 0001.patch", "git -C /r send-email HEAD~1", "git svn dcommit",
+                    "git -C /r svn dcommit --dry-run", "./gradlew :sub:publish", "./gradlew build :a:b:publish",
+                    "./gradlew publishToMavenCentral", "gradle clean publishToMavenLocal", "gradlew publishPlugins",
+                    "mvn deploy:deploy-file -Dfile=x.jar", "mvn -B clean deploy:deploy", "./mvnw deploy:deploy-file",
+                    "../mvnw deploy", "../mvnw -B clean deploy", "sub/gradlew publish", "/r/sub/gradlew -q publish",
+                    "../gradlew :x:publishToSonatype"):
             self.assertTrue(denied(cmd), cmd)
         for cmd in ("hansa status", "hansa git a log --oneline", "hansa git a show HEAD", "hansa release a",
                     "hansa lane set a release \"git push origin main\"", "hansa merge t0001", "git status",
                     "gh pr view 3", "git -C /some/repo status", "git -C /some/repo log --oneline",
-                    "hansa git a -C x push", "npm --prefix pkg test", "git log --grep push",
-                    "git log --grep push --oneline", "git grep push", "git grep -n push -- hansa",
-                    "git show HEAD:push.sh", "./mvnw verify", "./mvnw clean install", "gradle build",
-                    "./gradlew test", "gradlew assemble"):
+                    "hansa git a -C x push", "npm --prefix pkg test", "hansa git a log --grep push",
+                    "hansa git a grep push", "./mvnw verify", "./mvnw clean install", "gradle build",
+                    "./gradlew test", "gradlew assemble", "../mvnw verify", "sub/gradlew test", "mvn -B test",
+                    "./gradlew :sub:test"):
             self.assertFalse(denied(cmd), cmd)
+        for cmd in ("git log --grep push", "git grep push"):  # refused here, read through hansa git
+            self.assertTrue(denied(cmd), cmd)
         self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
 
     def test_a_lanes_env_refuses_the_shells_own_names_and_its_file_is_the_desks_alone(self):
@@ -6936,6 +6944,15 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual(len(told["problems"]), 1, (path, told))
                 self.assertIn(why, told["problems"][0], path)
                 self.assertNotIn("a folder on the PATH", told["problems"][0], path)
+        # the reason said is one that covers the folder on the PATH (the lane's repository, not the desk); when none
+        # does, the folder on the PATH is said beside it
+        for on_path, why, said in ((self.repo / "bin", "lane a's repository", False),
+                                   (self.tmp / "tools" / "bin", "the desk, or a folder above it", True)):
+            with unittest.mock.patch.dict(os.environ, {"PATH": f"/usr/bin:/bin:{on_path}"}):
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[str(self.tmp)]))
+            self.assertEqual(len(told["problems"]), 1, told)
+            self.assertIn(why, told["problems"][0])
+            self.assertEqual("a folder on the PATH" in told["problems"][0], said, told)
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
         from hansa import run
