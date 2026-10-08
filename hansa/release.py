@@ -321,6 +321,30 @@ def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") 
     return hits[:MOST_HITS], checked
 
 
+def command_hits(ln: dict, words: list, only: str | None = None) -> list:
+    """The forbidden words in a lane's release targets' command lines (any case, within one line), each
+    (target, word, line) once; only: that one target's ("" the unnamed one)."""
+    folded = [(w, w.casefold()) for w in words or [] if isinstance(w, str) and w.strip()]
+    out = []
+    for target, t in sorted(lane_targets(ln).items()):
+        if only is not None and target != only:
+            continue
+        for line in str(t.get("command") or "").splitlines():
+            w = next((w for w, f in folded if f in line.casefold()), None)
+            if w:
+                out.append((target, w, line.strip()[:300]))
+    return out
+
+
+def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
+    """What hansa says when a release command it has just set holds a forbidden word: the word and where."""
+    return desk.redact("Warning: " + "; ".join(
+        f"lane {lane}'s {'release target ' + t if t else 'release command'} holds \"{w}\", a word the principal "
+        f"keeps from going out: {line}" for t, w, line in hits)
+        + ". The setting is kept, but hansa refuses every release whose command line holds such a word: change the "
+          "command, or ask the principal about the word")
+
+
 def hits_text(hits: list) -> str:
     return "\n".join(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")" for h in hits)
 
@@ -1060,9 +1084,16 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
            True: "it runs from a checkout of the base branch's commit made for it (removed when it ends), as the "
                  "desk's account, outside the sandbox, with hansa's environment (not the lane's env), holding nothing "
                  f"(merges in {ln['repo']} go on meanwhile), only after the principal says yes on the page"}
+    files = ln.get("release_files") or []
+    listed = (["  release files (built and run by its releases outside the sandbox; hansa merge refuses a change "
+               "touching one until a verification of it holds): " + " ".join(files)] if files else
+              [f"  release files: none; advised, since its releases build and run what is on the base outside the "
+               f"sandbox: hansa lane set {name} release_files \"pom.xml **/pom.xml build.sh tools/release.sh\" (the "
+               f"build files and release scripts), and a change touching one is merged only once a verification of "
+               f"it holds"] if targets else [])
     if not targets:
         return [f"  release: none (set one with hansa lane set {name} release \"<command>\", or name targets with "
-                f"hansa lane target {name} NAME \"<command>\")", "  last release: none"]
+                f"hansa lane target {name} NAME \"<command>\")", "  last release: none", *listed]
     out = []
     for target, t in sorted(targets.items()):
         rs = [r for r in releases(desk) if r.get("lane") == name and (r.get("target") or "") == target]
@@ -1074,7 +1105,7 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
                 + (": the principal lets it go out without asking" if lane_listed(s, name, target)
                    else unlisted(s, name, target)) + ")",
                 f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
-    return out
+    return out + listed
 
 
 def unlisted(s: dict, name: str, target: str = "") -> str:

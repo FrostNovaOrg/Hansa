@@ -79,6 +79,7 @@ ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "r
 LISTED_AS = ("repo", "base", "command", "after", "fixed")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release")
 MAX_TARGETS = 20  # named release targets on one lane
+MAX_RELEASE_FILES = 100  # paths or globs on one lane's release_files
 TARGET_FIELDS = ("command", "timeout_min", "after", "fixed")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
@@ -377,8 +378,8 @@ def validate(s: dict, root=None) -> list:
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
-                           "preview", "preview_wait_s", "setup", "release", "targets", "max_turns", "timeout_min",
-                           "merge_timeout_min", "note", "identity", *MESSAGE_FIELDS}
+                           "preview", "preview_wait_s", "setup", "release", "targets", "release_files", "max_turns",
+                           "timeout_min", "merge_timeout_min", "note", "identity", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -416,6 +417,11 @@ def validate(s: dict, root=None) -> list:
         if identity_problem(ln.get("identity", "")):
             p.append(f"{at}: identity {identity_problem(ln['identity'])}")
         p += [f"{at}: {x}" for x in target_problems(ln)]
+        files = ln.get("release_files", [])
+        if not isinstance(files, list) or len(files) > MAX_RELEASE_FILES or not all(
+                isinstance(x, str) and release_file_ok(x) for x in files):
+            p.append(f"{at}: release_files must be a list of up to {MAX_RELEASE_FILES} paths or globs relative to the "
+                     "repository, such as pom.xml, **/pom.xml or tools/release.sh (no leading /, no .., no spaces)")
         if not _is_int(ln.get("max_turns", 300), 1, 1000):
             p.append(f"{at}: max_turns must be from 1 to 1000")
         if not _is_int(ln.get("timeout_min", 240), 1, 1440):
@@ -828,6 +834,48 @@ def claude_home(state_dir, name: str, p: dict) -> Path:
     if p.get("kind") == "subscription":
         return Path(p.get("config_dir") or os.path.expanduser("~/.claude"))
     return Path(state_dir) / f"claude-{name}"
+
+
+def release_file_ok(pattern: str) -> bool:
+    """A release_files entry: a path or glob relative to the repository, on one line, without spaces."""
+    parts = pattern.split("/")
+    return (bool(pattern) and len(pattern) <= 300 and not pattern.startswith("/") and ".." not in parts
+            and not any(c.isspace() for c in pattern) and not _has_control(pattern) and all(parts))
+
+
+def _glob_re(pattern: str) -> str:
+    """A release_files glob as a regular expression on a path relative to the repository: * and ? within one
+    folder's name, [...] a class, **/ any folders (none too), /** everything below, ** alone anything."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**/", i):
+            out.append("(?:[^/]+/)*")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif c == "*":
+            out.append("[^/]*")
+            i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        elif c == "[" and "]" in pattern[i + 2:]:
+            end = pattern.index("]", i + 2)
+            body = pattern[i + 1:end].replace("\\", "\\\\").replace("[", "\\[")
+            out.append("[" + ("^" + body[1:] if body[0] in "!^" else body) + "]")
+            i = end + 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return "".join(out)
+
+
+def release_files_in(files, patterns) -> list:
+    """The files (paths relative to the repository) that one of a lane's release_files names, in their order."""
+    pats = [re.compile(_glob_re(x)) for x in patterns or [] if isinstance(x, str) and x]
+    return [f for f in dict.fromkeys(files) if f and any(r.fullmatch(f) for r in pats)]
 
 
 def lane_targets(ln) -> dict:
@@ -1601,9 +1649,11 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
                            "their tools") for d in BREW_FOLDERS]
     fenced.append(("/dev", _overlaps, "it is /dev or inside it, the system's devices: workers' commands need /dev/null, "
                                       "/dev/tty and /dev/urandom"))
-    fenced += [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
-                "caches in the home folder, or a folder above it: name the files in it instead")
-               for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    # these leave what is inside them open to listing, so a folder on the PATH inside them is said as well
+    in_parts = [(os.path.join(home, d), _above, f"it is {os.path.join(home, d)}, where tools keep their settings and "
+                 "caches in the home folder, or a folder above it: name the files in it instead")
+                for d in HOME_TOOL_FOLDERS + (("Library",) if sys.platform == "darwin" else ())]
+    fenced += in_parts
     fenced += [(d, _above, f"it is {d}, the temporary folder, or a folder above it: workers' commands and tools "
                            "write and read there") for d in dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir()))]
     if root:
@@ -1623,8 +1673,15 @@ def deny_split(paths, root=None, lanes=None) -> tuple:
             p.append(f"{DENY_AT}{json.dumps(x)}: {FORMAT_WHY}")
             continue
         # one whose links cannot be followed is kept, denied as given: refused, it would be read
-        why = "; and ".join(w for w in (next((why for f, hit, why in fence if hit(x, f)), "")
-                                        for fence in (fenced, path_fenced)) if w)
+        hits = [(f, why) for f, hit, why in fenced if hit(x, f)]
+        paths_in = [(d, why) for d, hit, why in path_fenced if hit(x, d)]
+        # the reason said is one that covers every folder on the PATH the entry holds (/, the home folder, /usr/bin
+        # for /usr), which is then not said; else the first, and the folder on the PATH with it
+        said = next(((f, why) for f, why in hits if paths_in and all(_above(f, d) for d, _ in paths_in)
+                     and why not in (w for _, _, w in in_parts)), None)
+        on_path = "" if said else next((why for _, why in paths_in), "")
+        said = said or next(iter(hits), None)
+        why = "; and ".join(w for w in (said[1] if said else "", on_path) if w)
         if not why and _breaks(x):
             why = f"{BREAKS_WHY}, which the sandbox and a permission rule may read as a pattern"
         if why:

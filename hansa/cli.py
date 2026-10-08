@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, release, views
 from .desk import (EFFORTS, Desk, default_lane, default_settings, deny_split, home_secrets, identity_problem, json_text,
-                   kept_from_workers, lane_targets, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
+                   kept_from_workers, lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, read_json, read_split, resolved, stored, write_json,
                    PROJECT_INTRO)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
@@ -108,18 +108,28 @@ def permissions(desk: Desk) -> dict:
 # What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
 # and publishing. A release goes out through hansa release, which runs the lane's command itself after the
 # principal's yes; the coordinator reads a repository through hansa git.
-NO_PUBLISH = ("git push", "gh release", "gh pr merge", "gh repo", "npm publish", "pnpm publish", "yarn publish",
-              "yarn npm publish", "twine upload", "uv publish", "poetry publish", "cargo publish", "gem push",
-              "docker push", "podman push", "mvn deploy")
+NO_PUBLISH = ("git push", "git send-email", "git svn dcommit", "gh release", "gh pr merge", "gh repo", "npm publish",
+              "pnpm publish", "yarn publish", "yarn npm publish", "twine upload", "uv publish", "poetry publish",
+              "cargo publish", "gem push", "docker push", "podman push")
+# Maven's and Gradle's publishing, run by the tool or by a wrapper in any folder (../mvnw, sub/gradlew), with goals,
+# tasks or options before it: deploy and the deploy plugin's goals (deploy:deploy-file); publish, publishTo... and a
+# project's own (:sub:publish)
+BUILD_PUBLISH = {("mvn", "mvnw", "*/mvnw"): ("deploy", "deploy *", "deploy:d*"),
+                 ("gradle", "gradlew", "*/gradlew"): ("publish*", "*:publish*")}
 
 
 def no_publish_with_options() -> list:
-    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy): Claude Code
-    reads a * anywhere in a Bash rule as any text, the whole command matched. Only a lone trailing " *" may also
-    match nothing, so `git * push *` needs `git * push` beside it for a push without arguments. Claude Code
-    matches them after a plain xargs and wrappers such as env, nice or timeout too; they stop nothing run
-    through another shell (bash -c), a script, or an xargs with options of its own (xargs -n1 git push)."""
-    return [r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
+    """NO_PUBLISH with options between the program and the rest (git -C repo push, mvn -B deploy), and
+    BUILD_PUBLISH: Claude Code reads a * anywhere in a Bash rule as any text, the whole command matched. Only a
+    lone trailing " *" may also match nothing, so `git * push *` needs `git * push` beside it for a push without
+    arguments. The text between may be a subcommand too, so `git * push` denies git subtree push, git submodule
+    foreach git push and git lfs push, and a read with push among its arguments as well (git log --grep push):
+    the coordinator reads a repository through hansa git. Claude Code matches them after a plain xargs and
+    wrappers such as env, nice or timeout too; they stop nothing run through another shell (bash -c), a script,
+    or an xargs with options of its own (xargs -n1 git push)."""
+    return ([r for c in NO_PUBLISH for r in (c.replace(" ", " * ", 1), c.replace(" ", " * ", 1) + " *")]
+            + [f"{p}{between}{g}" for ps, gs in BUILD_PUBLISH.items() for p in ps for g in gs
+               for between in (" ", " * ")])
 
 
 def _text(args) -> str:
@@ -531,6 +541,17 @@ def _mergeable(desk: Desk, a):
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. {_wait_for(desk, v['task'])}")
+    touched = _release_files_touched(repo, m, lane)
+    if touched and not (v and v["verdict"] == "holds"):
+        more = len(touched) - 10
+        raise SystemExit(
+            f"hansa: the change in {a.id} touches what lane {m['lane']}'s releases build and run outside the sandbox "
+            f"(its release_files): {', '.join(touched[:10])}" + (f" and {more} more" if more > 0 else "")
+            + f"; nothing was merged, and no flag overrides this (--despite-check is for a failed check, not this). "
+            + (f"Its verification {v['task']} " + ("found that it does not hold" if v["verdict"] == "does not hold"
+                                                  else f"ended {v['verdict'] or 'without a verdict'}")
+               + ". " if v else "Nothing has verified it. ")
+            + f"Have it verified: hansa verify {a.id}, and merge once the verification holds")
     if v and v["verdict"] == "does not hold" and not a.despite_check:
         raise SystemExit(f"hansa: the verification {v['task']} found that {a.id} does not hold; nothing was merged. "
                          f"hansa show {v['task']} says what it ran. Send it back with hansa retry {a.id} \"...\", "
@@ -556,6 +577,19 @@ def _mergeable(desk: Desk, a):
     if git("status", "--porcelain", "--untracked-files=no", cwd=repo):
         raise SystemExit(f"hansa: the checkout at {repo} has uncommitted changes; nothing was merged")
     return m, v, chk, repo, base, lane
+
+
+def _release_files_touched(repo, m: dict, lane: dict) -> list:
+    """The files a task's change adds, changes or removes that the lane's release_files name."""
+    patterns = lane.get("release_files") or []
+    if not patterns:
+        return []
+    files = list(m.get("files") or [])
+    try:
+        files += git("diff", "--name-only", "--no-renames", m["base"], m["head"], cwd=repo).splitlines()
+    except (RuntimeError, KeyError):
+        pass
+    return release_files_in(files, patterns)
 
 
 def cmd_retry(a):
@@ -875,12 +909,13 @@ def cmd_release(a):
         paused = desk.paused()
         listed = (f"{who} is on the principal's list of releases without asking" if r.get("target") else
                   f"lane {a.lane} is on the principal's list of lanes released without asking")
+        gone = not_looking(desk)  # as the release's waiting text says it (release.waits_text)
         print(desk.redact(f"{head}\n{listed}, but the "
                           f"desk is paused ({paused}): while it is, only a release the principal said yes to runs, so "
                           f"this one waits until the desk is resumed. {after}" if paused else
                           f"{head}\n{listed}: hansa "
                           f"serve runs the command {'from a checkout of ' + r['commit'][:10] + ' made for it' if r.get('fixed') else 'in ' + r['repo']} "
-                          f"within seconds. {after}"))
+                          + (f"once it gets through its rounds; {gone}. {after}" if gone else f"within seconds. {after}")))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
     print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
@@ -1278,11 +1313,11 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
     desk.event(event, file=dst.name)
 
 
-LANE_LISTS = ("providers", "allow", "network", "write")
+LANE_LISTS = ("providers", "allow", "network", "write", "release_files")
 LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s", "note", *MESSAGE_FIELDS,
-               "identity")
+               "release", "release_files", "max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s", "note",
+               *MESSAGE_FIELDS, "identity")
 # empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait,
 # the identity of hansa's commits (then the repository's own, or hansa's)
 LANE_UNSET = ("merge_check", "merge_timeout_min", "preview_wait_s", *MESSAGE_FIELDS, "identity")
@@ -1307,7 +1342,8 @@ def _lane_value(field: str, values: list):
         raise SystemExit(f"hansa: none means an empty {field}, so it cannot come with other values "
                          f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
     if field in LANE_LISTS:
-        return [x for v in values for x in (v.split(",") if field == "providers" else [v]) if x]
+        return [x for v in values for x in (v.split(",") if field == "providers" else v.split()
+                                            if field == "release_files" else [v]) if x]
     if field == "env":
         env = {}
         for v in values:
@@ -1416,7 +1452,7 @@ def cmd_lane(a):
             given = {f: _lane_value(f, v if isinstance(v, list) else [v]) for f, v in (
                 ("providers", a.providers), ("check", a.check), ("setup", a.setup), ("allow", a.allow),
                 ("network", a.network), ("merge_check", a.merge_check), ("merge_timeout_min", a.merge_timeout),
-                ("identity", a.identity))
+                ("release_files", a.release_files), ("identity", a.identity))
                 if v is not None}
             if a.base is not None:
                 _lane_value("base", [a.base])
@@ -1469,7 +1505,7 @@ def cmd_lane(a):
                 brief.write_text("", encoding="utf-8")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
-                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check",
+                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check", "release_files",
                                                               "merge_timeout_min", "identity") if ln.get(f)))
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
@@ -1507,6 +1543,7 @@ def cmd_lane(a):
                                   + "\n".join(f"  {x}" for x in differs)))
             if differs or changed:
                 print(f"try it: hansa lane try {a.name}")
+            _say_forbidden(desk, a.name, ln)
             return
         if a.action == "remove":
             return _lane_remove(desk, a, s, new)
@@ -1547,6 +1584,8 @@ def cmd_lane(a):
               f"the sandbox, only after the principal says yes on the page, so this change is recorded and a release "
               f"asked with the old command no longer runs. Tell the principal, in the conversation, what you changed "
               f"and why. Ask for a release with: hansa release {a.name} \"<note>\"")
+    if a.field == "release":
+        _say_forbidden(desk, a.name, new["lanes"][a.name], "")
     if a.field == "network" and set(old) != set(value):  # the same hosts in another order change nothing
         desk.event("lane_network_changed", lane=a.name, old=old, new=value)
         print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "
@@ -1746,6 +1785,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
               f"for going out without asking), so this change is recorded and a release asked with the old command no "
               f"longer runs. Tell the principal, in the conversation, what you changed and why. Ask for a release "
               f"with: hansa release {a.name} {a.target} \"<note>\"")
+    _say_forbidden(desk, a.name, ln, a.target)
     if bool((old or {}).get("fixed")) != bool(t.get("fixed")):
         print(f"It now {release.runs_text(t)}"
               + (f": its command runs in a checkout of the release's commit made for it, so it names that commit as "
@@ -1755,6 +1795,13 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
                 "the page (its button for that, or unticking and ticking it again, then Save; a plain Save keeps "
                 "the old entry); "
                 "tell the principal, in the conversation, what you changed and why.")
+
+
+def _say_forbidden(desk: Desk, name: str, ln: dict, only: str | None = None) -> None:
+    """Say at once when a release command just set holds one of the principal's forbidden words."""
+    hits = release.command_hits(ln, desk.settings().get("release_forbidden") or [], only)
+    if hits:
+        print(release.command_hits_text(desk, name, hits))
 
 
 def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
@@ -2131,7 +2178,7 @@ def main(argv=None):
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
                    "providers, setup, check, merge_check, preview, network, folders it may write, env, allow, limits "
                    "with merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release "
-                   "targets, note) "
+                   "targets, release_files, note) "
                    "and standing instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Not with --repo")
@@ -2150,6 +2197,10 @@ def main(argv=None):
                    "makes for the lane (default: the repository's own user.name and user.email, else hansa's)")
     q.add_argument("--allow", nargs="+", metavar="RULE", help="commands a design session may run without asking, such as "
                    "'Bash(pnpm test:*)'; workers run any command in their sandbox and need none")
+    q.add_argument("--release-files", nargs="+", metavar="PATH", help="the files the lane's releases build and run "
+                   "outside the sandbox, as paths or globs relative to the repository, separated by spaces (\"pom.xml "
+                   "**/pom.xml build.sh tools/release.sh\"): hansa merge refuses a change touching one of them until "
+                   "a verification of it holds (hansa verify ID), and no flag overrides that")
     q = lane.add_parser("set", help="change one field of a lane", description=(
         "allow is the commands a design session may run without asking (workers run any command in their "
         "sandbox); providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
@@ -2186,7 +2237,14 @@ def main(argv=None):
         "to a public repository should have one, on the lane or in the repository's config. release is the command line that sends the base branch out (git push "
         "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). It is the lane's one "
         "unnamed release target; a lane that sends its base branch out in more than one way names its targets "
-        "instead (hansa lane target L NAME ...), and then has no release. " +
+        "instead (hansa lane target L NAME ...), and then has no release. A release command (or a target's, with hansa "
+        "lane target) that holds one of the principal's forbidden words is kept, and hansa says the word and where at "
+        "once; a release with it is refused. release_files is the list of files the lane's releases build and run "
+        "outside the sandbox (a Maven pom's plugins, a build script, the release script itself), as paths or globs "
+        "relative to the repository, separated by spaces, with ** for any folders (hansa lane set L release_files "
+        "\"pom.xml **/pom.xml build.sh tools/release.sh\"; none: empty): hansa merge refuses a change touching one of "
+        "them until a verification of that change holds (hansa verify ID), and neither --despite-check nor anything "
+        "else lets it through. " +
         "network is the list of hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "

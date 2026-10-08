@@ -2113,6 +2113,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("hansa", " ".join(a + c for a, c in got.values()))
         shown = self.hansa("explain", "lane", "b")
         self.assertIn("Bo Lane <bo@example.org>, from the lane's identity", shown)
+        self.assertIn("design sessions' commits, the commit hansa lane remove --keep makes)", shown)
 
     def test_without_a_lane_identity_hansa_takes_the_repositorys_own_and_never_the_accounts_global_one(self):
         globl = self.tmp / "global-gitconfig"
@@ -6919,9 +6920,8 @@ class DeskTest(unittest.TestCase):
         def matches(rule, cmd):  # as Claude Code matches a Bash rule: a prefix before :*, else * as any text
             if rule.endswith(":*") and "*" not in rule[:-2]:
                 return cmd == rule[:-2] or cmd.startswith(rule[:-2] + " ")
-            pattern = ".*".join(re.escape(x) for x in rule.split("*"))
-            if rule.endswith(" *") and rule.count("*") == 1:
-                pattern = pattern[:-3] + "( .*)?"
+            lone = rule.endswith(" *") and rule.count("*") == 1
+            pattern = ".*".join(re.escape(x) for x in (rule[:-2] if lone else rule).split("*")) + ("( .*)?" if lone else "")
             return re.fullmatch(pattern, cmd, re.S) is not None
 
         def denied(cmd):
@@ -6930,13 +6930,30 @@ class DeskTest(unittest.TestCase):
                     "gh repo delete x", "npm publish", "twine upload dist/*", "cargo publish", "docker push img:1",
                     "git -C /some/repo push", "git -C /some/repo push origin main", "git --no-pager push",
                     "git -c http.extraHeader=x push --force", "npm --prefix pkg publish", "mvn -B deploy",
-                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img"):
+                    "cargo --locked publish", "gh -R o/r release create v1", "docker --context x push img",
+                    "git --git-dir=/r/.git --work-tree /r push -f", "mvn deploy", "mvn clean deploy",
+                    "./mvnw deploy", "./mvnw clean deploy", "./mvnw -B -DskipTests deploy", "mvnw deploy",
+                    "mvnw -q clean deploy", "gradle publish", "gradle clean publish", "gradle --no-daemon publish",
+                    "./gradlew publish", "./gradlew build publish --info", "gradlew publish", "gradlew -q publish",
+                    "docker image push img", "git subtree push --prefix=d origin main", "git lfs push origin main",
+                    "git submodule foreach git push", "git -C /r subtree push --prefix=d origin main",
+                    "git send-email --to=x@y 0001.patch", "git -C /r send-email HEAD~1", "git svn dcommit",
+                    "git -C /r svn dcommit --dry-run", "./gradlew :sub:publish", "./gradlew build :a:b:publish",
+                    "./gradlew publishToMavenCentral", "gradle clean publishToMavenLocal", "gradlew publishPlugins",
+                    "mvn deploy:deploy-file -Dfile=x.jar", "mvn -B clean deploy:deploy", "./mvnw deploy:deploy-file",
+                    "../mvnw deploy", "../mvnw -B clean deploy", "sub/gradlew publish", "/r/sub/gradlew -q publish",
+                    "../gradlew :x:publishToSonatype"):
             self.assertTrue(denied(cmd), cmd)
         for cmd in ("hansa status", "hansa git a log --oneline", "hansa git a show HEAD", "hansa release a",
                     "hansa lane set a release \"git push origin main\"", "hansa merge t0001", "git status",
                     "gh pr view 3", "git -C /some/repo status", "git -C /some/repo log --oneline",
-                    "hansa git a -C x push", "npm --prefix pkg test"):
+                    "hansa git a -C x push", "npm --prefix pkg test", "hansa git a log --grep push",
+                    "hansa git a grep push", "./mvnw verify", "./mvnw clean install", "gradle build",
+                    "./gradlew test", "gradlew assemble", "../mvnw verify", "sub/gradlew test", "mvn -B test",
+                    "./gradlew :sub:test"):
             self.assertFalse(denied(cmd), cmd)
+        for cmd in ("git log --grep push", "git grep push"):  # refused here, read through hansa git
+            self.assertTrue(denied(cmd), cmd)
         self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
 
     def test_a_lanes_env_refuses_the_shells_own_names_and_its_file_is_the_desks_alone(self):
@@ -7022,6 +7039,25 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(len(told["problems"]), 1, told)
         self.assertIn("settings and caches in the home folder", told["problems"][0])
         self.assertIn(f"it is {tool}, a folder on the PATH hansa runs with", told["problems"][0])
+        # a reason that refuses the whole entry, and every folder on the PATH in it, is said alone
+        on_path = home / ".local" / "bin"
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"/usr/bin:/bin:{on_path}"}):
+            for path, why in (("/", "the whole machine"), (str(home), "the home folder"),
+                              ("/usr/bin", "where the system keeps its programs"),
+                              ("/usr", "where the system keeps its programs")):
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                self.assertEqual(len(told["problems"]), 1, (path, told))
+                self.assertIn(why, told["problems"][0], path)
+                self.assertNotIn("a folder on the PATH", told["problems"][0], path)
+        # the reason said is one that covers the folder on the PATH (the lane's repository, not the desk); when none
+        # does, the folder on the PATH is said beside it
+        for on_path, why, said in ((self.repo / "bin", "lane a's repository", False),
+                                   (self.tmp / "tools" / "bin", "the desk, or a folder above it", True)):
+            with unittest.mock.patch.dict(os.environ, {"PATH": f"/usr/bin:/bin:{on_path}"}):
+                told = self.page_save(lambda s: s.update(workers_may_not_read=[str(self.tmp)]))
+            self.assertEqual(len(told["problems"]), 1, told)
+            self.assertIn(why, told["problems"][0])
+            self.assertEqual("a folder on the PATH" in told["problems"][0], said, told)
 
     def test_each_worker_run_gets_its_own_temporary_folder_gone_when_it_ends(self):
         from hansa import run
@@ -8799,6 +8835,7 @@ class DeskTest(unittest.TestCase):
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["held"]["part"]), ("queued", "the deny-write patterns"), m)
 
+    @design_as_on_mac  # macOS's reading of the patterns, on every system; Linux's list at its end
     def test_a_sandbox_that_keeps_what_git_needs_open_holds_the_task_and_names_the_path(self):
         # the stand-in srt answers the write check with one more deny, of a new file in the worktree's own git
         # folder, as a deny pattern read otherwise than meant would keep it: the sandbox starts, and git add would fail
@@ -8822,7 +8859,10 @@ class DeskTest(unittest.TestCase):
         common = run.git_folders(dwt)[0]
         self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:],
                          [common / "refs" / "heads" / "task" / "t0002.lock", common / "objects" / ".hansa-try"])
+        with unittest.mock.patch.object(account, "LINUX", True):  # on Linux, where no design session runs: none of these
+            self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:], [])
 
+    @design_as_on_mac  # macOS's reading of the patterns; on Linux new names are not tried: the next test
     def test_a_sandbox_whose_patterns_do_not_keep_a_new_name_holds_the_task_and_names_the_path(self):
         # the stand-in srt reads the deny patterns as macOS does: here one that matches nothing, as a class of more
         # than 15 elements does, stands in for those that keep new names next to the worktree's own folder
@@ -8851,6 +8891,22 @@ class DeskTest(unittest.TestCase):
                          [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x", heads / "task" / "t0002x",
                           heads / ".hansa-try-kept"])
         self.assertEqual(run.git_needs_kept(self.repo), [])  # a main checkout: no patterns to try
+
+    def test_on_linux_a_sandbox_whose_patterns_keep_nothing_runs_the_task_and_the_status_says_what_is_left(self):
+        # srt on Linux drops every pattern, so the try there checks no new name: the same patterns as in the test
+        # before hold no task, and hansa status says what the try leaves to hansa's checks (LINUX_TRY_NOTE)
+        from hansa import run
+        real = run.others_than
+        unkept = lambda folder, names: [p if Path(folder).name != "worktrees" or "[" not in p
+                                        else p[:p.rindex("[")] + "[" + "0123456789abcdefg" + "]*" for p in real(folder, names)]
+        with unittest.mock.patch("hansa.run.others_than", unkept), unittest.mock.patch.object(account, "LINUX", True):
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual(m["state"], "done", m)
+            self.assertFalse(m.get("held"))
+            self.assertEqual(run.sandbox_held(self.desk), {})
+            self.assertGreater(len(self.srt_calls(sandbox=True)), 0)  # tried, and passed
+            self.assertIn(run.LINUX_TRY_NOTE, views.status_text(views.status(self.desk)))
 
     def stand_in_srt(self, line: str) -> None:
         """The stand-in srt with one of its settings (FAKE_SRT) set: RUN_TRY or LINUX_TRY."""
@@ -9013,6 +9069,100 @@ class DeskTest(unittest.TestCase):
             d.tick()
             self.assertEqual(self.desk.meta(tid)["state"], "queued")  # not started again while held
             self.assertEqual(len([x for x in alert.queued(self.desk) if x["kind"] == "sandbox"]), 1)
+
+    def test_a_restart_tries_each_held_lanes_sandbox_again_and_clears_or_renews_the_hold(self):
+        from hansa import account, run
+        self.assertEqual(self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))["state"], "done")
+        stale = {"why": "the sandbox could not start: from earlier code", "part": "", "kind": "worker", "at": 1}
+        held = self.desk.state_dir / run.SANDBOX_HELD
+        run.write_json(held, {"lanes": {"a": stale}, "told": ["the sandbox could not start: from earlier code"]})
+        self.assertIn("from earlier code", views.status_text(views.status(self.desk)))
+        run.SANDBOX_TRIES.clear()  # a restart on fixed code, with no task queued in the lane: the try passes
+        Dispatcher(self.desk).tick()
+        self.assertEqual(run.sandbox_held(self.desk), {})
+        shown = views.status_text(views.status(self.desk))
+        self.assertNotIn("UNABLE TO RUN", shown)
+        self.assertNotIn("from earlier code", shown)
+        # a try that fails keeps the hold, with the new reason, on the record and on the held task
+        run.write_json(held, {"lanes": {"a": stale}})
+        tid = self.desk.new_task("Add hello.txt again")
+        self.desk.update(tid, held={**stale, "lane": "a"}, error=stale["why"])
+        self.refusing_srt("settings['filesystem']['denyRead']")
+        run.SANDBOX_TRIES.clear()
+        Dispatcher(self.desk).tick()
+        h = run.sandbox_held(self.desk)["a"]["work"]
+        self.assertEqual(h["part"], "the deny-read list")
+        self.assertIn("sandbox-exec: sandbox_apply: Invalid argument", h["why"])
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertEqual(self.desk.meta(tid)["held"]["part"], "the deny-read list")
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("UNABLE TO RUN", shown)
+        self.assertNotIn("from earlier code", shown)
+        self.desk.update(tid, state="cancelled")
+        # a design session's hold is tried with the sandbox a design session gets, in the lane's design worktree
+        self.design_worktree(tid)
+        run.write_json(held, {"lanes": {"a": {"design": {**stale, "kind": "design session", "task": tid}}}})
+        run.SANDBOX_TRIES.clear()
+        with unittest.mock.patch.object(account, "LINUX", False):
+            self.assertEqual(run.sandbox_retry(self.desk, self.desk.settings()), [("a", "design")])
+        h = run.sandbox_held(self.desk)["a"]["design"]
+        self.assertEqual((h["kind"], h["part"]), ("design session", "the deny-read list"))
+        self.assertEqual(Path(self.srt_calls(sandbox=True)[-1]["cwd"]).resolve(), (self.desk.worktrees_dir / "a-design").resolve())
+
+    def test_two_lanes_held_for_the_same_reason_each_alert_once(self):
+        from hansa import alert, run
+        s = self.desk.settings()
+        s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.refusing_srt("settings['filesystem']['denyRead']")
+        with unittest.mock.patch("hansa.alert.command", lambda s: "true"):
+            ta, tb = self.desk.new_task("Add a.txt", lane="a"), self.desk.new_task("Add b.txt", lane="b")
+            Dispatcher(self.desk).tick()
+            self.assertEqual([self.desk.meta(t)["state"] for t in (ta, tb)], ["queued", "queued"])
+            self.assertEqual(set(run.sandbox_held(self.desk)), {"a", "b"})
+            run.SANDBOX_TRIES.clear()  # a restart: held again for the same reason, and not alerted again
+            Dispatcher(self.desk).tick()
+            said = sorted(x["text"] for x in alert.queued(self.desk) if x["kind"] == "sandbox")
+        self.assertEqual(len(said), 2, said)
+        self.assertIn("lane a cannot run", said[0])
+        self.assertIn("lane b cannot run", said[1])
+
+    def test_a_refused_design_sessions_sandbox_holds_only_the_lanes_design_sessions(self):
+        from hansa import run
+        refused = run.SandboxRefused("sandbox-exec: sandbox_apply: Invalid argument", "the network", "design session")
+        did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+        tid = self.desk.new_task("Add hello.txt")
+        with unittest.mock.patch("hansa.run.start_design", side_effect=refused):
+            d = Dispatcher(self.desk)
+            m = self.settle(d, tid)  # the lane's worker runs: its sandbox is another, with its own try
+            self.assertEqual(m["state"], "done", m)
+        self.assertEqual(self.desk.meta(did)["state"], "queued")
+        self.assertEqual(self.desk.meta(did)["held"]["kind"], "design session")
+        self.assertEqual(list(run.sandbox_held(self.desk)["a"]), ["design"])
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("free; its design sessions UNABLE TO RUN", shown)
+        self.assertIn("this holds its design sessions", shown)
+        self.assertIn("HELD: lane a cannot open a design session",
+                      waiting_reason(self.desk, self.desk.settings(), self.desk.meta(did), set()))
+        # a worker's refusal holds the workers and verifiers, and says so
+        run.hold(self.desk, self.desk.new_task("Add more"), "a", "the sandbox could not start: x", "", "worker")
+        self.assertEqual(sorted(run.sandbox_held(self.desk)["a"]), ["design", "work"])
+        self.assertIn("this holds its workers and verifiers", views.status_text(views.status(self.desk)))
+
+    def test_a_bash_result_as_text_blocks_is_read_for_a_sandbox_that_could_not_start(self):
+        from hansa import run
+        failed = "sandbox-exec: sandbox_apply: Invalid argument"
+        home = self.tmp / "record-home"
+        for i, content in enumerate(["Exit code 71\n" + failed, [{"type": "text", "text": "Exit code 71\n" + failed}]]):
+            rec = home / "projects" / "-work" / f"s{i}.jsonl"
+            rec.parent.mkdir(parents=True, exist_ok=True)
+            rec.write_text("".join(json.dumps(r) + "\n" for r in [
+                {"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "git status"}}]}},
+                {"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True, "content": content}]},
+                 "toolUseResult": "Error: Exit code 71\n" + failed}]))
+            self.assertEqual(run.sandbox_start_failure(home, f"s{i}"), (failed, None), content)
 
     def test_a_run_whose_sandbox_fails_after_a_call_that_succeeded_is_left_running(self):
         tid = self.sandbox_start_run("after-ok", "1.5")
@@ -11061,6 +11211,27 @@ class DeskTest(unittest.TestCase):
                       "not running. Then it asks the principal to join it.", out)
         self.assertNotIn("in seconds", out)
 
+    def test_a_release_without_asking_says_what_its_waiting_text_says_when_the_server_does_not_look(self):
+        from hansa import release, run
+        self.with_targets(test=f"touch {self.tmp / 'installed.txt'}")
+        self.tick_targets("test")
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        for n, quiet, said in ((1, 0, f"serve runs the command in {self.repo.resolve()} within seconds. "),
+                               (2, run.STUCK_AFTER + 60, "serve runs the command in "
+                                f"{self.repo.resolve()} once it gets through its rounds; `hansa serve` is busy or "
+                                "stuck: no round finished for 6 minutes. ")):
+            self.round_at(quiet)
+            out = self.hansa("release", "a", "test")
+            self.assertIn(said, out)
+            self.assertEqual("within seconds" in out, not quiet, out)
+            release.change(self.desk, n, lambda x: {"state": "stopped"})  # ended: the next may be asked
+        held.close()
+        out = self.hansa("release", "a", "test")
+        self.assertIn("once it gets through its rounds; `hansa serve` is not running. ", out)
+        self.assertIn(release.waits_text(self.desk, self.desk.settings(), release.get(self.desk, 3)), out)
+        self.assertNotIn("within seconds", out)
+
     def test_add_retry_and_verify_say_when_no_provider_of_the_lane_can_start_the_task(self):
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
@@ -12180,6 +12351,96 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{sha[:10]} committer: Osprey Bot <bot@example.org>", said)
         self.assertEqual(sorted((h["commit"], h["where"]) for h in release.get(self.desk, 1)["hits"]),
                          [(sha, "author"), (sha, "committer")])
+
+    def test_a_release_command_set_with_a_forbidden_word_is_said_at_once_and_kept(self):
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["maplebox"])), {"ok": True, "problems": []})
+        out = self.hansa("lane", "set", "a", "release", "scp target/app.jar /Users/MapleBox/deploy/")
+        self.assertIn("Warning: lane a's release command holds \"maplebox\"", out)
+        self.assertIn("scp target/app.jar /Users/MapleBox/deploy/", out)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["release"], "scp target/app.jar /Users/MapleBox/deploy/")
+        self.assertNotIn("Warning", self.hansa("lane", "set", "a", "release", "none"))
+        self.assertNotIn("Warning", self.hansa("lane", "target", "a", "push", "git push origin main"))
+        out = self.hansa("lane", "target", "a", "test", "./install.sh /home/maplebox/test")
+        self.assertIn("Warning: lane a's release target test holds \"maplebox\"", out)
+        self.assertIn("./install.sh /home/maplebox/test", out)
+        self.assertNotIn("target push", out)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["test"]["command"], "./install.sh /home/maplebox/test")
+        out = self.hansa("lane", "target", "a", "test", "--minutes", "30")  # changed otherwise: still said
+        self.assertIn("release target test holds \"maplebox\"", out)
+        out = self.hansa("lane", "add", "b", "--like", "a")
+        self.assertIn("Warning: lane b's release target test holds \"maplebox\"", out)
+        self.assertIn("test", self.desk.settings()["lanes"]["b"]["targets"])
+        said = self.refused("release", "a", "test")  # and refused at release time, as before
+        self.assertIn("release command: ./install.sh /home/maplebox/test", said)
+
+    def test_release_files_globs_match_nested_poms_and_are_kept_relative(self):
+        from hansa.desk import release_files_in, validate
+        files = ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "pom.xml.bak", "core/src/Main.java", "build.sh",
+                 "x/build.sh", "tools/release.sh"]
+        self.assertEqual(release_files_in(files, ["pom.xml", "**/pom.xml", "build.sh", "tools/release.sh"]),
+                         ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "build.sh", "tools/release.sh"])
+        self.assertEqual(release_files_in(files, ["**/pom.xml"]), ["pom.xml", "core/pom.xml", "a/b/c/pom.xml"])
+        self.assertEqual(release_files_in(files, ["core/**"]), ["core/pom.xml", "core/src/Main.java"])
+        self.assertEqual(release_files_in(files, ["*.sh"]), ["build.sh"])
+        s = self.desk.settings()
+        for bad in (["/etc/pom.xml"], ["../pom.xml"], ["a b"], [""], "pom.xml"):
+            s["lanes"]["a"]["release_files"] = bad
+            self.assertTrue(any("release_files" in x for x in validate(s)), bad)
+        s["lanes"]["a"]["release_files"] = ["pom.xml", "**/pom.xml"]
+        self.assertEqual(validate(s), [])
+
+    def test_a_merge_touching_a_release_file_waits_for_a_verification_that_holds(self):
+        d = Dispatcher(self.desk)
+        out = self.hansa("lane", "set", "a", "release_files", "pom.xml **/pom.xml build.sh tools/release.sh")
+        self.assertIn('["pom.xml", "**/pom.xml", "build.sh", "tools/release.sh"]', out)
+
+        def done(name, verdict):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_HELLO": name, "FAKE_VERDICT": verdict}
+            self.assertEqual(self.desk.save_settings(s), [])
+            return self.settle(d, self.desk.new_task("Change a file"))["id"]
+
+        plain = done("src/App.java", "holds")  # touches none of them: merged as before
+        self.assertIn(f"{plain} merged into main", self.hansa("merge", plain))
+        tid = done("core/sub/pom.xml", "does not hold")
+        for extra in ([], ["--despite-check"]):
+            said = self.refused("merge", tid, *extra)
+            self.assertIn("core/sub/pom.xml", said)
+            self.assertIn("release_files", said)
+            self.assertIn("Nothing has verified it", said)
+            self.assertIn(f"hansa verify {tid}", said)
+            self.assertIn("no flag overrides this", said)
+        self.hansa("verify", tid)
+        self.assertEqual(self.settle(d, self.desk.meta(tid)["verify"])["verdict"], "does not hold")
+        for extra in ([], ["--despite-check"]):
+            said = self.refused("merge", tid, *extra)
+            self.assertIn("core/sub/pom.xml", said)
+            self.assertIn("found that it does not hold", said)
+        self.assertEqual(self.desk.meta(tid)["state"], "done")
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_VERDICT"] = "holds"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        self.assertEqual(self.settle(d, self.desk.meta(tid)["verify"])["verdict"], "holds")
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+
+    def test_release_files_are_copied_by_like_and_shown_by_explain_with_advice_when_missing(self):
+        out = self.hansa("lane", "add", "b", "--like", "a", "--release-files", "pom.xml **/pom.xml")
+        self.assertEqual(self.desk.settings()["lanes"]["b"]["release_files"], ["pom.xml", "**/pom.xml"])
+        self.assertIn("release_files", out)
+        self.hansa("lane", "add", "c", "--like", "b")
+        self.assertEqual(self.desk.settings()["lanes"]["c"]["release_files"], ["pom.xml", "**/pom.xml"])
+        shown = views.explain_text(self.desk, "lane", "c")
+        self.assertIn("release files (built and run by its releases outside the sandbox", shown)
+        self.assertIn("pom.xml **/pom.xml", shown)
+        self.assertNotIn("advised", views.explain_text(self.desk, "lane", "a"))  # no release targets: no advice
+        self.with_release("./deploy.sh")
+        shown = views.explain_text(self.desk, "lane", "a")
+        self.assertIn("release files: none; advised", shown)
+        self.assertIn('hansa lane set a release_files "pom.xml **/pom.xml build.sh tools/release.sh"', shown)
+        self.hansa("lane", "set", "a", "release_files", "none")
+        self.assertNotIn("release_files", self.desk.settings()["lanes"]["a"].get("release_files", []))
 
     def test_a_forbidden_word_in_a_file_name_or_in_the_command_line_refuses_a_release(self):
         from hansa import release
@@ -13785,7 +14046,8 @@ class DeskTest(unittest.TestCase):
         own = subprocess.run(["git", "ls-files", "hansa"], cwd=here.parent, capture_output=True, text=True).stdout
         for f in own.split():  # every file the repository has under hansa/
             self.assertTrue(hansa.shipped(Path(f).relative_to("hansa")), f)
-        for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py"):
+        for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py",
+                  "._cli.py", "._card.md", "agents/._worker.md"):  # macOS's AppleDouble files, left by a copy
             self.assertFalse(hansa.shipped(Path(f)), f)
 
     def test_the_coordinators_notes_rule_is_given_for_each_spelling_of_the_desk(self):
