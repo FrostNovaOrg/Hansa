@@ -1066,6 +1066,35 @@ def _packed(common: Path, ref: str) -> str:
     return ""
 
 
+def _ref_now(common: Path, branch: str):
+    """(the id `branch`'s ref holds, or None, what was found), read as check_branch_ref reads it: the ref file's own
+    contents, never through a link, or packed-refs when there is no ref file."""
+    ref = common / "refs" / "heads" / branch
+    if os.path.lexists(ref):
+        text, what = _plain_text(ref)
+        return (text, "") if text is not None and OID.fullmatch(text) else (
+            None, what or f"now holds {text[:200]!r}, not a commit id")
+    packed = _packed(common, f"refs/heads/{branch}")
+    return (packed, "") if packed else (None, "is gone, and packed-refs does not hold it either")
+
+
+def branch_holds(repo, m: dict) -> str:
+    """'' when the task's branch still holds `head`, the commit hansa recorded as its work when its run ended
+    (finish): what is verified, merged, continued from and shown is that commit, never whatever the branch's name
+    leads to now. Else the line saying what the branch holds instead. The ref is read in the repository's common
+    folder as a plain file, never through a link (_ref_now)."""
+    branch = m.get("branch") or f"task/{m['id']}"
+    try:
+        common = Path(repo) / git("rev-parse", "--git-common-dir", cwd=repo)  # relative to repo, or absolute
+    except (RuntimeError, OSError) as e:
+        return f"{branch} cannot be read in {repo} ({str(e)[:200]})"
+    text, what = _ref_now(common.resolve(), branch)
+    if text == m.get("head"):
+        return ""
+    return (f"{branch} no longer holds {(m.get('head') or '')[:12]}, the commit hansa recorded as {m['id']}'s work "
+            f"when its run ended: its ref {what or 'now holds ' + text}")
+
+
 def _last_logged(common: Path, branch: str):
     """The id the branch's log last moved it to, or None."""
     log = common / "logs" / "refs" / "heads" / branch
@@ -1279,7 +1308,7 @@ def sandbox_leftovers(desk: Desk, wt: Path) -> list:
                  and (wt / f).stat().st_size == 0)]
 
 
-def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> None:
+def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> str:
     """Commit everything changed in the worktree but what a sandbox left there on `branch`, the one hansa made for
     the run; nothing when that is all and nothing is `merged`. The commit is made from the index with the branch's
     tip (and `merged`, a merge hansa made there) for parents, never with a MERGE_HEAD git would take from the
@@ -1287,14 +1316,15 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> N
     and without following a link. The tip is the id the branch's ref file (or packed-refs) holds, read by
     check_branch_ref, never through a link: one made in the meantime fails update-ref's check. Afterwards the ref
     must hold the new commit, whose first parent is that tip; otherwise GitFolderChanged, the ref is put back to
-    the tip (git_file_changed) and the work is left staged. What a merge left there is cleared then."""
+    the tip (git_file_changed) and the work is left staged. What a merge left there is cleared then. Returns the
+    commit the branch then holds: the new one, or the tip when nothing was committed (finish records it)."""
     old = check_branch_ref(desk, wt, branch)
     left = sandbox_leftovers(desk, wt)  # untracked until the add
     wgit(desk, wt, "add", "-A")
     if left:
         wgit(desk, wt, "rm", "-q", "--cached", "--", *left)
     if not wgit(desk, wt, "diff", "--cached", "--name-only") and not merged:
-        return
+        return old
     ref = f"refs/heads/{branch}"
     new = wgit(desk, wt, "commit-tree", wgit(desk, wt, "write-tree"), "-p", old,
                *(a for m in merged for a in ("-p", m)), "-m", message.strip())
@@ -1318,6 +1348,7 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=()) -> N
     for name in GIT_MERGE_LEFT:
         if os.path.isfile(own / name) and not os.path.islink(own / name):
             (own / name).unlink()
+    return new
 
 
 def is_local(host: str) -> bool:
@@ -2643,13 +2674,14 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     sweep(desk, tid)  # nothing the run left running may write in the worktree or its branch while hansa commits
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     changed = ""  # what the principal is told when the worktree's .git was changed: then the task fails
+    recorded = False
     try:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
         check_git_file(desk, wt, desk.settings()["lanes"].get(meta.get("lane"), {}).get("repo"))
         branch = meta.get("branch") or f"task/{tid}"
         check_head(desk, wt, branch)  # what hansa commits or stashes on is the task's
-        check_branch_ref(desk, wt, branch)  # and that branch's ref leads nowhere else
+        head = check_branch_ref(desk, wt, branch)  # and that branch's ref leads nowhere else
         # a design session may merge: hansa's commit at its end is a plain one on its branch all the same
         # (commit_work); a worker's or a verification's run may hold only the merge hansa made (retry --update)
         merged = "" if designing else check_no_operation(
@@ -2658,9 +2690,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
             else:
-                commit_work(desk, wt, task_message(desk.settings()["lanes"].get(meta.get("lane")), meta.get("lane") or "",
-                                                  tid, meta.get("title") or ""), branch, [merged] if merged else [])
-        head = wgit(desk, wt, "rev-parse", "HEAD")
+                head = commit_work(desk, wt, task_message(desk.settings()["lanes"].get(meta.get("lane")),
+                                                          meta.get("lane") or "", tid, meta.get("title") or ""),
+                                   branch, [merged] if merged else [])
+        # the task's work is the commit read or made here, by its id: the branch is never read again through a
+        # link (a leftover the sweep could not find may still write there), and from now on hansa verifies,
+        # merges, continues from and shows exactly this commit (branch_holds)
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
                       files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),
                       stat=wgit(desk, wt, "diff", "--shortstat", meta["base"], head))
@@ -2671,9 +2706,17 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields["markers"] = markers_in_change(wt, meta["base"], head)  # a conflict left unsettled
         if fields["markers"]:
             desk.event("conflict_markers_in_change", task=tid, files=sorted(fields["markers"]))
+        recorded = True  # the work is recorded: a ref changed now fails the task, which keeps it
+        common = own_git_folder(desk, wt).resolve().parent.parent
+        now_at, what = _ref_now(common, branch)
+        if now_at != head:
+            raise GitFolderChanged(wt, common / "refs" / "heads" / branch,
+                                   f"changed after hansa committed: it {what or 'now holds ' + now_at}, not {head}, "
+                                   f"the task's work, which is kept: the ref is put back to it", head, aside=True)
     except GitFileChanged as e:
         changed = git_file_changed(desk, tid, e)
-        fields.update(head="", commits=0, files=[], stat="")
+        if not recorded:
+            fields.update(head="", commits=0, files=[], stat="")
     except (RuntimeError, KeyError, OSError) as e:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
 
@@ -2991,9 +3034,11 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": 0})
             desk.event("merge_check_queued", task=tid, onto=tip, waited=True, command=merge_command(lane))
             return "check"
-        why = ""
+        why = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
         current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-        if current != name:
+        if why:
+            pass
+        elif current != name:
             why = f"the checkout at {repo} is on {current}, not {name}; the principal needs to switch it back"
         elif git("status", "--porcelain", "--untracked-files=no", cwd=repo):
             why = f"the checkout at {repo} has uncommitted changes"
@@ -3045,6 +3090,10 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         repo, name = Path(lane["repo"]), lane.get("base") or "main"
         wt = desk.worktrees_dir / lane_name
         tip = git("rev-parse", name, cwd=repo)
+        held = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
+        if held:
+            end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "note": f"{held}; nothing was merged"})
+            return None
         ready_worktree(desk, repo, wt, tid, tip)
         try:
             wgit(desk, wt, "checkout", "-q", "--detach", tip)
@@ -3157,9 +3206,11 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
                                           "passed_onto": result["onto"],
                                           **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {})})
             return desk.meta(tid)
-        why = ""
+        why = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
         current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-        if current != name:
+        if why:
+            pass
+        elif current != name:
             why = f"the checkout at {repo} is on {current}, not {name}; the principal needs to switch it back"
         elif git("status", "--porcelain", "--untracked-files=no", cwd=repo):
             why = f"the checkout at {repo} has uncommitted changes"

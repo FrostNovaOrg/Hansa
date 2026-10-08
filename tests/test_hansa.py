@@ -8020,6 +8020,90 @@ class DeskTest(unittest.TestCase):
                          "ref: refs/heads/main\n")
         self.assertEqual(order[:2], ["sweep", "commit"])  # what the session left running is stopped first
 
+    def test_the_commit_hansa_made_is_the_tasks_work_whatever_its_branch_ref_says_after(self):
+        # a leftover the sweep cannot find (on macOS a /bin/sh loop: hansa cannot read a system program's environment)
+        # may make the branch's ref a link to the base after hansa committed: read through it, the task would end
+        # done with nothing to merge, its work silently dropped. hansa records the commit it made instead, checks the
+        # ref once more as a plain file, and from then on uses only that commit
+        from hansa import run
+        first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual(first["state"], "done", first)
+        lane = self.desk.settings()["lanes"]["a"]
+        for when in ("next git", "last step"):
+            tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+            wt = Path(self.design_worktree(tid))
+            base = self.git_out("rev-parse", "main")
+            self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
+                             model_asked="sonnet", branch=f"task/{tid}", base=base)
+            (wt / "own.txt").write_text("the session's own commit\n")
+            sh("git", "add", "own.txt", cwd=wt)
+            sh("git", "commit", "-q", "-m", "own", cwd=wt)
+            ref = self.repo / ".git" / "refs" / "heads" / "task" / tid
+            (wt / "left.txt").write_text("left uncommitted\n")
+            made, wgit, commit_work, markers = [], run.wgit, run.commit_work, run.markers_in_change
+
+            def link():
+                if not ref.read_text().startswith("ref:"):
+                    ref.write_text("ref: refs/heads/main\n")
+
+            def after_the_commit(desk, w, *args):  # the first git hansa runs once its commit is checked and made
+                if made and when == "next git":
+                    link()
+                return wgit(desk, w, *args)
+
+            def committed(*a, **k):
+                out = commit_work(*a, **k)
+                made.append(out)
+                return out
+
+            def at_the_end(*a, **k):  # the last thing hansa does with the worktree before it records the task
+                if when == "last step":
+                    link()
+                return markers(*a, **k)
+            with unittest.mock.patch.object(run, "wgit", after_the_commit), \
+                    unittest.mock.patch.object(run, "commit_work", committed), \
+                    unittest.mock.patch.object(run, "markers_in_change", at_the_end):
+                m = run.finish(self.desk, tid, 0)
+            self.assertEqual(self.git_out("rev-parse", "main"), base, when)  # the base did not move
+            self.assertEqual(m["state"], "failed", (when, m))  # not done with nothing to merge
+            self.assertIn("changed after hansa committed", m["error"])
+            self.assertEqual(m["head"], made[0], when)  # the commit hansa made is recorded, not the base's tip
+            self.assertEqual(m["commits"], 2, when)  # the session's own commit and hansa's
+            self.assertEqual(ref.read_text(), m["head"] + "\n", when)  # put back to it: the work is kept
+            self.assertEqual(self.git_out("rev-list", "--count", f"main..task/{tid}"), "2", when)
+            self.assertEqual(next((self.desk.state_dir / "runs" / tid).glob("worktree-git-*/found.*")).read_text(),
+                             "ref: refs/heads/main\n")
+        # a finished task's branch that no longer holds the recorded commit: verify, merge (and its merge check),
+        # retry and show use only that commit, and refuse while its branch holds another (or a link)
+        m = first
+        ref = self.repo / ".git" / "refs" / "heads" / "task" / m["id"]
+        base = self.git_out("rev-parse", "main")
+        for held in ("ref: refs/heads/main", base):
+            ref.write_text(held + "\n")
+            for argv in (["merge", m["id"]], ["verify", m["id"]], ["retry", m["id"], "once more"],
+                         ["retry", m["id"], "--update", "once more"]):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                    main(["--desk", str(self.desk.root), *argv])
+                self.assertIn(f"task/{m['id']} no longer holds {m['head'][:12]}", str(e.exception.code), argv)
+            self.assertEqual(self.git_out("rev-parse", "main"), base)
+            self.assertEqual(self.desk.meta(m["id"])["state"], "done")
+            self.assertIn(f"BRANCH CHANGED: task/{m['id']} no longer holds {m['head'][:12]}",
+                          views.show_text(self.desk, m["id"]))
+            for start in (lambda: run.start_merge_check(self.desk, m["id"], "a", lane),
+                          lambda: run.plain_merge(self.desk, m["id"], lane)):
+                self.desk.update(m["id"], state="merging",
+                                 merge_check={"phase": "queued", "queued": time.time(), "moves": 0, "plain": True})
+                self.assertIsNone(start())
+                after = self.desk.meta(m["id"])
+                self.assertEqual(after["state"], "done", start)
+                self.assertIn("no longer holds", after["merge_check_result"]["note"], start)
+                self.assertEqual(self.git_out("rev-parse", "main"), base)
+        ref.write_text(m["head"] + "\n")  # put back: it merges again
+        self.assertNotIn("BRANCH CHANGED", views.show_text(self.desk, m["id"]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "merge", m["id"]])
+        self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
+
     def test_a_worker_cannot_put_a_merge_into_hansas_commit(self):
         # a MERGE_HEAD a worker wrote would make hansa's commit a merge with a commit nobody reviewed as a parent
         from hansa import run
@@ -8122,16 +8206,22 @@ class DeskTest(unittest.TestCase):
         main(["--desk", str(self.desk.root), "merge", m["id"], "--despite-check"])
         self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
 
-    def test_the_check_runs_to_its_end_and_what_the_worker_left_running_is_stopped_after_it(self):
+    def test_what_the_worker_left_running_is_stopped_before_the_check_which_runs_to_its_end_without_it(self):
         from hansa.run import alive
         pidfile = self.leave_detached()
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "sleep 1; test -f hello.txt"
         self.assertEqual(self.desk.save_settings(s), [])
-        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
         self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
         self.assertFalse(alive(int(pidfile.read_text())))
+        order = [e["event"] for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                 if e.get("task") == tid and e.get("event") in ("left_running_stopped", "task_finished",
+                                                                 "check_started", "check_finished", "task_checked")]
+        self.assertEqual(order[:3], ["left_running_stopped", "task_finished", "check_started"], order)
+        self.assertEqual(order.count("left_running_stopped"), 1, order)  # nothing was left for after the check
 
     def test_a_check_that_fails_printing_nothing_says_nothing_came_out(self):
         s = self.desk.settings()

@@ -219,10 +219,21 @@ page gives.
   the run's branch from the old id to the new one (`git update-ref` with the
   old id, without following a link). The old id is what the branch's ref file
   (or `packed-refs`) holds, read as a plain file, and what the run left running
-  is stopped before hansa commits, so nothing can change the ref meanwhile; if
-  it changed all the same (a link made, another id), or the branch does not end
-  on the new commit with the old id as its parent, the task fails, the ref is
-  put back to the old id and the work is left staged. At the end of a design session that
+  is stopped before hansa commits (and before the lane's check), so what hansa
+  finds can no longer change the ref; a leftover it cannot find (one that
+  cleared its environment, or on macOS a system program such as `/bin/sh`)
+  still could. So if the ref changed all the same (a link made, another id), or
+  the branch does not end on the new commit with the old id as its parent, the
+  task fails, the ref is put back to the old id and the work is left staged.
+  hansa records the commit it made (or the tip it read) as the task's work, by
+  its id, and never reads the branch again through a link: it reads the ref
+  once more as a plain file when it has recorded it, and if it then holds
+  anything else the task fails ("changed after hansa committed"), the ref is put
+  back to the recorded commit and the work is kept. From then on `hansa
+  verify`, `hansa merge` (and its merge check), `hansa retry` and `hansa show`
+  use exactly that commit, never what the branch's name leads to: while the
+  branch does not hold it, merge, verify and retry refuse with a line saying
+  what it holds instead, and `hansa show` says so. At the end of a design session that
   commit is always a plain one on its branch: a merge the session left under
   way is committed as the changes it made, without the merged commit as a
   parent (the session's own merge commits stay as they are). In the lane's own checkout, a `commondir` in its `.git`

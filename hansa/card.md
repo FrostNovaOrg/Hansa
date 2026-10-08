@@ -320,7 +320,9 @@ all new is designed elsewhere and comes to you as a finished design.
   cannot move the base, another branch or a tag, or touch another worktree's
   git folder; a branch ref it points at another ref is refused when it ends,
   even one changed while hansa commits (what it left running is stopped
-  first), and hansa's commit then is a plain one on its branch. Workers may write
+  first), and hansa's commit then is a plain one on its branch. hansa records
+  that commit as the task's work: verify, merge, retry and show use exactly it,
+  and refuse (show: says so) while the branch no longer holds it. Workers may write
   only their worktree's index and the like there, no merge state. There are no design sessions on Linux: `hansa design` refuses
   there, because that sandbox cannot keep a session that commits from moving
   other branches. On a Linux desk, shape a feature with the principal through
@@ -543,8 +545,9 @@ here; work that needs code changed or a browser goes to a worker.
   replaces it with [key of <provider>]. If a change itself holds a key, `hansa show`
   says so and hansa never merges it: redo the work with `hansa retry <id> --fresh`
   and tell the principal with `hansa ask`.
-- When a task ends (after its check), hansa stops every process it left running (a dev
-  server, a watcher), found by HANSA_TASK=<id> in their environment; `hansa show` lists them.
+- When a task ends, hansa stops every process it left running (a dev server, a
+  watcher) before it commits and before the lane's check runs, so the check runs
+  without them; found by HANSA_TASK=<id> in their environment; `hansa show` lists them.
   Limit: a process that cleared its environment is not found.
   Limit: on macOS hansa cannot read the environment of the system's own programs (`/bin/sh`,
   `/bin/sleep`), so a leftover process that is one of them is not found by HANSA_TASK.
