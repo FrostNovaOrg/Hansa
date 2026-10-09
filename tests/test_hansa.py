@@ -35,7 +35,7 @@ from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
                        waiting_reason)
-from hansa.web import start_web  # noqa: E402
+from hansa.web import cookie_name, start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 from hansa.run import RUN_TMP_DIR  # noqa: E402
@@ -13175,6 +13175,47 @@ class DeskTest(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_two_desks_pages_each_keep_their_own_cookie(self):
+        skip_unless_ports(self)
+        self.desk.web_token()
+        tokf = self.desk.state_dir / "web-token"
+        servers = []
+        try:
+            for tok in ("first-desk-token", "second-desk-token"):  # two desks: each has a token of its own
+                tokf.write_text(tok)
+                httpd = start_web(self.desk, "127.0.0.1", 0)
+                servers.append((httpd, f"http://127.0.0.1:{httpd.server_address[1]}", tok))
+            names = [cookie_name(tok) for _, _, tok in servers]
+            self.assertNotEqual(names[0], names[1])
+            for n, (_, _, tok) in zip(names, servers):
+                self.assertNotIn(tok, n)
+                self.assertNotEqual(n, "hansa_t")
+            # opening the address sets the desk's own cookie, as before but for its name
+            for n, (_, base, tok) in zip(names, servers):
+                with urllib.request.urlopen(f"{base}/?t={tok}") as r:
+                    self.assertEqual(r.headers["Set-Cookie"], f"{n}={tok}; HttpOnly; SameSite=Strict; Path=/")
+
+            def status(base, cookie):
+                req = urllib.request.Request(f"{base}/api/status", headers={"Cookie": cookie})
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.read().decode(), "Open the address that `hansa web` prints.")
+                    return e.code
+            both = "; ".join(f"{n}={tok}" for n, (_, _, tok) in zip(names, servers))
+            for i, (_, base, tok) in enumerate(servers):
+                other_n, other_tok = names[1 - i], servers[1 - i][2]
+                self.assertEqual(status(base, both), 200)  # both cookies in one header: each takes its own
+                self.assertEqual(status(base, f"{names[i]}={tok}"), 200)
+                self.assertEqual(status(base, f"{other_n}={other_tok}"), 403)  # the other desk's is not its key
+                self.assertEqual(status(base, f"{other_n}={tok}"), 403)  # nor its own token under another name
+                self.assertEqual(status(base, f"hansa_t={tok}"), 403)  # nor the old name
+        finally:
+            for httpd, _, _ in servers:
+                httpd.shutdown()
+                httpd.server_close()
+
     def test_the_page_cannot_change_lanes_or_concurrency(self):
         skip_unless_ports(self)
         s = self.desk.settings()
@@ -15476,7 +15517,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         def post(body):
             req = urllib.request.Request(f"{base}/api/release/stop?t={tok}", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json", "X-Hansa": "1",
-                                                  "Cookie": f"hansa_t={tok}"})
+                                                  "Cookie": f"{cookie_name(tok)}={tok}"})
             with urllib.request.urlopen(req) as resp:
                 return json.load(resp)
         try:
