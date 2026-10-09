@@ -91,6 +91,35 @@ the words or the command changed. The coordinator hears when the principal answe
 and when the release ends. `hansa release` lists them; `hansa explain lane L`
 shows each target's command and its last release.
 
+## Forbidden words before a release
+
+By the time a release finds a forbidden word, the word is on the base
+branch: taking it out takes another task, and the history still holds it.
+So hansa looks for the same words, matched the same way (any case, within
+one line, in text read as UTF-8), earlier:
+
+- `hansa add` and `hansa design` refuse a title that holds one, saying the
+  word and that it is in `--title` or in the text's first line (the title
+  when no `--title` is given), and queue nothing: the title goes into the
+  task's commit message and its merge's. The rest of the task's text is
+  not committed and is not looked at.
+- `hansa merge` refuses a task, or a design session, whose commits that the
+  base branch does not hold yet hold one: in a message, an added line (a
+  merge commit's: what it adds beyond its parents), the name of a file
+  added or changed, or an author's or committer's name or email. The merge
+  commit's own message and identity (the lane's `merge_message` and
+  `identity`) are looked at too. It says the words and the places, as a
+  release does, and what to do: a retry that takes them out (`hansa retry
+  ID --fresh "..."`; a retry that continues keeps the commits, and a word in
+  the title needs the task added again with another `--title`), or ask the
+  principal. A merge that waited its turn looks again before it merges, and
+  a merge check looks again at the merge commit it would land; either sends
+  the task back for review with the places in its result.
+
+With an empty list nothing is looked for and nothing changes. The release's
+own check stays as it was, the last net: a word set after a merge, or a
+commit that came to the base branch another way, is still found there.
+
 ## Files a release runs outside the sandbox
 
 A release builds and starts what is on the base branch outside the sandbox,

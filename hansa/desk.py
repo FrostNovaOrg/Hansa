@@ -262,8 +262,9 @@ def default_settings() -> dict:
         # repository, base branch, command and after waits for the yes. The principal's, on the page; empty: every
         # release waits for the yes.
         "releases_without_asking": [],
-        # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add or in
-        # their messages refuses the release. The principal's, on the page.
+        # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add, the
+        # files they name, their messages or identities refuses the release; one in a task's title refuses hansa
+        # add, and one in what a task's merge would bring in refuses the merge. The principal's, on the page.
         "release_forbidden": [],
         # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
         # it. The principal's, on the page; empty: no alerts.

@@ -2585,6 +2585,32 @@ def command_rules(command: str) -> list:
     return [f"Bash({p.strip()}:*)" for p in parts + [cur] if p.strip()]
 
 
+def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None) -> list:
+    """Where a task's merge into the base would hold one of the principal's release_forbidden words, matched as a
+    release matches them (release.words_in): the commits from commit that the base (at tip) does not hold, their
+    messages, identities, file names and added lines; and, for a merge not made yet (message given), its message
+    and the lane's identity, which hansa gives it. [] when the list is empty."""
+    words = [w for w in desk.settings().get("release_forbidden") or [] if isinstance(w, str) and w.strip()]
+    if not words:
+        return []
+    from .release import words_in
+    texts = []
+    if message:
+        name, email, _ = lane_identity(lane)
+        texts = [("merge message", message), ("merge author and committer", f"{name} <{email}>")]
+    return words_in(repo, [commit, f"^{tip}", "--"], words, texts)[0]
+
+
+def words_text(tid: str, hits: list) -> str:
+    """What hansa says when a task's merge holds forbidden words: the words, the places, and what to do."""
+    from .release import hits_text
+    return (f"the change in {tid} holds words the principal keeps from going out (release_forbidden), so it is not "
+            f"merged: once on the base branch, its history would keep them\n{hits_text(hits)}\nTake them out with "
+            f"hansa retry {tid} --fresh \"...\" (a retry that continues from {tid} keeps its commits; a word in the "
+            f"title or in the lane's merge_message or identity: add the task again with another --title, or change "
+            f"the lane), or ask the principal about the words (hansa ask)")
+
+
 def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
     """Providers whose stored key is in a change: in its files, binary ones too, or its commit messages."""
     r = subprocess.run(["git", "log", "-p", "-m", "--text", "--format=%B", f"{base}..{head}"], cwd=str(cwd),
@@ -4556,9 +4582,14 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             why = f"the checkout at {repo} has uncommitted changes"
         else:
             leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
+            words = [] if leaked else words_in_merge(desk, repo, tip, m["head"],
+                                                     merge_message(lane, m["lane"], tid, m["title"]), lane)
             if leaked:
                 desk.update(tid, leaked=leaked)
                 why = f"the change holds the key of {', '.join(leaked)}"
+            elif words:
+                desk.event("merge_forbidden", task=tid, found=len(words))
+                why = desk.redact(words_text(tid, words))
         if why:
             end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "note": f"{why}; nothing was merged"})
             return None
@@ -4732,9 +4763,13 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
             why = f"the checkout at {repo} has uncommitted changes"
         else:
             leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
+            words = [] if leaked else words_in_merge(desk, repo, tip, result["commit"])  # the merge commit too
             if leaked:
                 desk.update(tid, leaked=leaked)
                 why = f"the change holds the key of {', '.join(leaked)}"
+            elif words:
+                desk.event("merge_forbidden", task=tid, found=len(words))
+                why = desk.redact(words_text(tid, words))
         if not why:
             try:
                 git("merge", "--ff-only", "-q", result["commit"], cwd=repo, env={"HANSA_MERGING": "1"})

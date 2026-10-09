@@ -1452,7 +1452,7 @@ def release_settings_line(s: dict) -> str:
                "not paused (each target ticked on its own)" if listed else "")
             + (f" (lanes {', '.join(changed)} are on that list, but their repository, base branch or release command "
                "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
-            + f"; {len(words)} word(s) the principal keeps from going out are checked first. Both lists are the "
+            + f"; {len(words)} word(s) the principal keeps from going out are checked at hansa add (a task's title), at each merge and before each release. Both lists are the "
             "principal's, on the web page; you cannot set them (hansa ask). Do not push or deploy yourself.")
 
 
