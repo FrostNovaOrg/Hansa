@@ -1627,7 +1627,10 @@ class DeskTest(unittest.TestCase):
         said = self.refused("add", "falcon badge\nmore")  # no --title: the first line is the title
         self.assertIn("the title (the first line of the text, as no --title was given)", said)
         self.assertIn('"falcon badge"', said)
-        self.assertIn("Nothing was queued", self.refused("design", "the falcon plan", "--lane", "a"))
+        with unittest.mock.patch.object(account, "LINUX", False):  # design sessions refuse first on Linux
+            self.assertIn("Nothing was queued", self.refused("design", "the falcon plan", "--lane", "a"))
+        with unittest.mock.patch.object(account, "LINUX", True):
+            self.assertIn("design sessions do not run on Linux", self.refused("design", "the falcon plan", "--lane", "a"))
         self.assertEqual(self.desk.tasks(), [])
         self.assertIn("queued", self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "a"))
         self.forbid()
@@ -2828,7 +2831,7 @@ class DeskTest(unittest.TestCase):
         calls = len(self.srt_calls())
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
         self.assertEqual(len(self.srt_calls()), calls)
-        self.assertNotIn("merge check", views.explain_text(self.desk, "lane", "a"))
+        self.assertNotIn("  merge check before merging:", views.explain_text(self.desk, "lane", "a"))
         for bad in (0, 1441, "30"):
             s = self.desk.settings()
             s["lanes"]["a"]["merge_timeout_min"] = bad
@@ -4231,9 +4234,12 @@ class DeskTest(unittest.TestCase):
         for f in (self.desk.state_dir / "web-token", self.desk.state_dir / "alerts.json", link,
                   self.desk.secrets_dir / "key"):
             for args in (["add", "--file", str(f)], ["design", "--file", str(f)], ["lane", "brief", "a", "--file", str(f)]):
-                with self.assertRaises(SystemExit) as e:
-                    self.hansa(*args)
+                with self.assertRaises(SystemExit) as e, unittest.mock.patch.object(account, "LINUX", False):
+                    self.hansa(*args)  # design sessions refuse first on Linux, before the file is read
                 self.assertIn("which no agent reads", str(e.exception.code), args)
+            with self.assertRaises(SystemExit) as e, unittest.mock.patch.object(account, "LINUX", True):
+                self.hansa("design", "--file", str(f))
+            self.assertIn("design sessions do not run on Linux", str(e.exception.code))
         self.assertEqual(self.desk.tasks(), [])
         ok = self.tmp / "task.md"
         ok.write_text("Add hello.txt\n")
@@ -16496,8 +16502,11 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         fs, mac = got[True], got[False]
         self.assertEqual(fs["denyRead"], mac["denyRead"])  # no folder of its own denied any more
         self.assertEqual(fs["denyWrite"], mac["denyWrite"])
-        self.assertEqual([x for x in fs["allowWrite"] if ".hansa" in Path(x).parts], run.full_paths([own]))
-        self.assertEqual([x for x in mac["allowWrite"] if ".hansa" in Path(x).parts], [])
+        # under this desk's state folder, not any ".hansa": run as a lane's check, the test's TMPDIR is in one
+        state = [Path(x) for x in run.full_paths([self.desk.state_dir])]
+        in_state = lambda allow: [x for x in allow if any(p in Path(x).parents for p in state)]
+        self.assertEqual(in_state(fs["allowWrite"]), run.full_paths([own]))
+        self.assertEqual(in_state(mac["allowWrite"]), [])
         self.assertIn(tmp, fs["allowWrite"])
         # a desk whose path holds a space: the run's folder alone, a TMPDIR no build tool breaks on
         spaced = types.SimpleNamespace(state_dir=self.tmp / "a desk" / ".hansa")
