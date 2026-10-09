@@ -297,9 +297,10 @@ hansa is developed with hansa: the `tNNNN: <title>` and `Merge tNNNN: <title>` c
 desk's task commits and merges.
 
 `python3 -m unittest tests.test_hansa` (uses a stand-in for `claude`; no model is called).
-They run on GitHub's machines (Ubuntu and macOS, Python 3.9 and the newest) for every push to `alpha` or
-`main` and every pull request: `.github/workflows/tests.yml`. Before you change anything, read
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Before each push the maintainers run the whole suite on macOS and on Linux. Every push to `alpha` or `main`
+runs, on GitHub's macOS machine, the tests a sandboxed run cannot (those that listen on the loopback or run the
+real sandbox); every pull request runs the whole suite on Ubuntu and macOS, with Python 3.9 and the newest:
+`.github/workflows/tests.yml`. Before you change anything, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
