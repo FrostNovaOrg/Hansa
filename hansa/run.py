@@ -548,7 +548,7 @@ LINUX_TRY_NOTE = ("on Linux, new names in git's shared folder are left to hansa'
                   ".git file, the main checkout, no merge or rebase under way, commondir and config.worktree): srt "
                   "there keeps only paths that are there when a command starts, so the sandbox try checks only what "
                   "stays open for git and the paths there it must keep (the shared config, other worktrees' HEAD)")
-# What a lane's commands find in the sandbox on Linux, said in hansa explain lane there (README, "On a Linux server").
+# What a lane's commands find in the sandbox on Linux, said in hansa explain lane there (docs/linux-server.md).
 LINUX_SANDBOX_NOTES = (
     "on Linux, inside the sandbox, what the mount table says (Java's FileStore.isReadOnly, findmnt, df) can call a "
     "writable folder read-only: the worktree, the lane's write list and a worker's temporary folder are writable "
@@ -2093,8 +2093,8 @@ def sandbox_env(desk: Desk, lane: dict) -> dict:
 
 
 # What runs in the sandbox before a lane's setup, check and merge check (in_sandbox), and in front of each of a
-# worker's Bash commands (env_file), after the lane's env is set: Java and Maven made to work there (README, "Java
-# and Maven in a lane"). The sandbox's proxy wants a user and password, which it puts only in HTTPS_PROXY and
+# worker's Bash commands (env_file), after the lane's env is set: Java and Maven made to work there
+# (docs/java-and-maven.md). The sandbox's proxy wants a user and password, which it puts only in HTTPS_PROXY and
 # HTTP_PROXY, and Maven reads neither: so a Maven global settings file in $TMPDIR names that proxy, for https and
 # http, and MAVEN_ARGS gets `-gs <it>`. Java ignores TMPDIR, and on macOS the sandbox does not let it write its
 # own: so JAVA_TOOL_OPTIONS, which every JVM reads, gets -Djava.io.tmpdir. What was there is kept, and nothing is

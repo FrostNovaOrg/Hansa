@@ -1,0 +1,317 @@
+# Workers and the sandbox
+
+What workers, verifiers and design sessions may touch, how hansa keeps git's folders and tries the
+sandbox before a run, what a lane's write list, env and allow list may hold, which paths hansa refuses,
+and what hansa stops when a run ends. The [README](../README.md#what-keeps-it-safe) has the short version.
+
+## What workers, verifiers and design sessions may touch
+
+Workers (task and verification workers) change files in their worktree and
+report, inside Claude Code's sandbox, which the operating system enforces: any
+command, but files changed only in the worktree (and its temporary folder and
+the lane's write list, `hansa lane set L write ...`), no
+reading of the desk's keys and state, the coordinator's notes (`notes/`) and
+card (the desk's `CLAUDE.md`; design sessions may not read these either), of any provider's Claude Code folder or
+`~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
+shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
+macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
+AI tools and Anthropic's own tool settings in `~/.config/anthropic`, cloud
+tools, git and registry credentials, proxy clients' settings with their
+server passwords or subscription links, password stores and keyrings, the
+keychains, cookies, mail and messages under `~/Library`; Maven's master
+password, `~/.m2/settings-security.xml`), or of
+the folders and files the principal lists on the page (Settings, "workers may
+not read": this machine's own folders of keys, and `~/.m2/settings.xml` or
+`~/.gradle/gradle.properties` when they hold deploy credentials the project's
+builds do not need: hansa leaves them readable, as they also hold the mirrors
+and proxies a build may need; Read is denied there to every
+Claude Code run hansa starts, the coordinator too. An entry that would stop
+every worker is refused on saving, each with its reason: the home folder,
+the desk, a lane's repository, a folder on the `PATH`, the system's programs
+and libraries (`/usr/lib`, `/etc` and the like), Homebrew's `Cellar`, `opt`
+and `Caskroom`, `~/.config`, `~/.local`, `~/.cache` (and `~/Library` on
+macOS), the temporary folder, the desk's worktrees folder or a lane's
+worktree, or a folder above any of them, and `/dev` or anything in it; a
+file or folder inside one of the others, such as one file in `~/.config` or
+one formula's folder in `Cellar`, may be listed. A name with one of
+`()[]{}*?\`, in the entry or where its link leads, cannot be written as a
+rule and is refused too. A list saved before, or a link changed since, that
+holds such an entry, or any other the page would refuse now, stops every
+run: hansa starts no worker, verifier, design session or coordinator, fails
+each task it would have started with the entry and the reason, and says it in
+`hansa status` and at the top of the page, until the principal changes the
+entry on the page (Settings). Only an entry that has come to close a lane's
+repository, a worktree or a folder on the `PATH` is left out of runs
+instead, as a contradiction the coordinator and the principal settle; while
+it lasts, `hansa status` and the page say each time which entry it is and that
+the folder is open to that lane's runs and every other), no network but the
+lane's network list (`hansa lane set L network ...`), and no git command that
+changes history. They do not commit: hansa commits each task's changes on its
+own branch, and merges only what the coordinator merges. The lane's setup,
+before the worker, and its check, after it, run in the same sandbox (with
+`srt`): the lane's network and write lists hold for them too, so a setup that
+downloads needs its registry on the network list. A design session's commands
+run in the sandbox of its lane's workers too (the same network list, write
+list, what may not be read and keys kept from the environment), with two
+differences: it may write in git what committing and merging into its own
+branch (`task/<id>`) takes, and on macOS it may bind local ports, so a preview it starts
+serves the principal's browser (that also lets its commands reach every
+service on the Mac's loopback). It runs only its allowed commands, as
+before, and a command the sandbox refuses does not run outside it: the
+sandbox's `allowUnsandboxedCommands` is off, so Claude Code ignores
+`dangerouslyDisableSandbox`. There are no design sessions on Linux: `hansa
+design` refuses there with one line, and one queued before does not start.
+
+Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
+and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
+verifier or a design session read the desk's card or `notes/`.
+
+## Git's folders
+
+Claude Code opens a worktree's whole shared git folder for writing, and on
+Linux the sandbox (bubblewrap) keeps only paths that are there when a command
+starts, takes no name patterns and cannot open a branch's folder beneath a
+`refs/heads` it keeps, so a session that commits could make or move other
+branches, the base among them. The coordinator runs outside the sandbox.
+What each may write in git's folders: a worker (and a verifier) only its own
+worktree's folder under `.git/worktrees/` (its `index`, say), not its `HEAD`,
+logs, `commondir`, `gitdir` or `config.worktree`, nor what says a merge,
+cherry-pick, revert or rebase is under way there (`MERGE_HEAD`, `MERGE_MODE`,
+`CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge/`, `rebase-apply/`,
+`sequencer/`): workers never merge, hansa does. A design session (macOS) may write in git exactly what
+committing and merging into its own branch (`task/<id>`) takes: its own
+worktree's folder under `.git/worktrees/` but its `HEAD`, `commondir`, `gitdir`
+and `config.worktree` (git commits and merges on a branch without writing
+`HEAD`), git's objects, and its branch's ref and reflog, each with git's
+`.lock` beside it; its own merges' files (`MERGE_HEAD` and the like) among
+them. Its branch's ref it may write, but only as a commit id: hansa refuses
+one that leads to another ref (below). It cannot move the base, another branch or a tag, or write
+`packed-refs`, another worktree's folder, git's settings, hooks or `info/`, or
+the worktree's `.git` file; this holds for branches and worktrees made while
+it runs too (named with letters, digits, `.`, `_` and `-`, as hansa names
+them). Its commands run git with automatic gc, maintenance and rerere off
+(through the environment, after any git settings it already holds), since
+those write what it may not; git still tries to lock `packed-refs` on each
+commit and merge, prints that it could not, and goes on. The lane's setup and
+check may write nothing of git's folders.
+On Linux a worker's git denials hold for the names there when it starts (the
+whole `refs/`, `logs/`, `objects/`, `hooks/` and `info/`, git's settings,
+`packed-refs`, the worktree's `HEAD`, `commondir`, `gitdir` and
+`config.worktree`, other worktrees' folders), not for the patterns that keep
+what is made later in the shared folder and under `.git/worktrees/`, nor for
+a `MERGE_HEAD` or the like that is not there when it starts (the sandbox would
+put an empty file there, which git takes for a merge under way). What it
+could make there reaches nothing outside the sandbox: git obeys a new
+`commondir` or a worktree's folder only through the checks below, and hansa
+commits nothing while a merge or the like it did not start is under way.
+
+## Trying the sandbox before a run
+
+Before it starts a worker, a verifier or a design session, hansa serve tries
+that run's sandbox: `srt` with the same filesystem and network settings
+Claude Code is given, on `/usr/bin/true`, then a write of what git needs
+open there: the worktree's own `index` (opened to append, nothing written)
+and a new file in its own git folder, and for a design session its branch's
+ref's `.lock` and a new file in `objects/`; and a write of what must be
+kept, to see that the deny patterns match at all: a new file at the top of
+the shared git folder (`.hansa-try-kept`), a name next to the worktree's
+own folder under `worktrees/`, and for a design session a name next to its
+branch's ref and a new file in `refs/heads/` (what such a write makes is
+removed again). On Linux, where srt drops every deny pattern and keeps only
+paths there when a command starts, it writes only the worktree's own
+`index` and git folder, and as what must be kept the shared `config` and
+other worktrees' `HEAD` (opened to append); new names in the shared git
+folder are left to hansa's checks before it runs git. It does so once for each set of
+settings while it runs (a lane's tasks do not each pay for it; a restart
+tries again). When srt refuses them, the run does not start: its task is held,
+not failed and without using a try, and `hansa status` shows the lane as
+unable to run, with srt's first line and the part of the settings it
+refuses (the exact deny-write paths, the deny-write patterns, the deny-read
+list, the write list or the network, each tried alone, or "the deny-write
+patterns keep what git needs open" or "the deny-write patterns do not
+keep" with the path; a sandbox that does not keep what it should runs no
+one); the principal's
+alert is told once for each lane and reason. Only what was refused is
+held: a design session's refusal holds the lane's design sessions, a
+worker's or a verifier's its workers and verifiers, and `hansa status` says
+which. Held tasks start by themselves once a try passes: after a fix,
+restart `hansa serve`, which as it starts tries the sandbox of each held
+lane again, clearing the hold when the try passes and keeping it with the
+new reason when it fails (a change of the settings tries again too). Without srt, or with an srt that cannot run at all, the
+run starts as before, in Claude Code's own sandbox, which is set to fail
+rather than run a command outside it (`failIfUnavailable`). Claude Code
+carries its own copy of the sandbox library, which may differ from the srt
+installed, so the try is a guard, not proof: hansa also reads each run's
+session record while it runs, and when a Bash result begins with
+`sandbox-exec: ` (macOS) or `bwrap: ` (Linux) before any Bash call of the
+run succeeded, it stops the run and holds its task the same way ("the
+sandbox could not start: ..."), not counting it as a try. The deny patterns
+write their character classes as ranges, `-` first (`[-0-9B-Zb-z._]` for
+all but `a`): macOS refuses a sandbox with two or more classes that list
+some sixty characters one by one, and a negated class cannot stand in,
+since srt escapes its `^`. macOS's sandbox matches paths without regard to
+case, so a letter left out of a class is left out in both cases, and it
+reads a `-` just before `]` as a range up to the end of the character set,
+so the `-` goes first. And it silently drops a class of more than 15
+elements (a character or a range): the profile still applies, but the
+class matches nothing. So a class that would hold more is split into
+several patterns of at most 15 each (`[-0-9A-KMNPQS-VX-Z._]*` and
+`[a-kmnpqs-vx-z]*` for all but `objects`, `refs`, `logs` and `worktrees` at
+the top of a design session's shared git folder). hansa's own names are
+small letters, digits, `.`, `_` and `-`.
+
+## Before hansa runs git in a worktree
+
+Before hansa runs git in a worktree, it checks the worktree's `.git` file;
+that the git folder it leads to still points back to the repository
+(`commondir`) and to the worktree (`gitdir`) as git wrote them; that its
+`config.worktree` is empty, as hansa makes it, and the shared folder's is as
+hansa first saw it or empty; and that `extensions.worktreeConfig`, which makes
+git obey those files, is not on where hansa first saw it off. When one was
+changed, hansa runs no git there and keeps what it found; a `.git` file, a
+`commondir`, `gitdir` or `config.worktree` it puts back as it was. Before it
+commits, stashes or merges in a worktree, it also checks that the worktree's
+`HEAD` names the branch it made for that run, that this branch's ref is a
+plain commit id (or packed and not loose), never a link to another ref, and,
+in a worker's or a verifier's worktree, that no merge, cherry-pick, revert or
+rebase is under way but the merge of the base hansa itself made for `hansa
+retry --update`; it puts back what it found or sets it aside, and the task
+fails either way. hansa's commit at the end of a run is made from the index
+with the branch's tip (and, after that merge, the base's tip it merged) for
+parents, never from a `MERGE_HEAD` git would find there, and moves exactly
+the run's branch from the old id to the new one (`git update-ref` with the
+old id, without following a link). The old id is what the branch's ref file
+(or `packed-refs`) holds, read as a plain file, and what the run left running
+is stopped before hansa commits (and before the lane's check), so what hansa
+finds can no longer change the ref; a leftover it cannot find (one that
+cleared its environment, or on macOS a system program such as `/bin/sh`)
+still could. So if the ref changed all the same (a link made, another id), or
+the branch does not end on the new commit with the old id as its parent, the
+task fails, the ref is put back to the old id and the work is left staged.
+hansa records the commit it made (or the tip it read) as the task's work, by
+its id, and never reads the branch again through a link: it reads the ref
+once more as a plain file when it has recorded it, and if it then holds
+anything else the task fails ("changed after hansa committed"), the ref is put
+back to the recorded commit and the work is kept. From then on `hansa
+verify`, `hansa merge` (and its merge check), `hansa retry` and `hansa show`
+use exactly that commit, never what the branch's name leads to: while the
+branch does not hold it, merge, verify and retry refuse with a line saying
+what it holds instead, and `hansa show` says so. At the end of a design session that
+commit is always a plain one on its branch: a merge the session left under
+way is committed as the changes it made, without the merged commit as a
+parent (the session's own merge commits stay as they are). In the lane's own checkout, a `commondir` in its `.git`
+stops every hansa git command there until it is removed by hand; hansa does
+not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
+hooks from an empty folder and commit and tag signing off, whatever a
+setting there says; in the lane's own checkout its hooks run as before.
+
+## A lane's write list and env
+
+A write list holds a build or test tool's cache folders. The rule, in two
+lines: in the home folder of the account (whatever `HOME` says), only a
+plain folder (no name between the home folder and the entry starts with a
+dot, and not inside `~/Library` or `~/Applications`), such as
+`~/hansa-cache/<lane>/<tool>`; outside the home folder, anywhere but where
+programs are installed (the Homebrew prefix, `/opt/local`, `/opt/X11`,
+`/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, the
+system's own folders, and where `claude`, `git`, `srt`, `node`, `tmux`,
+hansa and its python really live) and the folders on the `PATH` hansa runs
+with, what is inside them and the folders above them. A lane writes only
+folders of its own: the user's caches (`~/.cache`, `~/Library/Caches`,
+`~/.m2/repository`, `~/.npm/_cacache` and the rest) cannot be listed, since
+they are shared with what runs outside the sandbox, and neither can the
+common tool homes with plain names (`~/go`, `~/miniconda3`, `~/anaconda3`,
+`~/miniforge3`, `~/mambaforge`, `~/miniconda`, `~/anaconda`,
+`~/micromamba`, `~/sdk`) or what is inside them. That list is not
+complete: hansa cannot see what your own shell, git or tools name in plain
+folders of the home folder (a conda install, a git hooks folder, a file
+your shell sources), so do not list such a folder. `hansa explain lane L`
+marks each entry a run would leave out, with why. A lane's env names may be
+in either case (`npm_config_cache`). The desk, the lane's
+repository, Claude Code's folders, credential files and other names for the
+whole disk are refused as before, and so is a name with `( ) [ ] { } * ?`,
+a backslash, a look-alike of one, or an invisible character. Point a tool at
+the lane's folder with the lane's env: pip `PIP_CACHE_DIR`, npm
+`npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
+`YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
+gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
+`CCACHE_DIR`, uv `UV_CACHE_DIR`, poetry `POETRY_CACHE_DIR`, pipenv
+`PIPENV_CACHE_DIR`, bun `BUN_INSTALL_CACHE_DIR`, deno `DENO_DIR`, NuGet
+`NUGET_PACKAGES`, coursier `COURSIER_CACHE`. A lane's env reaches the lane's commands, in the sandbox
+(setup, check, preview, `hansa lane try` and the worker's Bash commands),
+not Claude Code and not hansa's own programs: srt, the scripts around a
+setup or check and Claude Code run with the server's environment, and the
+worker's commands get the lane's env from a file hansa writes
+(`CLAUDE_ENV_FILE`). As a second line, what any lane's env on the desk
+names is closed to workers: a write entry cannot be, be inside or be above
+a folder on a lane's `PATH` or a full path in another env value, this
+lane's or another's. A cache variable (those
+above and `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`) may point at
+the lane's own folder; put a tool's bin folder on the `PATH` inside the
+check command, not in the lane's env. A lane's env takes no name that tells
+a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
+`GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
+`HOME`), no name sh, bash or zsh keeps for itself (read-only or special, such
+as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's `path` and
+`keymaps`, each one tried in sh, bash and zsh: setting one
+would stop every command of the lane's workers), no `PATH` entry that is empty
+or not a full path, and no place inside the desk. The file hansa writes it to
+for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
+The locale (`LANG`, `LC_ALL`) of a lane's setup, check, merge check, preview
+and workers is that of whoever started hansa: `hansa serve`'s environment
+(one started over ssh takes the client's), since nothing runs without it;
+`hansa explain lane L` says which locale they get and where from (when serve
+does not run, the locale of this shell, which a serve started here would give). A lane whose results must not depend on who started
+hansa sets its own (`hansa lane set L env ... LC_ALL=C.UTF-8`): tools such as
+`sort` and `comm` order and compare by the locale, and some `sort -u` keep
+only one of `acme-core` and `acmecore` under `en_US.UTF-8`.
+
+## A lane's allow list: commands and web tools
+
+A lane's allowed commands go to its workers, verifiers and design sessions alike: workers need no command
+rule, design sessions do. The list is also where a lane gives Claude Code's web tools, which reach the network
+from Claude Code's own process, outside the sandbox's network list: `WebFetch` only site by site, as
+`WebFetch(domain:docs.python.org)` or `WebFetch(domain:*.python.org)` (a bare `WebFetch`, or one for every
+site, is refused), and `WebSearch`, which sends search queries out of the machine. `WebFetch` takes public
+site names only: an IP address in any form, `localhost` and the names meant for local or private networks
+(`.local`, `.internal`, `.lan`, `.home.arpa`, `.test` and the like) are refused, and so is a wildcard over a
+suffix others share (`*.co.uk`, `*.github.io`), as a wildcard opens every name under it. So are names with no
+dot (`metadata`, which a resolver may complete) and the well-known names that come back as an address written
+in them or as this machine (`nip.io`, `sslip.io`, `lvh.me`, `localtest.me` and the like, with every name under
+them). Any listed name can still be pointed at any address, this machine included: list only sites you know;
+the principal sees every change. Each rule is one value, checked as Claude Code splits the list (on commas and
+spaces outside parentheses, where every `)` closes them): one it would split into several, such as
+`Bash(x),WebFetch` or `Bash(a(b),WebFetch,c)`, is refused. MCP tools are refused on the list (a task gets a
+browser with `hansa add --browser`). A change of the list is recorded, and `hansa explain lane L` shows the
+web tools and their sites beside the network list. A rule saved before it was refused is left out of runs; the
+page warns of it, names the coordinator's command that removes it, and saves the rest.
+
+## Paths hansa refuses
+
+A repository for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one without, in one
+line. They also refuse a desk or repository whose path holds a `)` followed later by a space or a comma
+(`Work (2024) x/desk`): Claude Code would split the rules hansa writes for it, and a rule meant to close a
+folder would leave it open. No run starts while such a rule would come out. Nor may the desk, the home folder
+or a lane's repository or worktree have one of `[ ] * ? \` in its path (or where its links lead): the
+sandbox's deny list and Claude Code's Read rules read those as a pattern, so a rule for `a[1]/desk/secrets`
+would close `a1/desk/secrets` and leave the real folder open. `hansa init`, `hansa lane add`, `hansa serve`,
+`hansa coordinator` and every run (worker, verifier, design session, setup, check, merge check,
+`hansa lane try`) refuse such a path and name it; move it. `{ }` match as themselves there.
+
+## What hansa stops when a run ends
+
+What hansa stops when a run ends (a worker, a verifier, a design session, or
+the lane's check after one): the run's process group; then each process
+`hansa serve` recorded below the run while it ran, whatever its group,
+environment or working folder (on each of its rounds, every few seconds, on
+the task, so a restarted server still has the record), if it still runs and
+is still the same process (its start time; a number since given to another
+process is left alone). Nothing is recorded for a run whose own process number
+no longer has the start time hansa saved for it, so a process that was given
+that number later, and its group, are never taken for the run's; then each process that names the task: `HANSA_TASK`
+in its environment, or the run's temporary folder in its arguments or as its
+TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
+lists what was stopped, with its group or alone, and the event log has it. What can still escape: a process started and moved
+out of every marker (`env -i`, another folder, a session of its own) between
+two rounds, whose parent ended before the next round. A design session's
+tmux session is ended with it; the tmux server is left running.
