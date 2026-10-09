@@ -1,5 +1,6 @@
 # hansa's test suite on GitHub's machines. Unlike a sandboxed run, ports on the loopback work here, so the
-# tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not.
+# tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not. So do
+# Unix sockets, which srt on Linux refuses: HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one fail too.
 # No secrets: the suite uses stand-ins for claude and srt, and needs no login.
 # On macOS the real srt is installed too, and one test runs it with the sandbox settings hansa gives a worker,
 # a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip without it): that the
@@ -34,6 +35,7 @@ jobs:
         python: ["3.9", "3.x"]  # the lowest hansa supports, and the newest
     env:
       HANSA_TESTS_NEED_PORTS: "1"
+      HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
       HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}
     steps:
       - uses: actions/checkout@v5
