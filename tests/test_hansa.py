@@ -4094,6 +4094,31 @@ class DeskTest(unittest.TestCase):
         self.hansa("add", "--file", str(ok))
         self.assertEqual(len(self.desk.tasks()), 1)
 
+    def test_file_from_standard_input_refuses_a_redirected_secret_and_a_hard_link_to_one(self):
+        bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
+        token = self.desk.web_token()
+        hard = self.tmp / "notes.txt"
+        os.link(self.desk.state_dir / "web-token", hard)  # outside the desk, no link to follow
+        for f in (self.desk.state_dir / "web-token", hard):
+            with open(f) as stdin:  # hansa add --file - < .hansa/web-token
+                r = subprocess.run([bin_, "--desk", str(self.desk.root), "add", "--file", "-"], stdin=stdin,
+                                   capture_output=True, text=True, env=env, timeout=30)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("standard input is a file in the desk's .hansa/", r.stderr)
+            self.assertNotIn(token, r.stdout + r.stderr)
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("add", "--file", str(hard))
+        self.assertIn("which no agent reads", str(e.exception.code))
+        self.assertEqual(self.desk.tasks(), [])
+        r = subprocess.run([bin_, "--desk", str(self.desk.root), "add", "--file", "-"], input="Add a.txt\n",
+                           capture_output=True, text=True, env=env, timeout=30)  # a pipe
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["sh", "-c", f'"$0" --desk "$1" add --file - <<EOF\nAdd b.txt\nEOF\n', bin_,
+                            str(self.desk.root)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)  # a here-document, a temporary file in some shells
+        self.assertEqual(len(self.desk.tasks()), 2)
+
     def test_a_task_cancelled_while_hansa_prepares_it_never_runs(self):
         import hansa.run as run
         seen = self.tmp / "argv.jsonl"

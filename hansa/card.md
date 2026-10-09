@@ -701,7 +701,8 @@ here; work that needs code changed or a browser goes to a worker.
   refuses in any Claude Code session, the `!` prefix's shell and a tmux a session opened included, and says
   how the principal opens the page from a terminal of their own; never ask for the address or the token.
   `--file` refuses a file in the desk's `.hansa/` or `secrets/` (the token, alerts waiting with a release's
-  one-time code, the keys), wherever a link leads.
+  one-time code, the keys), wherever a link leads, a hard link to one too, and `--file -` refuses one
+  redirected to standard input (`< .hansa/web-token`); a pipe or a here-document is fine.
 - Workers do not commit: when one ends, hansa commits its changes on its branch as
   one commit named after the task. A verification's scratch changes are set
   aside, never committed.

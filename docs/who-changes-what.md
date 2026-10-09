@@ -130,7 +130,11 @@ above set, the `!` prefix's shell included) it refuses, prints nothing of the
 address, and says how to open the page from a terminal of your own, as the
 README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
 before. `--file` (`hansa add`, `design`, `retry`, `lane brief`) refuses a file
-in the desk's `.hansa/` or `secrets/`, wherever a link leads: they hold the
+in the desk's `.hansa/` or `secrets/`, wherever a link leads, and a hard link
+to one of their files elsewhere; `--file -` refuses the same file redirected
+to standard input (`< .hansa/web-token`), found by its path or, where that
+cannot be told, its device and inode, while a pipe or a here-document is
+read as before: they hold the
 token, alerts waiting to go out with a release's one-time code, and the keys,
 and a file's text would go into the desk where agents read it.
 

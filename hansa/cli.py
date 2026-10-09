@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -151,23 +152,60 @@ def no_publish_with_options() -> list:
                for between in (" ", " * ")])
 
 
-def _kept_folder(args, f: Path) -> str:
-    """The desk's folder kept from every agent that this file is in, wherever a link leads (.hansa or secrets);
-    '' when it is in neither, or there is no desk."""
+def _kept_folder(args, f, st=None) -> str:
+    """The desk's folder kept from every agent that this file is in, wherever a link leads (.hansa or secrets),
+    or that holds a hard link to one of its secrets (st: the file's stat, when it is open already); '' when it is
+    in neither, or there is no desk."""
     try:
         desk = Desk.find(getattr(args, "desk", None))
     except SystemExit:
         return ""
-    real = os.path.realpath(f)
+    real = os.path.realpath(f) if f else ""
     for d in (desk.state_dir, desk.secrets_dir):
         top = os.path.realpath(d)
-        if real == top or real.startswith(top.rstrip(os.sep) + os.sep):
+        if real and (real == top or real.startswith(top.rstrip(os.sep) + os.sep)):
             return d.name
+    try:
+        st = st or os.stat(f)
+    except (OSError, TypeError):
+        return ""
+    held = [desk.state_dir / "web-token", desk.state_dir / "alerts.json"]
+    held += [Path(r, n) for r, _, ns in os.walk(desk.secrets_dir) for n in ns]
+    for s in held:
+        try:
+            if os.path.samestat(st, os.stat(s)):
+                return s.parent.name if s.parent == desk.state_dir else desk.secrets_dir.name
+        except OSError:
+            pass
     return ""
+
+
+def _stdin_kept(args) -> str:
+    """_kept_folder for standard input when a shell redirected a file to it (< .hansa/web-token); a pipe or a
+    here-document is never refused."""
+    try:
+        st = os.fstat(sys.stdin.fileno())
+    except (OSError, ValueError):
+        return ""
+    if not stat.S_ISREG(st.st_mode):
+        return ""
+    path = ""
+    try:
+        if hasattr(fcntl, "F_GETPATH"):  # macOS
+            path = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0].decode()
+        else:  # Linux
+            path = os.readlink("/proc/self/fd/0")
+    except (OSError, UnicodeDecodeError):
+        pass  # the inode tells it all the same
+    return _kept_folder(args, path, st)
 
 
 def _text(args) -> str:
     if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
+        kept = _stdin_kept(args)
+        if kept:
+            raise SystemExit(f"hansa: standard input is a file in the desk's {kept}/, which no agent reads, and its "
+                             f"text would go into the desk for them; nothing was changed")
         return sys.stdin.read()
     if getattr(args, "file", None):
         f = Path(args.file)
