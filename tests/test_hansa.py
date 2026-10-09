@@ -37,6 +37,35 @@ from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tm
 from hansa.web import start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
+from hansa.run import SANDBOX_TMPFS  # noqa: E402
+
+# What a lane's command on Linux is given in front of it, by hansa's prelude (run.LINUX_PRELUDE) and by srt: git's
+# global config and excludes in the run's tmpfs, srt's proxy settings for git. A test makes its own repositories
+# and runs git in them, and the prelude's tests run the prelude afresh: neither should meet the excludes (which
+# leave out .vscode, .gitconfig and the other placeholders' names) or a prelude already applied.
+LANE_GIT_ENV = ("GIT_CONFIG_GLOBAL", "HANSA_GIT_EXCLUDES", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_SSH_COMMAND")
+
+
+def in_lane_sandbox(env=os.environ) -> bool:
+    """Whether the suite runs inside hansa's sandbox on Linux, as a lane's check: the prelude ran before it."""
+    return bool(env.get("HANSA_GIT_EXCLUDES")) or env.get("TMPDIR", "").rstrip("/").endswith("/" + SANDBOX_TMPFS)
+
+
+IN_LANE = in_lane_sandbox()  # as the suite started, before setUpModule takes HANSA_GIT_EXCLUDES out
+
+
+def setUpModule():
+    """Run as a lane's check, the tests meet what they meet on GitHub's machines: without the outer prelude's
+    variables (LANE_GIT_ENV and an older git's GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n), but with its TMPDIR. A
+    test of how the prelude treats an account's own GIT_CONFIG_GLOBAL sets its own."""
+    if not IN_LANE:
+        return
+    env = unittest.mock.patch.dict(os.environ)
+    env.start()
+    unittest.addModuleCleanup(env.stop)
+    for k in [k for k in os.environ if k in LANE_GIT_ENV or re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_[0-9]+", k)]:
+        del os.environ[k]
+
 
 def ports_refused() -> str:
     """Why a local port cannot be bound here, or "" where it can. Only a refusal (EPERM or EACCES, as macOS's
@@ -72,6 +101,29 @@ def skip_unless_ports(test):
     why = ports_refused()
     if why:
         skip_in_sandbox(test, why, "HANSA_TESTS_NEED_PORTS", "ports must work")
+
+
+@functools.lru_cache(maxsize=None)
+def unix_sockets_refused() -> str:
+    """Why a Unix socket cannot be made here, or "" where it can; probed once. srt on Linux refuses to make one
+    at all, macOS's sandbox to bind it. As for ports, only a refusal counts; any other error is raised."""
+    d = tempfile.mkdtemp()
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.bind(os.path.join(d, "s"))
+        finally:
+            s.close()
+    except PermissionError as e:
+        return f"cannot make a Unix socket here ({e}; a sandbox refuses to)"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return ""
+
+
+# A test that makes a Unix socket: if unix_sockets_refused() says why, skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS),
+# in its own body. With HANSA_TESTS_NEED_UNIX_SOCKETS=1 (as on GitHub's machines, where they work) a refusal fails.
+NEED_UNIX_SOCKETS = ("HANSA_TESTS_NEED_UNIX_SOCKETS", "Unix sockets must work")
 
 
 def design_as_on_mac(test):
@@ -505,6 +557,24 @@ def may_write(box: dict, path, rules=None) -> bool:
     if not any(under(x) for x in [*allow, *opened]):
         return False
     return not any(re.match(sandbox_glob(x), p) if any(c in x for c in "*?[") else under(x) for x in deny)
+
+
+def python_loads() -> list:
+    """The folders the python running the tests loads modules from, taken from the python itself as hansa takes
+    them (desk._run_fence), links resolved: where it is installed decides which of the system's folders hold one."""
+    import site
+    import sysconfig
+    mods = [x for x in sys.path if x] + [sysconfig.get_paths().get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")]
+    try:
+        mods += [*site.getsitepackages(), site.getusersitepackages()]
+    except (AttributeError, OSError, TypeError):  # a python started without its site module
+        pass
+    return list(dict.fromkeys(os.path.realpath(x) for x in mods if isinstance(x, str) and x.startswith("/")))
+
+
+def overlaps(a: str, b: str) -> bool:
+    """Whether one of two full paths is the other or inside it."""
+    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
 
 
 def sh_out(*args, cwd) -> str:
@@ -5871,13 +5941,13 @@ class DeskTest(unittest.TestCase):
         self.assertIn('a.note ? h("span"', (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
 
     def test_a_post_reaches_a_real_inbox(self):
+        why = unix_sockets_refused()  # srt on Linux refuses to make one, macOS's sandbox to bind it
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
         path = str(self.tmp / "inbox.sock")
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(srv.close)
-        try:
-            srv.bind(path)
-        except OSError as e:
-            skip_in_sandbox(self, f"cannot make a Unix socket here ({e}; a sandbox refuses to)")
+        srv.bind(path)
         srv.listen(1)
         srv.settimeout(10)
         os.environ.pop("HANSA_NOTIFY_CAPTURE")
@@ -8948,9 +9018,21 @@ class DeskTest(unittest.TestCase):
                 told = self.refused_and_left_out(x, "it would open " if top != "/usr" else "")
                 if top not in ("/Applications", "/Library", "/usr") or "/usr/local/share" in str(x):  # else a nearer fence may say it
                     self.assertIn(f"it would open {top}, {where}", told)
-            for x in ("/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x"):  # the system's own: says where a cache goes
+            # the system's own: says where a cache goes. Unless the python running hansa loads modules from inside
+            # it (dist-packages under /usr/local/lib, say): then that is the reason given, which says it first
+            loaded = python_loads()
+            system = [x for x in ("/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x")
+                      if not any(overlaps(os.path.realpath(x), d) for d in loaded)]
+            self.assertIn("/usr/lib/x", system)
+            for x in system:
                 self.assertIn("(a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or "
                               "/tmp)", self.refused_and_left_out(x, "the system's own settings, libraries or programs"))
+            for x in {"/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x"} - set(system):
+                self.refused_and_left_out(x, "which the python that runs hansa loads modules from")
+            # and a folder that would open one of them, wherever python is installed
+            import site
+            self.refused_and_left_out(Path(site.getsitepackages()[0]) / "pkg",
+                                      "which the python that runs hansa loads modules from")
             fine = ["/srv/x/tools/xdg-cache/pnpm", "/tmp/cache", "/opt/cache", "/var/cache/x", "/mnt/big/cache",
                     str(self.tmp.resolve() / "elsewhere" / "cache"), str(home / "work" / "cache")]
             self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
@@ -15493,8 +15575,12 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(fs["denyRead"][-len(tmpfs):], tmpfs)  # read-denied: srt hides it under an empty tmpfs
         self.assertEqual(fs["denyRead"][:-len(tmpfs)], mac["denyRead"])
         self.assertIn(str(self.tmp / "run-True"), fs["allowWrite"])  # the run's folder, srt's sockets in it, as before
-        self.assertFalse([x for x in fs["allowWrite"] + fs["denyWrite"] if run.SANDBOX_TMPFS in x])
-        self.assertFalse([x for x in mac["denyRead"] if run.SANDBOX_TMPFS in x])
+        tops = {tempfile.gettempdir(), os.path.realpath(tempfile.gettempdir())}  # a hansa-tmpfs itself in a lane's check
+
+        def below_tmpdir(x):
+            return next((x[len(t):] for t in tops if x == t or x.startswith(t.rstrip("/") + "/")), x)
+        self.assertFalse([x for x in fs["allowWrite"] + fs["denyWrite"] if run.SANDBOX_TMPFS in below_tmpdir(x)])
+        self.assertFalse([x for x in mac["denyRead"] if run.SANDBOX_TMPFS in below_tmpdir(x)])
 
     def test_explain_lane_on_linux_says_the_mount_table_can_call_a_writable_folder_read_only(self):
         for linux in (False, True):
@@ -15951,6 +16037,71 @@ class PortSkipTest(unittest.TestCase):
         self.assertEqual((r.skipped, r.failures, len(r.errors)), ([], [], 1))
 
 
+class UnixSocketSkipTest(unittest.TestCase):
+    """unix_sockets_refused, with skip_in_sandbox, tells a sandbox that refuses Unix sockets (srt on Linux refuses
+    to make one, macOS's sandbox to bind it) from a machine where they work."""
+
+    def setUp(self):
+        unix_sockets_refused.cache_clear()  # probed afresh with the socket each test gives, and after it
+        self.addCleanup(unix_sockets_refused.cache_clear)
+
+    def outcome(self, made=None, bound=None, need=""):
+        s = unittest.mock.MagicMock()
+        s.bind.side_effect = bound
+
+        class Probe(unittest.TestCase):
+            def runTest(self):
+                why = unix_sockets_refused()
+                if why:
+                    skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
+        result = unittest.TestResult()
+        with unittest.mock.patch.object(socket, "socket", side_effect=made, return_value=s), \
+                unittest.mock.patch.dict(os.environ, {"HANSA_TESTS_NEED_UNIX_SOCKETS": need}):
+            Probe().run(result)
+            unix_sockets_refused.cache_clear()
+        return result
+
+    def test_sockets_that_work_neither_skip_nor_fail(self):
+        for need in ("", "1"):
+            r = self.outcome(need=need)
+            self.assertEqual((r.skipped, r.failures, r.errors, r.testsRun), ([], [], [], 1))
+
+    def test_a_refusing_sandbox_skips_with_its_reason_whether_it_refuses_the_socket_or_the_bind(self):
+        refused = PermissionError(1, "Operation not permitted")
+        for r in (self.outcome(made=refused), self.outcome(bound=refused)):
+            self.assertEqual((len(r.skipped), r.failures, r.errors), (1, [], []))
+            self.assertIn("cannot make a Unix socket here", r.skipped[0][1])
+            self.assertIn("a sandbox refuses to", r.skipped[0][1])
+
+    def test_where_sockets_are_needed_a_refusal_fails(self):
+        r = self.outcome(made=PermissionError(1, "Operation not permitted"), need="1")
+        self.assertEqual((r.skipped, len(r.failures), r.errors), ([], 1, []))
+        self.assertIn("HANSA_TESTS_NEED_UNIX_SOCKETS=1", r.failures[0][1])
+
+    def test_another_error_is_not_taken_for_a_sandbox(self):
+        r = self.outcome(bound=OSError(63, "File name too long"))
+        self.assertEqual((r.skipped, r.failures, len(r.errors)), ([], [], 1))
+
+
+class LaneEnvTest(unittest.TestCase):
+    """The suite run as a lane's check on Linux, inside hansa's sandbox, without what the prelude gave it."""
+
+    def test_a_lanes_sandbox_is_told_by_the_preludes_excludes_or_its_tmpfs(self):
+        self.assertTrue(in_lane_sandbox({"HANSA_GIT_EXCLUDES": "/t/hansa-tmpfs/hansa-git-excludes-1-2"}))
+        self.assertTrue(in_lane_sandbox({"TMPDIR": f"/tmp/hansa-check-x/{SANDBOX_TMPFS}"}))
+        self.assertTrue(in_lane_sandbox({"TMPDIR": f"/tmp/hansa-check-x/{SANDBOX_TMPFS}/"}))
+        for env in ({}, {"TMPDIR": "/tmp"}, {"TMPDIR": f"/tmp/{SANDBOX_TMPFS}-not"}, {"HANSA_GIT_EXCLUDES": ""},
+                    {"GIT_CONFIG_GLOBAL": "/home/me/.gitconfig"}):  # an account's own: not a lane's
+            self.assertFalse(in_lane_sandbox(env), env)
+
+    def test_the_tests_meet_none_of_the_preludes_git_settings_there(self):
+        if not IN_LANE:
+            self.skipTest("not run inside a lane's sandbox on Linux")
+        self.assertEqual([k for k in os.environ if k in LANE_GIT_ENV or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))],
+                         [])
+        self.assertTrue(os.environ["TMPDIR"])  # the run's own, kept
+
+
 class Samples:
     """Tests for OnlyUnsandboxedTest, outside it so that it calls neither helper itself and is not marked."""
 
@@ -15975,6 +16126,7 @@ class OnlyUnsandboxedTest(unittest.TestCase):
                                                    Samples.test_other)], [True, True, False])
         self.assertTrue(unsandboxed(DeskTest.test_design_session_opens_for_the_principal_and_comes_back_for_review))
         self.assertTrue(unsandboxed(DeskTest.test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should))
+        self.assertTrue(unsandboxed(DeskTest.test_a_post_reaches_a_real_inbox))
         self.assertFalse(unsandboxed(PortSkipTest.test_a_refusing_sandbox_skips_with_its_reason))
 
     def test_the_rest_skip_with_the_reason(self):
