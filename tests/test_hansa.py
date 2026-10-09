@@ -651,10 +651,11 @@ class DeskTest(unittest.TestCase):
                           XDG_RUNTIME_DIR=str(self.tmp))  # the inboxes' folder (notify.socket_path), not the account's
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
         # free space as the tests set it (self.free, in bytes, or by path: self.free_at), never the machine's: hansa
-        # serve starts nothing new under the desk's floor of free space (hansa/disk.py)
-        self.free, self.free_at = 500 * 10 ** 9, {}
+        # serve starts nothing new under the desk's floor of free space (hansa/disk.py). The volumes' size: self.total
+        # (None: not known)
+        self.free, self.free_at, self.total = 500 * 10 ** 9, {}, 10 ** 12
         usage = unittest.mock.patch("shutil.disk_usage", lambda p: types.SimpleNamespace(
-            total=10 ** 12, used=10 ** 12 - self.free_for(p), free=self.free_for(p)))
+            total=self.total, used=(self.total or 0) - self.free_for(p), free=self.free_for(p)))
         usage.start()
         self.addCleanup(usage.stop)
         if not tmp_writable():  # inside a sandbox that keeps /tmp closed: the workers' folders go in the test's own
@@ -13946,6 +13947,87 @@ class DeskTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.hansa("disk-floor", "-1")
         self.assertIn("disk_floor must be a number", " ".join(validate({**self.desk.settings(), "disk_floor": "x"})))
+
+    def test_a_small_volume_has_a_quarter_of_its_size_as_its_floor_and_a_margin_scaled_with_it(self):
+        from hansa import disk
+        GB = 10 ** 9
+        self.total = int(3.9 * GB)  # a tmpfs /tmp on a machine with 8 GB of memory
+        self.free = int(3.8 * GB)  # nearly empty: not low under the default floor of 10 GB
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(disk.held(self.desk), [])
+        self.assertEqual(self.events("disk_low"), [])
+        said = self.hansa("status")
+        self.assertNotIn("DISK LOW", said)
+        self.assertIn("· floor 10 GB (floor 1.0 GB for the desk's 3.9 GB volume) (hansa disk-floor)", said)
+        self.assertIn("has 3.8 GB free (floor 1.0 GB for this 3.9 GB volume)", self.hansa("explain", "server"))
+        # nearly full: low, and what says so gives the floor that applies to it
+        self.free = int(0.5 * GB)
+        tid = self.desk.new_task("Add hello.txt")
+        for _ in range(2):
+            d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        [low] = self.events("disk_low")
+        self.assertIn("has 0.5 GB free (floor 1.0 GB for this 3.9 GB volume)", low["volumes"][0])
+        said = self.hansa("status")
+        self.assertIn("has 0.5 GB free (floor 1.0 GB for this 3.9 GB volume): hansa serve starts no new task", said)
+        self.assertNotIn("(floor 10 GB): hansa serve starts", said)
+        self.assertRegex(said, r"until every volume has its own floor and margin free \(\S+ 1\.1 GB(; \S+ 1\.1 GB)*\); "
+                               r"what runs goes on")
+        self.assertIn("waiting: hansa serve starts nothing new while free space is under its floor: ", said)
+        self.assertIn("(floor 1.0 GB for this 3.9 GB volume)", views.status(self.desk)["disk"]["low_text"])
+        self.assertIn("now: DISK LOW", self.hansa("explain", "server"))
+        self.assertIn("1.1 GB", notify._item(self.desk, low)[1])
+        # once low, it starts again only past its own scaled margin (a tenth of a GB here, not 1 GB)
+        self.free = int(1.0 * GB)  # over its floor, not by the margin
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertIn("not yet 1.1 GB", self.hansa("status"))
+        self.free = int(1.08 * GB)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "running")
+        self.assertEqual(len(self.events("disk_ok")), 1)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+
+    def test_the_floor_of_a_volume_by_its_size(self):
+        from hansa import disk
+        GB = 10 ** 9
+        small, large, unknown = {"total": int(3.9 * GB)}, {"total": 40 * GB}, {"total": None}
+        self.assertAlmostEqual(disk.vol_floor(10, small), 0.975)
+        self.assertAlmostEqual(disk.vol_margin(10, small), 0.0975)
+        self.assertLessEqual(disk.vol_margin(2, {"total": 4 * GB}), disk.vol_floor(2, {"total": 4 * GB}) / 4)
+        self.assertEqual((disk.vol_floor(10, large), disk.vol_margin(10, large)), (10, disk.MARGIN))  # as before
+        self.assertEqual((disk.vol_floor(10, unknown), disk.vol_margin(10, unknown)), (10, disk.MARGIN))
+        self.assertEqual(disk.vol_floor(10, {}), 10)  # a record from before the size was kept
+        self.assertEqual((disk.vol_floor(0, small), disk.vol_floor(0, large)), (0, 0))
+        self.assertEqual(disk.own_floor(10, large), "")
+        # a large volume behaves as before: 9 GB free of 40 is low under 10, with the floor as set
+        self.total, self.free = 40 * GB, 9 * GB
+        rec = disk.look(self.desk, self.desk.settings())
+        self.assertTrue(rec["low"])
+        said = self.hansa("status")
+        self.assertIn("has 9.0 GB free (floor 10 GB): hansa serve starts", said)
+        self.assertIn("until every volume has 11.0 GB free;", said)
+        self.free = int(10.5 * GB)
+        self.assertTrue(disk.look(self.desk, self.desk.settings())["low"])  # not past the margin of 1 GB
+        self.free = int(11.2 * GB)
+        self.assertFalse(disk.look(self.desk, self.desk.settings())["low"])
+        # a volume whose total is not known keeps the floor as set
+        self.total, self.free = None, 5 * GB
+        rec = disk.look(self.desk, self.desk.settings())
+        self.assertTrue(rec["low"])
+        self.assertIn("has 5.0 GB free (floor 10 GB): hansa serve starts", self.hansa("status"))
+        # floor 0 is off for both
+        self.hansa("disk-floor", "0")
+        for total, free in ((int(3.9 * GB), 1), (40 * GB, 1)):
+            self.total, self.free = total, free
+            self.assertEqual(disk.look(self.desk, self.desk.settings())["low"], [])
+        # the setting stays one number, and says the rule
+        out = self.hansa("disk-floor", "10")
+        self.assertIn("disk floor: off -> 10 GB", out)
+        self.assertIn("a volume smaller than 40 GB has a quarter of its size as its floor", out)
+        self.assertIn("smaller than four times the floor", self.hansa("help", "disk-floor").replace("\n", " "))
+        self.assertIn("smaller than 4 times the floor", self.hansa("explain", "server"))
 
     def test_a_merge_check_asked_while_the_disk_is_low_waits_and_runs_once_there_is_space(self):
         d, t1, t2 = self.two_lanes(check="test -f README.md")

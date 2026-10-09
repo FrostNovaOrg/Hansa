@@ -269,8 +269,9 @@ def _item(desk: Desk, e: dict):
         return _release_item(desk, e)
     if kind == "disk_low":
         return ("disk",), (f"free space is under the floor ({e.get('floor') or 0:g} GB): "
-                           + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until every "
-                           f"volume has {(e.get('floor') or 0) + disk.MARGIN:g} GB free; what runs goes on · next: free "
+                           + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until "
+                           + (e.get("again") or f"every volume has {(e.get('floor') or 0) + disk.MARGIN:g} GB free")
+                           + "; what runs goes on · next: free "
                            "space, or hansa explain server"), None, True, None
     if kind == "disk_ok":
         return ("disk",), ("free space is back over the floor"
