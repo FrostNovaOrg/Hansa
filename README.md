@@ -14,7 +14,7 @@ for each release, or once for a release target the principal lets go out without
 | **Runs on** | macOS or Linux, with Python 3.9 or newer, git and Claude Code |
 | **Install** | Nothing to build: Python's standard library only, run from a checkout |
 | **Interfaces** | A local web page for the principal; the `hansa` command for the coordinator |
-| **License** | AGPL-3.0-or-later, or a commercial license |
+| **License** | Apache-2.0 |
 
 [How it works](#how-it-works) · [Key terms](#key-terms) · [Quick start](#quick-start) ·
 [Commands](#everyday-commands) · [Safety](#what-keeps-it-safe) · [Limits](#limits) ·
@@ -303,11 +303,8 @@ They run on GitHub's machines (Ubuntu and macOS, Python 3.9 and the newest) for 
 
 ## License
 
-Hansa is dual-licensed.
+Hansa is licensed under the [Apache License, Version 2.0](LICENSE).
 
-- **Open source:** [GNU AGPL v3 or later](LICENSE). Use it, change it, share it; if you run a modified version as a network service or distribute it, the AGPL asks you to share your source under the same terms.
-- **Commercial:** [Hansa Commercial License](LICENSE-COMMERCIAL.md) from FrostNova, for embedding Hansa in proprietary products or services without AGPL obligations.
-
-`SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Hansa-Commercial`
+`SPDX-License-Identifier: Apache-2.0`
 
 Copyright (c) 2026 FrostNova.
