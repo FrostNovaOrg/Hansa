@@ -2095,7 +2095,12 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "done", m)
         pid = {f.stem: int(f.read_text()) for f in pids.iterdir()}
-        self.assertEqual(sorted(x["pid"] for x in m["left_running"]), sorted([pid["script"], pid["tmpdir"]]))
+        listed = [x["pid"] for x in m["left_running"]]
+        self.assertEqual(len(listed), len(set(listed)), m["left_running"])
+        self.assertLessEqual({pid["script"], pid["tmpdir"]}, set(listed), m["left_running"])
+        # anything else is a `sleep 1` the script's loop started, recorded by hansa serve and still alive at the sweep
+        more = [x for x in m["left_running"] if x["pid"] not in (pid["script"], pid["tmpdir"])]
+        self.assertEqual([os.path.basename(x["command"].split()[0]) for x in more], ["sleep"] * len(more), more)
         self.assertFalse(alive(pid["script"]) or alive(pid["tmpdir"]))
         self.assertTrue(alive(pid["near"]) and alive(pid["other"]))  # /tmp/hansa-<id>-<random>2, another run's
         [x] = [x for x in m["left_running"] if x["pid"] == pid["script"]]
