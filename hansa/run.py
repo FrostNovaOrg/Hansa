@@ -2464,9 +2464,24 @@ def make_worker_tmp(desk: Desk, tid: str) -> str:
     mounts over paths it hides (claude-empty-*), which it leaves when it ends. So its path is kept short:
     under /tmp, not the server's TMPDIR (a long path under /var/folders on macOS)."""
     tmp = tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=WORKER_TMP_ROOT)
-    desk.change(tid, lambda x: {"worker_tmp": tmp,
-                                "worker_tmps": [*(x.get("worker_tmps") or []), {"path": tmp, "removed": None}]})
+    mark = run_mark(desk, tid)  # the run's HANSA_RUN, given with its folder (worker_env)
+    desk.change(tid, lambda x: {"worker_tmp": tmp, "worker_tmps": [*(x.get("worker_tmps") or []),
+                                                                   {"path": tmp, "removed": None, "mark": mark}]})
     return tmp
+
+
+def run_mark(desk: Desk, tid: str) -> str:
+    """A marker made for one run, that no other run has (task ids repeat from desk to desk, and one account may
+    run several desks): HANSA_RUN=<it> in the environment of what hansa starts for the run, recorded on the task
+    (run_marks, which outlives the run), so sweep finds what the run left by it and never another desk's."""
+    mark = uuid.uuid4().hex
+    desk.change(tid, lambda x: {"run_marks": [*(x.get("run_marks") or []), mark]})
+    return mark
+
+
+def tmp_mark(desk: Desk, tid: str, tmp: str) -> str:
+    """The run marker recorded with a worker run's folder (make_worker_tmp)."""
+    return next((r.get("mark") or "" for r in desk.meta(tid).get("worker_tmps") or [] if r.get("path") == tmp), "")
 
 
 def commands_tmp(tmp: str) -> str:
@@ -2957,16 +2972,18 @@ def _names_folder(folders: list):
     return lambda arg: bool(word.search(arg)), in_tmpdir
 
 
-def task_processes(tid: str, folders: list = ()) -> list:
-    """This account's processes whose environment gives HANSA_TASK as this task, and no other task, or that name
-    one of `folders` (the task's own run folders, worker_tmps) in an argument or as their TMPDIR, whatever their
-    environment says: [(pid, arguments)]. One that cleared its environment, and names no such folder, is not found."""
-    want, found = f"HANSA_TASK={tid}".encode(), []
+def task_processes(marks: list, folders: list = ()) -> list:
+    """This account's processes whose environment gives HANSA_RUN as one of `marks` (the task's runs' own,
+    run_marks), and no other, or that name one of `folders` (the task's own run folders, worker_tmps) in an
+    argument or as their TMPDIR, whatever their environment says: [(pid, arguments)]. HANSA_TASK alone finds
+    nothing: task ids repeat from desk to desk. One that cleared its environment, and names no such folder, is
+    not found."""
+    want, found = {f"HANSA_RUN={x}".encode() for x in marks if x}, []
     in_args, in_tmpdir = _names_folder(list(folders))
 
     def ours(args: list, env: list) -> bool:
-        named = [x for x in env if x.startswith(b"HANSA_TASK=")]
-        return (bool(named) and all(x == want for x in named)) or any(map(in_args, args)) or \
+        named = [x for x in env if x.startswith(b"HANSA_RUN=")]
+        return (bool(named) and all(x in want for x in named)) or any(map(in_args, args)) or \
             any(in_tmpdir(x[7:]) for x in env if x.startswith(b"TMPDIR="))
     if Path("/proc").is_dir():
         for p in Path("/proc").iterdir():
@@ -3186,9 +3203,9 @@ def sweep(desk: Desk, tid: str) -> list:
     watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor
     the command doing this. First what hansa serve recorded below the task's runs while they ran (record_run):
     each run's process group, then each recorded process that still runs and is still the same process (its
-    start); then what it finds now by HANSA_TASK in their environment, or by one of the task's run folders
-    (worker_tmps) in their arguments or TMPDIR: a process started without HANSA_TASK still names its run's
-    folder, and one started between two recordings is found so. The record is cleared.
+    start); then what it finds now by the marker of one of the task's runs (HANSA_RUN, run_marks) in their
+    environment, or by one of the task's run folders (worker_tmps) in their arguments or TMPDIR: a process
+    started without the marker still names its run's folder, and one started between two recordings is found so. The record is cleared.
     What was stopped goes on the task (left_running) and in the event log."""
     keep = {os.getpid(), os.getppid()}
     try:
@@ -3220,7 +3237,7 @@ def sweep(desk: Desk, tid: str) -> list:
     done = {x[0] for x in in_groups}
     found = [(p, _args(p), st) for p, st in seen.items() if st and p not in done and running(p, st)]
     folders = [r["path"] for r in m.get("worker_tmps") or [] if r.get("path")]
-    found += [(p, args, proc_start(p)) for p, args in task_processes(tid, folders)
+    found += [(p, args, proc_start(p)) for p, args in task_processes(m.get("run_marks") or [], folders)
               if p not in keep and p not in done | {x[0] for x in found}]
     found = [(p, args, s) for p, args, s in found if running(p, s)]
     if m.get("started_procs") or m.get("run_groups"):
@@ -3616,7 +3633,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
 def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str) -> dict:
     """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
     return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), "HANSA_TASK": tid,
-            "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
+            "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
             "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
             "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
 
@@ -3758,7 +3775,7 @@ def design_command(desk: Desk, tid: str):
         raise RuntimeError(f"hansa started no design session: {unsplit}")
     env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane, DESIGN_GIT_CONFIG),
            **git_config_env(sandbox_env(desk, lane), DESIGN_GIT_CONFIG), "HANSA_TASK": tid,
-           "CLAUDE_CODE_TMPDIR": tmp,
+           "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp,
            "TMPDIR": tmp, "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
            **identity_env(lane)}  # its own commits are the lane's, as hansa's are
     return with_setup(desk, tid, argv, lane, pname, p, wt), env, wt
@@ -4212,7 +4229,8 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
             return None
         wt, pname = Path(meta.get("worktree") or desk.worktrees_dir / lane_name), meta.get("provider", "")
         srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
-        env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
+        env = {**base_env(), "HANSA_TASK": tid, "HANSA_RUN": run_mark(desk, tid), "TERM": "dumb", "TMPDIR": tmp,
+               "CLAUDE_CODE_TMPDIR": tmp}
         desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
             proc = subprocess.Popen(["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "check.exit"), tmp,
@@ -4563,7 +4581,8 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
             argv = ["/bin/sh", "-c", SETUP_SCRIPT, token, in_sandbox(desk, lane, lane["setup"]), str(raw / "merge-setup.log"),
                     str(raw / "merge-check.err"), expected_git_line(desk, wt) or "(unknown, so no git runs here)",
                     stmp, ssrt, ssettings, *argv]
-        env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
+        env = {**base_env(), "HANSA_TASK": tid, "HANSA_RUN": run_mark(desk, tid), "TERM": "dumb", "TMPDIR": tmp,
+               "CLAUDE_CODE_TMPDIR": tmp}
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
               "own": own_merge_check(lane), "message_note": said,
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}

@@ -688,7 +688,8 @@ here; work that needs code changed or a browser goes to a worker.
   watcher) before it commits and before the lane's check runs, so the check runs
   without them; `hansa show` lists them. Found: what `hansa serve` recorded below the
   run every few seconds while it ran, whatever its environment or folder, and what
-  has HANSA_TASK=<id> in its environment or the run's folder in its arguments or TMPDIR.
+  has the run's own marker in its environment (HANSA_RUN, made for each run; HANSA_TASK alone
+  finds nothing, as task ids repeat from desk to desk) or the run's folder in its arguments or TMPDIR.
   Limit: a process that leaves every marker (`env -i`, another folder, a session of
   its own) between two of serve's rounds, its parent ended by the next, escapes.
 - Nothing hansa starts gets a Claude Code session's identity or inbox (CLAUDE_CODE_MESSAGING_*,
