@@ -178,7 +178,7 @@ MAC_SECRETS = (
 PROVIDER_KINDS = ("subscription", "compatible")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
-MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK")
+MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK", "HANSA_RUN")
 # A lane's env reaches only what runs in the sandbox (run.in_sandbox, run.env_file): srt, the worker's Claude
 # Code and the /bin/sh scripts around a setup or check get hansa's environment. As a second line, what a
 # lane's env names is closed to workers, as what hansa's own environment names is, and these names, which

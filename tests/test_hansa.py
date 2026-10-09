@@ -387,8 +387,9 @@ if os.environ.get("FAKE_LEAVE_HIDDEN"):  # one that drops every marker: env -i, 
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     open(os.environ["FAKE_LEAVE_HIDDEN"], "w").write(str(c.pid))
     time.sleep(float(os.environ.get("FAKE_LEAVE_HIDDEN_WAIT", "1.5")))  # running a while: a round sees it
-if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_TASK, naming folders: its run's, and others
-    tmp, bare = os.environ["CLAUDE_CODE_TMPDIR"], {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "TMPDIR")}
+if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_RUN, naming folders: its run's, and others
+    tmp = os.environ["CLAUDE_CODE_TMPDIR"]
+    bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN", "TMPDIR")}
     open(os.path.join(tmp, "load.sh"), "w").write("while :; do sleep 1; done\n")
     sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
     near, other = tmp + "2", os.path.join(os.path.dirname(tmp), "hansa-t9999-abcdefgh")
@@ -2048,20 +2049,38 @@ class DeskTest(unittest.TestCase):
                if e["event"] == "left_running_stopped"]
         self.assertEqual((e["task"], len(e["processes"])), (tid, 1))
 
-    def test_a_process_naming_another_task_or_only_like_this_one_is_left_alone(self):
+    def test_a_process_naming_another_run_or_only_this_task_is_left_alone(self):
         from hansa.run import task_processes
         pidfile = self.leave_detached()
         tid = self.desk.new_task("Add hello.txt")
-        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
-        others = [self.sleeper(env={**bare, "HANSA_TASK": "t9999"}),
-                  self.sleeper(env={**bare, "HANSA_TASK": tid + "0"}),
-                  self.sleeper(env={**bare, "OLD_HANSA_TASK": tid, "HANSA_TASKS": tid})]
+        bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
+        others = [self.sleeper(env={**bare, "HANSA_RUN": "another-run"}),
+                  self.sleeper(env={**bare, "HANSA_TASK": tid}),  # another desk's task of the same id, or an old hansa's
+                  self.sleeper(env={**bare, "OLD_HANSA_RUN": "x", "HANSA_RUNS": "x", "HANSA_TASK": "t9999"})]
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
         self.assertEqual([p.poll() for p in others], [None, None, None])
-        self.assertEqual([p for p, _ in task_processes("t9999")], [others[0].pid])  # found, when it is that task's
+        self.assertEqual([p for p, _ in task_processes(["another-run"])], [others[0].pid])  # found, by its run's mark
+        self.assertEqual([p for p, _ in task_processes(["another-run" + "0", "another"])], [])
+        self.assertEqual(len(m["run_marks"]), 1)
+        self.assertEqual(m["worker_tmps"][0]["mark"], m["run_marks"][0])
 
-    def test_what_is_left_running_without_hansa_task_is_found_by_its_runs_own_folder(self):
+    def test_two_desks_each_with_a_t0001_sweep_only_their_own(self):
+        from hansa import run
+        pidfile = self.leave_detached()
+        other = init_desk(self.tmp / "desk2", str(self.repo), "a")
+        tid, theirs = self.desk.new_task("Add hello.txt"), other.new_task("Add hello.txt")
+        self.assertEqual(tid, theirs)
+        bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
+        left = self.sleeper(env={**bare, "HANSA_TASK": theirs, "HANSA_RUN": run.run_mark(other, theirs)})
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
+        self.assertIsNone(left.poll())  # the other desk's t0001 is not this one's
+        self.assertEqual([x["pid"] for x in run.sweep(other, theirs)], [left.pid])
+        self.assertIsNotNone(left.wait(10))
+
+    def test_what_is_left_running_without_its_runs_marker_is_found_by_its_runs_own_folder(self):
         from hansa.run import alive
         pids = self.tmp / "left"
         pids.mkdir()
@@ -2092,7 +2111,7 @@ class DeskTest(unittest.TestCase):
         tmp = self.desk.meta(tid)["worker_tmp"]
         self.assertEqual(env["CLAUDE_CODE_TMPDIR"], tmp)  # a folder of its own, as a worker's
         self.assertEqual([r["path"] for r in self.desk.meta(tid)["worker_tmps"]], [tmp])
-        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
         left = self.sleeper(env={**bare, "TMPDIR": os.path.join(tmp, "claude-501")})
         other = self.sleeper(env={**bare, "TMPDIR": tmp + "2"})
         with unittest.mock.patch("hansa.run.end_design"):
@@ -2131,7 +2150,8 @@ class DeskTest(unittest.TestCase):
                 child = int(pidfile.read_text())
             time.sleep(0.1)
         folders = [r["path"] for r in self.desk.meta(tid).get("worker_tmps") or []]
-        self.assertNotIn(child, [p for p, _ in task_processes(tid, folders)])  # no marker finds it
+        marks = self.desk.meta(tid).get("run_marks") or []
+        self.assertNotIn(child, [p for p, _ in task_processes(marks, folders)])  # no marker finds it
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(alive(child))
@@ -2164,7 +2184,7 @@ class DeskTest(unittest.TestCase):
 
     def test_a_recorded_process_whose_number_went_to_another_is_not_stopped(self):
         from hansa import run
-        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
         theirs, leader, ours = self.sleeper(env=bare), self.sleeper(env=bare), self.sleeper(env=bare)
         tid = self.desk.new_task("Add hello.txt")
         old = "1.000000" if sys.platform == "darwin" else "boot:1"  # the start of the process once recorded
@@ -2180,7 +2200,7 @@ class DeskTest(unittest.TestCase):
     def stranger(self):
         """A process of the principal's (a shell with a child, leading a session of its own) and its child's pid."""
         from hansa.run import process_table
-        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
         sh = subprocess.Popen(["/bin/sh", "-c", "sleep 60 & wait"], env=bare, start_new_session=True)
         self.addCleanup(lambda: (os.killpg(sh.pid, 9) if sh.poll() is None else None, sh.wait()))
         end = time.time() + 10
@@ -2209,7 +2229,7 @@ class DeskTest(unittest.TestCase):
 
     def test_a_process_given_the_runs_number_between_two_rounds_is_neither_recorded_nor_stopped(self):
         from hansa import run
-        bare = {k: v for k, v in os.environ.items() if k != "HANSA_TASK"}
+        bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
         ours = self.sleeper(env=bare)  # what the run started, recorded on an earlier round
         sh, kid = self.stranger()
         tid = self.desk.new_task("Add hello.txt")
@@ -16513,6 +16533,33 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.assertFalse(Path(call["tmpdir"]).exists())
         self.assertEqual(os.listdir(root), [])  # each removed when its command ended
         self.assertEqual(self.desk.meta(tid)["sandbox_tmp"], [])
+
+    def test_on_linux_what_a_check_leaves_is_swept_by_its_marker_or_its_folder_on_disk(self):
+        from hansa import run
+        from hansa.run import alive
+        out = self.tmp / "left.txt"
+        leave = ('import os, subprocess as s, sys; e = dict(os.environ); e.pop("HANSA_RUN", None); '
+                 'o = dict(start_new_session=True, stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL); '
+                 'w = [sys.executable, "-c", "import time; time.sleep(300)"]; '  # macOS hides /bin/sleep's environment
+                 'a = s.Popen(w, **o); b = s.Popen(w, env=e, **o); '
+                 'open(sys.argv[1], "w").write(" ".join([str(a.pid), str(b.pid), os.environ["TMPDIR"]]))')
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"test -f hello.txt && python3 -c {shlex.quote(leave)} {shlex.quote(str(out))}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        with unittest.mock.patch.object(account, "LINUX", True), \
+                unittest.mock.patch("hansa.run.run_recorded", lambda m: {}):  # found by neither serve's record nor its group
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+        marked, bare, tmpdir = out.read_text().split()
+        self.addCleanup(lambda: [alive(int(p)) and os.kill(int(p), 9) for p in (marked, bare)])
+        self.assertEqual(Path(tmpdir).parent, self.desk.state_dir / run.RUN_TMP_DIR)  # its own folder, on disk
+        self.assertIn(tmpdir, m["run_folders"])
+        end = time.time() + 15  # the check's sweep comes after the task is recorded as done
+        while "left_running" not in m and time.time() < end:
+            time.sleep(0.1)
+            m = self.desk.meta(tid)
+        self.assertEqual(sorted(x["pid"] for x in m.get("left_running", [])), sorted([int(marked), int(bare)]))
+        self.assertFalse(alive(int(marked)) or alive(int(bare)))
 
     def test_explain_lane_on_linux_says_the_mount_table_can_call_a_writable_folder_read_only(self):
         for linux in (False, True):

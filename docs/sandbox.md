@@ -322,9 +322,12 @@ the task, so a restarted server still has the record), if it still runs and
 is still the same process (its start time; a number since given to another
 process is left alone). Nothing is recorded for a run whose own process number
 no longer has the start time hansa saved for it, so a process that was given
-that number later, and its group, are never taken for the run's; then each process that names the task: `HANSA_TASK`
-in its environment, or the run's temporary folder in its arguments or as its
-TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
+that number later, and its group, are never taken for the run's; then each process that names one of the task's runs: the run's own marker,
+`HANSA_RUN`, in its environment (made for each run and recorded on the task as
+`run_marks`; `HANSA_TASK` alone finds nothing, since task ids repeat from desk to
+desk and one account may run several desks), or one of the run's temporary folders
+(the worker's; a setup's or check's, and its own folder on disk on Linux, kept on
+the task as `run_folders`) in its arguments or as its TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
 lists what was stopped, with its group or alone, and the event log has it. What can still escape: a process started and moved
 out of every marker (`env -i`, another folder, a session of its own) between
 two rounds, whose parent ended before the next round. A design session's

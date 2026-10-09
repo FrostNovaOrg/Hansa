@@ -6,8 +6,8 @@ stop the preview when the worker ends.
 
 It runs in the worker's own process, after the lane's setup (hansa.run.with_preview): hansa serve never waits
 on it. The preview runs in srt with the lane's sandbox and local binding, in a process group of its own, with
-hansa's environment (never a provider's key), HANSA_TASK and its own temporary folder. Its output goes through
-a pipe this reads to its end, so the preview never waits on it; <log> keeps its first and last
+hansa's environment (never a provider's key), HANSA_TASK, the worker run's marker (HANSA_RUN) and its own
+temporary folder. Its output goes through a pipe this reads to its end, so the preview never waits on it; <log> keeps its first and last
 hansa.run.PREVIEW_KEEP / 2 bytes, with a line between them saying how much was left out. It is ready at the first
 http://localhost:PORT or http://127.0.0.1:PORT address it prints, or once a port it names answers; it has
 <seconds> to be. One not ready by then is stopped. The worker is then started with <ready note> (@ADDRESS@
@@ -138,7 +138,7 @@ def main() -> int:
     log, state, seconds, srt, settings, tmp, tid, root, command, ready_note, not_ready_note = sys.argv[1:cut]
     worker = sys.argv[cut + 1:]
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-    env.update(HANSA_TASK=tid, TERM="dumb", TMPDIR=tmp, CLAUDE_CODE_TMPDIR=tmp)
+    env.update(HANSA_TASK=tid, HANSA_RUN=os.environ.get("HANSA_RUN", ""), TERM="dumb", TMPDIR=tmp, CLAUDE_CODE_TMPDIR=tmp)
     kept = Kept(log, run.PREVIEW_KEEP // 2)
     try:
         proc = subprocess.Popen([srt, "--settings", settings, "--", "/bin/sh", "-c", command], env=env,
