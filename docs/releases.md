@@ -183,8 +183,8 @@ code gives the code, and what to do with it, right after the desk's name:
 When several alerts go out in one run, the first line also gives each
 waiting release's number and code (`[hansa] desk NAME: 3 alerts · #1 code
 K7P3QX · #2 code M4R8TW`), and the lines holding a code come first, each
-starting as a single one does. A release that waits with no code (no alert
-command when it began to wait) reads `release #1 of lane a, target staging
+starting as a single one does. A release that waits with no code (it had
+already stopped waiting when its code was to be made) reads `release #1 of lane a, target staging
 (main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
 ...`. The cut at 1,000 characters never takes a code. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
