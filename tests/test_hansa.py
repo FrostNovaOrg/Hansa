@@ -14047,6 +14047,119 @@ class DeskTest(unittest.TestCase):
         self.hansa("release", "a")
         self.assertEqual(release.get(self.desk, 2)["state"], "approved")
 
+    PAGE_HARNESS = r"""
+// Runs the page's script with just enough of a DOM to build the Settings tab from the settings given on standard
+// input, then prints each release tick as the page built it: no layout, no browser.
+const fs = require("fs"), vm = require("vm");
+const [page, given] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse(fs.readFileSync(0, "utf8"))];
+const script = page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"));
+class El {
+  constructor(tag) { this.tag = tag; this.kids = []; this.attrs = {}; this.className = ""; this.hidden = false;
+    this.value = ""; this.checked = false; this.on = {}; this.classList = {toggle: () => {}}; this.dataset = {}; }
+  set textContent(x) { this.kids = [String(x)]; } get textContent() { return this.kids.map(k => k.textContent ?? k).join(""); }
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v); }
+  addEventListener(k, f) { this.on[k] = f; }
+  append(...xs) { this.kids.push(...xs); } replaceChildren(...xs) { this.kids = xs; }
+  contains() { return false; } get nodeType() { return 1; }
+}
+class Text { constructor(s) { this.textContent = s; } get nodeType() { return 3; } }
+const ids = {};
+const document = {createElement: t => new El(t), createTextNode: s => new Text(s), title: "", body: new El("body"),
+  hidden: false, activeElement: null, querySelectorAll: () => [],
+  querySelector: s => ids[s] || (ids[s] = new El("div"))};
+const reply = path => path.startsWith("/api/settings") ? given : path.startsWith("/api/events") ? [] : null;
+const fetch = async path => { const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r}; };
+const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
+  setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
+vm.runInContext(script, ctx);
+const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
+vm.runInContext("loadSettings()", ctx).then(() => {
+  const ticks = [];
+  walk(ids["#tab-settings"], el => { if (el.className === "tick") ticks.push({lane: el.attrs["data-lane"], target: el.attrs["data-target"],
+    ticked: el.kids[0].checked, text: el.textContent}); });
+  let input = null; walk(ids["#tab-settings"], el => { if (!input && el.className === "tick") input = el.kids[0]; });
+  input.checked = !input.checked; input.on.change({target: input});  // a click on the first tick
+  console.log(JSON.stringify({ticks, after: vm.runInContext("S.releases_without_asking", ctx)}));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+"""
+
+    def test_the_page_lays_out_long_commands_inside_the_page(self):
+        css = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        css = css[css.index("<style>"):css.index("</style>")]
+        # a long command, path or ref breaks in its box; the label column of a grid cannot grow past the page, and
+        # no grid or flex child keeps the width of its content; a tick's box keeps its size beside wrapping words
+        for rule in ("body, td, label, code, .mono { overflow-wrap:anywhere; }",
+                     "grid-template-columns: fit-content(22em) minmax(0, 1fr);",
+                     ".row > *, .grid > *, .facts > * { min-width:0; }",
+                     "grid-template-columns: minmax(0, 24em) minmax(0, 1fr);",
+                     ".grid, .facts { grid-template-columns:minmax(0, 1fr); }",
+                     "pre { white-space:pre-wrap; overflow-wrap:anywhere;",
+                     ".tick > input { flex:none;"):
+            self.assertIn(rule, css)
+        self.assertNotIn("max-content 1fr", css)
+
+    def principals_release_desk(self):
+        """A desk with lane a and two release targets, one with a long command of few spaces,
+        lanes b, c and d with no release, and three old entries for the unnamed releases of a, b and c."""
+        long = ('git push --receive-pack="runuser -u hansa -- git-receive-pack" '
+                'shop-test.example.org:/srv/shop/repositories/shop-mirror-for-the-integration-test-machine.git '
+                '"+$HANSA_RELEASE_COMMIT:refs/heads/shop-test" && ssh shop-test.example.org '
+                '/srv/shop/checkouts/shop-integration/bin/hansa --desk /srv/shop/desks/integration-test-desk lane try h '
+                '--at "$HANSA_RELEASE_COMMIT"')
+        self.assertGreater(len(long), 270)
+        self.hansa("lane", "target", "a", "shop-test", long)
+        self.hansa("lane", "target", "a", "github", "git push origin alpha", "--after", "shop-test")
+        for lane in ("b", "c", "d"):
+            self.hansa("lane", "add", lane, "--like", "a")
+            s = self.desk.settings()
+            s["lanes"][lane].pop("targets", None)
+            s["lanes"][lane].pop("release", None)
+            self.assertEqual(self.desk.save_settings(s), [])
+        s = self.desk.settings()
+        s["releases_without_asking"] = ["a", {"lane": "b", "target": "", "command": "make deploy"}, "c"]
+        self.desk.settings_path.write_text(json.dumps(s))
+        return long
+
+    def test_old_entries_for_targets_no_lane_has_are_said_as_such(self):
+        self.principals_release_desk()
+        shown = public_settings(self.desk)
+        self.assertEqual(shown["problems"], [])
+        self.assertEqual([(u["lane"], u["target"], u["gone"], u["was"], u["why"]) for u in shown["release_unmatched"]],
+                         [("a", "", True, "", "lane a has no unnamed release command now (its targets have names)"),
+                          ("b", "", True, "make deploy", "lane b has no release command now"),
+                          ("c", "", True, "", "lane c has no release command now")])
+        # they can be taken off the list: a save without them keeps only what is ticked
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "github"}])),
+                         {"ok": True, "problems": []})
+        self.assertEqual([(x["lane"], x["target"]) for x in self.desk.settings()["releases_without_asking"]],
+                         [("a", "github")])
+        self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_settings_page_renders_a_desk_with_long_commands_and_old_entries(self):
+        self.principals_release_desk()
+        self.assertEqual(self.page_save(lambda s: s["releases_without_asking"].append({"lane": "a", "target": "shop-test"})),
+                         {"ok": True, "problems": []})
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        r = subprocess.run(["node", str(harness), str(page)], input=json.dumps(public_settings(self.desk)),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        # every target each lane has, then each old entry, ticked as saved; the old ones said as such
+        self.assertEqual([(x["lane"], x["target"], x["ticked"]) for x in out["ticks"]],
+                         [("a", "shop-test", True), ("a", "github", False), ("a", "", True), ("b", "", True), ("c", "", True)])
+        gone = {x["lane"]: x["text"] for x in out["ticks"] if not x["target"]}
+        for lane in "abc":
+            self.assertIn("no lane has this release target now", gone[lane])
+        self.assertIn("its command then: make deploy", gone["b"])
+        self.assertIn("its command then was not recorded", gone["a"])
+        self.assertNotIn("no lane has", next(x["text"] for x in out["ticks"] if x["target"] == "shop-test"))
+        # a click on the first tick unticks it alone
+        self.assertEqual([listed for listed in out["after"] if isinstance(listed, dict) and listed.get("target") == "shop-test"], [])
+        self.assertEqual(len(out["after"]), 3)
+
     def test_the_coordinator_cannot_change_the_principals_release_settings(self):
         s = self.desk.settings()
         self.assertEqual((s["releases_without_asking"], s["release_forbidden"]), ([], []))
