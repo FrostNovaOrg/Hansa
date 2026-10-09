@@ -27,10 +27,13 @@ each lane's standing instructions (`hansa lane brief`, kept in
 (`hansa lane set L release "git push origin main"`) or its named release
 targets (`hansa lane target L NAME "<command>"`) and asking for a release
 (`hansa release L [TARGET] "note"`), never pushing or deploying by itself:
-its settings deny `git push`, `gh release`, `gh pr merge`, `gh repo` and the
-usual publish commands (`npm`, `pnpm`, `yarn`, `uv` and `poetry publish`,
-`twine upload`, `cargo publish`, `gem push`, `docker` and `podman push`,
-`mvn deploy`) from its own shell, whatever its mode, written plainly or with
+its settings deny pushing and publishing from its own shell, whatever its
+mode: git's (`git push`, `git send-email`, `git svn dcommit`), GitHub's
+(`gh release`, `gh pr merge`, `gh repo`), a package or image registry's
+(`npm publish`, `yarn npm publish`, `twine upload`, `cargo publish`,
+`docker push`), and Maven's and Gradle's (`mvn deploy`, Gradle's `publish`
+tasks, through a wrapper such as `./mvnw` too); the full list is in the card
+(`hansa/card.md`, How work moves). They are denied written plainly or with
 options before the subcommand (`git -C DIR push`), and after a plain `xargs`
 or a wrapper such as `env`, `nice` or `timeout`, which Claude Code looks
 past (`xargs git push` is caught); run through another shell
