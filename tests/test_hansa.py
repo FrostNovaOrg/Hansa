@@ -2,6 +2,7 @@
 import contextlib
 import fcntl
 import functools
+import inspect
 import io
 import json
 import os
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import unittest.mock
 import urllib.error
@@ -79,15 +81,26 @@ def ports_refused() -> str:
     return ""
 
 
+def skip_in_sandbox(test, why, need="", must=""):
+    """Skip a test for what a sandboxed run cannot give it (a local port, a Unix socket, the real srt), saying
+    why. Where the environment variable need is 1 (as on GitHub's machines) it fails instead, saying it must
+    (must), so the test cannot quietly stop running. A test that calls it or skip_unless_ports in its own body
+    is one a sandboxed run cannot make: HANSA_TESTS_ONLY_UNSANDBOXED=1 runs those alone (only_unsandboxed)."""
+    if need and os.environ.get(need) == "1":
+        test.fail(f"{why}, and {need}=1 says {must}")
+    test.skipTest(why)
+
+
+NEED_SRT = ("HANSA_TESTS_NEED_SRT", "the real sandbox must be tried")
+
+
 def skip_unless_ports(test):
     """Skip a test that binds a local port where the sandbox refuses to, as tests that make a Unix socket
     skip where one is refused. With HANSA_TESTS_NEED_PORTS=1 (as on CI, where ports work) a refusal fails
     the test instead, so the port tests cannot quietly stop running."""
     why = ports_refused()
-    if why and os.environ.get("HANSA_TESTS_NEED_PORTS") == "1":
-        test.fail(f"{why}, and HANSA_TESTS_NEED_PORTS=1 says ports must work")
     if why:
-        test.skipTest(why)
+        skip_in_sandbox(test, why, "HANSA_TESTS_NEED_PORTS", "ports must work")
 
 
 @functools.lru_cache(maxsize=None)
@@ -108,14 +121,9 @@ def unix_sockets_refused() -> str:
     return ""
 
 
-def skip_unless_unix_sockets(test):
-    """Skip a test that makes a Unix socket where the sandbox refuses to; with HANSA_TESTS_NEED_UNIX_SOCKETS=1
-    (as on CI, where they work) a refusal fails the test instead, as HANSA_TESTS_NEED_PORTS does for ports."""
-    why = unix_sockets_refused()
-    if why and os.environ.get("HANSA_TESTS_NEED_UNIX_SOCKETS") == "1":
-        test.fail(f"{why}, and HANSA_TESTS_NEED_UNIX_SOCKETS=1 says Unix sockets must work")
-    if why:
-        test.skipTest(why)
+# A test that makes a Unix socket: if unix_sockets_refused() says why, skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS),
+# in its own body. With HANSA_TESTS_NEED_UNIX_SOCKETS=1 (as on GitHub's machines, where they work) a refusal fails.
+NEED_UNIX_SOCKETS = ("HANSA_TESTS_NEED_UNIX_SOCKETS", "Unix sockets must work")
 
 
 def design_as_on_mac(test):
@@ -5933,7 +5941,9 @@ class DeskTest(unittest.TestCase):
         self.assertIn('a.note ? h("span"', (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
 
     def test_a_post_reaches_a_real_inbox(self):
-        skip_unless_unix_sockets(self)
+        why = unix_sockets_refused()  # srt on Linux refuses to make one, macOS's sandbox to bind it
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
         path = str(self.tmp / "inbox.sock")
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(srv.close)
@@ -10142,17 +10152,11 @@ class DeskTest(unittest.TestCase):
     def test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should(self):
         # srt itself (installed on GitHub's macOS machines, with HANSA_TESTS_NEED_SRT=1); elsewhere it skips
         from hansa import run
-        need = os.environ.get("HANSA_TESTS_NEED_SRT") == "1"
-
-        def skip(why):
-            if need:
-                self.fail(f"{why}, and HANSA_TESTS_NEED_SRT=1 says the real sandbox must be tried")
-            self.skipTest(why)
         path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
                                if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
         srt = shutil.which("srt", path=path)
         if not srt:
-            skip("srt is not installed")
+            skip_in_sandbox(self, "srt is not installed", *NEED_SRT)
 
         def in_srt(make, *argv):  # make: the settings, given the temporary folder of the run
             t = tempfile.mkdtemp(dir=self.tmp)
@@ -10164,7 +10168,8 @@ class DeskTest(unittest.TestCase):
                               "filesystem": {"allowWrite": run.full_paths([t]), "denyRead": [], "denyWrite": []}},
                    "/usr/bin/true")
         if r.returncode:
-            skip(f"no sandbox can be applied here (inside one already?): srt said {(r.stderr or r.stdout).strip()[:200]}")
+            skip_in_sandbox(self, f"no sandbox can be applied here (inside one already?): srt said "
+                                  f"{(r.stderr or r.stdout).strip()[:200]}", *NEED_SRT)
         for i in range(3):  # several linked worktrees
             sh("git", "worktree", "add", "-q", "-b", f"task/t09{i}", str(self.tmp / f"other{i}"), cwd=self.repo)
         s = self.desk.settings()
@@ -12025,7 +12030,7 @@ class DeskTest(unittest.TestCase):
         probe = [tmux, "-L", tmux_socket(self.desk) + "-probe"]
         subprocess.run(probe + ["new-session", "-d", "sleep 5"], capture_output=True, timeout=30)
         if subprocess.run(probe + ["kill-server"], capture_output=True, timeout=30).returncode:
-            self.skipTest("tmux cannot make its socket here (a sandbox refuses to create Unix sockets)")
+            skip_in_sandbox(self, "tmux cannot make its socket here (a sandbox refuses to create Unix sockets)")
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["providers"]["claude"]["config_dir"] = str(self.tmp / "cc")
@@ -15594,7 +15599,7 @@ class DeskTest(unittest.TestCase):
                                if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
         srt = shutil.which("srt", path=path)
         if not srt:
-            self.skipTest("srt is not installed")
+            skip_in_sandbox(self, "srt is not installed", *NEED_SRT)
         (self.repo / ".vscode").mkdir()
         (self.repo / ".vscode" / "settings.json").write_text("{}\n")
         sh("git", "add", ".vscode", cwd=self.repo)
@@ -15610,7 +15615,8 @@ class DeskTest(unittest.TestCase):
                            cwd=self.repo, capture_output=True, text=True, timeout=120,
                            env={**os.environ, "PATH": path, "TMPDIR": t, "CLAUDE_CODE_TMPDIR": t})
         if r.returncode and "tmp=" not in r.stdout:
-            self.skipTest(f"no sandbox can be applied here (inside one already?): srt said {(r.stderr or r.stdout).strip()[:200]}")
+            skip_in_sandbox(self, f"no sandbox can be applied here (inside one already?): srt said "
+                                  f"{(r.stderr or r.stdout).strip()[:200]}", *NEED_SRT)
         lines = r.stdout.splitlines()
         self.assertIn(" M .vscode/settings.json", lines)  # tracked: still listed
         self.assertIn("?? new.txt", lines)
@@ -16032,8 +16038,8 @@ class PortSkipTest(unittest.TestCase):
 
 
 class UnixSocketSkipTest(unittest.TestCase):
-    """skip_unless_unix_sockets tells a sandbox that refuses Unix sockets (srt on Linux refuses to make one,
-    macOS's sandbox to bind it) from a machine where they work."""
+    """unix_sockets_refused, with skip_in_sandbox, tells a sandbox that refuses Unix sockets (srt on Linux refuses
+    to make one, macOS's sandbox to bind it) from a machine where they work."""
 
     def setUp(self):
         unix_sockets_refused.cache_clear()  # probed afresh with the socket each test gives, and after it
@@ -16045,7 +16051,9 @@ class UnixSocketSkipTest(unittest.TestCase):
 
         class Probe(unittest.TestCase):
             def runTest(self):
-                skip_unless_unix_sockets(self)
+                why = unix_sockets_refused()
+                if why:
+                    skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
         result = unittest.TestResult()
         with unittest.mock.patch.object(socket, "socket", side_effect=made, return_value=s), \
                 unittest.mock.patch.dict(os.environ, {"HANSA_TESTS_NEED_UNIX_SOCKETS": need}):
@@ -16092,6 +16100,71 @@ class LaneEnvTest(unittest.TestCase):
         self.assertEqual([k for k in os.environ if k in LANE_GIT_ENV or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))],
                          [])
         self.assertTrue(os.environ["TMPDIR"])  # the run's own, kept
+
+
+class Samples:
+    """Tests for OnlyUnsandboxedTest, outside it so that it calls neither helper itself and is not marked."""
+
+    def test_port(self):
+        skip_unless_ports(self)
+
+    def test_socket_in_a_function(self):
+        def bind():
+            skip_in_sandbox(self, "no socket")
+        bind()
+
+    def test_other(self):
+        self.assertTrue("skip_unless_ports")  # skip_in_sandbox named in a comment or a string is no call
+
+
+class OnlyUnsandboxedTest(unittest.TestCase):
+    """HANSA_TESTS_ONLY_UNSANDBOXED=1 runs the tests that call skip_in_sandbox or skip_unless_ports and skips
+    the rest."""
+
+    def test_a_test_is_marked_by_the_helper_it_calls(self):
+        self.assertEqual([unsandboxed(f) for f in (Samples.test_port, Samples.test_socket_in_a_function,
+                                                   Samples.test_other)], [True, True, False])
+        self.assertTrue(unsandboxed(DeskTest.test_design_session_opens_for_the_principal_and_comes_back_for_review))
+        self.assertTrue(unsandboxed(DeskTest.test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should))
+        self.assertTrue(unsandboxed(DeskTest.test_a_post_reaches_a_real_inbox))
+        self.assertFalse(unsandboxed(PortSkipTest.test_a_refusing_sandbox_skips_with_its_reason))
+
+    def test_the_rest_skip_with_the_reason(self):
+        case = type("Case", (Samples, unittest.TestCase), {})
+        only_unsandboxed(case)
+        result = unittest.TestResult()
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TESTS_NEED_PORTS": ""}):
+            unittest.defaultTestLoader.loadTestsFromTestCase(case).run(result)
+        self.assertEqual((result.testsRun, result.failures, result.errors), (3, [], []))
+        self.assertEqual([t._testMethodName for t, why in result.skipped if why == ONLY_UNSANDBOXED], ["test_other"])
+
+
+ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
+
+
+def unsandboxed(test) -> bool:
+    """Whether a test calls skip_in_sandbox or skip_unless_ports itself, in its body or a function in it."""
+    def names(code):
+        yield from code.co_names
+        for c in code.co_consts:
+            if isinstance(c, types.CodeType):
+                yield from names(c)
+    return bool({"skip_in_sandbox", "skip_unless_ports"} & set(names(inspect.unwrap(test).__code__)))
+
+
+def only_unsandboxed(case):
+    """Skip every test of a TestCase class but those a sandboxed run cannot make (unsandboxed)."""
+    for name in unittest.defaultTestLoader.getTestCaseNames(case):
+        if not unsandboxed(getattr(case, name)):
+            setattr(case, name, unittest.skip(ONLY_UNSANDBOXED)(getattr(case, name)))
+
+
+# What GitHub's machines run on every push (.github/workflows/tests.yml): the tests that need what a sandboxed run
+# cannot give, as the desk that develops hansa runs the whole suite in a sandbox for every task.
+if os.environ.get("HANSA_TESTS_ONLY_UNSANDBOXED") == "1":
+    for case in [c for c in list(globals().values()) if isinstance(c, type) and issubclass(c, unittest.TestCase)]:
+        only_unsandboxed(case)
+    del case  # else the loader finds the last class twice
 
 
 if __name__ == "__main__":

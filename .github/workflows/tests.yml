@@ -1,7 +1,16 @@
-# hansa's test suite on GitHub's machines. Unlike a sandboxed run, ports on the loopback work here, so the
-# tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not. So do
-# Unix sockets, which srt on Linux refuses: HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one fail too.
-# No secrets: the suite uses stand-ins for claude and srt, and needs no login.
+# hansa's test suite on GitHub's machines. No secrets: the suite uses stand-ins for claude and srt, and needs no login.
+#
+# What runs when, and why:
+# - A push to alpha or main runs, on one macOS machine with the newest Python, only the tests a sandboxed run
+#   cannot (HANSA_TESTS_ONLY_UNSANDBOXED=1; the rest skip): the maintainers run the whole suite on macOS, in
+#   hansa's sandbox, for every change, and on Linux before every push, and GitHub's macOS minutes count ten times.
+# - A pull request, or a run started by hand (workflow_dispatch), runs the whole suite on Ubuntu and macOS, with
+#   Python 3.9 and the newest.
+# Those tests are the ones that call skip_in_sandbox or skip_unless_ports (tests/test_hansa.py): they listen on
+# the loopback, make a Unix socket or run the real srt. Unlike a sandboxed run, ports on the loopback work here,
+# so the tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not.
+# So do Unix sockets, which srt on Linux refuses: HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one
+# fail rather than skip too. Both jobs set both.
 # On macOS the real srt is installed too, and one test runs it with the sandbox settings hansa gives a worker,
 # a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip without it): that the
 # sandbox starts, leaves open what git needs (the worktree's own folder, a design session's branch ref and
@@ -15,6 +24,7 @@ on:
   push:
     branches: [alpha, main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,8 +34,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unsandboxed:
+    name: macOS, Python 3.x, the tests a sandbox cannot run
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      HANSA_TESTS_ONLY_UNSANDBOXED: "1"
+      HANSA_TESTS_NEED_PORTS: "1"
+      HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
+      HANSA_TESTS_NEED_SRT: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Install srt, the sandbox runtime
+        run: npm install -g @anthropic-ai/sandbox-runtime
+      - name: Run the tests
+        run: python3 -m unittest -v tests.test_hansa
+
   test:
     name: ${{ matrix.os }}, Python ${{ matrix.python }}
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
