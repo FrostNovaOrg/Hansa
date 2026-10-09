@@ -195,20 +195,20 @@ def failure_spans(lines: list) -> list:
     return out
 
 
-def failed_check_lines(log: str, tail: list, tid: str) -> list:
+def failed_check_lines(log: str, tail: list, tid: str, option: str = "--check-log") -> list:
     """For hansa show, a check or merge check that failed: the failing tests (or the errors that kept them from
     running) lifted out of its whole output (failure_spans), those of their lines above its last TAIL_LINES lines
     (a failure's message above them even when its marker is among them), each cut to BLOCK_LINES and all to
     FAILURE_LINES, then those last lines, always: never less than its last lines alone, which is all it gives
     when nothing in it is recognised, or when the output is not kept (tail: the last lines as recorded). Then a
-    line for each known cause its output shows (output_hints)."""
+    line for each known cause its output shows (output_hints). option: the hansa show option that prints it whole."""
     hints = ["  " + h for h in output_hints(log or "\n".join(tail))]
     lines = [plain(x, None) for x in log.rstrip().splitlines()]
     while lines and not lines[0].strip():
         lines.pop(0)
     if not lines:
         return ["  " + plain(x) for x in tail] + hints
-    whole = [f"  the whole output: hansa show {tid} --check"]
+    whole = [f"  the whole output: hansa show {tid} {option}"]
     last = max(0, len(lines) - TAIL_LINES)  # the lines from here are shown as its last lines
     picked, kinds = [], set()
     for kind, keep in failure_spans(lines):  # the lines above the last ones, a failure's message above them too
@@ -369,7 +369,7 @@ def merge_result_lines(m: dict, log: str = "") -> list:
     hint = machine_hint(r)
     return ([f"merge check ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
              + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
-            + failed_check_lines(log, r.get("tail", []), m["id"]) + (["  " + hint] if hint else []))
+            + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
 
 
 def ready_now(desk: Desk, s: dict | None = None) -> list:
@@ -536,6 +536,9 @@ def status(desk: Desk) -> dict:
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
+                     "effort": m.get("effort_used", ""), "effort_from": m.get("effort_from"),
+                     "effort_said": effort_text(m.get("effort_used", ""), m.get("effort_from"),
+                                                s["providers"].get(m.get("provider") or "")),
                      "checking": m.get("phase") == "checking", "starting": m.get("phase") == "starting",
                      "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                      "browser": bool(m.get("browser")),
@@ -614,7 +617,8 @@ def status_text(st: dict) -> str:
         out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
                                                f"{m['check_minutes']} min so far" if m["checking"]
                                                else "hansa is preparing it" if m.get("starting")
-                                               else f"on {m['provider']} ({m['model']})")
+                                               else f"on {m['provider']} ({m['model']}"
+                                               + (f", {m['effort_said']}" if m.get("effort_said") else "") + ")")
                 + (" with a browser" if m["browser"] else "")
                 + (f" ({m['minutes']} min in all)" if m["checking"] else f", {m['minutes']} min") + f": {m['title']}"
                 + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
@@ -768,32 +772,79 @@ def merge_log(m: dict) -> str:
     return "merge-setup.log" if note.startswith("the lane's setup failed") else "merge-check.log"
 
 
-def check_output_text(desk: Desk, tid: str) -> str:
-    """hansa show ID --check: the whole output of the task's last check and of its last merge check, keys removed."""
-    m = desk.meta(tid)
-    d = desk.tasks_dir / tid
+CHECK_LOG_TAIL = 20  # the last lines of each log hansa show ID --check gives
+
+
+def _check_logs(desk: Desk, m: dict) -> list:
+    """The task's last check and last merge check, those that ran: (what, the option that prints it whole, its
+    first line, its log file)."""
+    d = desk.tasks_dir / m["id"]
     out = []
     chk = m.get("check")
     if chk:
         how = ("could not run" if chk.get("could_not_run") else "passed" if chk.get("ok")
                else "FAILED" + (f" ({chk['note']})" if chk.get("note") else f" (exit {chk.get('exit')})"))
-        log = read_text(d / "check.log").rstrip()
-        out += [f"check (run by hansa, not the worker): {how}: {chk.get('command', '')}",
-                desk.redact(log) if log else "(it printed nothing)" if (d / "check.log").exists()
-                else "(its output is not kept: hansa show has its last lines)"]
+        out.append(("check", "--check-log", f"check (run by hansa, not the worker): {how}: {chk.get('command', '')}",
+                    d / "check.log"))
     r = m.get("merge_check_result") or {}
     if r and not r.get("waited") and not r.get("conflict"):
         how = ("could not run" if r.get("could_not_run") else "passed" if r.get("ok")
                else "FAILED" + (f" ({r['note']})" if r.get("note") else f" (exit {r.get('exit')})"))
-        log = read_text(d / merge_log(m)).rstrip()
-        out += ["", f"merge check (on the task merged onto the base at {str(r.get('onto', ''))[:10]}): {how}: "
-                    f"{r.get('command', '')}" + (" (what the lane's setup printed)" if merge_log(m) == "merge-setup.log" else ""),
-                desk.redact(log) if log else "(it printed nothing)" if (d / merge_log(m)).exists()
-                else "(its output is not kept: hansa show has its last lines)"]
-    if not out:
-        return (f"{tid}: no check has run on it" + (": it is checked now; hansa wait, then this again"
-                                                  if m.get("phase") == "checking" or m["state"] == "merging" else ""))
-    return "\n".join(out).lstrip("\n")
+        out.append(("merge check", "--merge-check-log",
+                    f"merge check (on the task merged onto the base at {str(r.get('onto', ''))[:10]}): {how}: "
+                    f"{r.get('command', '')}" + (" (what the lane's setup printed)" if merge_log(m) == "merge-setup.log"
+                                                 else ""), d / merge_log(m)))
+    return out
+
+
+def _no_check_text(m: dict, what: str = "check") -> str:
+    return (f"{m['id']}: no {what} has run on it" + (": it is checked now; hansa wait, then this again"
+                                                    if m.get("phase") == "checking" or m["state"] == "merging" else ""))
+
+
+def check_output_text(desk: Desk, tid: str) -> str:
+    """hansa show ID --check: for the task's last check and its last merge check, each apart: what ran and how it
+    ended, the file with its whole output and that file's size, and its last CHECK_LOG_TAIL lines, keys removed.
+    The first line says what follows; --check-log and --merge-check-log print one of them whole."""
+    m = desk.meta(tid)
+    logs = _check_logs(desk, m)
+    if not logs:
+        return _no_check_text(m)
+    out = [f"{tid}: its {' and its '.join(w for w, *_ in logs)}, each apart: how it ended, the file with its whole "
+           f"output, and its last {CHECK_LOG_TAIL} lines (keys removed). One of them whole: "
+           + " or ".join(f"hansa show {tid} {opt}" for _, opt, *_ in logs)]
+    for what, opt, head, f in logs:
+        lines = desk.redact(read_text(f)).rstrip().splitlines()
+        out += ["", f"== {head}"]
+        if not f.exists():
+            out.append("   its output is not kept: hansa show has its last lines")
+            continue
+        size = f.stat().st_size
+        out.append(f"   whole output: {f} ({len(lines)} line{'s' if len(lines) != 1 else ''}, {size:,} bytes)")
+        if not lines:
+            out.append("   (it printed nothing)")
+            continue
+        last = lines[-CHECK_LOG_TAIL:]
+        out.append(f"   its last {len(last)} lines:" if len(last) < len(lines) else "   all of it:")
+        out += last
+    return "\n".join(out)
+
+
+def check_log_text(desk: Desk, tid: str, merge: bool = False) -> str:
+    """hansa show ID --check-log / --merge-check-log: the whole output of the task's last check, or of its last
+    merge check, keys removed, under a first line that says which it is and how long."""
+    m = desk.meta(tid)
+    what = "merge check" if merge else "check"
+    logs = [x for x in _check_logs(desk, m) if x[0] == what]
+    if not logs:
+        return _no_check_text(m, what)
+    _, opt, head, f = logs[0]
+    if not f.exists():
+        return f"{head}\n(its output is not kept: hansa show has its last lines)"
+    log = desk.redact(read_text(f)).rstrip()
+    n = len(log.splitlines())
+    return (f"the whole output of {tid}'s {head} ({n} line{'s' if n != 1 else ''}, keys removed; from {f})\n"
+            + (log if log else "(it printed nothing)"))
 
 
 def report_text(desk: Desk, tid: str) -> str:
@@ -807,6 +858,29 @@ def report_text(desk: Desk, tid: str) -> str:
     return "\n\n".join(out)
 
 
+EFFORT_FROM = {"task": "the task's --effort", "provider": "the provider's default", "design": "the desk's design "
+               "setting", "coordinator": "the coordinator's setting"}
+
+
+def effort_text(effort: str, came_from, provider: dict | None) -> str:
+    """The effort a run was started with and where it came from (run.start records both: effort_used and
+    effort_from), and, on a provider whose endpoint is not Claude's own, that it may ignore it. '' for a run
+    started before hansa kept where it came from and with no effort."""
+    if came_from is None and not effort:
+        return ""
+    said = (f"effort {effort}" + (f" from {EFFORT_FROM.get(came_from, came_from)}" if came_from else "") if effort
+            else "claude's default effort")
+    if (provider or {}).get("kind") == "compatible":
+        said += "; its endpoint is not Claude's own and may ignore effort"
+    return said
+
+
+def run_text(m: dict, provider: dict | None) -> str:
+    """A run's provider, model and effort: `name (model, effort high from the task's --effort)`."""
+    e = effort_text(m.get("effort_used", m.get("effort", "")), m.get("effort_from"), provider)  # a task's, an attempt's
+    return f"{m['provider']} ({m.get('model_asked', m.get('model', ''))}" + (f", {e}" if e else "") + ")"
+
+
 def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     """hansa show. full: the whole text and report. heard: whether the session it is for hears from hansa
     (default: the session this command runs in)."""
@@ -815,7 +889,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     d = desk.tasks_dir / tid
     head = f"{tid} · {m['state']} · lane {m.get('lane') or 'any'}"
     if m.get("provider"):
-        head += f" · {m['provider']} ({m.get('model_asked')})" + (f" · {m['turns']} turns" if m.get("turns") else "")
+        head += (f" · {run_text(m, desk.settings()['providers'].get(m['provider']))}"
+                 + (f" · {m['turns']} turns" if m.get("turns") else ""))
     if m.get("started"):
         head += f" · {max(0, int(((m.get('finished') or time.time()) - m['started']) // 60))} min"
     if m.get("browser"):
@@ -845,8 +920,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out += [f"env: {x}" for x in m.get("env_left_out") or []]
     out += [f"what workers may not read: {x}" for x in m.get("no_read_left_out") or []]
     for a in m.get("attempts", []):
-        out.append(f"earlier try on {a['provider']}: {a['error']}" if a.get("kind") != "limit" else
-                   f"earlier run on {a['provider']}: {a['error']} (its usage limit; "
+        on = a["provider"]  # with its model and effort when they were not those of the run above
+        if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
+                m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
+            on = run_text(a, desk.settings()["providers"].get(a["provider"]))
+        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") != "limit" else
+                   f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
@@ -1373,7 +1452,7 @@ def release_settings_line(s: dict) -> str:
                "not paused (each target ticked on its own)" if listed else "")
             + (f" (lanes {', '.join(changed)} are on that list, but their repository, base branch or release command "
                "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
-            + f"; {len(words)} word(s) the principal keeps from going out are checked first. Both lists are the "
+            + f"; {len(words)} word(s) the principal keeps from going out are checked at hansa add (a task's title), at each merge and before each release. Both lists are the "
             "principal's, on the web page; you cannot set them (hansa ask). Do not push or deploy yourself.")
 
 

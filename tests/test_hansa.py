@@ -38,18 +38,21 @@ from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tm
 from hansa.web import start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
-from hansa.run import SANDBOX_TMPFS  # noqa: E402
+from hansa.run import RUN_TMP_DIR  # noqa: E402
 
 # What a lane's command on Linux is given in front of it, by hansa's prelude (run.LINUX_PRELUDE) and by srt: git's
-# global config and excludes in the run's tmpfs, srt's proxy settings for git. A test makes its own repositories
+# global config and excludes in the command's TMPDIR, srt's proxy settings for git. A test makes its own repositories
 # and runs git in them, and the prelude's tests run the prelude afresh: neither should meet the excludes (which
 # leave out .vscode, .gitconfig and the other placeholders' names) or a prelude already applied.
 LANE_GIT_ENV = ("GIT_CONFIG_GLOBAL", "HANSA_GIT_EXCLUDES", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_SSH_COMMAND")
 
 
 def in_lane_sandbox(env=os.environ) -> bool:
-    """Whether the suite runs inside hansa's sandbox on Linux, as a lane's check: the prelude ran before it."""
-    return bool(env.get("HANSA_GIT_EXCLUDES")) or env.get("TMPDIR", "").rstrip("/").endswith("/" + SANDBOX_TMPFS)
+    """Whether the suite runs inside hansa's sandbox on Linux, as a lane's check: the prelude ran before it, or
+    its TMPDIR is a lane command's own, in a desk's .hansa/tmp (run.run_tmp)."""
+    t = Path(env.get("TMPDIR") or "/")
+    return bool(env.get("HANSA_GIT_EXCLUDES")) or (t.name.startswith("hansa-") and t.parent.name == RUN_TMP_DIR
+                                                   and t.parent.parent.name == ".hansa")
 
 
 IN_LANE = in_lane_sandbox()  # as the suite started, before setUpModule takes HANSA_GIT_EXCLUDES out
@@ -428,6 +431,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "nu
 
 # A stand-in for srt: records how it was called, with the settings file's content, then runs the command.
 # Like the real one, it ignores the TMPDIR it is given: inside, TMPDIR is CLAUDE_CODE_TMPDIR, else /tmp/claude.
+# It records where that folder's hansa-tmp (run.RUN_TMP_LINK) leads, on Linux the command's TMPDIR on disk.
 # How macOS's sandbox reads a deny pattern, as measured with srt: srt's globToRegex (* and ? within a name, [...] as
 # written, and all beneath what it names), then without regard to case, a - just before ] read as a range up to the
 # end of the character set (a - first is a plain -), and a class of more than 15 elements (a character, \. or a
@@ -462,6 +466,8 @@ mode = os.fstat(1).st_mode
 with open(LOG, "a") as f:
     f.write(json.dumps({"argv": args, "settings": settings, "tmpdir": os.environ.get("TMPDIR", ""),
                         "tmp_there": os.path.isdir(os.environ.get("TMPDIR", "")), "cwd": os.getcwd(),
+                        "tmp_link": os.path.islink(os.path.join(os.environ.get("TMPDIR", ""), "hansa-tmp"))
+                        and os.readlink(os.path.join(os.environ["TMPDIR"], "hansa-tmp")) or "",
                         "env": dict(os.environ),
                         "stdout": "pipe" if stat.S_ISFIFO(mode) else "file" if stat.S_ISREG(mode) else "other"}) + "\n")
 EXTRA_DENY = []
@@ -659,6 +665,17 @@ class DeskTest(unittest.TestCase):
             return [c for c in calls if tried(c)]
         calls = [c for c in calls if not tried(c)]
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
+
+    def commands_tmp(self, call, allow) -> str:
+        """The TMPDIR a lane's command saw after the prelude, given a stand-in srt call: srt's (the run's folder),
+        or on Linux the command's own on disk that its link leads to (run.run_tmp), which it may write too."""
+        from hansa import run
+        if not account.LINUX:
+            return call["tmpdir"]
+        own = call["tmp_link"]  # run.RUN_TMP_LINK in the run's folder, as the stand-in srt found it
+        self.assertEqual(Path(own).parent, self.desk.state_dir / run.RUN_TMP_DIR)
+        self.assertIn(own, allow)
+        return os.path.realpath(own)
 
     @staticmethod
     def ran(call) -> str:
@@ -1186,13 +1203,26 @@ class DeskTest(unittest.TestCase):
         self.assertIn("check (run by hansa, not the worker): FAILED (exit 1) in 2 s: python3 -m unittest\n"
                       "  the failing tests, from its output:\n    " + "=" * 70 + "\n    FAIL: test_b (t.T.test_b)", shown)
         self.assertIn("    AssertionError: 1 != 2\n", shown)
-        self.assertIn(f"  the whole output: hansa show {tid} --check", shown)
+        self.assertIn(f"  the whole output: hansa show {tid} --check-log", shown)
         self.assertNotIn("test_a (t.T.test_a) ... ok", shown)
-        whole = self.hansa_out("show", tid, "--check")
-        self.assertTrue(whole.startswith("check (run by hansa, not the worker): FAILED (exit 1): python3 -m unittest\n"
-                                         "using [key of mimo]\n"), whole[:300])
+        whole = self.hansa_out("show", tid, "--check-log")
+        self.assertTrue(whole.startswith(f"the whole output of {tid}'s check (run by hansa, not the worker): FAILED "
+                                         f"(exit 1): python3 -m unittest ({len(log.splitlines())} lines, keys removed; "
+                                         f"from {self.desk.tasks_dir / tid / 'check.log'})\nusing [key of mimo]\n"),
+                        whole[:400])
         self.assertEqual(whole.count("test_a (t.T.test_a) ... ok"), 40)
         self.assertNotIn(key, whole)
+        # --check: each log apart, its file, its size and its last lines, under a first line that says so
+        both = self.hansa_out("show", tid, "--check")
+        self.assertTrue(both.startswith(f"{tid}: its check, each apart: how it ended, the file with its whole output, "
+                                        f"and its last 20 lines (keys removed). One of them whole: hansa show {tid} "
+                                        f"--check-log\n\n== check (run by hansa, not the worker): FAILED (exit 1): "
+                                        f"python3 -m unittest\n   whole output: {self.desk.tasks_dir / tid / 'check.log'} "
+                                        f"({len(log.splitlines())} lines, {(self.desk.tasks_dir / tid / 'check.log').stat().st_size:,} bytes)\n"),
+                        both[:600])
+        self.assertIn("   its last 20 lines:\n", both)
+        self.assertEqual(both.count("test_a (t.T.test_a) ... ok"), 0)  # 40 of them, all above its last 20 lines
+        self.assertNotIn(key, both)
         # a long run of failures is cut, and says how much more there is
         (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"--- FAIL: Test{i} (0.00s)\n" for i in range(90)))
         shown = views.show_text(self.desk, tid)
@@ -1209,11 +1239,21 @@ class DeskTest(unittest.TestCase):
         (self.desk.tasks_dir / tid / "merge-check.log").write_text("merged badly\n")
         self.desk.update(tid, merge_check_result={"ok": False, "exit": 3, "note": "", "command": "make test",
                                                   "onto": "0123456789abcdef", "seconds": 1, "tail": ["merged badly"]})
-        whole = self.hansa_out("show", tid, "--check")
-        self.assertIn("\n\nmerge check (on the task merged onto the base at 0123456789): FAILED (exit 3): make test\n"
-                      "merged badly", whole)
+        both = self.hansa_out("show", tid, "--check")
+        self.assertTrue(both.startswith(f"{tid}: its check and its merge check, each apart: "), both[:200])
+        self.assertIn(f"One of them whole: hansa show {tid} --check-log or hansa show {tid} --merge-check-log\n", both)
+        self.assertIn("\n\n== merge check (on the task merged onto the base at 0123456789): FAILED (exit 3): make test\n"
+                      f"   whole output: {self.desk.tasks_dir / tid / 'merge-check.log'} (1 line, 13 bytes)\n   all of it:\nmerged badly", both)
+        self.assertLess(both.index("== check"), both.index("== merge check"))
+        self.assertEqual(self.hansa_out("show", tid, "--merge-check-log"),
+                         f"the whole output of {tid}'s merge check (on the task merged onto the base at 0123456789): "
+                         f"FAILED (exit 3): make test (1 line, keys removed; from "
+                         f"{self.desk.tasks_dir / tid / 'merge-check.log'})\nmerged badly\n")
+        self.assertNotIn("merged badly", self.hansa_out("show", tid, "--check-log"))
+        self.assertIn(f"  the whole output: hansa show {tid} --merge-check-log", views.show_text(self.desk, tid))
         other = self.desk.new_task("Something else")
         self.assertEqual(self.hansa_out("show", other, "--check"), f"{other}: no check has run on it\n")
+        self.assertEqual(self.hansa_out("show", other, "--merge-check-log"), f"{other}: no merge check has run on it\n")
 
     def test_status_and_explain_say_where_the_web_page_is(self):
         st = views.status(self.desk)
@@ -1553,6 +1593,79 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             main(["--desk", str(self.desk.root), "merge", tid])
         self.assertFalse((self.repo / "notes.txt").exists())
+
+    def forbid(self, *words):
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=list(words))), {"ok": True, "problems": []})
+
+    def done_with(self, **lane):
+        s = self.desk.settings()
+        s["lanes"]["a"].update(lane)
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        return tid
+
+    def test_a_title_holding_a_forbidden_word_is_refused_at_add_and_the_text_is_not_looked_at(self):
+        self.forbid("Falcon")
+        said = self.refused("add", "Fix the badge", "--title", "Ship the FALCON badge")
+        self.assertIn('--title holds "Falcon", which the principal keeps from going out', said)
+        self.assertIn("Nothing was queued", said)
+        said = self.refused("add", "falcon badge\nmore")  # no --title: the first line is the title
+        self.assertIn("the title (the first line of the text, as no --title was given)", said)
+        self.assertIn('"falcon badge"', said)
+        self.assertIn("Nothing was queued", self.refused("design", "the falcon plan", "--lane", "a"))
+        self.assertEqual(self.desk.tasks(), [])
+        self.assertIn("queued", self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "a"))
+        self.forbid()
+        self.assertIn("queued", self.hansa("add", "x", "--title", "Ship the falcon badge"))
+
+    def test_a_task_adding_a_line_with_a_forbidden_word_is_not_merged_and_hansa_says_where(self):
+        tid = self.done_with(env={"FAKE_WRITE": "the Falcon plan"})
+        tip = self.git_out("rev-parse", "main")
+        self.forbid("falcon")
+        said = self.refused("merge", tid)
+        self.assertIn(f"the change in {tid} holds words the principal keeps from going out", said)
+        self.assertIn('notes.txt: the Falcon plan  ("falcon")', said)
+        self.assertIn(f"hansa retry {tid} --fresh", said)
+        self.assertIn("ask the principal", said)
+        self.assertIn("Nothing was merged", said)
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual(self.desk.meta(tid)["state"], "done")
+        self.forbid()  # nothing changes when the list is empty
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_a_forbidden_word_in_a_file_name_an_author_or_the_merge_message_stops_a_merge(self):
+        tid = self.done_with(env={"FAKE_HELLO": "falcon-notes.txt"})
+        self.forbid("Falcon")
+        self.assertIn("file name: falcon-notes.txt", self.refused("merge", tid))
+        self.forbid("osprey")
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Osprey Bot <bot@example.com>"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.done_with()
+        said = self.refused("merge", tid)
+        self.assertIn("author: Osprey Bot <bot@example.com>", said)
+        self.assertIn("merge author and committer: Osprey Bot <bot@example.com>", said)
+        self.forbid("heron")
+        s = self.desk.settings()
+        s["lanes"]["a"].pop("identity")
+        s["lanes"]["a"]["merge_message"] = "Merge {task} into heron: {title}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertIn(f"merge message: Merge {tid} into heron", self.refused("merge", tid))
+        self.forbid()
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_a_merge_check_does_not_land_a_merge_that_holds_a_forbidden_word(self):
+        tid = self.done_with(check="true", env={"FAKE_WRITE": "the falcon plan"})
+        tip = self.move_main()  # so it needs a merge check
+        self.assertIn("is not merged yet", self.hansa("merge", tid))
+        self.forbid("falcon")  # set while the merge check waits
+        m = self.settle_merge(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertIn("notes.txt: the falcon plan", m["merge_check_result"]["note"])
+        self.assertIn("nothing was merged", m["merge_check_result"]["note"])
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
 
     def test_what_a_worker_prints_stays_out_of_the_task_folder_until_hansa_removes_keys(self):
         key = "sk-test-printed-0321"
@@ -4114,6 +4227,31 @@ class DeskTest(unittest.TestCase):
         self.hansa("add", "--file", str(ok))
         self.assertEqual(len(self.desk.tasks()), 1)
 
+    def test_file_from_standard_input_refuses_a_redirected_secret_and_a_hard_link_to_one(self):
+        bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
+        token = self.desk.web_token()
+        hard = self.tmp / "notes.txt"
+        os.link(self.desk.state_dir / "web-token", hard)  # outside the desk, no link to follow
+        for f in (self.desk.state_dir / "web-token", hard):
+            with open(f) as stdin:  # hansa add --file - < .hansa/web-token
+                r = subprocess.run([bin_, "--desk", str(self.desk.root), "add", "--file", "-"], stdin=stdin,
+                                   capture_output=True, text=True, env=env, timeout=30)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("standard input is a file in the desk's .hansa/", r.stderr)
+            self.assertNotIn(token, r.stdout + r.stderr)
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("add", "--file", str(hard))
+        self.assertIn("which no agent reads", str(e.exception.code))
+        self.assertEqual(self.desk.tasks(), [])
+        r = subprocess.run([bin_, "--desk", str(self.desk.root), "add", "--file", "-"], input="Add a.txt\n",
+                           capture_output=True, text=True, env=env, timeout=30)  # a pipe
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["sh", "-c", f'"$0" --desk "$1" add --file - <<EOF\nAdd b.txt\nEOF\n', bin_,
+                            str(self.desk.root)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)  # a here-document, a temporary file in some shells
+        self.assertEqual(len(self.desk.tasks()), 2)
+
     def test_a_task_cancelled_while_hansa_prepares_it_never_runs(self):
         import hansa.run as run
         seen = self.tmp / "argv.jsonl"
@@ -4311,9 +4449,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
                                           "deniedDomains": [], "allowLocalBinding": True})
         worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
-        # the same lists as the worker's; on Linux, and the run's own folder srt mounts a tmpfs over (srt_settings)
-        tmpfs = run.full_paths([Path(call["tmpdir"]) / run.SANDBOX_TMPFS]) if account.LINUX else []
-        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"] + tmpfs)
+        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])  # the same lists as the worker's
         self.assertEqual(got["filesystem"]["denyWrite"], worker["denyWrite"])
         self.assertIn(str(self.desk.secrets_dir), got["filesystem"]["denyRead"])
         self.assertIn(str(Path.home() / ".ssh"), got["filesystem"]["denyRead"])
@@ -4323,7 +4459,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn(str(m2), allow)
         self.assertTrue(call["tmp_there"])
         self.assertIn(call["tmpdir"], allow)  # TMPDIR is a folder the setup may write
-        self.assertIn("tmp=" + call["tmpdir"], (self.desk.tasks_dir / tid / "setup.log").read_text())
+        self.assertIn("tmp=" + self.commands_tmp(call, allow), (self.desk.tasks_dir / tid / "setup.log").read_text())
         self.assertFalse(Path(call["tmpdir"]).exists())  # removed once the setup ended
         self.assertFalse((self.desk.state_dir / "runs" / tid).exists())  # the settings file too
 
@@ -7384,6 +7520,154 @@ class DeskTest(unittest.TestCase):
     def allowed_by(argv):
         return argv[argv.index("--allowedTools") + 1:]
 
+    def test_workers_and_verifiers_run_a_probe_from_a_script_file_in_a_lane_with_no_allowed_commands(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = []
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        vid = self.desk.meta(tid)["verify"]
+        self.settle(Dispatcher(self.desk), vid)
+        argvs = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(len(argvs), 2)
+        for argv, who in zip(argvs, (tid, vid)):
+            tmp = run.commands_tmp(self.desk.meta(who)["worker_tmps"][-1]["path"])
+            told = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+            self.assertIn("To try a line taken from a build or other script (one that holds rm, say), write it to a "
+                          f"script file in your temporary folder and run that with sh: `sh {tmp}/probe.sh`, not "
+                          '`bash -c "..."`. Claude Code refuses a shell -c it cannot check', told)
+            # no allowed command of the lane's, yet sh with a script runs: Bash is let through in the sandbox
+            self.assertIn("Bash", self.allowed_by(argv))
+            self.assertFalse([r for r in self.denied_by(argv) if r.startswith(("Bash(sh", "Bash(bash", "Bash(/bin"))])
+            box = self.sandbox_of(argv)
+            self.assertEqual((box["autoAllowBashIfSandboxed"], box["allowUnsandboxedCommands"]), (True, False))
+        probe = self.tmp / "probe"
+        probe.mkdir()
+        (probe / "probe.sh").write_text(f'mkdir -p "{probe}/out" && touch "{probe}/out/x" && rm -r "{probe}/out" '
+                                        '&& echo ran\n')
+        r = subprocess.run(["sh", str(probe / "probe.sh")], capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, "ran\n"), r.stderr)
+        self.assertFalse((probe / "out").exists())
+
+    def test_show_and_status_give_the_effort_each_run_started_with_and_where_it_came_from(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        plain = self.desk.new_task("Add hello.txt")
+        self.settle(d, plain)
+        self.assertNotIn("--effort", json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn(f"{plain} · done · lane a · claude (opus, claude's default effort) · ", views.show_text(self.desk, plain))
+        asked = self.desk.new_task("Add hello.txt", effort="max")
+        self.settle(d, asked)
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertEqual(argv[argv.index("--effort") + 1], "max")
+        self.assertIn(" · claude (opus, effort max from the task's --effort) · ", views.show_text(self.desk, asked))
+        s = self.desk.settings()
+        s["providers"]["claude"]["effort"] = "high"
+        self.assertEqual(self.desk.save_settings(s), [])
+        own = self.desk.new_task("Add hello.txt")
+        self.settle(d, own)
+        self.assertIn(" · claude (opus, effort high from the provider's default) · ", views.show_text(self.desk, own))
+        # an endpoint that is not Claude's own may ignore it
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "low", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-effort-0001")
+        compat = self.desk.new_task("Add hello.txt")
+        self.settle(d, compat)
+        said = ("mimo (mimo-x, effort low from the provider's default; its endpoint is not Claude's own and may ignore "
+                "effort)")
+        self.assertIn(f" · {said} · ", views.show_text(self.desk, compat))
+        # hansa status, of a run under way
+        self.desk.update(compat, state="running", phase="", pid=os.getpid(), pid_start=run.proc_start(os.getpid()),
+                         started=time.time())
+        st = views.status(self.desk)
+        row = next(x for x in st["running"] if x["id"] == compat)
+        self.assertEqual((row["effort"], row["effort_from"]), ("low", "provider"))
+        self.assertIn(f"  {compat} a on {said}, 0 min: ", views.status_text(st))
+        self.desk.update(compat, state="done", pid=None)
+        # an earlier run started otherwise names its own; one started as the last does not repeat it
+        keep = run.run_numbers(self.desk.meta(asked), {})
+        self.assertEqual((keep["model"], keep["effort"], keep["effort_from"]), ("opus", "max", "task"))
+        self.desk.update(own, attempts=[{"provider": "claude", "at": time.time(), "error": "it stopped",
+                                         "kind": "refused", **keep},
+                                        {"provider": "claude", "at": time.time(), "error": "again", "kind": "refused",
+                                         **run.run_numbers(self.desk.meta(own), {})}])
+        shown = views.show_text(self.desk, own)
+        self.assertIn("earlier try on claude (opus, effort max from the task's --effort): it stopped\n", shown)
+        self.assertIn("earlier try on claude: again\n", shown)
+
+    def test_hansa_help_with_a_command_prints_that_commands_help(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["verify", "--help"])
+        self.assertEqual(self.hansa_out("help", "verify"), out.getvalue())
+        self.assertTrue(self.hansa_out("help").startswith("# Desk card"))
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("help", "nosuch")
+        self.assertIn("no command nosuch", str(e.exception.code))
+
+    def test_hansa_removes_the_empty_folders_it_makes_in_the_temporary_folder(self):
+        from hansa import run
+        base = self.tmp / "tmp"
+        base.mkdir()
+        old = time.time() - 2 * run.TMP_SWEEP_AGE
+        def folder(name, old_one=True, inside=""):
+            f = base / name
+            f.mkdir()
+            if inside:
+                (f / inside).write_text("")
+            if old_one:
+                os.utime(f, (old, old))
+            return f
+        left = folder("hansa-no-hooks-abc123")
+        inbox = folder(f"hansa-{os.getuid()}")
+        fresh = folder("hansa-no-hooks-fresh", old_one=False)  # perhaps a running process's
+        used = folder("hansa-no-hooks-used", inside="x")
+        another = folder(f"hansa-{os.getuid() + 1}")  # another account's name
+        other = folder("hansa-t0001-abc")  # a worker's, removed with its run (remove_sandbox_tmp)
+        self.assertEqual(sorted(run.sweep_tmp(str(base))), sorted([str(left), str(inbox)]))
+        for f in (fresh, used, another, other):
+            self.assertTrue(f.is_dir(), f)
+        # a process removes its own as it exits
+        r = subprocess.run([sys.executable, "-c", "from hansa import run; print(run.no_hooks())"],
+                           cwd=str(Path(__file__).resolve().parent.parent), env={**os.environ, "TMPDIR": str(base)},
+                           capture_output=True, text=True)
+        made = r.stdout.strip()
+        self.assertTrue(made.startswith(str(base / run.NO_HOOKS_PREFIX)), r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(made))
+        # hansa serve sweeps as it starts, then each hour
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "sweep_tmp") as swept:
+            d.tick()
+            d.tick()
+            self.assertEqual(swept.call_count, 1)
+            d.swept -= run.TMP_SWEEP_AGE
+            d.tick()
+            self.assertEqual(swept.call_count, 2)
+        # a session's inbox folder goes with the last inbox in it, once the session has ended
+        box = base / f"hansa-{os.getuid()}"
+        box.mkdir()
+        (box / "c2.sock").write_text("")  # not a socket: not one hansa's inbox, so left as it is
+        notify.remove_inbox(str(box / "c1.sock"))
+        self.assertTrue(box.is_dir())
+        (box / "c2.sock").unlink()
+        notify.remove_inbox(str(box / "c1.sock"))  # its session's Claude Code removed the socket itself
+        self.assertFalse(box.exists())
+        mine = base / "mine"
+        mine.mkdir()
+        notify.remove_inbox(str(mine / "c1.sock"))  # a --messaging-socket-path of the session's own: not hansa's
+        self.assertTrue(mine.is_dir())
+
     def test_a_lanes_allow_list_holds_web_tools_to_listed_sites(self):
         s = self.desk.settings()
         for bad in ("WebFetch", "WebFetch(*)", "WebFetch(domain:*)", "WebFetch(domain:*.com)", "WebFetch(example.com)",
@@ -9337,8 +9621,7 @@ class DeskTest(unittest.TestCase):
                 lane = self.desk.settings()["lanes"]["a"]
                 deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
                 srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
-            # a setup's and a check's, as a worker's, and on Linux the tmpfs for their TMPDIR (srt_settings)
-            self.assertEqual(deny, [x for x in srt if Path(x).name != run.SANDBOX_TMPFS])
+            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
             for f in everywhere:
                 self.assertIn(str(home / f), deny, (system, f))
             for f in mac:
@@ -9380,8 +9663,7 @@ class DeskTest(unittest.TestCase):
                 lane = self.desk.settings()["lanes"]["a"]
                 deny = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
                 srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
-            # a setup's and a check's, as a worker's, and on Linux the tmpfs for their TMPDIR (srt_settings)
-            self.assertEqual(deny, [x for x in srt if Path(x).name != run.SANDBOX_TMPFS])
+            self.assertEqual(deny, srt)  # a setup's and a check's, as a worker's
             for f in everywhere:
                 self.assertIn(str(home / f), deny, (system, f))
             for f in mac:
@@ -10986,7 +11268,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn(str(Path(m["worktree"]) / ".git"), got["filesystem"]["denyWrite"])
         self.assertIn(m["worktree"], got["filesystem"]["allowWrite"])
         self.assertIn(call["tmpdir"], got["filesystem"]["allowWrite"])  # TMPDIR is a folder the check may write
-        self.assertIn("tmp=" + call["tmpdir"], m["check"]["tail"])
+        self.assertIn("tmp=" + self.commands_tmp(call, got["filesystem"]["allowWrite"]), m["check"]["tail"])
         [tried] = [c for c in self.srt_calls(tries=True) if c not in self.srt_calls()]  # srt was tried first
         self.assertEqual((tried["settings"]["network"], tried["cwd"]), (got["network"], call["cwd"]))
         self.assertTrue(self.desk.state_dir.joinpath("srt.json").exists())
@@ -14068,10 +14350,12 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(release.get(self.desk, 2)["state"], "approved")
 
     PAGE_HARNESS = r"""
-// Runs the page's script with just enough of a DOM to build the Settings tab from the settings given on standard
-// input, then prints each release tick as the page built it: no layout, no browser.
+// Runs the page's script with just enough of a DOM to build its tabs from the replies given on standard input (by
+// path: /api/settings, /api/status, /api/events), then prints what argv[3] asks for: "ticks", each release tick of
+// the Settings tab as the page built it; "nulls", the text nodes of the Status and Settings tabs that read "null".
+// No layout, no browser.
 const fs = require("fs"), vm = require("vm");
-const [page, given] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse(fs.readFileSync(0, "utf8"))];
+const [page, given, ask] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse(fs.readFileSync(0, "utf8")), process.argv[3]];
 const script = page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"));
 class El {
   constructor(tag) { this.tag = tag; this.kids = []; this.attrs = {}; this.className = ""; this.hidden = false;
@@ -14079,7 +14363,9 @@ class El {
   set textContent(x) { this.kids = [String(x)]; } get textContent() { return this.kids.map(k => k.textContent ?? k).join(""); }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v); }
   addEventListener(k, f) { this.on[k] = f; }
-  append(...xs) { this.kids.push(...xs); } replaceChildren(...xs) { this.kids = xs; }
+  // as the DOM does, what is not a node becomes text: null the text "null"
+  append(...xs) { this.kids.push(...xs.map(x => x instanceof El || x instanceof Text ? x : new Text(String(x)))); }
+  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
   contains() { return false; } get nodeType() { return 1; }
 }
 class Text { constructor(s) { this.textContent = s; } get nodeType() { return 3; } }
@@ -14087,13 +14373,21 @@ const ids = {};
 const document = {createElement: t => new El(t), createTextNode: s => new Text(s), title: "", body: new El("body"),
   hidden: false, activeElement: null, querySelectorAll: () => [],
   querySelector: s => ids[s] || (ids[s] = new El("div"))};
-const reply = path => path.startsWith("/api/settings") ? given : path.startsWith("/api/events") ? [] : null;
+const reply = path => given[Object.keys(given).find(p => path.startsWith(p))] ?? (path.startsWith("/api/events") ? [] : null);
 const fetch = async path => { const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r}; };
 const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
   setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
 vm.runInContext(script, ctx);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
-vm.runInContext("loadSettings()", ctx).then(() => {
+if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()])", ctx).then(() => {
+  const nulls = [];
+  for (const tab of ["#tab-status", "#tab-settings"]) {
+    walk(ids[tab], el => el.kids.forEach(k => { if ((k.textContent ?? k) === "null" && !(k instanceof El)) nulls.push(tab); }));
+    if (!ids[tab] || !ids[tab].kids.length) nulls.push(tab + " not built");
+  }
+  console.log(JSON.stringify(nulls));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else vm.runInContext("loadSettings()", ctx).then(() => {
   const ticks = [];
   walk(ids["#tab-settings"], el => { if (el.className === "tick") ticks.push({lane: el.attrs["data-lane"], target: el.attrs["data-target"],
     ticked: el.kids[0].checked, text: el.textContent}); });
@@ -14163,7 +14457,7 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-        r = subprocess.run(["node", str(harness), str(page)], input=json.dumps(public_settings(self.desk)),
+        r = subprocess.run(["node", str(harness), str(page), "ticks"], input=json.dumps({"/api/settings": public_settings(self.desk)}),
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
@@ -14179,6 +14473,20 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         # a click on the first tick unticks it alone
         self.assertEqual([listed for listed in out["after"] if isinstance(listed, dict) and listed.get("target") == "shop-test"], [])
         self.assertEqual(len(out["after"]), 3)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_status_and_settings_tabs_show_no_null_for_sections_a_desk_has_not(self):
+        # a desk with nothing running, queued or waiting: the sections it has not are left out, not shown as "null"
+        status = views.status(self.desk)
+        self.assertEqual((status["running"], status["queued"], status["review"], status["design"]), ([], [], [], []))
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        given = {"/api/settings": public_settings(self.desk), "/api/status": status, "/api/events": []}
+        r = subprocess.run(["node", str(harness), str(page), "nulls"], input=json.dumps(given),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [])
 
     def test_the_coordinator_cannot_change_the_principals_release_settings(self):
         s = self.desk.settings()
@@ -15849,37 +16157,106 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         for kept in (".m2/settings.xml", ".m2", ".gradle/gradle.properties", ".gradle"):  # mirrors, proxies a build needs
             self.assertNotIn(kept, home_secrets())
 
-    def test_on_linux_srt_mounts_a_tmpfs_of_its_own_for_the_commands_temporary_folder(self):
+    def test_on_linux_a_lane_commands_tmpdir_is_a_folder_of_its_own_on_the_desks_disk(self):
         from hansa import run
         lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
-        got = {}
+        got, folders = {}, {}
         for linux in (False, True):
-            t = self.tmp / f"run-{linux}"
-            t.mkdir()
             with unittest.mock.patch.object(account, "LINUX", linux):
-                got[linux] = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(t))["filesystem"]
+                tmp, own = folders[linux] = run.run_tmp(self.desk, "check")
+                self.addCleanup(shutil.rmtree, own, ignore_errors=True)
+                self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+                got[linux] = run.srt_settings(self.desk, lane, "claude", p, self.repo, tmp, own=own)["filesystem"]
                 prelude = run.with_prelude("true")
-            self.assertEqual((t / run.SANDBOX_TMPFS).is_dir(), linux)  # srt mounts a tmpfs only over one that is there
+                worker = run.sandbox_settings(self.desk, lane, "claude", p, self.repo)["sandbox"]["filesystem"]
             self.assertEqual(run.LINUX_PRELUDE in prelude, linux)
             self.assertTrue(prelude.startswith(run.sandbox_prelude(linux)))
+            self.assertEqual(Path(tmp).parent, Path(tempfile.gettempdir()))  # srt's, its sockets in it, as before
+            self.assertEqual(stat.S_IMODE(os.stat(own).st_mode), 0o700)
+            self.assertIn(str(self.desk.state_dir), got[linux]["denyRead"])  # hidden from every other run's sandbox:
+            self.assertIn(str(self.desk.state_dir), worker["denyRead"])  # a lane command's, a worker's
+        tmp, own = folders[False]
+        self.assertEqual((own, os.listdir(tmp)), (tmp, []))  # macOS: one folder, as it was
+        tmp, own = folders[True]
+        self.assertEqual(Path(own).parent, self.desk.state_dir / run.RUN_TMP_DIR)  # under the desk, on its disk
+        self.assertTrue(Path(own).name.startswith("hansa-check-"))
+        self.assertEqual(stat.S_IMODE(os.stat(Path(own).parent).st_mode), 0o700)
+        self.assertEqual(os.readlink(Path(tmp) / run.RUN_TMP_LINK), own)  # what the prelude follows
+        self.assertEqual(os.listdir(tmp), [run.RUN_TMP_LINK])
         fs, mac = got[True], got[False]
-        tmpfs = run.full_paths([self.tmp / "run-True" / run.SANDBOX_TMPFS])
-        self.assertEqual(fs["denyRead"][-len(tmpfs):], tmpfs)  # read-denied: srt hides it under an empty tmpfs
-        self.assertEqual(fs["denyRead"][:-len(tmpfs)], mac["denyRead"])
-        self.assertIn(str(self.tmp / "run-True"), fs["allowWrite"])  # the run's folder, srt's sockets in it, as before
-        tops = {tempfile.gettempdir(), os.path.realpath(tempfile.gettempdir())}  # a hansa-tmpfs itself in a lane's check
+        self.assertEqual(fs["denyRead"], mac["denyRead"])  # no folder of its own denied any more
+        self.assertEqual(fs["denyWrite"], mac["denyWrite"])
+        self.assertEqual([x for x in fs["allowWrite"] if ".hansa" in Path(x).parts], run.full_paths([own]))
+        self.assertEqual([x for x in mac["allowWrite"] if ".hansa" in Path(x).parts], [])
+        self.assertIn(tmp, fs["allowWrite"])
+        # a desk whose path holds a space: the run's folder alone, a TMPDIR no build tool breaks on
+        spaced = types.SimpleNamespace(state_dir=self.tmp / "a desk" / ".hansa")
+        with unittest.mock.patch.object(account, "LINUX", True):
+            tmp, own = run.run_tmp(spaced, "setup")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.assertEqual((own, os.listdir(tmp)), (tmp, []))
+        self.assertFalse(spaced.state_dir.exists())
 
-        def below_tmpdir(x):
-            return next((x[len(t):] for t in tops if x == t or x.startswith(t.rstrip("/") + "/")), x)
-        self.assertFalse([x for x in fs["allowWrite"] + fs["denyWrite"] if run.SANDBOX_TMPFS in below_tmpdir(x)])
-        self.assertFalse([x for x in mac["denyRead"] if run.SANDBOX_TMPFS in below_tmpdir(x)])
+    def test_on_linux_a_lane_commands_tmpdir_on_disk_is_removed_when_it_ends(self):
+        from hansa import run
+        s = self.desk.settings()
+        step = 'echo "tmp=$TMPDIR" && echo kept > "$TMPDIR/f" && ls "$TMPDIR"'
+        s["lanes"]["a"].update(setup=step, check="test -f hello.txt && " + step, network=["pypi.org"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        with unittest.mock.patch.object(account, "LINUX", True):
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
+        root = self.desk.state_dir / run.RUN_TMP_DIR
+        for log, name in ((self.desk.tasks_dir / tid / "setup.log").read_text(), "setup"), ("\n".join(m["check"]["tail"]), "check"):
+            [said] = [x for x in log.splitlines() if x.startswith("tmp=")]
+            own = Path(said[4:])
+            self.assertEqual(own.parent, root, log)  # the prelude followed the run folder's link to it
+            self.assertTrue(own.name.startswith(f"hansa-{name}-"))
+            self.assertIn("f", log.splitlines())  # written there, beside the git files the prelude made
+        calls = self.srt_calls()
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            allow = call["settings"]["filesystem"]["allowWrite"]
+            self.assertTrue([x for x in allow if Path(x).parent == root], allow)
+            self.assertIn(call["tmpdir"], allow)  # srt's own: its TMPDIR and CLAUDE_CODE_TMPDIR, as before
+            self.assertFalse(Path(call["tmpdir"]).exists())
+        self.assertEqual(os.listdir(root), [])  # each removed when its command ended
+        self.assertEqual(self.desk.meta(tid)["sandbox_tmp"], [])
+
+    def test_on_linux_what_a_check_leaves_is_swept_by_its_marker_or_its_folder_on_disk(self):
+        from hansa import run
+        from hansa.run import alive
+        out = self.tmp / "left.txt"
+        leave = ('import os, subprocess as s, sys; e = dict(os.environ); e.pop("HANSA_RUN", None); '
+                 'o = dict(start_new_session=True, stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL); '
+                 'w = [sys.executable, "-c", "import time; time.sleep(300)"]; '  # macOS hides /bin/sleep's environment
+                 'a = s.Popen(w, **o); b = s.Popen(w, env=e, **o); '
+                 'open(sys.argv[1], "w").write(" ".join([str(a.pid), str(b.pid), os.environ["TMPDIR"]]))')
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"test -f hello.txt && python3 -c {shlex.quote(leave)} {shlex.quote(str(out))}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        with unittest.mock.patch.object(account, "LINUX", True), \
+                unittest.mock.patch("hansa.run.run_recorded", lambda m: {}):  # found by neither serve's record nor its group
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+        marked, bare, tmpdir = out.read_text().split()
+        self.addCleanup(lambda: [alive(int(p)) and os.kill(int(p), 9) for p in (marked, bare)])
+        self.assertEqual(Path(tmpdir).parent, self.desk.state_dir / run.RUN_TMP_DIR)  # its own folder, on disk
+        self.assertIn(tmpdir, m["run_folders"])
+        end = time.time() + 15  # the check's sweep comes after the task is recorded as done
+        while "left_running" not in m and time.time() < end:
+            time.sleep(0.1)
+            m = self.desk.meta(tid)
+        self.assertEqual(sorted(x["pid"] for x in m.get("left_running", [])), sorted([int(marked), int(bare)]))
+        self.assertFalse(alive(int(marked)) or alive(int(bare)))
 
     def test_explain_lane_on_linux_says_the_mount_table_can_call_a_writable_folder_read_only(self):
         for linux in (False, True):
             with unittest.mock.patch.object(account, "LINUX", linux):
                 text = views.explain_text(self.desk, "lane", "a")
             for said in ("FileStore.isReadOnly", "findmnt", "trust the error of the write itself",
-                         "TMPDIR of each of the lane's commands hansa runs in srt is a tmpfs of its own",
+                         "is a folder of its own on the desk's disk, in .hansa/tmp, which no other run can read",
                          "does not list the empty files the sandbox puts at the top of the worktree"):
                 (self.assertIn if linux else self.assertNotIn)(said, text)
 
@@ -15897,12 +16274,18 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         sh("git", "add", ".vscode", cwd=self.repo)
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "editor", cwd=self.repo)
         lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
-        t = tempfile.mkdtemp(dir=self.tmp)
-        f = Path(t) / "settings.json"
-        write_json(f, run.srt_settings(self.desk, lane, "claude", p, self.repo, t))
+        t, own = run.run_tmp(self.desk, "check")  # the folders of a lane's check (in_srt)
+        t2, own2 = run.run_tmp(self.desk, "check")  # and of another run's, beside it
+        for x in (t, own, t2, own2):
+            self.addCleanup(shutil.rmtree, x, ignore_errors=True)
+        f, f2 = Path(t) / "settings.json", Path(t2) / "settings.json"
+        write_json(f, run.srt_settings(self.desk, lane, "claude", p, self.repo, t, own=own))
+        write_json(f2, run.srt_settings(self.desk, lane, "claude", p, self.repo, t2, own=own2))
         check = ('printf "\\n" >> .vscode/settings.json && echo made > new.txt && git status --porcelain -uall'
                  ' && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git status --porcelain'
-                 ' && echo "tmp=$TMPDIR" && : > "$TMPDIR/w" && echo wrote')
+                 ' && echo "tmp=$TMPDIR" && : > "$TMPDIR/w" && echo wrote'
+                 ' && echo "devices $(stat -c %d "$TMPDIR") $(stat -c %d "$TMPDIR/..")"'
+                 """ && awk -v d="$TMPDIR" '$5 == d { split($6, o, ","); print "mount " o[1] }' /proc/self/mountinfo""")
         r = subprocess.run([srt, "--settings", str(f), "--", "sh", "-c", run.in_sandbox(self.desk, lane, check)],
                            cwd=self.repo, capture_output=True, text=True, timeout=120,
                            env={**os.environ, "PATH": path, "TMPDIR": t, "CLAUDE_CODE_TMPDIR": t})
@@ -15913,14 +16296,23 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertIn(" M .vscode/settings.json", lines)  # tracked: still listed
         self.assertIn("?? new.txt", lines)
         self.assertFalse([x for x in lines if x.startswith("??") and x[3:].split("/")[0] in run.SANDBOX_PLACEHOLDERS], lines)
-        self.assertIn(f"tmp={Path(t) / run.SANDBOX_TMPFS}", lines)  # srt's tmpfs, another device than the folder
+        self.assertIn(f"tmp={os.path.realpath(own)}", lines)  # the command's own folder, on the desk's disk
         self.assertIn("wrote", lines)
-        self.assertFalse((Path(t) / run.SANDBOX_TMPFS / "w").exists())  # in memory, not on the host
+        self.assertTrue((Path(own) / "w").exists())  # on disk, not in memory
+        [devices] = [x.split()[1:] for x in lines if x.startswith("devices ")]
+        self.assertNotEqual(devices[0], devices[1])  # a mount of its own, whose parent is srt's tmpfs over .hansa,
+        self.assertIn("mount rw", lines)  # writable in the mount table: Java's FileStore.isReadOnly says false
+        r = subprocess.run([srt, "--settings", str(f2), "--", "sh", "-c",
+                            f"ls {shlex.quote(own)} 2>&1; cat {shlex.quote(own)}/w 2>&1; echo done"],
+                           cwd=self.repo, capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "PATH": path, "TMPDIR": t2, "CLAUDE_CODE_TMPDIR": t2})
+        self.assertIn("done", r.stdout.splitlines(), r.stdout + r.stderr)
+        self.assertNotIn("w", r.stdout.splitlines())  # another run's sandbox cannot read it
 
 
 class LinuxPreludeTest(unittest.TestCase):
-    """run.LINUX_PRELUDE, run in the sandbox on Linux before a lane's commands and a worker's: the run's tmpfs as
-    TMPDIR, and git told to leave out the sandbox's placeholders. Run here without a sandbox, as sh reads it."""
+    """run.LINUX_PRELUDE, run in the sandbox on Linux before a lane's commands and a worker's: the command's own
+    folder on disk as TMPDIR, and git told to leave out the sandbox's placeholders. Run here without a sandbox, as sh reads it."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -16040,7 +16432,7 @@ class LinuxPreludeTest(unittest.TestCase):
         self.placeholders()
         self.assertEqual(self.git_status(PATH=f"{fake}{os.pathsep}{self.env['PATH']}"), [])
 
-    def test_it_adds_its_excludes_once_and_uses_srts_tmpfs_only_when_there(self):
+    def test_it_adds_its_excludes_once_and_moves_tmpdir_to_the_commands_own_folder_only_when_it_may_write_it(self):
         from hansa import run
         show = 'echo "$TMPDIR $GIT_CONFIG_GLOBAL $GIT_CONFIG_COUNT ${GIT_CONFIG_KEY_1:-none}"'
         twice = run.sandbox_prelude(True) + "exec /bin/sh -c " + shlex.quote(run.sandbox_prelude(True) + show)
@@ -16054,27 +16446,32 @@ class LinuxPreludeTest(unittest.TestCase):
         self.assertNotIn("hansa-gitconfig", config)
         self.assertEqual(sorted(re.sub(r"-[0-9]+-[0-9]+$", "", n) for n in os.listdir(self.run_tmp)),
                          ["hansa-git-excludes", "hansa-gitconfig"])  # one of each, and no part left
-        tmpfs = self.run_tmp / run.SANDBOX_TMPFS
-        tmpfs.mkdir()
+        own = self.tmp / "desk" / ".hansa" / run.RUN_TMP_DIR / "hansa-check-x"  # as run.run_tmp makes them
+        own.mkdir(parents=True)
+        (self.run_tmp / run.RUN_TMP_LINK).mkdir()  # a folder of that name, not the link: TMPDIR stays
         r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=self.env, capture_output=True,
                            text=True, check=True)
-        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))  # the same device: srt mounted nothing there
-        fake = self.tmp / "bin"
-        fake.mkdir()
-        (fake / "stat").write_text('#!/bin/sh\ncase $3 in */%s) echo 2 ;; *) echo 1 ;; esac\n' % run.SANDBOX_TMPFS)
-        (fake / "stat").chmod(0o755)
-        env = {**self.env, "PATH": f"{fake}{os.pathsep}{self.env['PATH']}"}  # a device of its own, as srt's tmpfs
-        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))
+        (self.run_tmp / run.RUN_TMP_LINK).rmdir()
+        (self.run_tmp / run.RUN_TMP_LINK).symlink_to(self.tmp / "gone")  # srt bound nothing there: TMPDIR stays
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=self.env, capture_output=True,
                            text=True, check=True)
-        self.assertEqual(r.stdout.split()[0], str(tmpfs))
-        self.assertEqual(Path(r.stdout.split()[1]).parent, tmpfs)
-        self.assertEqual(len(list(tmpfs.glob("hansa-git-excludes-*"))), 1)
-        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + 'echo "$JAVA_TOOL_OPTIONS"'], env=env,
+        self.assertEqual(r.stdout.split()[0], str(self.run_tmp))
+        (self.run_tmp / run.RUN_TMP_LINK).unlink()
+        (self.run_tmp / run.RUN_TMP_LINK).symlink_to(own)
+        own = Path(os.path.realpath(own))  # the folder itself, as srt binds it, links resolved
+        for env in (self.env, {**self.env, "TMPDIR": f"{self.run_tmp}/"}):
+            r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+                               text=True, check=True)
+            self.assertEqual(r.stdout.split()[0], str(own))
+            self.assertEqual(Path(r.stdout.split()[1]).parent, own)
+        self.assertEqual(len(list(own.glob("hansa-git-excludes-*"))), 1)
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + 'echo "$JAVA_TOOL_OPTIONS"'], env=self.env,
                            capture_output=True, text=True, check=True)
-        self.assertEqual(r.stdout.strip(), f"-Djava.io.tmpdir={tmpfs}")  # Java's temporary folder too
-        tmpfs.chmod(0o500)  # a tmpfs the command cannot write: the run's folder stays
-        self.addCleanup(tmpfs.chmod, 0o700)
-        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=env, capture_output=True,
+        self.assertEqual(r.stdout.strip(), f"-Djava.io.tmpdir={own}")  # Java's temporary folder too
+        own.chmod(0o500)  # a folder the command cannot write: the run's folder stays
+        self.addCleanup(own.chmod, 0o700)
+        r = subprocess.run(["/bin/sh", "-c", run.sandbox_prelude(True) + show], env=self.env, capture_output=True,
                            text=True, check=True)
         self.assertEqual(r.stdout.split()[0], str(self.run_tmp))
         # a worker's TMPDIR (Claude Code's own folder) has no such folder, and macOS gets none of it
@@ -16378,11 +16775,12 @@ class UnixSocketSkipTest(unittest.TestCase):
 class LaneEnvTest(unittest.TestCase):
     """The suite run as a lane's check on Linux, inside hansa's sandbox, without what the prelude gave it."""
 
-    def test_a_lanes_sandbox_is_told_by_the_preludes_excludes_or_its_tmpfs(self):
-        self.assertTrue(in_lane_sandbox({"HANSA_GIT_EXCLUDES": "/t/hansa-tmpfs/hansa-git-excludes-1-2"}))
-        self.assertTrue(in_lane_sandbox({"TMPDIR": f"/tmp/hansa-check-x/{SANDBOX_TMPFS}"}))
-        self.assertTrue(in_lane_sandbox({"TMPDIR": f"/tmp/hansa-check-x/{SANDBOX_TMPFS}/"}))
-        for env in ({}, {"TMPDIR": "/tmp"}, {"TMPDIR": f"/tmp/{SANDBOX_TMPFS}-not"}, {"HANSA_GIT_EXCLUDES": ""},
+    def test_a_lanes_sandbox_is_told_by_the_preludes_excludes_or_its_tmpdir(self):
+        self.assertTrue(in_lane_sandbox({"HANSA_GIT_EXCLUDES": "/d/.hansa/tmp/hansa-check-x/hansa-git-excludes-1-2"}))
+        self.assertTrue(in_lane_sandbox({"TMPDIR": f"/d/.hansa/{RUN_TMP_DIR}/hansa-check-x"}))
+        self.assertTrue(in_lane_sandbox({"TMPDIR": f"/d/.hansa/{RUN_TMP_DIR}/hansa-check-x/"}))
+        for env in ({}, {"TMPDIR": "/tmp"}, {"TMPDIR": "/tmp/hansa-check-x"}, {"TMPDIR": f"/d/{RUN_TMP_DIR}/hansa-check-x"},
+                    {"TMPDIR": f"/d/.hansa/{RUN_TMP_DIR}"}, {"HANSA_GIT_EXCLUDES": ""},
                     {"GIT_CONFIG_GLOBAL": "/home/me/.gitconfig"}):  # an account's own: not a lane's
             self.assertFalse(in_lane_sandbox(env), env)
 

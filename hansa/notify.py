@@ -32,6 +32,7 @@ of the desk. Desk-wide events go to every follower.
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -707,6 +708,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         except Exception as e:  # noqa: BLE001 - the register then shows it as gone quiet, which it is
             _say(f"could not record the end: {e}")
         write_json(priv / f"{key}.state.json", {**read_json(priv / f"{key}.state.json", {}), "ended": now()})
+        if gone(sess):  # not when hansa notify off ends it: the session still runs, its inbox with it
+            remove_inbox(sock)
         held.close()
 
 
@@ -1158,6 +1161,7 @@ def socket_path(pid: int) -> str:
             continue
         if stat.S_IMODE(st.st_mode) & 0o077:
             os.chmod(d, 0o700)
+        os.utime(d)  # in use again: run.sweep_tmp removes only an empty one left alone for an hour
         path = os.path.join(d, f"c{pid}.sock")
         try:
             if stat.S_ISSOCK(os.lstat(path).st_mode):  # left by an earlier process with this pid
@@ -1166,6 +1170,19 @@ def socket_path(pid: int) -> str:
             pass
         return path
     raise RuntimeError("there is no short folder only this account can open for the session's inbox")
+
+
+def remove_inbox(sock: str) -> None:
+    """Once its session has ended: the inbox socket_path gave it, and its folder when no other session's inbox is
+    in it. An inbox elsewhere (the session's own --messaging-socket-path) is left as it is."""
+    d = os.path.dirname(sock)
+    if os.path.basename(d) != f"hansa-{os.getuid()}":
+        return
+    with contextlib.suppress(OSError):
+        if stat.S_ISSOCK(os.lstat(sock).st_mode):
+            os.unlink(sock)
+    with contextlib.suppress(OSError):
+        os.rmdir(d)  # only when empty
 
 
 def clear_said(pid: int, window: str, running: bool = False) -> str:

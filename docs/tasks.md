@@ -67,6 +67,28 @@ lane, or waits for one.
   the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
   and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
 
+## A check's output
+
+`hansa show ID` gives a failed check's failing tests and its last lines. `hansa show ID --check` gives the task's
+last check and its last merge check apart, each under a line of its own (`== check ...`, `== merge check ...`):
+how it ended, the file in the task's folder with its whole output (`check.log`, `merge-check.log`, or
+`merge-setup.log` when the lane's setup failed before the merge check) with its lines and bytes, and its last 20
+lines. Its first line says which of the two follow and how to print each whole: `hansa show ID --check-log` and
+`hansa show ID --merge-check-log` print one output whole, keys removed, under a line that names it, its length
+and its file.
+
+## Effort
+
+Each run is started with an effort, and hansa records where it came from: a task's own `--effort` (`hansa add`,
+`hansa retry`, `hansa verify`), else its provider's default effort (set on the page), else none, which leaves
+it to claude's own default. A design session takes the desk's design setting, then the coordinator's when it
+runs on the coordinator's provider, then the provider's. Lanes have no effort setting. `hansa show ID` gives
+it beside the provider and model (`claude (opus, effort high from the task's --effort)`), `hansa status`
+gives it for each running task (and `hansa status --json` as `effort` and `effort_from`), and an earlier try
+started with another model or effort names its own. On a provider whose endpoint is not Claude's own (kind
+`compatible`: any endpoint that speaks the Anthropic API) they add that the endpoint may ignore effort: hansa
+passes it on, but some such endpoints do not act on it.
+
 ## Browser tasks and the preview
 
 A task or verification with a browser (`hansa add --browser`, `hansa verify

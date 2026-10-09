@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -25,7 +26,7 @@ from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_h
                   lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, words_in_merge, words_text, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -151,23 +152,60 @@ def no_publish_with_options() -> list:
                for between in (" ", " * ")])
 
 
-def _kept_folder(args, f: Path) -> str:
-    """The desk's folder kept from every agent that this file is in, wherever a link leads (.hansa or secrets);
-    '' when it is in neither, or there is no desk."""
+def _kept_folder(args, f, st=None) -> str:
+    """The desk's folder kept from every agent that this file is in, wherever a link leads (.hansa or secrets),
+    or that holds a hard link to one of its secrets (st: the file's stat, when it is open already); '' when it is
+    in neither, or there is no desk."""
     try:
         desk = Desk.find(getattr(args, "desk", None))
     except SystemExit:
         return ""
-    real = os.path.realpath(f)
+    real = os.path.realpath(f) if f else ""
     for d in (desk.state_dir, desk.secrets_dir):
         top = os.path.realpath(d)
-        if real == top or real.startswith(top.rstrip(os.sep) + os.sep):
+        if real and (real == top or real.startswith(top.rstrip(os.sep) + os.sep)):
             return d.name
+    try:
+        st = st or os.stat(f)
+    except (OSError, TypeError):
+        return ""
+    held = [desk.state_dir / "web-token", desk.state_dir / "alerts.json"]
+    held += [Path(r, n) for r, _, ns in os.walk(desk.secrets_dir) for n in ns]
+    for s in held:
+        try:
+            if os.path.samestat(st, os.stat(s)):
+                return s.parent.name if s.parent == desk.state_dir else desk.secrets_dir.name
+        except OSError:
+            pass
     return ""
+
+
+def _stdin_kept(args) -> str:
+    """_kept_folder for standard input when a shell redirected a file to it (< .hansa/web-token); a pipe or a
+    here-document is never refused."""
+    try:
+        st = os.fstat(sys.stdin.fileno())
+    except (OSError, ValueError):
+        return ""
+    if not stat.S_ISREG(st.st_mode):
+        return ""
+    path = ""
+    try:
+        if hasattr(fcntl, "F_GETPATH"):  # macOS
+            path = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0].decode()
+        else:  # Linux
+            path = os.readlink("/proc/self/fd/0")
+    except (OSError, UnicodeDecodeError):
+        pass  # the inode tells it all the same
+    return _kept_folder(args, path, st)
 
 
 def _text(args) -> str:
     if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
+        kept = _stdin_kept(args)
+        if kept:
+            raise SystemExit(f"hansa: standard input is a file in the desk's {kept}/, which no agent reads, and its "
+                             f"text would go into the desk for them; nothing was changed")
         return sys.stdin.read()
     if getattr(args, "file", None):
         f = Path(args.file)
@@ -252,12 +290,30 @@ def _waits(desk: Desk, tid: str) -> str:
     return f"\n{tid} waits: {why}" if "no provider ready" in why else ""
 
 
+def _title_allowed(desk: Desk, s: dict, title: str | None, text: str) -> None:
+    """Refuse, before anything is queued, a title that holds one of the principal's forbidden words: hansa puts it
+    in the task's commit message and its merge's. With no --title it is the text's first line, cut at 80
+    characters, as new_task makes it; the rest of the text is never committed and not looked at."""
+    given = desk.redact(title or "")
+    title = given or (desk.redact(text.strip()).splitlines() or [""])[0][:80]
+    found = release.title_hits(title, s.get("release_forbidden") or [])
+    if found:
+        where = "--title" if given else "the title (the first line of the text, as no --title was given)"
+        raise SystemExit(desk.redact(
+            f"hansa: {where} holds {', '.join(json.dumps(w, ensure_ascii=False) for w in found)}, which the principal "
+            f"keeps from going out, and the title goes into the task's commit message and its merge's: "
+            f"{json.dumps(title, ensure_ascii=False)}. Nothing was queued: give another --title, or ask the principal "
+            f"about the words (hansa ask)"))
+
+
 def cmd_add(a):
     desk = Desk.find(a.desk)
     s = desk.settings()
     if a.browser and not s.get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
-    tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
+    text = _text(a)
+    _title_allowed(desk, s, a.title, text)
+    tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
@@ -286,13 +342,15 @@ def cmd_design(a):
     if lane not in s["lanes"]:
         raise SystemExit("hansa: say which lane the design session is for: --lane L" if not lane
                          else f"hansa: there is no lane {lane}")
+    text = _text(a)
+    _title_allowed(desk, s, a.title, text)
     with desk.lock():
         open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
                  and m["state"] in ("queued", "running")]
         if open_:
             raise SystemExit(f"hansa: lane {lane} already has design session {open_[0]} open; one at a time per lane "
                              f"(hansa show {open_[0]})")
-        tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "",
+        tid = desk.new_task(text, kind="design", lane=lane, title=a.title or "",
                             browser=bool(s.get("browser")) or None, **notify.recorded(notify.session_here()))
     why_not = not_looking(desk)  # as the waiting lines say it (run.waiting_reason)
     opens = (f"hansa opens the design session once `hansa serve` gets through its rounds; {why_not}. Then it"
@@ -309,6 +367,8 @@ def cmd_status(a):
 def cmd_show(a):
     desk = Desk.find(a.desk)
     print(views.report_text(desk, a.id) if a.report else views.check_output_text(desk, a.id) if a.check
+          else views.check_log_text(desk, a.id) if a.check_log
+          else views.check_log_text(desk, a.id, merge=True) if a.merge_check_log
           else views.show_text(desk, a.id, full=a.full))
 
 
@@ -585,6 +645,11 @@ def _mergeable(desk: Desk, a):
         raise SystemExit(f"hansa: the change in {a.id} holds git's conflict markers ({markers_text(markers)}); nothing "
                          f"was merged, and no flag overrides this. Next: hansa retry {a.id} --update \"settle the "
                          f"markers in {', '.join(markers)}\"\n{MARKERS_ON_PURPOSE}")
+    words = words_in_merge(desk, repo, git("rev-parse", base, cwd=repo), m["head"],
+                           merge_message(lane, m["lane"], a.id, m["title"]), lane)
+    if words:
+        desk.event("merge_forbidden", task=a.id, found=len(words))
+        raise SystemExit(desk.redact(f"hansa: {words_text(a.id, words)}. Nothing was merged"))
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. {_wait_for(desk, v['task'])}")
@@ -2167,6 +2232,13 @@ def cmd_notes(a):
 
 
 def cmd_help(a):
+    if a.command:  # hansa help verify: what hansa verify --help prints
+        p = a.commands.get(a.command)
+        if not p:
+            raise SystemExit(f"hansa: no command {a.command}; hansa help alone prints the agent card, and hansa --help "
+                             "lists the commands")
+        p.print_help()
+        return
     print(CARD.read_text(encoding="utf-8"))
 
 
@@ -2245,8 +2317,11 @@ def main(argv=None):
     g.add_argument("--full", action="store_true", help="the whole text and the whole report")
     g.add_argument("--report", action="store_true", help="the report alone, whole (for a verification, its verdict "
                                                          "and its report)")
-    g.add_argument("--check", action="store_true", help="the whole output of the task's last check and of its last "
-                                                        "merge check, keys removed")
+    g.add_argument("--check", action="store_true", help="the task's last check and its last merge check, each apart: "
+                   "how it ended, the file with its whole output and its size, and its last lines, keys removed")
+    g.add_argument("--check-log", action="store_true", help="the whole output of the task's last check, keys removed")
+    g.add_argument("--merge-check-log", action="store_true", help="the whole output of the task's last merge check, "
+                                                                  "keys removed")
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
@@ -2583,7 +2658,8 @@ def main(argv=None):
     add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
         "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "
         "window of hours, local time, when it is idle and nobody is typing (it needs tmux)")
-    add("help", cmd_help, "print the agent card")
+    p = add("help", cmd_help, "print the agent card; with a command, that command's help")
+    p.add_argument("command", nargs="?", help="a command, such as verify: its help, as hansa verify --help prints it")
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--by", type=int, required=True)
@@ -2608,6 +2684,7 @@ def main(argv=None):
     elif extra:
         ap.error(f"unrecognized arguments: {' '.join(extra)}")
     a.rest = rest
+    a.commands = sub.choices
     if not getattr(a, "fn", None):
         ap.print_help()
         return 0

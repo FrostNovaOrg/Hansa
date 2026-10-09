@@ -204,6 +204,15 @@ stops every hansa git command there until it is removed by hand; hansa does
 not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
 hooks from an empty folder and commit and tag signing off, whatever a
 setting there says; in the lane's own checkout its hooks run as before.
+That empty folder, `hansa-no-hooks-*` in the temporary folder, is made once
+by each hansa process that needs it and removed as the process exits. One a
+process could not remove (it became another program, as `hansa coordinator`
+becomes Claude Code, or was killed), and an empty `hansa-<uid>`, where hansa
+makes the inbox of each session it posts to (a session's follower removes its
+inbox, and the folder once no other inbox is in it, when the session ends),
+`hansa serve` removes as it starts and each hour,
+from the temporary folder and `/tmp`: only empty ones, the account's own,
+left alone for an hour.
 
 ## A lane's write list and env
 
@@ -286,6 +295,11 @@ browser with `hansa add --browser`). A change of the list is recorded, and `hans
 web tools and their sites beside the network list. A rule saved before it was refused is left out of runs; the
 page warns of it, names the coordinator's command that removes it, and saves the rest.
 
+Inside the sandbox a worker or verifier needs no rule to run a command, but Claude Code still refuses a shell
+`-c` it cannot check, such as `bash -c "..."` with a line that runs `rm` taken from a build script. Workers and
+verifiers are told to write such a probe to a script file in their temporary folder and run it with `sh`
+(`sh <their temporary folder>/probe.sh`), which runs in a lane with no allowed commands as in any other.
+
 ## Paths hansa refuses
 
 A repository for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one without, in one
@@ -311,8 +325,9 @@ no longer has the start time hansa saved for it, so a process that was given
 that number later, and its group, are never taken for the run's; then each process that names one of the task's runs: the run's own marker,
 `HANSA_RUN`, in its environment (made for each run and recorded on the task as
 `run_marks`; `HANSA_TASK` alone finds nothing, since task ids repeat from desk to
-desk and one account may run several desks), or the run's temporary folder in its
-arguments or as its TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
+desk and one account may run several desks), or one of the run's temporary folders
+(the worker's; a setup's or check's, and its own folder on disk on Linux, kept on
+the task as `run_folders`) in its arguments or as its TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
 lists what was stopped, with its group or alone, and the event log has it. What can still escape: a process started and moved
 out of every marker (`env -i`, another folder, a session of its own) between
 two rounds, whose parent ended before the next round. A design session's
