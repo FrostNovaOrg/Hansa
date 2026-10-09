@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import hansa  # noqa: E402
 from hansa import account, cli, cost, notify, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
@@ -635,6 +636,9 @@ class DeskTest(unittest.TestCase):
         for k in ("CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_ENV_FILE",
                   "HANSA_TASK", "HANSA_DESK", "HANSA_ROLE"):
             os.environ.pop(k, None)
+        session = unittest.mock.patch.dict(hansa.SESSION, clear=True)  # what hansa took out as it was imported here
+        session.start()
+        self.addCleanup(session.stop)
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
                           HANSA_NOTIFY_GATHER="0.5",
                           XDG_RUNTIME_DIR=str(self.tmp))  # the inboxes' folder (notify.socket_path), not the account's
@@ -3934,6 +3938,161 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["web", "--help"])
         self.assertIn("hansa web </dev/null", " ".join(out.getvalue().split()))
+
+    # -- a Claude Code session's identity stays out of what hansa starts (hansa/__init__.py) -------------------
+    SESSION_ENV = {"CLAUDE_CODE_MESSAGING_TOKEN": "tok-1", "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/inbox.sock",
+                   "CLAUDE_CODE_SESSION_ID": "sess-1", "CLAUDE_CODE_SESSION_ATTENDED": "1", "CLAUDE_PID": "4242",
+                   "CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_CHILD_SESSION": "1",
+                   "CLAUDE_CODE_EXECPATH": "/x/claude", "CLAUDE_EFFORT": "high", "AI_AGENT": "claude-code",
+                   "CLAUDE_CODE_MESSAGING_SOMETHING_NEW": "by rule"}
+
+    def test_a_claude_code_sessions_variables_are_named_in_one_place_by_name_and_by_rule(self):
+        import hansa
+        for k in self.SESSION_ENV:
+            self.assertTrue(hansa.session_var(k), k)
+        for k in ("CLAUDE_CODE_SESSION_ANYTHING", "CLAUDE_CODE_CHILD_ANYTHING"):
+            self.assertTrue(hansa.session_var(k), k)
+        # how Claude Code runs, which hansa sets or passes on itself (the lane's env reaches a worker's commands
+        # through CLAUDE_ENV_FILE): not a session's identity
+        for k in ("CLAUDE_ENV_FILE", "CLAUDE_CODE_TMPDIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MAX_RETRIES", "ANTHROPIC_BASE_URL",
+                  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBAGENT_MODEL", "HANSA_ROLE", "PATH"):
+            self.assertFalse(hansa.session_var(k), k)
+        self.assertEqual(hansa.without_session({**self.SESSION_ENV, "PATH": "/bin"}), {"PATH": "/bin"})
+
+    def test_hansa_takes_a_claude_code_sessions_identity_out_of_its_environment_as_it_starts(self):
+        code = str(Path(__file__).resolve().parent.parent)
+        out = subprocess.run([sys.executable, "-c", "import hansa, json, os, subprocess; print(json.dumps("
+                              "[hansa.SESSION, hansa.session_vars(), subprocess.run(['env'], capture_output=True, "
+                              "text=True).stdout]))"],
+                             env={**os.environ, **self.SESSION_ENV, "PYTHONPATH": code}, capture_output=True, text=True,
+                             timeout=30)
+        kept, names, child = json.loads(out.stdout)
+        self.assertEqual(kept, self.SESSION_ENV)  # for what notifying needs (notify.session_here, notify on)
+        self.assertEqual(names, sorted(self.SESSION_ENV))
+        for k in self.SESSION_ENV:
+            self.assertNotIn(f"\n{k}=", "\n" + child)  # nothing it starts gets them
+
+    def test_a_release_the_alert_and_git_get_no_claude_code_session(self):
+        from hansa import alert, release
+        import hansa.run as run
+        seen, alerted = self.tmp / "release-env.txt", self.tmp / "alert-env.txt"
+        self.with_release(f"env > {seen}")
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"], alert={
+            "command": f"env > {alerted}"})), {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        hook = self.repo / ".git" / "hooks" / "post-checkout"
+        hook.write_text(f"#!/bin/sh\nenv > {self.tmp / 'git-env.txt'}\n")
+        hook.chmod(0o755)
+        with unittest.mock.patch.dict(os.environ, self.SESSION_ENV):  # set after hansa was imported, as a test can
+            self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+            alert.test(self.desk)
+            run.git("checkout", "-q", "-b", "other", cwd=self.repo)
+        for f in (seen, alerted, self.tmp / "git-env.txt"):
+            names = {x.split("=", 1)[0] for x in f.read_text().splitlines() if "=" in x}
+            self.assertEqual(names & set(self.SESSION_ENV), set(), f.name)
+        self.assertIn("HANSA_RELEASE", seen.read_text())
+
+    def test_the_desks_account_is_given_only_the_sessions_pid(self):
+        with unittest.mock.patch.object(account, "runuser_bin", lambda: "/usr/sbin/runuser"), \
+                unittest.mock.patch.dict(os.environ, self.SESSION_ENV):
+            env = account._as("someone", ["add", "x"], self.desk.root)[1]
+        self.assertEqual({k for k in env if k in self.SESSION_ENV}, {"CLAUDE_PID"})  # which session asked
+        self.assertEqual(env["CLAUDE_PID"], "4242")
+        import hansa
+        with unittest.mock.patch.object(account, "runuser_bin", lambda: "/usr/sbin/runuser"), \
+                unittest.mock.patch.dict(hansa.SESSION, {"CLAUDE_PID": "77", "CLAUDE_CODE_MESSAGING_TOKEN": "t"}):
+            env = account._as("someone", ["add", "x"], self.desk.root)[1]  # as hansa took them out at its start
+        self.assertEqual((env.get("CLAUDE_PID"), "CLAUDE_CODE_MESSAGING_TOKEN" in env), ("77", False))
+
+    def test_notify_reads_the_session_hansa_took_out_of_its_environment(self):
+        import hansa
+        p, sock = self.session()
+        with unittest.mock.patch.dict(hansa.SESSION, {"CLAUDE_PID": str(p.pid), "CLAUDE_CODE_MESSAGING_SOCKET": sock}):
+            self.assertEqual(notify.session_here(), {"pid": p.pid, "start": notify.proc_start(p.pid)})
+
+    def test_hansa_serve_started_in_a_claude_code_session_says_what_it_dropped(self):
+        import hansa.run as run
+        self.assertEqual(run.record_serve_session(self.desk), [])  # from a plain shell: nothing to say
+        self.serving()
+        pid = run.server_holder(self.desk)[0]
+        write_json(self.desk.state_dir / "serve-session", {"pid": pid, "dropped": []})
+        self.assertEqual(run.serve_session(self.desk), "")
+        self.assertNotIn("Claude Code session", views.status_text(views.status(self.desk)))
+        with unittest.mock.patch.dict(os.environ, self.SESSION_ENV):
+            names = run.record_serve_session(self.desk)
+            self.assertEqual({k for k in os.environ if k in self.SESSION_ENV}, set())  # out of its environment
+        self.assertEqual(names, sorted(self.SESSION_ENV))
+        rec = json.loads((self.desk.state_dir / "serve-session").read_text())
+        self.assertEqual(rec, {"pid": os.getpid(), "dropped": names})
+        self.assertEqual(run.serve_session(self.desk), "")  # another server's record (this process is not serving)
+        write_json(self.desk.state_dir / "serve-session", {"pid": pid, "dropped": names})
+        said = run.serve_session(self.desk)
+        self.assertIn("hansa serve was started inside a Claude Code session", said)
+        self.assertIn("CLAUDE_CODE_MESSAGING_TOKEN", said)
+        self.assertIn("plain shell", said)
+        self.assertIn(said, views.status_text(views.status(self.desk)).splitlines())
+        explained = views.explain_text(self.desk, "server")
+        self.assertIn(f"  now: {said}", explained)
+        self.assertIn("CLAUDE_CODE_MESSAGING_*", explained)
+
+    def test_hansa_serve_says_once_at_start_that_it_runs_in_a_claude_code_session(self):
+        import hansa.web as web
+
+        class Once:  # one round, then Ctrl+C
+            def __init__(self, desk):
+                pass
+
+            def tick(self):
+                raise KeyboardInterrupt
+        err = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, self.SESSION_ENV), \
+                unittest.mock.patch.object(web, "start_web", lambda *a: types.SimpleNamespace(server_address=("h", 1))), \
+                unittest.mock.patch.object(cli, "Dispatcher", Once), \
+                unittest.mock.patch.object(cli, "try_srt_at_start", lambda d: {}), \
+                unittest.mock.patch.object(cli.alert, "start_thread", lambda d: None), \
+                unittest.mock.patch.object(cli.signal, "signal"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            main(["--desk", str(self.desk.root), "serve", "--port", "0"])
+        said = [x for x in err.getvalue().splitlines() if "Claude Code session" in x]
+        self.assertEqual(len(said), 1, err.getvalue())
+        self.assertTrue(said[0].startswith("hansa serve: hansa serve was started inside a Claude Code session"))
+        self.assertIn("CLAUDE_CODE_SESSION_ID", said[0])
+        self.assertEqual(json.loads((self.desk.state_dir / "serve-session").read_text())["dropped"],
+                         sorted(self.SESSION_ENV))
+
+    def test_the_web_command_refuses_in_a_claude_code_session_and_says_how_the_principal_opens_the_page(self):
+        bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+        env = {k: v for k, v in os.environ.items() if k not in ("HANSA_ROLE", "HANSA_TASK")}
+        token = self.desk.web_token()
+        for given in ({"CLAUDE_CODE_SESSION_ID": "s"}, {"CLAUDECODE": "1"}, {"CLAUDE_CODE_MESSAGING_TOKEN": "t"},
+                      self.SESSION_ENV):  # a session's Bash tool, its ! prefix, a tmux it opened: any of them set
+            r = subprocess.run([bin_, "--desk", str(self.desk.root), "web"], input="", capture_output=True, text=True,
+                               env={**env, **given}, timeout=30)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn(token, r.stdout + r.stderr)
+            self.assertNotIn("?t=", r.stdout + r.stderr)
+            self.assertIn("inside a Claude Code session", r.stderr)
+            self.assertIn("ssh -L 8765:127.0.0.1:8765 HOST ", r.stderr)
+            self.assertIn(f"--desk {self.desk.root} web", r.stderr)
+
+    def test_file_refuses_the_desks_state_and_secrets(self):
+        self.desk.web_token()
+        (self.desk.state_dir / "alerts.json").write_text('[{"code": "ABC123"}]')
+        link = self.tmp / "innocent.txt"
+        link.symlink_to(self.desk.state_dir / "web-token")
+        self.desk.secrets_dir.mkdir(exist_ok=True)
+        (self.desk.secrets_dir / "key").write_text("k")
+        for f in (self.desk.state_dir / "web-token", self.desk.state_dir / "alerts.json", link,
+                  self.desk.secrets_dir / "key"):
+            for args in (["add", "--file", str(f)], ["design", "--file", str(f)], ["lane", "brief", "a", "--file", str(f)]):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa(*args)
+                self.assertIn("which no agent reads", str(e.exception.code), args)
+        self.assertEqual(self.desk.tasks(), [])
+        ok = self.tmp / "task.md"
+        ok.write_text("Add hello.txt\n")
+        self.hansa("add", "--file", str(ok))
+        self.assertEqual(len(self.desk.tasks()), 1)
 
     def test_a_task_cancelled_while_hansa_prepares_it_never_runs(self):
         import hansa.run as run
