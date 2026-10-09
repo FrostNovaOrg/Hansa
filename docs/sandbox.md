@@ -204,6 +204,15 @@ stops every hansa git command there until it is removed by hand; hansa does
 not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
 hooks from an empty folder and commit and tag signing off, whatever a
 setting there says; in the lane's own checkout its hooks run as before.
+That empty folder, `hansa-no-hooks-*` in the temporary folder, is made once
+by each hansa process that needs it and removed as the process exits. One a
+process could not remove (it became another program, as `hansa coordinator`
+becomes Claude Code, or was killed), and an empty `hansa-<uid>`, where hansa
+makes the inbox of each session it posts to (a session's follower removes its
+inbox, and the folder once no other inbox is in it, when the session ends),
+`hansa serve` removes as it starts and each hour,
+from the temporary folder and `/tmp`: only empty ones, the account's own,
+left alone for an hour.
 
 ## A lane's write list and env
 
@@ -285,6 +294,11 @@ spaces outside parentheses, where every `)` closes them): one it would split int
 browser with `hansa add --browser`). A change of the list is recorded, and `hansa explain lane L` shows the
 web tools and their sites beside the network list. A rule saved before it was refused is left out of runs; the
 page warns of it, names the coordinator's command that removes it, and saves the rest.
+
+Inside the sandbox a worker or verifier needs no rule to run a command, but Claude Code still refuses a shell
+`-c` it cannot check, such as `bash -c "..."` with a line that runs `rm` taken from a build script. Workers and
+verifiers are told to write such a probe to a script file in their temporary folder and run it with `sh`
+(`sh <their temporary folder>/probe.sh`), which runs in a lane with no allowed commands as in any other.
 
 ## Paths hansa refuses
 

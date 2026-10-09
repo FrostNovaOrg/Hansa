@@ -166,8 +166,8 @@ does not hear it; only you can change that.
 
 The coordinator runs these; you can run them too. Every coordinator command is in
 [`hansa/card.md`](hansa/card.md), which `hansa help` prints. `hansa --help` lists every command, the
-principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` gives
-all of a command's options.
+principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` (or
+`hansa help <command>`) gives all of a command's options.
 
 | Command | What it does |
 |---|---|
