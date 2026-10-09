@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import build
+from . import build, session_value, without_session
 
 LINUX = sys.platform.startswith("linux")
 PATH_OPTIONS = ("--desk", "--repo")  # made full paths before switching: the account starts elsewhere
@@ -103,7 +103,7 @@ def switch_args(argv: list, desk_root: Path) -> list:
 
 def _as(account: str, args: list, desk_root: Path) -> tuple:
     """What runs `hansa ARGS` as the account, with the same environment (runuser sets HOME, USER and
-    LOGNAME for it), and the folder to run it in: `/`, as notify.spawn does. `-m` puts the current folder
+    LOGNAME for it) but a Claude Code session's, of which it gets CLAUDE_PID alone (hansa/__init__.py), and the folder to run it in: `/`, as notify.spawn does. `-m` puts the current folder
     first on Python's path, so from a folder holding another checkout of hansa the account would run that
     one; switch_args has made the path options full paths already."""
     runuser = runuser_bin()
@@ -111,7 +111,9 @@ def _as(account: str, args: list, desk_root: Path) -> tuple:
         raise SystemExit(f"hansa: this desk belongs to the account {account}, and hansa runs its commands as that "
                          f"account; that needs runuser (part of util-linux), which is not on this machine. Install "
                          f"util-linux, or run hansa as {account} yourself")
-    env = dict(os.environ)
+    env = without_session(os.environ)
+    if session_value("CLAUDE_PID"):  # which session asked, recorded with its task or request (notify.session_here)
+        env["CLAUDE_PID"] = session_value("CLAUDE_PID")
     here = str(Path(__file__).resolve().parent.parent)  # this hansa, whatever the account's PATH holds
     env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["HANSA_BUILD"] = build()  # which code this is, as hansa --version says it (git may refuse the account)

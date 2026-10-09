@@ -1043,19 +1043,22 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
     """'' while a release target on the principal's list of releases without asking is what it was when the page
     saved the list; otherwise what is no longer so (zh: in Chinese, for the page)."""
     lane, target = listed_key(entry)
-    if not isinstance(entry, dict):
-        return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
-                "the list was saved before hansa recorded each lane's repository, base branch and release command")
+    # a target no lane has now is said as such first, whenever and however its entry was saved
     ln = s.get("lanes", {}).get(lane)
     if not ln:
         return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
-    if not entry.get("repo"):
-        return f"保存清单时工作线 {lane} 还不在桌面上" if zh else f"lane {lane} was not on the desk when the list was saved"
     if target not in lane_targets(ln):
         if zh:
             return f"工作线 {lane} 现在没有发布目标 {target}" if target else f"工作线 {lane} 现在没有不带名字的发布命令"
-        return (f"lane {lane} has no release target {target} now" if target else
-                f"lane {lane} has no unnamed release command now (its targets have names)")
+        if target:
+            return f"lane {lane} has no release target {target} now"
+        return (f"lane {lane} has no unnamed release command now (its targets have names)" if lane_targets(ln) else
+                f"lane {lane} has no release command now")
+    if not isinstance(entry, dict):
+        return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
+                "the list was saved before hansa recorded each lane's repository, base branch and release command")
+    if not entry.get("repo"):
+        return f"保存清单时工作线 {lane} 还不在桌面上" if zh else f"lane {lane} was not on the desk when the list was saved"
     now_as = listed_as(ln, target)
     # an entry saved without after (before hansa recorded it) stands for a target that must follow none
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
@@ -2435,9 +2438,12 @@ def public_settings(desk: Desk) -> dict:
     # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:
     # their releases wait for the yes until the list is saved again
     listed = s.get("releases_without_asking") if isinstance(s.get("releases_without_asking"), list) else []
-    unmatched = [{"lane": listed_key(x)[0], "target": listed_key(x)[1], "why": why,
-                  "why_zh": listed_mismatch(s, x, True)}
-                 for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why]
+    # gone: a target no lane has now, which the page shows among the ticks with what it was, to be unticked
+    unmatched = [{"lane": lane, "target": target, "why": why, "why_zh": listed_mismatch(s, x, True),
+                  "gone": target not in lane_targets(s.get("lanes", {}).get(lane)),
+                  "was": str(x.get("command", x.get("release", ""))) if isinstance(x, dict) else ""}
+                 for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why
+                 for lane, target in [listed_key(x)]]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}

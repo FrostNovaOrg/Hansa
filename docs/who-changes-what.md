@@ -95,3 +95,53 @@ editing code in the lanes' repositories;
 code changes go through workers, so each gets a branch, the lane's check and
 a merge. Its whole interface is `hansa/card.md`, copied into the desk as
 `CLAUDE.md`.
+
+### A Claude Code session's identity, and the page's token
+
+A process started from a Claude Code session (its Bash tool, a tmux it
+opened, the `!` prefix) inherits the session's identity and inbox:
+`CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_MESSAGING_SOCKET`, with which a
+process can post into other sessions as that session, and
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, `CLAUDECODE`,
+`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_EFFORT`, `AI_AGENT`
+and others. Every `hansa` command takes them out of its own environment as it
+starts: by name, and by rule every `CLAUDE_CODE_MESSAGING_*`,
+`CLAUDE_CODE_SESSION_*` and `CLAUDE_CODE_CHILD_*` (the list is in
+[`hansa/__init__.py`](../hansa/__init__.py)). So nothing hansa starts gets
+them: not a release's command, the alert command, a design session, the
+preview, git and its hooks, the follower that posts to a session, nor the
+desk's account on a Linux server. Workers and the lanes' setups and checks
+never had them, as hansa builds their environment itself. Only hansa's
+notifying uses them, in the command run from the session: `CLAUDE_PID` says
+which session asked for a task or request (the desk's account is given that
+one alone), and `hansa notify on` hands `CLAUDE_CODE_MESSAGING_SOCKET` to its
+follower on the follower's command line. How Claude Code runs
+(`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, `CLAUDE_CODE_MAX_RETRIES` and the
+like) is not a session's identity and stays.
+
+`hansa serve` started inside a Claude Code session runs without them, and says
+so: once as it starts, in `hansa status` and in `hansa explain server`, naming
+what it dropped. It is better started from a plain shell, a terminal or tmux
+of your own.
+
+The page's address carries its token, which approves releases. `hansa web`
+prints it only outside a Claude Code session: in one (any of the variables
+above set, the `!` prefix's shell included) it refuses, prints nothing of the
+address, and says how to open the page from a terminal of your own, as the
+README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
+before. `--file` (`hansa add`, `design`, `retry`, `lane brief`) refuses a file
+in the desk's `.hansa/` or `secrets/`, wherever a link leads: they hold the
+token, alerts waiting to go out with a release's one-time code, and the keys,
+and a file's text would go into the desk where agents read it.
+
+Nothing else hansa prints holds the token or a one-time code: `hansa serve`,
+`hansa status` and `hansa explain` give the page's host and port only; the
+page logs no requests and answers one without the token with a fixed
+refusal; the event log, posts to a session and errors never carry either; a
+release's code is kept as a keyed hash, and an alert command's output is not
+kept when its alert held a code. Two places hold them in the clear, closed to
+agents by the coordinator's permission rules (Read is denied there) and the
+workers' sandbox: `.hansa/web-token`, and `.hansa/alerts.json` while an alert
+with a code waits to go out. The coordinator runs outside any sandbox, so a
+Bash command the principal approves could still read them; it should never be
+asked to.

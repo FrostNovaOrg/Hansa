@@ -128,6 +128,10 @@ A desk has one `hansa serve`. More than one desk on a machine: each desk's `hans
 cd ~/desk && hansa web     # prints the page's address, with a token; keep this terminal open
 ```
 
+Run `hansa web` and `hansa serve` from a terminal of your own, not from a Claude Code session: `hansa web`
+refuses there, as the token would land in the session's context, and `hansa serve` drops the session's
+identity from its environment and says so ([details](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)).
+
 From your own computer, open the page of a desk on another machine through an SSH tunnel (for a desk on
 another port, tunnel that port instead):
 

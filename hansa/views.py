@@ -9,12 +9,12 @@ import sys
 import time
 from pathlib import Path
 
-from . import account, alert, build, cost, installed, installed_text, notify, release
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, installed, installed_text, notify, release
 from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
-                  provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
+                  provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
 
 STATES = {
@@ -506,6 +506,7 @@ def status(desk: Desk) -> dict:
         "build": build(),
         "installed": installed(),  # when the code this runs was put in place
         "serve_code": serve_code(desk, server),  # hansa serve on older code than is installed: what to do
+        "serve_session": serve_session(desk, server),  # hansa serve started inside a Claude Code session: what it dropped
         "audits_cost": bool(s["coordinator"].get("audits_cost")),
         "paused": desk.paused(),
         "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
@@ -587,6 +588,7 @@ def status_text(st: dict) -> str:
     out = [" · ".join(out + [f"hansa {st['build']}", installed_text(st.get("installed") or 0) or "installed ?",
                               time.strftime("now %H:%M")])]
     out += [st["serve_code"]] if st.get("serve_code") else []  # what asks for action first, then information
+    out += [st["serve_session"]] if st.get("serve_session") else []
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
@@ -1250,6 +1252,14 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "desk: a second one refuses to start.",
             f"  now: {server_text(server_state(desk))}",
             f"  {page_text(page_of(desk, server_state(desk)))}",
+            "What it starts outside a worker's sandbox (a release's command, the alert command, design sessions, the "
+            "preview, git) runs with its environment, less what carries a Claude Code session's identity or "
+            f"messaging ({', '.join(p + '*' for p in SESSION_PREFIXES)}, {', '.join(SESSION_NAMES)}): with those a "
+            "process could post into other sessions as that session. Every hansa command takes them out of its own "
+            "environment as it starts, so started from a Claude Code session (its Bash tool, a tmux it opened, the "
+            "! prefix) hansa serve runs without them, and says so as it starts, in hansa status and here. Start it "
+            "from a plain shell all the same.",
+            *([f"  now: {sess}"] if (sess := serve_session(desk)) else []),
             f"It counts as running while a hansa serve holds serve.lock, which names its process, and as not "
             f"running once none holds it, whatever process that number names by then. Once a round (starting and finishing tasks) it writes its heartbeat; a round can "
             f"take a while, when a worker's processes are stopped (up to 20 s each) or what a task left is swept "

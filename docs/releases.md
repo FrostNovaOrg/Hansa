@@ -41,7 +41,10 @@ until the principal takes it back in (the page's button that takes changed
 entries back in as they are now, or unticking and ticking it again, then
 Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
 target taken out and set again with the same command and `--after` keeps its
-tick. The principal answers in one of two ways: on the page, or by saying
+tick. An entry for a target no lane has now (the lane is gone, has no release, or its
+release command became named targets) stays on the list, ticked, among the
+others, said as such with the command it had when saved, until the principal
+unticks it and saves. The principal answers in one of two ways: on the page, or by saying
 in the conversation the one-time code that comes with the alert for that
 release (6 characters, no look-alikes), which the coordinator passes on
 with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only

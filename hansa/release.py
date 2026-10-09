@@ -55,6 +55,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import without_session
 from .desk import Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
@@ -983,7 +984,7 @@ def _launch(desk: Desk, r: dict, token: str, cwd) -> subprocess.Popen:
     d = log_dir(desk)
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{rid}.exit").unlink(missing_ok=True)
-    env = {**os.environ, "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"],
+    env = {**without_session(os.environ), "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"],
            "HANSA_RELEASE_TARGET": r.get("target") or "", "HANSA_RELEASE_REPO": r["repo"]}
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)

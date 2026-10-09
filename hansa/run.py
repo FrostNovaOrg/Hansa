@@ -26,7 +26,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, build, installed, installed_text
+from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    read_json, resolved, task_message, update_message, write_json, write_problems)
@@ -991,7 +991,7 @@ def worktree_git_settings() -> list:
 
 def git(*args, cwd, env=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
-    e = {**os.environ, **GIT_ID, **(env or {})}
+    e = {**without_session(os.environ), **GIT_ID, **(env or {})}
     linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
     r = subprocess.run(["git", *(worktree_git_settings() if linked else ()), *args], cwd=str(cwd), env=e,
                        capture_output=True, text=True, errors="replace")
@@ -1684,7 +1684,7 @@ def worktree_config_on(common: Path) -> bool:
         return False
     r = subprocess.run(["git", "config", "--file", str(Path(common) / "config"), "--type=bool", "--get",
                         "extensions.worktreeConfig"], cwd="/", capture_output=True, text=True, errors="replace",
-                       env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+                       env={**without_session(os.environ), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
     return r.stdout.strip() == "true"
 
 
@@ -3832,7 +3832,7 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
                   f"task/{tid}")
     if cancelled_before_start(desk, tid):
         return
-    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    env = {k: v for k, v in without_session(os.environ).items() if k != "TMUX"}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
     # -P prints the pane's process id once the session exists: tmux may exit 0 without making it
     # (when it cannot create its socket, say), and a session that ends at once still printed it
@@ -5540,6 +5540,35 @@ def lane_locale(desk: Desk, lane: dict, st: dict = None) -> str:
     if outer is None:
         return f"whatever is in {whose}"
     return f"{said or 'none set (the C locale)'}, from {whose}"
+
+
+def record_serve_session(desk: Desk) -> list:
+    """hansa serve, as it starts: the Claude Code session's variables it was started with (hansa/__init__.py), which
+    it takes out of its environment, so nothing it starts gets them; recorded for hansa status and hansa explain
+    server. Returns their names: none when it was started from a plain shell."""
+    names = session_vars()
+    for k in names:
+        os.environ.pop(k, None)
+    write_json(desk.state_dir / "serve-session", {"pid": os.getpid(), "dropped": names})
+    return names
+
+
+def serve_session_text(names) -> str:
+    return (f"hansa serve was started inside a Claude Code session; it took that session's {', '.join(names)} out of "
+            "its environment, so nothing it starts gets them. Better start it from a plain shell (a terminal or tmux "
+            "of your own, not one Claude Code opened)")
+
+
+def serve_session(desk: Desk, st: dict = None) -> str:
+    """'' unless the hansa serve that runs was started inside a Claude Code session; then that, in a line."""
+    st = st or server_state(desk)
+    if st["state"] == "gone":
+        return ""
+    rec = read_json(desk.state_dir / "serve-session", {})
+    if not isinstance(rec, dict) or rec.get("pid") != st["pid"] or not isinstance(rec.get("dropped"), list):
+        return ""
+    names = [k for k in rec["dropped"] if isinstance(k, str)]
+    return serve_session_text(names) if names else ""
 
 
 def serve_code(desk: Desk, st: dict = None) -> str:
