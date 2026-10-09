@@ -1068,12 +1068,13 @@ def _recover(desk: Desk, r: dict) -> None:
     finish(desk, r["id"])
 
 
-def tick(desk: Desk, s: dict, procs: dict) -> None:
+def tick(desk: Desk, s: dict, procs: dict, starting: bool = True) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider). A release
     asked to stop gets TERM, then KILL after STOP_GRACE seconds, and is finished once nothing of it runs. What a
-    running release's command starts is recorded each round, and what of it still runs is stopped at its end."""
+    running release's command starts is recorded each round, and what of it still runs is stopped at its end. None
+    starts while starting is False (free space under the floor): an approved one waits, and goes once there is space."""
     for r in releases(desk):
         if r.get("state") == "running":
             r = _record_started(desk, r)
@@ -1104,6 +1105,8 @@ def tick(desk: Desk, s: dict, procs: dict) -> None:
             change(desk, r["id"], lambda x: {"timed_out": True, "limit_min": limit, "limit_of": whose})
             stop(r.get("pid"), r.get("pid_start", ""), procs.get(r["id"]))
     sweep_checkouts(desk)
+    if not starting:
+        return
     tasks = desk.tasks()
     # one at a time per repository, fixed or not: two releases of one repository may send to the same place
     held = {r.get("repo") for r in releases(desk) if r.get("state") in ("starting", "running")}
@@ -1146,6 +1149,11 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
         return (f"等同一仓库上工作线 {m.get('lane')} 的 {m['id']} 合并验收结束" if zh else
                 f"waits for {m['id']}'s merge check on lane {m.get('lane')}, on the same repository")
     from .run import not_looking
+    from . import disk
+    low = disk.held(desk)
+    if low:
+        return (f"等磁盘空出来：有卷的剩余空间低于下限（{disk.floor_text(disk.floor(s))}），hansa serve 暂不开始新的事"
+                if zh else "waits: " + disk.short_text(desk, low))
     gone = not_looking(desk)
     if zh:
         return "后台（hansa serve）没在运行或卡住了，开始不了" if gone else "hansa serve 下次查看时开始（几秒内）"

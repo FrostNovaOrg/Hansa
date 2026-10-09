@@ -163,14 +163,16 @@ page sets it: no `hansa` command sets, changes or clears it, and `hansa lane
 set` has nothing like it. `hansa serve` runs it when a release starts waiting
 for the principal's yes (also when a ticked target's tick no longer holds and
 its release goes back to waiting), when a release ends (done, failed, void or
-forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), and when
+forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), when a
+lane's runs cannot start because their sandbox cannot (once for each lane and reason), when free space goes under the
+floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), and when
 its own rounds have stopped for 15 minutes; not for ordinary task events,
 which go to the coordinator. It runs as the desk's account, outside the
 sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
 coordinator, workers, verifiers and design sessions; removed when the command ends, and what a stopped or killed
 `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
-`release_stopped`, `ask`, `server_stuck`, `test`; comma-separated when several go out together)
+`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `test`; comma-separated when several go out together)
 and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
 characters; a release's text names its lane and target. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts

@@ -291,7 +291,7 @@ output.
 | [Releases and alerts](docs/releases.md) | Release targets, answers by one-time code, files a release runs, stopping a release, the principal's alert command |
 | [On a Linux server](docs/linux-server.md) | The coordinator as root, the desk as an ordinary account; what a lane's commands meet in Linux's sandbox |
 | [Java and Maven in a lane](docs/java-and-maven.md) | What hansa sets up for Maven and Java in the sandbox, what that changes for a build script (`mktemp` on macOS too), and what a project and its lane need |
-| [The desk: files, keys and notes](docs/desk.md) | Keys, the coordinator's permission rules and notes, the project's own rules, what the coordinator's session leaves out |
+| [The desk: files, keys and notes](docs/desk.md) | Keys, the coordinator's permission rules and notes, the project's own rules, what the coordinator's session leaves out, the floor of free space, where a desk's files grow |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each version, Bellhop's included |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to change hansa, and the licensing of contributions |
 

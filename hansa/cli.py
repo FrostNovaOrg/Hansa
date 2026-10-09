@@ -2216,6 +2216,28 @@ def cmd_concurrency(a):
     print(f"concurrency: {old} -> {a.n}")
 
 
+def cmd_disk_floor(a):
+    from . import disk
+    desk = Desk.find(a.desk)
+    if a.gb is None:
+        free = disk.desk_free(desk)[0]
+        print(f"disk floor: {disk.floor_text(disk.floor(desk.settings()))}; "
+              f"{disk.gb(free) if free is not None else '? GB'} free on the desk's volume")
+        return
+    if not 0 <= a.gb <= disk.MOST_FLOOR:
+        raise SystemExit(f"hansa: the floor is a number of GB from 0 (off) to {disk.MOST_FLOOR}; nothing was changed")
+    gb = int(a.gb) if a.gb == int(a.gb) else a.gb
+    with desk.lock():
+        new = desk.settings()
+        old = disk.floor(new)
+        new["disk_floor"] = gb
+        _save(desk, new)
+    print(f"disk floor: {disk.floor_text(old)} -> {disk.floor_text(gb)}"
+          + (": hansa serve starts things however little space is free" if not gb else
+             f": hansa serve starts nothing new while a volume it writes on has less free, and starts again once each "
+             f"has {gb + disk.MARGIN:g} GB"))
+
+
 def cmd_notes(a):
     desk = Desk.find(a.desk)
     if a.words[:1] == ["archive"] and len(a.words) > 1:
@@ -2628,6 +2650,9 @@ def main(argv=None):
                    "(default: archive/FILE)")
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
     p.add_argument("n", nargs="?", type=int)
+    p = add("disk-floor", cmd_disk_floor, "show, or set, the free space (GB) under which hansa serve starts nothing "
+            "new (default 10; 0: off)")
+    p.add_argument("gb", nargs="?", type=float, metavar="GB")
     p = add("cost", cmd_cost, "tokens and what they are worth")
     p.description = ("Tokens and what they are worth: the workers' runs, and the coordinator's own session with its "
                      "helpers. The coordinator is counted only when it runs with the workers' Claude login (the same "

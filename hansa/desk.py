@@ -84,7 +84,7 @@ PROJECT_LONG = 8 * 1024
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
 # The events that may call for an alert to the principal (alert.from_event)
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
-           "ask", "sandbox_held")
+           "ask", "sandbox_held", "disk_low")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
 # it: {lane, target, repo, base, command, after, fixed?} (after: the target it must follow, "" for none; fixed: "yes"
 # for a target that runs from a fixed checkout, left out for one that runs in the repository); a target goes out without asking only while it still has
@@ -237,6 +237,9 @@ def default_settings() -> dict:
     return {
         "version": 1,
         "concurrency": 1,
+        # GB of free space under which hansa serve starts nothing new (hansa/disk.py); 0: off. The coordinator's
+        # (hansa disk-floor), as concurrency is
+        "disk_floor": 10,
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
         # Design sessions, which the principal works in directly (`hansa design`). Blank provider
@@ -315,7 +318,7 @@ def validate(s: dict, root=None, page: bool = False) -> list:
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
-    known = {"version", "concurrency", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
+    known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden",
              "alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
@@ -349,6 +352,9 @@ def validate(s: dict, root=None, page: bool = False) -> list:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
         p.append("concurrency must be a whole number from 1 to 8")
+    fl = s.get("disk_floor", 10)
+    if not isinstance(fl, (int, float)) or isinstance(fl, bool) or not 0 <= fl <= 100000 or fl != fl:
+        p.append("disk_floor must be a number of GB from 0 (off) to 100000")
     if not _is_int(s.get("cool_minutes"), 1, 1440):
         p.append("cool_minutes must be a whole number from 1 to 1440")
 

@@ -91,6 +91,9 @@ const T = ZH ? {
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
   laneWarnings:"这些工作线的允许命令里有现在不收的规则：运行时会被略去，别的设置照样能保存。要删掉它们，请协调席执行下面写的命令：",
   concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
+  diskFloor:"磁盘剩余空间下限", diskFloorOff:"关闭", diskFree:"桌面所在卷现在剩余",
+  diskFloorNote:"任一卷（桌面、各工作线的仓库和工作区、临时文件夹）剩余空间低于它时，后台不开始任何新的事，正在跑的照常跑完；每个卷都多出 1 GB 后自动恢复。由协调席用 hansa disk-floor 设定，这里只能看。",
+  diskLow:"磁盘空间不足，不开始新的事",
   laneCommands:"工作线最近改过的命令、网络和可写文件夹（最新在前，最多 20 条）",
   laneCommandsNote:"装依赖和验收命令由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟执行层一样的网络和可写范围）；起页面的命令由设计会话自己跑，设计会话不在沙箱里。网络和可写文件夹的改动，会放宽这条工作线的执行层（连同装依赖和验收）能做的事。",
   f_setup:"装依赖", f_check:"验收命令", f_preview:"起页面", field:"哪一项", change:"原来 -> 现在", at:"时间",
@@ -164,6 +167,9 @@ const T = ZH ? {
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
   laneWarnings:"These lanes' allowed commands hold rules no longer accepted: runs leave them out, and the other settings save all the same. To remove them, ask the coordinator to run the command named:",
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
+  diskFloor:"Free space floor", diskFloorOff:"off", diskFree:"free now on the desk's volume",
+  diskFloorNote:"while any volume hansa writes on (the desk, each lane's repository and worktree, the temporary folders) has less free, hansa serve starts nothing new and lets what runs finish; it starts again once each has 1 GB more. Set by the coordinator with hansa disk-floor; here you can only look.",
+  diskLow:"disk space low, nothing new starts",
   laneCommands:"Recent changes to lane commands, networks and write folders (newest first, at most 20)",
   laneCommandsNote:"hansa runs the setup and check commands itself, in srt with the lane's sandbox (the workers' network and folders); the preview command is run by the design session, which has no sandbox. Network and write changes widen what the lane's workers, and its setup and check, may do.",
   f_setup:"setup", f_check:"check", f_preview:"preview", field:"Field", change:"old -> new", at:"When",
@@ -278,9 +284,12 @@ async function loadStatus() {
     + (st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
        : st.server_up ? T.serverUp : T.serverDown)
     + (st.srt_missing ? " · " + st.srt_missing : "")
+    + (st.disk && st.disk.low_text ? " · " + (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "")
+    + (st.disk && st.disk.unknown || []).map(x => " · " + x).join("")
     + (st.no_read_stop ? " · " + T.noReadStop + ": " + st.no_read_stop : "")
     + (st.no_read_left_out || []).map(x => " · " + T.workersMayNotReadSkipped + ": " + x).join("");
   $("#state").className = (st.paused || !st.server_up || (st.server && st.server.state === "stuck") || st.srt_missing
+    || (st.disk && (st.disk.low_text || (st.disk.unknown || []).length))
     || st.no_read_stop || (st.no_read_left_out || []).length) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});
   const t = st.last_24h;
@@ -379,10 +388,10 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [];
+let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [];
 async function loadSettings(problems) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
-  S = r.settings; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
+  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   renderSettings(problems && problems.length ? problems : r.problems);
 }
@@ -497,6 +506,8 @@ function renderSettings(problems) {
         h("span", {class:"mono"}, `${JSON.stringify(e.old ?? "")} -> ${JSON.stringify(e.new ?? "")}`)])) : h("p", {class:"muted"}, T.none)),
     section(T.general, h("div", {class:"grid"},
       T.concurrency, h("div", {}, h("strong", {}, S.concurrency), " ", h("span", {class:"muted"}, T.concurrencyNote)),
+      T.diskFloor, h("div", {}, h("strong", {}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
+        DISK_FREE == null ? null : ` · ${T.diskFree} ${(DISK_FREE / 1e9).toFixed(1)} GB`, " ", h("span", {class:"muted"}, T.diskFloorNote)),
       T.coolMinutes, bind(S, "cool_minutes", "number"),
       T.coordinator, h("div", {class:"row"}, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers)),
         T.model, bind(S.coordinator, "model"), T.effort, pick(S.coordinator, "effort", EFFORTS)),
