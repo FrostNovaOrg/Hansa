@@ -9,10 +9,10 @@ import sys
 import time
 from pathlib import Path
 
-from . import account, alert, build, cost, installed, installed_text, notify, release
+from . import account, alert, build, cost, disk, installed, installed_text, notify, release
 from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
+from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
@@ -305,12 +305,12 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
     ahead = merge_check_waits_for(desk, m, tasks)
     if mc.get("plain"):
         how = "without a check" + ("" if mc.get("despite") else f" if {base} has still not moved")
-        return (f"merge queued, to go in {how}: " + (f"waits for {ahead}" if ahead else not_looking(desk)
+        return (f"merge queued, to go in {how}: " + (f"waits for {ahead}" if ahead else disk_short(desk) or not_looking(desk)
                                                       or "merges when `hansa serve` next looks (within seconds)"))
     other = merge_check_busy_with(desk, m, tasks)
     return (f"merge check queued{again}: " + (f"waits for {ahead}" if ahead else
                                               f"waits for lane {lane}, busy with {other}" if other else
-                                              not_looking(desk)
+                                              disk_short(desk) or not_looking(desk)
                                               or "starts when `hansa serve` next looks (within seconds)"))
 
 
@@ -524,6 +524,10 @@ def status(desk: Desk) -> dict:
         # entries of what workers may not read that stop every run, and those left out of runs (desk.no_read_parts)
         "no_read_stop": stop_text(no_read[2]), "no_read_left_out": no_read[1],
         "concurrency": s["concurrency"],
+        # free space: the desk's volume now, the floor, and the volumes for which hansa serve starts nothing new
+        "disk": {"free": disk.desk_free(desk)[0], "floor": disk.floor(s), "line": disk.desk_line(desk, s),
+                 "low": (low := disk.held(desk)),
+                 "low_text": disk.held_text(desk, low, disk.floor(s)) if low else ""},
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
                    "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
@@ -589,11 +593,13 @@ def status_text(st: dict) -> str:
     out += [st["serve_code"]] if st.get("serve_code") else []  # what asks for action first, then information
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
+    out += [st["disk"]["low_text"]] if (st.get("disk") or {}).get("low_text") else []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
     out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
     out += [f"what workers may not read, entry left out: {x.removeprefix(DENY_AT)}"
             for x in st.get("no_read_left_out") or []]
     out += [page_text(st["page"])] if st.get("page") else []
+    out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
     out += [project_text(st["project"])] if st.get("project") else []
@@ -834,6 +840,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if m.get("error"):
         out.append(f"error: {m['error']}")
     out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
+    out += [disk.trimmed_text(m)] if disk.trimmed_text(m) else []
     if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
         out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":
@@ -1294,7 +1301,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "run and holds its task the same way.",
             *([f"  {LINUX_TRY_NOTE[0].upper()}{LINUX_TRY_NOTE[1:]}."] if account.LINUX else []),
             *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, groups in sorted(sandbox_held(desk).items())
-              for h in groups.values()]])
+              for h in groups.values()],
+            *disk.explain_lines(desk, desk.settings())])
     if what == "notify":
         who = notify.names(desk)
         return "\n".join([
@@ -1345,7 +1353,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
         *read_lines(desk, s),
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
-        "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), lane briefs (hansa lane brief) and "
+        "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), the floor of free space under "
+        "which nothing new starts (hansa disk-floor), lane briefs (hansa lane brief) and "
         "pause/resume.",
         release_settings_line(s),
         alert.explain_line(s)])

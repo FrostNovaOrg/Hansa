@@ -15,7 +15,7 @@ import threading
 import urllib.parse
 from pathlib import Path
 
-from . import alert, cost, release, views
+from . import alert, cost, disk, release, views
 from .desk import Desk, deny_split, lane_warnings, public_settings, read_json, read_split
 from .run import check_provider
 
@@ -52,8 +52,8 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
     return out
 
 
-# The coordinator sets these (hansa lane, hansa concurrency); the page only shows them.
-NOT_FROM_PAGE = ("lanes", "concurrency")
+# The coordinator sets these (hansa lane, hansa concurrency, hansa disk-floor); the page only shows them.
+NOT_FROM_PAGE = ("lanes", "concurrency", "disk_floor")
 
 
 def _save_settings(desk: Desk, body: dict) -> dict:
@@ -121,7 +121,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if url.path == "/api/status":
                 return self._send(200, views.status(desk))
             if url.path == "/api/settings":
-                return self._send(200, public_settings(desk))
+                # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
+                return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
             if url.path == "/api/cost":
                 rep = cost.report(desk, max(1, min(90, int(q.get("days", ["7"])[0]))))
                 if q.get("rows", ["0"])[0] != "1":

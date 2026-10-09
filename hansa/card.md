@@ -80,6 +80,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
+| `hansa disk-floor [GB]` | show, or set, the free space under which `hansa serve` starts nothing new (default 10 GB; 0 turns it off; see What you change) |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model\|provider]` | tokens and what they are worth at the principal's prices; with `--json`, `--rows` adds every row |
 | `hansa ask "<request>"` | put a request on the principal's page; answering it there closes it |
 | `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
@@ -368,7 +369,8 @@ to a public repository, a deploy to production) waits for the principal:
   failed and ask again. Your settings deny pushing and publishing from your
   shell (see How work moves); `hansa release` runs the command itself.
 - The principal may have alerts (their own command, run by hansa when a release
-  waits or ends, or you file a request); the coordinator does not send them.
+  waits or ends, you file a request, or free space goes under the floor);
+  the coordinator does not send them.
 
 ## Hearing from hansa
 hansa posts to your session through its inbox when something needs you: a task
@@ -379,7 +381,8 @@ names became ready when it was not as you asked (once, on a key or settings save
 a check, or its rest running out; the request may be done: if it is, close it
 with `hansa ask --close N "why"`), the server stopped (or,
 still running, finished no round for 5 minutes: busy or stuck), and then that it
-runs again. A server busy for less than that is not news. Each
+runs again, free space went under the floor (`hansa disk-floor`), and then that it
+is back over it. A server busy for less than that is not news. Each
 message starts with `[hansa]` and the desk, one line per event with the next
 command. A session started with `hansa coordinator` is posted to by itself;
 otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
@@ -504,6 +507,26 @@ here; work that needs code changed or a browser goes to a worker.
   repository's `.gitattributes` keeps both sides' lines instead. A lane's provider order decides
   which provider does its tasks, so to split work among providers, give each
   its own lane.
+- Free space, also yours, with `hansa disk-floor [GB]` (default 10 GB; 0 turns
+  it off; the page shows it, and cannot change it). Each round `hansa serve`
+  looks at the free space of each volume it and its runs write on: the desk's
+  folder, each lane's repository and worktree, the folder worker runs get their
+  temporary folders in (`/tmp`) and its own TMPDIR. While any has less free than
+  the floor it starts no new task, verification, try, merge or merge check,
+  design session or release; what already runs goes on (a running task's
+  check too). `hansa status` says which volume, its free space and the floor
+  (and always shows the desk's volume's free space), as do the page and
+  `hansa explain server`; queued tasks, merges and releases say they wait for
+  it. You are told once when it goes under and once when it is back; the
+  principal's alert runs once. It starts again by itself once every volume has
+  the floor and 1 GB more free. Free space rather than lower the floor: a lane
+  whose builds leave large outputs in its worktree (`target/`, `build/`,
+  `node_modules/`), or fill a cache of its own, should clean them in its setup.
+  A task's folder keeps what its setup, check and merge check printed; once a
+  day `hansa serve` cuts each such log of a task that ended (merged, cancelled,
+  failed, replaced) more than 30 days ago to its last 256 KB, under a first line
+  saying so, and `hansa show` says it was trimmed. The task's text, record,
+  report and result stay whole, and so does the event log.
 - A lane's setup, check and preview run outside the worker: hansa runs them
   itself, not a worker's or a design session's rules. The setup and
   check run in the lane's sandbox (its network and write lists apply); so

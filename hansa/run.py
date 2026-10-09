@@ -4958,6 +4958,7 @@ class Dispatcher:
         self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
+        self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
 
     def sandbox_waits(self, ln: str, s: dict, group: str = "work") -> bool:
         """Whether a lane's tasks of this group (sandbox_group) wait for their sandbox: held by this server (hold)
@@ -5108,10 +5109,11 @@ class Dispatcher:
                     if x.get("cancel") else {"state": "done", "phase": ""})
         sweep(desk, tid)
 
-    def merge_checks(self, s: dict) -> None:
+    def merge_checks(self, s: dict, starting: bool = True) -> None:
         """Finish merge checks that ended, stop those cancelled or over the lane's time, take over or finish
         those an earlier server left, and start queued ones on free lanes (also while dispatch is paused:
-        they use no provider)."""
+        they use no provider; neither they nor a merge without a check while starting is False, with free space
+        under the floor)."""
         desk = self.desk
         for tid, proc in list(self.merge_procs.items()):
             if has_ended(proc):
@@ -5151,6 +5153,8 @@ class Dispatcher:
             if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
                 desk.update(m["id"], merge_check={**mc, "timed_out": True})
                 stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
+        if not starting:
+            return
         from .release import holds_repo, releases
         tasks = desk.tasks()
         busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
@@ -5205,9 +5209,10 @@ class Dispatcher:
             elif (desk.meta(m["id"]).get("merge_check") or {}).get("phase") == "queued":
                 held.add(at)  # merged at once onto a base that had moved: checked again, still first in line
 
-    def tries(self, s: dict) -> None:
+    def tries(self, s: dict, starting: bool = True) -> None:
         """Finish tries that ended, stop those over the lane's time, finish those an earlier server left, and
-        start queued ones (also while dispatch is paused: they use no provider)."""
+        start queued ones (also while dispatch is paused: they use no provider; not while starting is False, with
+        free space under the floor)."""
         desk = self.desk
         for ln, proc in list(self.try_procs.items()):
             if has_ended(proc):
@@ -5227,7 +5232,7 @@ class Dispatcher:
                 if time.time() - (t.get("started") or time.time()) > 60 * limit:
                     write_try(desk, ln, {**t, "timed_out": True})
                     stop(t.get("pid"), t.get("pid_start", ""), self.try_procs.get(ln))
-            if t.get("phase") != "queued":
+            if t.get("phase") != "queued" or not starting:
                 continue
             if ln not in s["lanes"]:
                 end_try(desk, ln, {"ok": False, "steps": {}, "note": f"lane {ln} is no longer in settings"})
@@ -5252,6 +5257,23 @@ class Dispatcher:
             self.desk.ready_news()
         self.resting = resting
 
+    def disk(self, s: dict) -> list:
+        """The volumes under the floor of free space (disk.look), for which nothing new starts this round; and,
+        once a day, the trimming of what old tasks kept (disk.trim). A look that fails holds nothing back."""
+        from . import disk
+        if time.time() - self.trimmed >= disk.TRIM_EVERY:
+            self.trimmed = time.time()
+            try:
+                disk.trim(self.desk)
+            except Exception as e:  # noqa: BLE001 - keep serving; the error is on record
+                self.desk.event("trim_failed", error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+        try:
+            rec = disk.look(self.desk, s)
+        except Exception as e:  # noqa: BLE001 - keep serving; the error is on record
+            self.desk.event("disk_look_failed", error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+            return []
+        return rec["low"]
+
     def record(self, tasks: list) -> None:
         """Record what each running worker, verifier, design session and check runs below it (record_run), once
         each round: what it starts that leaves every marker sweep finds is still stopped at its end."""
@@ -5271,6 +5293,7 @@ class Dispatcher:
             for key in sandbox_retry(desk, s):
                 self.held[key] = json.dumps(s, sort_keys=True, default=str)
             beat(desk)
+        low = self.disk(s)
         self.record(desk.tasks())
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
@@ -5297,12 +5320,12 @@ class Dispatcher:
                     desk.update(m["id"], timed_out=True)
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
         self.sandbox_watch(s)
-        self.tries(s)
+        self.tries(s, starting=not low)
         from .release import tick as releases
-        releases(desk, s, self.release_procs)  # before merge checks: a yes waits for none that is only queued
-        self.merge_checks(s)
+        releases(desk, s, self.release_procs, starting=not low)  # before merge checks: a yes waits for none only queued
+        self.merge_checks(s, starting=not low)
         beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
-        if desk.paused():
+        if desk.paused() or low:  # free space under the floor: what runs goes on, nothing new starts
             return
         designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
         for m in desk.tasks():  # a design session has its own worktree and waits on the principal
@@ -5563,6 +5586,13 @@ def server_text(st: dict) -> str:
             + " · next: hansa explain server")
 
 
+def disk_short(desk: Desk) -> str:
+    """Why hansa serve starts nothing new now, for what waits; '' when free space is over the floor (disk.held)."""
+    from . import disk
+    low = disk.held(desk)
+    return disk.short_text(desk, low) if low else ""
+
+
 def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
     """Why a queued task is not running yet, in one line."""
     if m.get("kind") == "design":
@@ -5572,10 +5602,13 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
                 else f"HELD: lane {m.get('lane')} cannot open a design session, {sandbox_held_text(held)}" if held
+                else disk_short(desk) if disk_short(desk)
                 else "opens when `hansa serve` next looks (within seconds)" if not not_looking(desk)
                 else f"opens once `hansa serve` gets through its rounds; {not_looking(desk)}")
     if desk.paused():
         return "dispatch is paused"
+    if disk_short(desk):
+        return disk_short(desk)
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
     if not lanes:
         return "no lanes in settings"

@@ -5,8 +5,8 @@ there arrives in the session as a message from another session. A follower is a 
 per session and desk. It reads the desk's event log from where it left off, picks what the coordinator
 waits for (a task ended, a verification or design session ended, a queued merge check ended, the principal
 answered a request, a provider an open request names became ready, the principal answered a release, a release
-ended or became void, the server stopped), and posts it to that session's inbox. It ends when the session's
-process does.
+ended or became void, the server stopped, free space went under the floor or came back over it), and posts it to
+that session's inbox. It ends when the session's process does.
 
     `hansa coordinator`   starts one for the session it launches (--messaging-socket-path, a path it chose)
     `hansa notify on`     starts one for the session it is run from (CLAUDE_PID, CLAUDE_CODE_MESSAGING_SOCKET)
@@ -47,7 +47,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account
+from . import account, disk
 from .desk import Desk, now, read_json, write_json
 from .run import alive, claude_bin, proc_start, server_state, srt_needed, srt_record
 
@@ -266,6 +266,15 @@ def _item(desk: Desk, e: dict):
     if kind in ("release_answered", "release_ended", "release_void", "release_forbidden",
                 "release_stopped") and not e.get("quiet"):
         return _release_item(desk, e)
+    if kind == "disk_low":
+        return ("disk",), (f"free space is under the floor ({e.get('floor') or 0:g} GB): "
+                           + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until every "
+                           f"volume has {(e.get('floor') or 0) + disk.MARGIN:g} GB free; what runs goes on · next: free "
+                           "space, or hansa explain server"), None, True, None
+    if kind == "disk_ok":
+        return ("disk",), ("free space is back over the floor"
+                           + (f" ({e.get('floor') or 0:g} GB)" if e.get("floor") else " (the floor is off)")
+                           + ": hansa serve starts things again"), None, True, None
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
                              "hansa explain server"), None, True, None

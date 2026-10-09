@@ -4,7 +4,8 @@ The principal sets one command line on the page (settings `alert`, which only th
 the page records that it saved it, and when. hansa runs it when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a request to the principal is filed (hansa ask), when a lane's runs cannot
-start because their sandbox cannot (once for each lane and reason: run.hold), and
+start because their sandbox cannot (once for each lane and reason: run.hold), when free space goes under the floor
+and hansa serve starts nothing new (once each time: disk.look), and
 when hansa serve has finished no round for STUCK_ALERT seconds; not for ordinary task events, which go to the
 coordinator. The coordinator sends none: no hansa command does.
 
@@ -44,7 +45,7 @@ from pathlib import Path
 
 from .desk import Desk, now, read_json, write_json
 
-KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "test")
+KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "test")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
@@ -182,6 +183,10 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
         add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
                              + (f"task {fields['task']} is held" if fields.get("task") else "its tasks are held")
                              + ", not failed")
+    elif kind == "disk_low":  # once each time it goes under (disk.look)
+        add(desk, "disk", f"free space is under the floor ({fields.get('floor') or 0:g} GB): "
+                          + "; ".join(fields.get("volumes") or []) + ": hansa serve starts no new task or release "
+                          "until there is space again; what runs goes on")
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
@@ -413,7 +418,7 @@ def explain_line(s: dict) -> str:
                 "With none, no release gets a one-time code: the principal approves releases on the page only.")
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
-            "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, or hansa serve finishes no "
-            "round for a long time. You send no alerts and cannot set it. A release waiting for the principal gets a "
+            "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, free space goes under the "
+            "floor (hansa disk-floor), or hansa serve finishes no round for a long time. You send no alerts and cannot set it. A release waiting for the principal gets a "
             "one-time code that only that alert carries: the principal answers on the page, or says the code in the "
             "conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). Never guess one.")
