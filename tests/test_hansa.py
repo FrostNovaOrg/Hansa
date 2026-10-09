@@ -1111,13 +1111,26 @@ class DeskTest(unittest.TestCase):
         self.assertIn("check (run by hansa, not the worker): FAILED (exit 1) in 2 s: python3 -m unittest\n"
                       "  the failing tests, from its output:\n    " + "=" * 70 + "\n    FAIL: test_b (t.T.test_b)", shown)
         self.assertIn("    AssertionError: 1 != 2\n", shown)
-        self.assertIn(f"  the whole output: hansa show {tid} --check", shown)
+        self.assertIn(f"  the whole output: hansa show {tid} --check-log", shown)
         self.assertNotIn("test_a (t.T.test_a) ... ok", shown)
-        whole = self.hansa_out("show", tid, "--check")
-        self.assertTrue(whole.startswith("check (run by hansa, not the worker): FAILED (exit 1): python3 -m unittest\n"
-                                         "using [key of mimo]\n"), whole[:300])
+        whole = self.hansa_out("show", tid, "--check-log")
+        self.assertTrue(whole.startswith(f"the whole output of {tid}'s check (run by hansa, not the worker): FAILED "
+                                         f"(exit 1): python3 -m unittest ({len(log.splitlines())} lines, keys removed; "
+                                         f"from {self.desk.tasks_dir / tid / 'check.log'})\nusing [key of mimo]\n"),
+                        whole[:400])
         self.assertEqual(whole.count("test_a (t.T.test_a) ... ok"), 40)
         self.assertNotIn(key, whole)
+        # --check: each log apart, its file, its size and its last lines, under a first line that says so
+        both = self.hansa_out("show", tid, "--check")
+        self.assertTrue(both.startswith(f"{tid}: its check, each apart: how it ended, the file with its whole output, "
+                                        f"and its last 20 lines (keys removed). One of them whole: hansa show {tid} "
+                                        f"--check-log\n\n== check (run by hansa, not the worker): FAILED (exit 1): "
+                                        f"python3 -m unittest\n   whole output: {self.desk.tasks_dir / tid / 'check.log'} "
+                                        f"({len(log.splitlines())} lines, {(self.desk.tasks_dir / tid / 'check.log').stat().st_size:,} bytes)\n"),
+                        both[:600])
+        self.assertIn("   its last 20 lines:\n", both)
+        self.assertEqual(both.count("test_a (t.T.test_a) ... ok"), 0)  # 40 of them, all above its last 20 lines
+        self.assertNotIn(key, both)
         # a long run of failures is cut, and says how much more there is
         (self.desk.tasks_dir / tid / "check.log").write_text("".join(f"--- FAIL: Test{i} (0.00s)\n" for i in range(90)))
         shown = views.show_text(self.desk, tid)
@@ -1134,11 +1147,21 @@ class DeskTest(unittest.TestCase):
         (self.desk.tasks_dir / tid / "merge-check.log").write_text("merged badly\n")
         self.desk.update(tid, merge_check_result={"ok": False, "exit": 3, "note": "", "command": "make test",
                                                   "onto": "0123456789abcdef", "seconds": 1, "tail": ["merged badly"]})
-        whole = self.hansa_out("show", tid, "--check")
-        self.assertIn("\n\nmerge check (on the task merged onto the base at 0123456789): FAILED (exit 3): make test\n"
-                      "merged badly", whole)
+        both = self.hansa_out("show", tid, "--check")
+        self.assertTrue(both.startswith(f"{tid}: its check and its merge check, each apart: "), both[:200])
+        self.assertIn(f"One of them whole: hansa show {tid} --check-log or hansa show {tid} --merge-check-log\n", both)
+        self.assertIn("\n\n== merge check (on the task merged onto the base at 0123456789): FAILED (exit 3): make test\n"
+                      f"   whole output: {self.desk.tasks_dir / tid / 'merge-check.log'} (1 line, 13 bytes)\n   all of it:\nmerged badly", both)
+        self.assertLess(both.index("== check"), both.index("== merge check"))
+        self.assertEqual(self.hansa_out("show", tid, "--merge-check-log"),
+                         f"the whole output of {tid}'s merge check (on the task merged onto the base at 0123456789): "
+                         f"FAILED (exit 3): make test (1 line, keys removed; from "
+                         f"{self.desk.tasks_dir / tid / 'merge-check.log'})\nmerged badly\n")
+        self.assertNotIn("merged badly", self.hansa_out("show", tid, "--check-log"))
+        self.assertIn(f"  the whole output: hansa show {tid} --merge-check-log", views.show_text(self.desk, tid))
         other = self.desk.new_task("Something else")
         self.assertEqual(self.hansa_out("show", other, "--check"), f"{other}: no check has run on it\n")
+        self.assertEqual(self.hansa_out("show", other, "--merge-check-log"), f"{other}: no merge check has run on it\n")
 
     def test_status_and_explain_say_where_the_web_page_is(self):
         st = views.status(self.desk)
@@ -7134,6 +7157,154 @@ class DeskTest(unittest.TestCase):
     @staticmethod
     def allowed_by(argv):
         return argv[argv.index("--allowedTools") + 1:]
+
+    def test_workers_and_verifiers_run_a_probe_from_a_script_file_in_a_lane_with_no_allowed_commands(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = []
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        vid = self.desk.meta(tid)["verify"]
+        self.settle(Dispatcher(self.desk), vid)
+        argvs = [json.loads(x) for x in seen.read_text().splitlines()]
+        self.assertEqual(len(argvs), 2)
+        for argv, who in zip(argvs, (tid, vid)):
+            tmp = run.commands_tmp(self.desk.meta(who)["worker_tmps"][-1]["path"])
+            told = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+            self.assertIn("To try a line taken from a build or other script (one that holds rm, say), write it to a "
+                          f"script file in your temporary folder and run that with sh: `sh {tmp}/probe.sh`, not "
+                          '`bash -c "..."`. Claude Code refuses a shell -c it cannot check', told)
+            # no allowed command of the lane's, yet sh with a script runs: Bash is let through in the sandbox
+            self.assertIn("Bash", self.allowed_by(argv))
+            self.assertFalse([r for r in self.denied_by(argv) if r.startswith(("Bash(sh", "Bash(bash", "Bash(/bin"))])
+            box = self.sandbox_of(argv)
+            self.assertEqual((box["autoAllowBashIfSandboxed"], box["allowUnsandboxedCommands"]), (True, False))
+        probe = self.tmp / "probe"
+        probe.mkdir()
+        (probe / "probe.sh").write_text(f'mkdir -p "{probe}/out" && touch "{probe}/out/x" && rm -r "{probe}/out" '
+                                        '&& echo ran\n')
+        r = subprocess.run(["sh", str(probe / "probe.sh")], capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, "ran\n"), r.stderr)
+        self.assertFalse((probe / "out").exists())
+
+    def test_show_and_status_give_the_effort_each_run_started_with_and_where_it_came_from(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        plain = self.desk.new_task("Add hello.txt")
+        self.settle(d, plain)
+        self.assertNotIn("--effort", json.loads(seen.read_text().splitlines()[-1]))
+        self.assertIn(f"{plain} · done · lane a · claude (opus, claude's default effort) · ", views.show_text(self.desk, plain))
+        asked = self.desk.new_task("Add hello.txt", effort="max")
+        self.settle(d, asked)
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertEqual(argv[argv.index("--effort") + 1], "max")
+        self.assertIn(" · claude (opus, effort max from the task's --effort) · ", views.show_text(self.desk, asked))
+        s = self.desk.settings()
+        s["providers"]["claude"]["effort"] = "high"
+        self.assertEqual(self.desk.save_settings(s), [])
+        own = self.desk.new_task("Add hello.txt")
+        self.settle(d, own)
+        self.assertIn(" · claude (opus, effort high from the provider's default) · ", views.show_text(self.desk, own))
+        # an endpoint that is not Claude's own may ignore it
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "low", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-effort-0001")
+        compat = self.desk.new_task("Add hello.txt")
+        self.settle(d, compat)
+        said = ("mimo (mimo-x, effort low from the provider's default; its endpoint is not Claude's own and may ignore "
+                "effort)")
+        self.assertIn(f" · {said} · ", views.show_text(self.desk, compat))
+        # hansa status, of a run under way
+        self.desk.update(compat, state="running", phase="", pid=os.getpid(), pid_start=run.proc_start(os.getpid()),
+                         started=time.time())
+        st = views.status(self.desk)
+        row = next(x for x in st["running"] if x["id"] == compat)
+        self.assertEqual((row["effort"], row["effort_from"]), ("low", "provider"))
+        self.assertIn(f"  {compat} a on {said}, 0 min: ", views.status_text(st))
+        self.desk.update(compat, state="done", pid=None)
+        # an earlier run started otherwise names its own; one started as the last does not repeat it
+        keep = run.run_numbers(self.desk.meta(asked), {})
+        self.assertEqual((keep["model"], keep["effort"], keep["effort_from"]), ("opus", "max", "task"))
+        self.desk.update(own, attempts=[{"provider": "claude", "at": time.time(), "error": "it stopped",
+                                         "kind": "refused", **keep},
+                                        {"provider": "claude", "at": time.time(), "error": "again", "kind": "refused",
+                                         **run.run_numbers(self.desk.meta(own), {})}])
+        shown = views.show_text(self.desk, own)
+        self.assertIn("earlier try on claude (opus, effort max from the task's --effort): it stopped\n", shown)
+        self.assertIn("earlier try on claude: again\n", shown)
+
+    def test_hansa_help_with_a_command_prints_that_commands_help(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["verify", "--help"])
+        self.assertEqual(self.hansa_out("help", "verify"), out.getvalue())
+        self.assertTrue(self.hansa_out("help").startswith("# Desk card"))
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("help", "nosuch")
+        self.assertIn("no command nosuch", str(e.exception.code))
+
+    def test_hansa_removes_the_empty_folders_it_makes_in_the_temporary_folder(self):
+        from hansa import run
+        base = self.tmp / "tmp"
+        base.mkdir()
+        old = time.time() - 2 * run.TMP_SWEEP_AGE
+        def folder(name, old_one=True, inside=""):
+            f = base / name
+            f.mkdir()
+            if inside:
+                (f / inside).write_text("")
+            if old_one:
+                os.utime(f, (old, old))
+            return f
+        left = folder("hansa-no-hooks-abc123")
+        inbox = folder(f"hansa-{os.getuid()}")
+        fresh = folder("hansa-no-hooks-fresh", old_one=False)  # perhaps a running process's
+        used = folder("hansa-no-hooks-used", inside="x")
+        another = folder(f"hansa-{os.getuid() + 1}")  # another account's name
+        other = folder("hansa-t0001-abc")  # a worker's, removed with its run (remove_sandbox_tmp)
+        self.assertEqual(sorted(run.sweep_tmp(str(base))), sorted([str(left), str(inbox)]))
+        for f in (fresh, used, another, other):
+            self.assertTrue(f.is_dir(), f)
+        # a process removes its own as it exits
+        r = subprocess.run([sys.executable, "-c", "from hansa import run; print(run.no_hooks())"],
+                           cwd=str(Path(__file__).resolve().parent.parent), env={**os.environ, "TMPDIR": str(base)},
+                           capture_output=True, text=True)
+        made = r.stdout.strip()
+        self.assertTrue(made.startswith(str(base / run.NO_HOOKS_PREFIX)), r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(made))
+        # hansa serve sweeps as it starts, then each hour
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "sweep_tmp") as swept:
+            d.tick()
+            d.tick()
+            self.assertEqual(swept.call_count, 1)
+            d.swept -= run.TMP_SWEEP_AGE
+            d.tick()
+            self.assertEqual(swept.call_count, 2)
+        # a session's inbox folder goes with the last inbox in it, once the session has ended
+        box = base / f"hansa-{os.getuid()}"
+        box.mkdir()
+        (box / "c2.sock").write_text("")  # not a socket: not one hansa's inbox, so left as it is
+        notify.remove_inbox(str(box / "c1.sock"))
+        self.assertTrue(box.is_dir())
+        (box / "c2.sock").unlink()
+        notify.remove_inbox(str(box / "c1.sock"))  # its session's Claude Code removed the socket itself
+        self.assertFalse(box.exists())
+        mine = base / "mine"
+        mine.mkdir()
+        notify.remove_inbox(str(mine / "c1.sock"))  # a --messaging-socket-path of the session's own: not hansa's
+        self.assertTrue(mine.is_dir())
 
     def test_a_lanes_allow_list_holds_web_tools_to_listed_sites(self):
         s = self.desk.settings()

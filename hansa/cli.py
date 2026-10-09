@@ -290,6 +290,8 @@ def cmd_status(a):
 def cmd_show(a):
     desk = Desk.find(a.desk)
     print(views.report_text(desk, a.id) if a.report else views.check_output_text(desk, a.id) if a.check
+          else views.check_log_text(desk, a.id) if a.check_log
+          else views.check_log_text(desk, a.id, merge=True) if a.merge_check_log
           else views.show_text(desk, a.id, full=a.full))
 
 
@@ -2138,6 +2140,13 @@ def cmd_notes(a):
 
 
 def cmd_help(a):
+    if a.command:  # hansa help verify: what hansa verify --help prints
+        p = a.commands.get(a.command)
+        if not p:
+            raise SystemExit(f"hansa: no command {a.command}; hansa help alone prints the agent card, and hansa --help "
+                             "lists the commands")
+        p.print_help()
+        return
     print(CARD.read_text(encoding="utf-8"))
 
 
@@ -2216,8 +2225,11 @@ def main(argv=None):
     g.add_argument("--full", action="store_true", help="the whole text and the whole report")
     g.add_argument("--report", action="store_true", help="the report alone, whole (for a verification, its verdict "
                                                          "and its report)")
-    g.add_argument("--check", action="store_true", help="the whole output of the task's last check and of its last "
-                                                        "merge check, keys removed")
+    g.add_argument("--check", action="store_true", help="the task's last check and its last merge check, each apart: "
+                   "how it ended, the file with its whole output and its size, and its last lines, keys removed")
+    g.add_argument("--check-log", action="store_true", help="the whole output of the task's last check, keys removed")
+    g.add_argument("--merge-check-log", action="store_true", help="the whole output of the task's last merge check, "
+                                                                  "keys removed")
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
@@ -2554,7 +2566,8 @@ def main(argv=None):
     add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
         "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "
         "window of hours, local time, when it is idle and nobody is typing (it needs tmux)")
-    add("help", cmd_help, "print the agent card")
+    p = add("help", cmd_help, "print the agent card; with a command, that command's help")
+    p.add_argument("command", nargs="?", help="a command, such as verify: its help, as hansa verify --help prints it")
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--by", type=int, required=True)
@@ -2579,6 +2592,7 @@ def main(argv=None):
     elif extra:
         ap.error(f"unrecognized arguments: {' '.join(extra)}")
     a.rest = rest
+    a.commands = sub.choices
     if not getattr(a, "fn", None):
         ap.print_help()
         return 0

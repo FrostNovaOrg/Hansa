@@ -8,6 +8,8 @@ worker ends. Nothing here needs the worker to know about hansa.
 """
 from __future__ import annotations
 
+import atexit
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -178,6 +180,9 @@ on branch task/{tid}, which was made for this task.
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
   Write its path out in full in commands, not as $TMPDIR: Claude Code cannot see what a variable
   stands for, and refuses a command whose paths it cannot place.
+- To try a line taken from a build or other script (one that holds rm, say), write it to a script
+  file in your temporary folder and run that with sh: `sh {tmp}/probe.sh`, not `bash -c "..."`.
+  Claude Code refuses a shell -c it cannot check, such as one that runs rm; a script file runs.
 - If a command you need is refused, say which one and why you need it in your report;
   do not look for a way around the refusal.
 - `git stash` is refused, `git stash list` too, and one refused part refuses the whole command
@@ -204,6 +209,9 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
   alone for this run and is removed when it ends: put scratch files there, not in this directory.
   Write its path out in full in commands, not as $TMPDIR: Claude Code cannot see what a variable
   stands for, and refuses a command whose paths it cannot place.
+- To try a line taken from a build or other script (one that holds rm, say), write it to a script
+  file in your temporary folder and run that with sh: `sh {tmp}/probe.sh`, not `bash -c "..."`.
+  Claude Code refuses a shell -c it cannot check, such as one that runs rm; a script file runs.
 - If a command you need is refused, say which one and why in your report; do not look for a way around it.
 - `git stash` is refused, `git stash list` too, and one refused part refuses the whole command
   line. To see a file as it was before your changes: `git show HEAD:path` (before the task's, the
@@ -970,14 +978,54 @@ def join_command(m: dict) -> str:
 
 
 _NO_HOOKS = []  # the empty folder hansa's git in a worktree takes its hooks from, made once (no_hooks)
+NO_HOOKS_PREFIX = "hansa-no-hooks-"
+TMP_SWEEP_AGE = 3600  # seconds: an empty folder of hansa's this old in the temporary folder is a leftover (sweep_tmp)
 
 
 def no_hooks() -> str:
+    """Made once a process, and removed as it exits (_remove_no_hooks); one a process left (it exec'd another
+    program, or was killed) is swept later (sweep_tmp)."""
     if not _NO_HOOKS:
-        _NO_HOOKS.append(tempfile.mkdtemp(prefix="hansa-no-hooks-"))  # 0700, the desk's account's alone
+        _NO_HOOKS.append(tempfile.mkdtemp(prefix=NO_HOOKS_PREFIX))  # 0700, the desk's account's alone
+        atexit.register(_remove_no_hooks)
     if not os.path.isdir(_NO_HOOKS[0]):  # removed meanwhile (a /tmp cleaner): a new one
-        _NO_HOOKS[0] = tempfile.mkdtemp(prefix="hansa-no-hooks-")
+        _NO_HOOKS[0] = tempfile.mkdtemp(prefix=NO_HOOKS_PREFIX)
     return _NO_HOOKS[0]
+
+
+def _remove_no_hooks() -> None:
+    if _NO_HOOKS:
+        with contextlib.suppress(OSError):
+            os.rmdir(_NO_HOOKS[0])  # empty, as git never writes there; one that is not stays
+
+
+def sweep_tmp(*bases: str) -> list:
+    """Empty folders hansa made in the temporary folders (bases: tempfile's and /tmp) that a process left, older than
+    TMP_SWEEP_AGE and this account's: the hansa-no-hooks-* of a process that exec'd another program or was killed
+    (no_hooks), and the hansa-<uid> of session inboxes no session uses now (notify.socket_path). Only empty ones
+    are removed, so a folder in use stays. hansa serve sweeps as it starts and each hour. Returns what it removed."""
+    gone, mine = [], f"hansa-{os.getuid()}"
+    for base, n in [(b, n) for b in dict.fromkeys(bases or (tempfile.gettempdir(), "/tmp")) for n in _names(b)]:
+        if not (n.startswith(NO_HOOKS_PREFIX) or n == mine):
+            continue
+        f = os.path.join(base, n)
+        try:
+            st = os.lstat(f)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or time.time() - st.st_mtime < TMP_SWEEP_AGE \
+                    or (_NO_HOOKS and f == _NO_HOOKS[0]):
+                continue
+            os.rmdir(f)
+            gone.append(f)
+        except OSError:  # not empty, or another's: left as it is
+            continue
+    return gone
+
+
+def _names(d: str) -> list:
+    try:
+        return os.listdir(d)
+    except OSError:
+        return []
 
 
 def worktree_git_settings() -> list:
@@ -3532,6 +3580,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     wt, base = prepare(desk, lane_name, lane, meta)
     model = (meta.get("model") if p["kind"] == "subscription" else "") or p["model"]  # other providers: their own
     effort = meta.get("effort") or p.get("effort", "")
+    effort_from = "task" if meta.get("effort") else "provider" if effort else ""  # views.effort_text says it
     brief = desk.lanes_dir / lane_name / "brief.md"
     verifying = meta.get("kind") == "verify"
     tmp = make_worker_tmp(desk, tid)  # removed by not_started too, should the start fail on the way
@@ -3607,7 +3656,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(command, cwd=str(wt), env=env, stdin=stdin, stdout=out,
                                     stderr=err, start_new_session=True)
-        desk.update(tid, phase="", model_asked=model, effort_used=effort, pid=proc.pid,
+        desk.update(tid, phase="", model_asked=model, effort_used=effort, effort_from=effort_from, pid=proc.pid,
                     pid_start=proc_start(proc.pid))
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
@@ -3788,6 +3837,8 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     meta = desk.transition(
         tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname, model_asked=model,
         effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
+        effort_from="design" if ds.get("effort") else "coordinator" if pname == co["provider"] and co.get("effort")
+        else "provider" if p.get("effort") else "",
         started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False, cancel=False,
         tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None)
     if not meta:
@@ -4170,7 +4221,8 @@ def run_numbers(meta: dict, fields: dict) -> dict:
     """What one run of a task used, as kept on its attempt record when the task is queued for another try."""
     return {"usage": fields.get("usage") or {}, "turns": fields.get("turns"), "session_id": fields.get("session_id", ""),
             "launch": meta.get("launch", ""), "ran_from": meta.get("started"), "ended": fields.get("finished") or now(),
-            "model": meta.get("model_asked", "")}
+            "model": meta.get("model_asked", ""), "effort": meta.get("effort_used", ""),
+            "effort_from": meta.get("effort_from", "")}
 
 
 def keep_lost_run(desk: Desk, m: dict) -> dict:
@@ -4958,6 +5010,7 @@ class Dispatcher:
         self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
+        self.swept = 0.0  # when it last swept hansa's leftover empty folders in the temporary folder (sweep_tmp)
 
     def sandbox_waits(self, ln: str, s: dict, group: str = "work") -> bool:
         """Whether a lane's tasks of this group (sandbox_group) wait for their sandbox: held by this server (hold)
@@ -5271,6 +5324,9 @@ class Dispatcher:
             for key in sandbox_retry(desk, s):
                 self.held[key] = json.dumps(s, sort_keys=True, default=str)
             beat(desk)
+        if time.time() - self.swept >= TMP_SWEEP_AGE:
+            self.swept = time.time()
+            sweep_tmp()
         self.record(desk.tasks())
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
