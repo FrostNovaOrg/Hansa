@@ -57,6 +57,14 @@ session or release. What already runs goes on, a running task's check and a resu
 It starts again by itself once every volume has the floor and 1 GB more free, so that it does not stop and start
 at every round around the line. A release asked meanwhile waits, approved, and goes once there is space.
 
+Each place is looked at on its own. One that cannot be looked at (a lane's repository in a folder the account
+cannot read, say) is left out, and only it: the others are measured and hold as before, and `hansa status`, the
+page and `hansa explain server` say which place cannot be looked at, since when and why, and that the free space
+of its volume is not known and holds nothing back. If the look fails as a whole, `hansa serve` holds nothing back
+while it fails, and `hansa status` says so with what the last look that worked measured and when, rather than a
+`DISK LOW` that no longer holds. Either is an event (`disk_look_failed`, and `disk_look_ok` once it can look again)
+when it changes, not each round, and the coordinator's session hears it.
+
 The floor is the coordinator's, as concurrency is: `hansa disk-floor` shows it with the free space of the desk's
 volume, `hansa disk-floor 20` sets it to 20 GB (default 10; 0 turns it off). The page shows it and cannot change
 it.

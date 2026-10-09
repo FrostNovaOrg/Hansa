@@ -527,7 +527,8 @@ def status(desk: Desk) -> dict:
         # free space: the desk's volume now, the floor, and the volumes for which hansa serve starts nothing new
         "disk": {"free": disk.desk_free(desk)[0], "floor": disk.floor(s), "line": disk.desk_line(desk, s),
                  "low": (low := disk.held(desk)),
-                 "low_text": disk.held_text(desk, low, disk.floor(s)) if low else ""},
+                 "low_text": disk.held_text(desk, low, disk.floor(s)) if low else "",
+                 "unknown": disk.unknown_lines(desk)},  # what its look could not measure, and what was known
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and m.get("lane") == n), None),
                    "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
@@ -594,6 +595,7 @@ def status_text(st: dict) -> str:
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     out += [st["disk"]["low_text"]] if (st.get("disk") or {}).get("low_text") else []
+    out += (st.get("disk") or {}).get("unknown") or []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
     out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
     out += [f"what workers may not read, entry left out: {x.removeprefix(DENY_AT)}"

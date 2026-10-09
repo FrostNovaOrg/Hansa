@@ -9,7 +9,10 @@ runs goes on (a worker's resume and its task's check are part of a task that run
 volume has the floor and MARGIN GB more free, so that it does not flap. What it saw is in .hansa/disk.json (look),
 which hansa status, the page and hansa explain server read; going under and coming back over are events (disk_low,
 disk_ok), which the coordinator's session hears once each (notify), and disk_low runs the principal's alert once
-(alert.from_event).
+(alert.from_event). Each place is looked at on its own (measure): one that cannot be (a folder above it the account
+cannot read) is left out, and only it, and said so; the free space of its volume is not known. A look that fails
+as a whole holds nothing back while it fails, and its record says so (look_failed). Either is an event when it
+changes (disk_look_failed, disk_look_ok), not each round: the event log is never trimmed.
 
 What old tasks kept (trim): a task's folder keeps its text, record (meta.json), report (result.md) and result
 (run.json), which stay whole, and the output of its processes, of which only the preview's is capped (PREVIEW_KEEP).
@@ -70,14 +73,20 @@ def places(desk: Desk, s: dict) -> list:
     return out
 
 
-def _there(p: Path):
-    """The path, or the nearest folder above it that exists (a worktree not made yet is on its parent's volume)."""
+def _volume_of(p: Path):
+    """(device, mount, usage) of the volume path p is on: the path's, or where it is not there yet the nearest
+    folder above it that is (a worktree not made yet is on its parent's volume). Raises OSError when it cannot be
+    looked at (a folder above it the account cannot read, say)."""
     p = Path(os.path.abspath(p))
-    while not p.exists():
-        if p == p.parent:
-            return None
-        p = p.parent
-    return p
+    while True:
+        try:
+            dev = os.stat(p).st_dev
+            break
+        except (FileNotFoundError, NotADirectoryError):
+            if p == p.parent:
+                raise
+            p = p.parent
+    return dev, _mount(p), shutil.disk_usage(p)
 
 
 def _mount(p: Path) -> str:
@@ -87,24 +96,30 @@ def _mount(p: Path) -> str:
     return str(p)
 
 
-def volumes(desk: Desk, s: dict) -> list:
-    """Each volume of places once: {mount, what (the places on it), free, total}, the desk's first. A place that
-    cannot be looked at is left out."""
-    vols = {}
+def measure(desk: Desk, s: dict, was: dict | None = None) -> tuple:
+    """Each place looked at on its own: (volumes, failed). volumes: each volume of places once, {mount, what (the
+    places on it), free, total}, the desk's first. failed: the places that cannot be looked at, {what, path,
+    error, since} (since: from was, the last look's record, for a place that failed then too), left out of volumes
+    and only they; their volumes' free space is not known."""
+    before = {(f.get("what"), f.get("path")): f.get("since") for f in failed_places(was or {})}
+    vols, failed = {}, []
     for what, p in places(desk, s):
-        at = _there(p)
-        if at is None:
-            continue
         try:
-            dev = os.stat(at).st_dev
-            u = shutil.disk_usage(at)
-        except OSError:
+            dev, mount, u = _volume_of(p)
+        except Exception as e:  # noqa: BLE001 - this place is left out; the rest are measured
+            failed.append({"what": what, "path": str(p), "error": desk.redact(f"{type(e).__name__}: {e}")[:300],
+                           "since": before.get((what, str(p))) or now()})
             continue
-        v = vols.setdefault(dev, {"mount": _mount(at), "what": [], "free": u.free, "total": u.total})
+        v = vols.setdefault(dev, {"mount": mount, "what": [], "free": u.free, "total": u.total})
         if what not in v["what"]:
             v["what"].append(what)
         v["free"] = min(v["free"], u.free)
-    return list(vols.values())
+    return list(vols.values()), failed
+
+
+def failed_places(rec: dict) -> list:
+    f = rec.get("failed")
+    return [x for x in f if isinstance(x, dict)] if isinstance(f, list) else []
 
 
 def record_file(desk: Desk) -> Path:
@@ -120,32 +135,91 @@ def volume_text(v: dict) -> str:
     return f"{v.get('mount')} ({', '.join(v.get('what') or [])}) has {gb(v.get('free') or 0)} free"
 
 
+def place_text(f: dict) -> str:
+    return f"{f.get('what')} ({f.get('path')})"
+
+
 def look(desk: Desk, s: dict) -> dict:
     """hansa serve's look, each round: the volumes, and which hold it back (low). Under the floor it holds back; once
-    holding back, it goes on until every volume has the floor and MARGIN more. Says each change once, as an event.
-    Returns the record it wrote."""
+    holding back, it goes on until every volume has the floor and MARGIN more. Says each change once, as an event:
+    of the floor (disk_low, disk_ok), and of the places that cannot be looked at (disk_look_failed, disk_look_ok:
+    which, and when they can be looked at again), as the event log is never trimmed. Returns the record it wrote."""
     fl = floor(s)
     was = record(desk)
     was_low = bool(was.get("low"))
-    vols = volumes(desk, s)
+    vols, failed = measure(desk, s, was)
     bar = (fl + (MARGIN if was_low else 0)) * GB
     low = [v for v in vols if v["free"] < bar] if fl else []
-    rec = {"pid": os.getpid(), "at": now(), "floor": fl, "volumes": vols, "low": low,
-           "since": (was.get("since") if was_low else now()) if low else None}
+    at = now()
+    rec = {"pid": os.getpid(), "at": at, "measured": at, "floor": fl, "volumes": vols, "low": low,
+           "since": (was.get("since") if was_low else at) if low else None, "failed": failed}
     desk.state_dir.mkdir(exist_ok=True)
     write_json(record_file(desk), rec)
     if low and not was_low:
         desk.event("disk_low", floor=fl, volumes=[volume_text(v) for v in low])
     elif was_low and not low:
         desk.event("disk_ok", floor=fl, volumes=[volume_text(v) for v in vols])
+    key = lambda f: (f.get("what"), f.get("path"))
+    old = failed_places(was)
+    new = [f for f in failed if key(f) not in {key(x) for x in old}]
+    back = [f for f in old if key(f) not in {key(x) for x in failed}]
+    if new:
+        desk.event("disk_look_failed", places=[f"{place_text(f)}: {f['error']}" for f in new])
+    if back:
+        desk.event("disk_look_ok", places=[place_text(f) for f in back])
+    if isinstance(was.get("error"), dict):
+        desk.event("disk_look_ok", error=was["error"].get("text"))
     return rec
+
+
+def look_failed(desk: Desk, error: str) -> None:
+    """hansa serve's look failed as a whole (not one place: a fault in it, or its record cannot be written): while
+    it fails nothing is held back, and its record says so, with what the last look that worked measured, so that
+    hansa status does not go on saying what that look saw as if it held. An event when the error is new, not each
+    round."""
+    was = record(desk)
+    old = was.get("error") if isinstance(was.get("error"), dict) else {}
+    same = old.get("text") == error
+    if not same:
+        desk.event("disk_look_failed", error=error)
+    write_json(record_file(desk), {
+        **was, "pid": os.getpid(), "at": now(), "low": [], "since": None,
+        "error": {"text": error, "since": old.get("since") if same else now()},
+        "last_low": was.get("last_low") if old else (was.get("low") or [])})
 
 
 def held(desk: Desk) -> list:
     """The volumes for which hansa serve starts nothing new, as it last looked (a server that starts again looks
-    again in its first round); [] when none."""
-    low = record(desk).get("low")
-    return low if isinstance(low, list) else []
+    again in its first round); [] when none, or when its look fails (look_failed)."""
+    rec = record(desk)
+    low = rec.get("low")
+    return low if isinstance(low, list) and not rec.get("error") else []
+
+
+def _when(t) -> str:
+    if not isinstance(t, (int, float)) or isinstance(t, bool):
+        return "?"
+    return time.strftime("%H:%M" if time.time() - t < 86400 else "%Y-%m-%d %H:%M", time.localtime(t))
+
+
+def unknown_lines(desk: Desk, rec: dict | None = None) -> list:
+    """For hansa status, explain server and the page: what hansa serve's look could not measure, from its record
+    (rec, or the one on file): a look that failed as a whole, with what was last known and when it was measured,
+    and each place that cannot be looked at, whose volume's free space is not known. [] when it measured all."""
+    rec = record(desk) if rec is None else rec
+    out = []
+    err = rec.get("error")
+    if isinstance(err, dict):
+        last = rec.get("last_low") if isinstance(rec.get("last_low"), list) else []
+        known = (f"last measured {_when(rec['measured'])}: " + ("; ".join(volume_text(v) for v in last)
+                 + ", under the floor then" if last else "every volume over the floor then")
+                 if isinstance(rec.get("measured"), (int, float)) else "free space never measured")
+        out.append(f"disk: hansa serve could not look at free space since {_when(err.get('since'))} ({err.get('text')})"
+                   f", so it holds nothing back until it can; {known} · hansa explain server")
+    for f in failed_places(rec):
+        out.append(f"disk: hansa serve cannot look at {place_text(f)} since {_when(f.get('since'))} ({f.get('error')}):"
+                   " the free space of its volume is not known, and holds nothing back · hansa explain server")
+    return out
 
 
 def held_text(desk: Desk, low: list, fl=None) -> str:
@@ -194,7 +268,14 @@ def explain_lines(desk: Desk, s: dict) -> list:
         f"worktree, or fill a cache of its own, should clean them in its setup), or set the floor with hansa "
         f"disk-floor GB (default {DEFAULT_FLOOR}; 0 turns it off).",
         f"  floor: {floor_text(fl)}"]
-    lines += [f"  {volume_text(v)}" for v in volumes(desk, s)]
+    rec = record(desk)
+    try:
+        vols, failed = measure(desk, s, rec)
+        rec = {**rec, "failed": failed}
+    except Exception:  # noqa: BLE001 - what hansa serve's last look recorded, which says it failed
+        vols = []
+    lines += [f"  {volume_text(v)}" for v in vols]
+    lines += [f"  {x}" for x in unknown_lines(desk, rec)]
     lines += [f"  now: {held_text(desk, low, fl)}"] if low else []
     return lines
 

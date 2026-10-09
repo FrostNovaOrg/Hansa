@@ -275,6 +275,15 @@ def _item(desk: Desk, e: dict):
         return ("disk",), ("free space is back over the floor"
                            + (f" ({e.get('floor') or 0:g} GB)" if e.get("floor") else " (the floor is off)")
                            + ": hansa serve starts things again"), None, True, None
+    if kind == "disk_look_failed":
+        return ("disk", "look"), (("hansa serve cannot look at the free space of " + "; ".join(e.get("places") or [])
+                                   + ": the free space of its volume is not known, and holds nothing back")
+                                  if e.get("places") else
+                                  f"hansa serve could not look at free space ({e.get('error')}), so it holds nothing "
+                                  "back until it can") + " · next: hansa explain server", None, True, None
+    if kind == "disk_look_ok":
+        return ("disk", "look"), ("hansa serve can look at the free space of " + "; ".join(e.get("places"))
+                                  if e.get("places") else "hansa serve can look at free space again"), None, True, None
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
                              "hansa explain server"), None, True, None

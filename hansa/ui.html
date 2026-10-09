@@ -272,10 +272,11 @@ async function loadStatus() {
        : st.server_up ? T.serverUp : T.serverDown)
     + (st.srt_missing ? " · " + st.srt_missing : "")
     + (st.disk && st.disk.low_text ? " · " + (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "")
+    + (st.disk && st.disk.unknown || []).map(x => " · " + x).join("")
     + (st.no_read_stop ? " · " + T.noReadStop + ": " + st.no_read_stop : "")
     + (st.no_read_left_out || []).map(x => " · " + T.workersMayNotReadSkipped + ": " + x).join("");
   $("#state").className = (st.paused || !st.server_up || (st.server && st.server.state === "stuck") || st.srt_missing
-    || (st.disk && st.disk.low_text)
+    || (st.disk && (st.disk.low_text || (st.disk.unknown || []).length))
     || st.no_read_stop || (st.no_read_left_out || []).length) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});
   const t = st.last_24h;

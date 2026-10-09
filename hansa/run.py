@@ -4959,6 +4959,7 @@ class Dispatcher:
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
+        self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
 
     def sandbox_waits(self, ln: str, s: dict, group: str = "work") -> bool:
         """Whether a lane's tasks of this group (sandbox_group) wait for their sandbox: held by this server (hold)
@@ -5259,7 +5260,8 @@ class Dispatcher:
 
     def disk(self, s: dict) -> list:
         """The volumes under the floor of free space (disk.look), for which nothing new starts this round; and,
-        once a day, the trimming of what old tasks kept (disk.trim). A look that fails holds nothing back."""
+        once a day, the trimming of what old tasks kept (disk.trim). A place that cannot be looked at is left out
+        (disk.measure); a look that fails as a whole holds nothing back, and is recorded once, not each round."""
         from . import disk
         if time.time() - self.trimmed >= disk.TRIM_EVERY:
             self.trimmed = time.time()
@@ -5269,9 +5271,16 @@ class Dispatcher:
                 self.desk.event("trim_failed", error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
         try:
             rec = disk.look(self.desk, s)
-        except Exception as e:  # noqa: BLE001 - keep serving; the error is on record
-            self.desk.event("disk_look_failed", error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+        except Exception as e:  # noqa: BLE001 - keep serving; the error is on record, once (disk.look_failed)
+            error = self.desk.redact(f"{type(e).__name__}: {e}")[:300]
+            if error != self.look_error:
+                self.look_error = error
+                try:
+                    disk.look_failed(self.desk, error)
+                except Exception:  # noqa: BLE001 - its record cannot be written either
+                    pass
             return []
+        self.look_error = None
         return rec["low"]
 
     def record(self, tasks: list) -> None:

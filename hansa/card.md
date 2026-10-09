@@ -518,7 +518,9 @@ here; work that needs code changed or a browser goes to a worker.
   (and always shows the desk's volume's free space), as do the page and
   `hansa explain server`; queued tasks, merges and releases say they wait for
   it. You are told once when it goes under and once when it is back; the
-  principal's alert runs once. It starts again by itself once every volume has
+  principal's alert runs once. A place it cannot look at (a folder the account
+  cannot read) is left out alone and said so, as is a look that fails: you are
+  told once, and then once it can look again. It starts again by itself once every volume has
   the floor and 1 GB more free. Free space rather than lower the floor: a lane
   whose builds leave large outputs in its worktree (`target/`, `build/`,
   `node_modules/`), or fill a cache of its own, should clean them in its setup.

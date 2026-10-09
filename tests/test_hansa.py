@@ -13393,6 +13393,120 @@ class DeskTest(unittest.TestCase):
             self.hansa("disk-floor", "-1")
         self.assertIn("disk_floor must be a number", " ".join(validate({**self.desk.settings(), "disk_floor": "x"})))
 
+    def test_a_merge_check_asked_while_the_disk_is_low_waits_and_runs_once_there_is_space(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        self.hansa("merge", t1)
+        self.free = 2 * 10 ** 9
+        d.tick()
+        self.hansa("merge", t2)  # main moved: a merge check, which hansa serve starts
+        for _ in range(3):
+            d.tick()
+        m = self.desk.meta(t2)
+        self.assertEqual((m["state"], m["merge_check"]["phase"]), ("merging", "queued"))
+        self.assertIn("merge check queued", views.show_text(self.desk, t2))
+        self.assertIn("hansa serve starts nothing new while free space is under the floor",
+                      views.status_text(views.status(self.desk)))
+        self.free = 500 * 10 ** 9
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
+
+    def unreadable_lane_b(self) -> Path:
+        """Lane b, on a repository in a folder the account cannot read; the folder, opened again at the end."""
+        locked = self.tmp / "locked"
+        locked.mkdir()
+        sh("git", "clone", "-q", str(self.repo), str(locked / "repo"), cwd=self.tmp)
+        s = self.desk.settings()
+        s["lanes"]["b"] = {**json.loads(json.dumps(s["lanes"]["a"])), "repo": str(locked / "repo")}
+        self.assertEqual(self.desk.save_settings(s), [])
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        try:
+            os.stat(locked / "repo")
+        except PermissionError:
+            return locked
+        self.skipTest("this account reads a folder of mode 000 (root)")
+
+    def test_a_place_that_cannot_be_looked_at_is_left_out_alone_and_said_once(self):
+        from hansa import disk
+        locked = self.unreadable_lane_b()
+        self.free = 2 * 10 ** 9  # every volume under the floor
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        for _ in range(4):
+            d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")  # the rest is measured, and holds
+        self.assertTrue(disk.held(self.desk))
+        self.assertEqual(len(self.events("disk_low")), 1)
+        [failed] = self.events("disk_look_failed")  # once, not each round
+        [place] = failed["places"]
+        self.assertIn(f"lane b's repository ({locked / 'repo'}): PermissionError", place)
+        said = self.hansa("status")
+        self.assertIn("DISK LOW: ", said)
+        self.assertIn(f"disk: hansa serve cannot look at lane b's repository ({locked / 'repo'}) since ", said)
+        self.assertIn("the free space of its volume is not known, and holds nothing back", said)
+        explained = self.hansa("explain", "server")
+        self.assertIn(f"hansa serve cannot look at lane b's repository ({locked / 'repo'})", explained)
+        self.assertIn("lane a's repository", explained)  # measured
+        self.assertTrue(views.status(self.desk)["disk"]["unknown"])  # what the page shows
+        self.assertIn("hansa serve cannot look at the free space of lane b's repository",
+                      notify._item(self.desk, failed)[1])
+        # it can be looked at again: said once
+        locked.chmod(0o700)
+        self.free = 500 * 10 ** 9
+        for _ in range(2):
+            d.tick()
+        [ok] = self.events("disk_look_ok")
+        self.assertEqual(ok["places"], [f"lane b's repository ({locked / 'repo'})"])
+        self.assertEqual(len(self.events("disk_look_failed")), 1)
+        self.assertNotIn("cannot look at", self.hansa("status"))
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+
+    def test_a_look_that_fails_after_a_low_reading_leaves_no_stale_warning(self):
+        from hansa import disk
+        locked = self.unreadable_lane_b()
+        locked.chmod(0o700)
+        self.free_at = {locked: 2 * 10 ** 9}  # only lane b's repository's place is low
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertIn("lane b's repository", self.hansa("status").split("DISK LOW: ")[1].splitlines()[0])
+        # its folder can no longer be read: the place left out, the rest over the floor, so hansa serve starts again
+        locked.chmod(0)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        d.tick()
+        self.assertNotEqual(self.desk.meta(tid)["state"], "queued")
+        said = self.hansa("status")
+        self.assertNotIn("DISK LOW", said)
+        self.assertIn("hansa serve cannot look at lane b's repository", said)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual(len(self.events("disk_ok")), 1)
+        # a look that fails as a whole after a low reading: nothing is held, and status says what was last known
+        locked.chmod(0o700)
+        self.free_at = {}
+        self.free = 2 * 10 ** 9
+        d.tick()
+        self.assertIn("DISK LOW", self.hansa("status"))
+        with unittest.mock.patch("hansa.disk.measure", side_effect=PermissionError(13, "Permission denied")):
+            tid = self.desk.new_task("Add more.txt", lane="a")
+            for _ in range(3):
+                d.tick()
+            self.assertNotEqual(self.desk.meta(tid)["state"], "queued")
+            self.assertEqual(disk.held(self.desk), [])
+            said = self.hansa("status")
+            self.assertNotIn("DISK LOW", said)
+            self.assertRegex(said, r"disk: hansa serve could not look at free space since \d\d:\d\d \(PermissionError: "
+                                   r"\[Errno 13\] Permission denied\), so it holds nothing back until it can; last "
+                                   r"measured \d\d:\d\d: .*has 2\.0 GB free, under the floor then")
+            self.assertNotIn("waiting: hansa serve starts nothing new", said)
+            self.assertIn("could not look at free space", self.hansa("explain", "server"))
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual([e.get("error") for e in self.events("disk_look_failed")][-1:],
+                         ["PermissionError: [Errno 13] Permission denied"])  # once, not each round
+        self.assertEqual(sum(1 for e in self.events("disk_look_failed") if e.get("error")), 1)
+        self.free = 500 * 10 ** 9
+        d.tick()
+        self.assertEqual(sum(1 for e in self.events("disk_look_ok") if e.get("error")), 1)
+        self.assertNotIn("could not look at", self.hansa("status"))
+
     def test_serve_trims_the_logs_of_tasks_that_ended_over_30_days_ago_and_keeps_the_rest_whole(self):
         from hansa import disk
         day = 86400
