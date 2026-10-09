@@ -15623,10 +15623,10 @@ class LinuxPreludeTest(unittest.TestCase):
         sh("git", "config", "core.excludesFile", str(self.tmp / "mine"), cwd=self.repo)
         listed = self.git_status()
         self.assertNotIn("?? new.txt", listed)
-        self.assertIn("?? .mcp.json", listed)  # the placeholders show there again (README)
+        self.assertIn("?? .mcp.json", listed)  # the placeholders show there again (docs/linux-server.md)
         sh("git", "config", "--unset", "core.excludesFile", cwd=self.repo)
         listed = self.git_out("-c", f"core.excludesFile={self.tmp / 'mine'}", "status", "--porcelain", "-uall")
-        self.assertIn("?? .mcp.json", listed.splitlines())  # git -c, too (README)
+        self.assertIn("?? .mcp.json", listed.splitlines())  # git -c, too (docs/linux-server.md)
         self.assertNotIn("?? new.txt", listed.splitlines())
         listed = self.git_status(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile",
                                  GIT_CONFIG_VALUE_0=str(self.tmp / "mine"))

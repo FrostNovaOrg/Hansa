@@ -538,7 +538,7 @@ here; work that needs code changed or a browser goes to a worker.
   holds on this machine.
 - A Java or Maven lane: hansa sets Maven's proxy and Java's temporary folder in the sandbox by
   itself; what the project and the lane need (Mockito as a Java agent, a Maven repository of the
-  lane's own, the network list) is in hansa's README, "Java and Maven in a lane". Gradle is not covered yet.
+  lane's own, the network list) is in hansa's docs/java-and-maven.md. Gradle is not covered yet.
   Every JVM there prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr first (`java -version`, `java
   -XshowSettings`; `javac -version` and `mvn -v` with `2>&1`): a script reading the version looks for
   the line holding `version "`, not the first line. A script that sets `MAVEN_ARGS` itself drops

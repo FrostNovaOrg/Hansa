@@ -1,5 +1,5 @@
 #!/bin/sh
-# What a lane's commands find in the sandbox on Linux: run it as a lane's check (README, "On a Linux server"),
+# What a lane's commands find in the sandbox on Linux: run it as a lane's check (docs/linux-server.md),
 # in the lane's worktree. It prints, for the TMPDIR it is given and for the worktree, what the mount table says
 # (findmnt, df), what Java's FileStore.isReadOnly says (when java is there), and whether a write there works;
 # then the untracked files git status lists at the top of the worktree (the first 3, and how many more). It prints
