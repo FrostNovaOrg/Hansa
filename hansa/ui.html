@@ -210,6 +210,8 @@ const T = ZH ? {
 };
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
+// what a node is given as children: null and false are left out (the DOM's append and replaceChildren would show "null")
+const shown = kids => kids.flat(9).filter(c => c != null && c !== false);
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -219,7 +221,7 @@ function h(tag, attrs, ...kids) {
     else if (k === "checked") el.checked = !!v;
     else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of kids.flat(9)) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+  for (const c of shown(kids)) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
 const section = (title, ...kids) => h("section", {}, h("h2", {}, title), ...kids);
@@ -248,7 +250,7 @@ function err(e) { $("#state").textContent = String(e.message || e); $("#state").
 const detailOpen = new Set();
 function taskLink(id) {
   const box = h("div", {class:"mono", hidden:!detailOpen.has(id)});
-  const load = async () => { const r = await api("/api/task?id=" + id); box.replaceChildren(h("pre", {}, r.text), shotStrip(id, r.shots, 12)); };
+  const load = async () => { const r = await api("/api/task?id=" + id); box.replaceChildren(...shown([h("pre", {}, r.text), shotStrip(id, r.shots, 12)])); };
   if (detailOpen.has(id)) load().catch(err);
   const btn = h("button", {class:"link", onclick: () => {
     if (detailOpen.has(id)) { detailOpen.delete(id); box.hidden = true; }
@@ -282,7 +284,7 @@ async function loadStatus() {
     || st.no_read_stop || (st.no_read_left_out || []).length) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});
   const t = st.last_24h;
-  $("#tab-status").replaceChildren(
+  $("#tab-status").replaceChildren(...shown([
     h("section", {}, h("div", {class:"row"},
       st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
                 : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)],
@@ -324,7 +326,7 @@ async function loadStatus() {
       checkButton(p.name, loadStatus)]))),
     section(T.events, h("div", {class:"mono"}, ev.slice(0, 20).map(e => h("div", {}, `${when(e.ts)}  ${e.event}  ` +
       Object.entries(e).filter(([k]) => k !== "ts" && k !== "event").map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")))))
-  );
+  ]));
 }
 function releaseBlock(r) {
   const reason = h("input", {placeholder:T.releaseReason, style:"flex:1"});
@@ -460,7 +462,7 @@ function renderSettings(problems) {
   const newProv = h("input", {placeholder:T.newName});
   const newPrice = h("input", {placeholder:"model"});
   const msg = h("span", {});
-  $("#tab-settings").replaceChildren(
+  $("#tab-settings").replaceChildren(...shown([
     problems && problems.length ? section(T.problems, h("ul", {}, problems.map(p => h("li", {class:"bad"}, p)))) : null,
     NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
     section(T.providers,
@@ -530,10 +532,10 @@ function renderSettings(problems) {
     h("div", {class:"row bar"},
       h("button", {class:"primary", onclick: async () => {
         try { const r = await api("/api/settings", {settings:S, rev:REV});
-          if (r.ok) { await loadSettings(); msg.textContent = T.saved; msg.className = "ok"; $("#tab-settings").append(msg); }
+          if (r.ok) { await loadSettings(); msg.textContent = T.saved; msg.className = "ok"; $("#tab-settings").append(...shown([msg])); }
           else { renderSettings(r.problems); window.scrollTo(0, 0); } } catch (e) { err(e); } }}, T.save),
       h("button", {onclick: () => loadSettings()}, T.reload), msg)
-  );
+  ]));
 }
 
 /* ---------- cost ---------- */
@@ -549,7 +551,7 @@ async function loadCost() {
       rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
         ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
   };
-  $("#tab-cost").replaceChildren(
+  $("#tab-cost").replaceChildren(...shown([
     h("section", {},
       h("div", {class:"row"}, T.days, pick({d:String(costDays)}, "d", ["1", "7", "30"], ["1", "7", "30"]), T.daysUnit,
         h("strong", {}, `${T.total}: ${fmt(r.total.tokens)} ${T.tokens} · $${r.total.usd.toFixed(2)} ${T.listValue}`),
@@ -557,7 +559,7 @@ async function loadCost() {
       h("p", {class:"muted"}, T.costNote),
       r.coordinator_uncounted ? h("p", {class:"warn"}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted) : null,
       r.unpriced_models.length ? h("p", {class:"warn"}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice) : null),
-    section(T.cost, ["seat", "day", "model", "lane", "provider", "task"].map(block)));
+    section(T.cost, ["seat", "day", "model", "lane", "provider", "task"].map(block))]));
   const sel = $("#tab-cost select");
   sel.addEventListener("change", e => { costDays = Number(e.target.value); loadCost().catch(err); });
 }
@@ -567,14 +569,14 @@ async function exportCsv() {
   const esc = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
   const a = h("a", {href:URL.createObjectURL(new Blob([csv], {type:"text/csv"})), download:`cost-${costDays}d.csv`});
-  document.body.append(a); a.click(); a.remove();
+  document.body.append(...shown([a])); a.click(); a.remove();
 }
 
 /* ---------- start ---------- */
 document.title = T.title;
 $("#title").textContent = T.title;
 for (const tab of ["status", "settings", "cost"])
-  $("#tabs").append(h("button", {"data-tab":tab, onclick: () => show(tab)}, T[tab]));
+  $("#tabs").append(...shown([h("button", {"data-tab":tab, onclick: () => show(tab)}, T[tab])]));
 if (location.search.includes("t=")) history.replaceState(null, "", "/");
 show("status");
 setInterval(() => {

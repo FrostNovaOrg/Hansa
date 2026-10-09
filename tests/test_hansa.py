@@ -14048,10 +14048,12 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(release.get(self.desk, 2)["state"], "approved")
 
     PAGE_HARNESS = r"""
-// Runs the page's script with just enough of a DOM to build the Settings tab from the settings given on standard
-// input, then prints each release tick as the page built it: no layout, no browser.
+// Runs the page's script with just enough of a DOM to build its tabs from the replies given on standard input (by
+// path: /api/settings, /api/status, /api/events), then prints what argv[3] asks for: "ticks", each release tick of
+// the Settings tab as the page built it; "nulls", the text nodes of the Status and Settings tabs that read "null".
+// No layout, no browser.
 const fs = require("fs"), vm = require("vm");
-const [page, given] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse(fs.readFileSync(0, "utf8"))];
+const [page, given, ask] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse(fs.readFileSync(0, "utf8")), process.argv[3]];
 const script = page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"));
 class El {
   constructor(tag) { this.tag = tag; this.kids = []; this.attrs = {}; this.className = ""; this.hidden = false;
@@ -14059,7 +14061,9 @@ class El {
   set textContent(x) { this.kids = [String(x)]; } get textContent() { return this.kids.map(k => k.textContent ?? k).join(""); }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v); }
   addEventListener(k, f) { this.on[k] = f; }
-  append(...xs) { this.kids.push(...xs); } replaceChildren(...xs) { this.kids = xs; }
+  // as the DOM does, what is not a node becomes text: null the text "null"
+  append(...xs) { this.kids.push(...xs.map(x => x instanceof El || x instanceof Text ? x : new Text(String(x)))); }
+  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
   contains() { return false; } get nodeType() { return 1; }
 }
 class Text { constructor(s) { this.textContent = s; } get nodeType() { return 3; } }
@@ -14067,13 +14071,21 @@ const ids = {};
 const document = {createElement: t => new El(t), createTextNode: s => new Text(s), title: "", body: new El("body"),
   hidden: false, activeElement: null, querySelectorAll: () => [],
   querySelector: s => ids[s] || (ids[s] = new El("div"))};
-const reply = path => path.startsWith("/api/settings") ? given : path.startsWith("/api/events") ? [] : null;
+const reply = path => given[Object.keys(given).find(p => path.startsWith(p))] ?? (path.startsWith("/api/events") ? [] : null);
 const fetch = async path => { const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r}; };
 const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
   setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
 vm.runInContext(script, ctx);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
-vm.runInContext("loadSettings()", ctx).then(() => {
+if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()])", ctx).then(() => {
+  const nulls = [];
+  for (const tab of ["#tab-status", "#tab-settings"]) {
+    walk(ids[tab], el => el.kids.forEach(k => { if ((k.textContent ?? k) === "null" && !(k instanceof El)) nulls.push(tab); }));
+    if (!ids[tab] || !ids[tab].kids.length) nulls.push(tab + " not built");
+  }
+  console.log(JSON.stringify(nulls));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else vm.runInContext("loadSettings()", ctx).then(() => {
   const ticks = [];
   walk(ids["#tab-settings"], el => { if (el.className === "tick") ticks.push({lane: el.attrs["data-lane"], target: el.attrs["data-target"],
     ticked: el.kids[0].checked, text: el.textContent}); });
@@ -14143,7 +14155,7 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-        r = subprocess.run(["node", str(harness), str(page)], input=json.dumps(public_settings(self.desk)),
+        r = subprocess.run(["node", str(harness), str(page), "ticks"], input=json.dumps({"/api/settings": public_settings(self.desk)}),
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
@@ -14159,6 +14171,20 @@ vm.runInContext("loadSettings()", ctx).then(() => {
         # a click on the first tick unticks it alone
         self.assertEqual([listed for listed in out["after"] if isinstance(listed, dict) and listed.get("target") == "shop-test"], [])
         self.assertEqual(len(out["after"]), 3)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_status_and_settings_tabs_show_no_null_for_sections_a_desk_has_not(self):
+        # a desk with nothing running, queued or waiting: the sections it has not are left out, not shown as "null"
+        status = views.status(self.desk)
+        self.assertEqual((status["running"], status["queued"], status["review"], status["design"]), ([], [], [], []))
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        given = {"/api/settings": public_settings(self.desk), "/api/status": status, "/api/events": []}
+        r = subprocess.run(["node", str(harness), str(page), "nulls"], input=json.dumps(given),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [])
 
     def test_the_coordinator_cannot_change_the_principals_release_settings(self):
         s = self.desk.settings()
