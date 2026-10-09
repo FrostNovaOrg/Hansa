@@ -4,9 +4,17 @@ It only reads and writes the desk's files and never calls a model. It listens on
 127.0.0.1; open it through an SSH tunnel with the address `hansa web` prints. The
 token in that address becomes a cookie; changes also need a header that only
 this page sends, so another site cannot submit them.
+
+Each desk's cookie has a name of its own, from a short hash of its token (which
+tells nothing of the token), and its page accepts only that one: browsers keep
+cookies by host, not by port, so two desks' pages open side by side at
+127.0.0.1, or through tunnels to other machines, no longer log each other out.
+A page left open from before that (when every desk's cookie was `hansa_t`)
+asks once more for the address `hansa web` prints.
 """
 from __future__ import annotations
 
+import hashlib
 import http.cookies
 import http.server
 import json
@@ -84,8 +92,14 @@ def _save_settings(desk: Desk, body: dict) -> dict:
     return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {})}
 
 
+def cookie_name(token: str) -> str:
+    """The name of this desk's cookie: no other desk's page uses it, and it tells nothing of the token."""
+    return "hansa_t_" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
 def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
     token = desk.web_token()
+    name = cookie_name(token)
 
     class Page(http.server.BaseHTTPRequestHandler):
         server_version = "hansa"
@@ -98,7 +112,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if q.get("t", [""])[0] == token:
                 return True
             c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-            return bool(c.get("hansa_t")) and c["hansa_t"].value == token
+            return bool(c.get(name)) and c[name].value == token
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", cookie: bool = False):
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
@@ -107,7 +121,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             if cookie:
-                self.send_header("Set-Cookie", f"hansa_t={token}; HttpOnly; SameSite=Strict; Path=/")
+                self.send_header("Set-Cookie", f"{name}={token}; HttpOnly; SameSite=Strict; Path=/")
             self.end_headers()
             self.wfile.write(data)
 
