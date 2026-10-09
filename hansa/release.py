@@ -10,7 +10,8 @@ agent may edit: the lane, the target, the commit, the command line, the note, th
 from the commit, on no remote-tracking branch of the repository and not in that target's last release that went
 out) and the files they change. Before the request waits for the principal, the command line, the lines those commits add,
 the names of the files they add or change, and their messages are checked against the principal's
-release_forbidden words; a hit refuses it. The principal answers on the page (Release, or Refuse with a
+release_forbidden words; a hit refuses it (the last net: hansa add refuses a title with one, and a merge a task
+whose commits or merge commit hold one, run.words_in_merge). The principal answers on the page (Release, or Refuse with a
 reason), or says in the conversation the one-time code their alert carried, which the coordinator passes on
 (hansa release yes|no ID CODE: see answer_by_code); a target on the principal's releases_without_asking list needs no answer while it is what the list
 recorded when the page saved it, and while the desk is not paused. hansa serve runs an approved
@@ -281,9 +282,14 @@ def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") 
     what a merge brings in from a branch is read in that branch's commits when they go out, and not at all when
     they are on a remote-tracking branch, already out. ([{word, commit, where, line}], each place once, at most
     MOST_HITS; how many commits were checked)."""
+    return words_in(repo, _range(since, commit), words, [("release command", command)])
+
+
+def words_in(repo, rng: list, words: list, texts=()) -> tuple:
+    """forbidden_in for any range of commits (git log's arguments, ending in --), and for texts that are not in a
+    commit yet ([(where, text)], each line looked at, commit ''): a merge's message before it is made, say."""
     words = [w for w in words if isinstance(w, str) and w.strip()]
     folded = [(w, w.casefold()) for w in words]
-    rng = _range(since, commit)
     hits, seen, checked = [], set(), 0
 
     def look(sha, where, line):
@@ -294,8 +300,9 @@ def forbidden_in(repo, since: str, commit: str, words: list, command: str = "") 
                 hits.append({"word": w, "commit": sha or "", "where": where, "line": line.strip()[:300]})
                 return
 
-    for line in command.splitlines():
-        look("", "release command", line)
+    for where, text in texts:
+        for line in (text or "").splitlines():
+            look("", where, line)
     sha = None
     for line in _git_lines(repo, "log", "--format=%x00%H%n%B", *rng):
         if line.startswith("\0"):
@@ -350,6 +357,13 @@ def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
 
 def hits_text(hits: list) -> str:
     return "\n".join(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")" for h in hits)
+
+
+def title_hits(title: str, words: list) -> list:
+    """The forbidden words in a task's title, which hansa puts in its commit message and its merge's: each
+    word once, any case."""
+    low = (title or "").casefold()
+    return [w for w in dict.fromkeys(w for w in words or [] if isinstance(w, str) and w.strip()) if w.casefold() in low]
 
 
 def named_files(command: str, files: list) -> list:

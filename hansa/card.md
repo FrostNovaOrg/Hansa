@@ -311,6 +311,20 @@ to a public repository, a deploy to production) waits for the principal:
   refused at once, with the places found (the commit, and `author` or
   `committer` for an identity): take them out of the base branch's history (a
   task) or of the command, or ask the principal.
+  The same words, matched the same way, are looked for earlier, so they do
+  not reach the base branch: `hansa add` and `hansa design` refuse a title
+  that holds one (it goes into the task's commit message and its merge's;
+  with no `--title`, the text's first line), and nothing is queued; the rest
+  of the text is not committed and not looked at. `hansa merge` refuses a
+  task (a design session's too) whose commits hold one, in a message, an
+  added line, the name of a file added or changed, or an author's or
+  committer's name or email, or whose merge message or lane identity does,
+  with the places found; a merge check looks again before it lands its
+  merge commit, and sends the task back for review saying where. Then: a
+  retry that takes them out (`hansa retry ID --fresh "..."`: one that
+  continues keeps the commits; a word in the title, add the task again with
+  another `--title`), or ask the principal. The release's check stays, the
+  last net.
   All the outgoing commits are checked (the page shows at most 200, and says
   how many were checked). A word is matched within one line only (a phrase
   split over a line break is not found), and only in text hansa can read as

@@ -25,7 +25,7 @@ from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_h
                   lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, record_serve_locale, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, words_in_merge, words_text, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -233,12 +233,30 @@ def _waits(desk: Desk, tid: str) -> str:
     return f"\n{tid} waits: {why}" if "no provider ready" in why else ""
 
 
+def _title_allowed(desk: Desk, s: dict, title: str | None, text: str) -> None:
+    """Refuse, before anything is queued, a title that holds one of the principal's forbidden words: hansa puts it
+    in the task's commit message and its merge's. With no --title it is the text's first line, cut at 80
+    characters, as new_task makes it; the rest of the text is never committed and not looked at."""
+    given = desk.redact(title or "")
+    title = given or (desk.redact(text.strip()).splitlines() or [""])[0][:80]
+    found = release.title_hits(title, s.get("release_forbidden") or [])
+    if found:
+        where = "--title" if given else "the title (the first line of the text, as no --title was given)"
+        raise SystemExit(desk.redact(
+            f"hansa: {where} holds {', '.join(json.dumps(w, ensure_ascii=False) for w in found)}, which the principal "
+            f"keeps from going out, and the title goes into the task's commit message and its merge's: "
+            f"{json.dumps(title, ensure_ascii=False)}. Nothing was queued: give another --title, or ask the principal "
+            f"about the words (hansa ask)"))
+
+
 def cmd_add(a):
     desk = Desk.find(a.desk)
     s = desk.settings()
     if a.browser and not s.get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued")
-    tid = desk.new_task(_text(a), lane=a.lane or "", effort=a.effort or "", model=a.model or "",
+    text = _text(a)
+    _title_allowed(desk, s, a.title, text)
+    tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
@@ -267,13 +285,15 @@ def cmd_design(a):
     if lane not in s["lanes"]:
         raise SystemExit("hansa: say which lane the design session is for: --lane L" if not lane
                          else f"hansa: there is no lane {lane}")
+    text = _text(a)
+    _title_allowed(desk, s, a.title, text)
     with desk.lock():
         open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
                  and m["state"] in ("queued", "running")]
         if open_:
             raise SystemExit(f"hansa: lane {lane} already has design session {open_[0]} open; one at a time per lane "
                              f"(hansa show {open_[0]})")
-        tid = desk.new_task(_text(a), kind="design", lane=lane, title=a.title or "",
+        tid = desk.new_task(text, kind="design", lane=lane, title=a.title or "",
                             browser=bool(s.get("browser")) or None, **notify.recorded(notify.session_here()))
     why_not = not_looking(desk)  # as the waiting lines say it (run.waiting_reason)
     opens = (f"hansa opens the design session once `hansa serve` gets through its rounds; {why_not}. Then it"
@@ -566,6 +586,11 @@ def _mergeable(desk: Desk, a):
         raise SystemExit(f"hansa: the change in {a.id} holds git's conflict markers ({markers_text(markers)}); nothing "
                          f"was merged, and no flag overrides this. Next: hansa retry {a.id} --update \"settle the "
                          f"markers in {', '.join(markers)}\"\n{MARKERS_ON_PURPOSE}")
+    words = words_in_merge(desk, repo, git("rev-parse", base, cwd=repo), m["head"],
+                           merge_message(lane, m["lane"], a.id, m["title"]), lane)
+    if words:
+        desk.event("merge_forbidden", task=a.id, found=len(words))
+        raise SystemExit(desk.redact(f"hansa: {words_text(a.id, words)}. Nothing was merged"))
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. {_wait_for(desk, v['task'])}")

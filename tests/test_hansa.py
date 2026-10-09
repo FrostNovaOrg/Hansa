@@ -1479,6 +1479,79 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "merge", tid])
         self.assertFalse((self.repo / "notes.txt").exists())
 
+    def forbid(self, *words):
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=list(words))), {"ok": True, "problems": []})
+
+    def done_with(self, **lane):
+        s = self.desk.settings()
+        s["lanes"]["a"].update(lane)
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        return tid
+
+    def test_a_title_holding_a_forbidden_word_is_refused_at_add_and_the_text_is_not_looked_at(self):
+        self.forbid("Falcon")
+        said = self.refused("add", "Fix the badge", "--title", "Ship the FALCON badge")
+        self.assertIn('--title holds "Falcon", which the principal keeps from going out', said)
+        self.assertIn("Nothing was queued", said)
+        said = self.refused("add", "falcon badge\nmore")  # no --title: the first line is the title
+        self.assertIn("the title (the first line of the text, as no --title was given)", said)
+        self.assertIn('"falcon badge"', said)
+        self.assertIn("Nothing was queued", self.refused("design", "the falcon plan", "--lane", "a"))
+        self.assertEqual(self.desk.tasks(), [])
+        self.assertIn("queued", self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "a"))
+        self.forbid()
+        self.assertIn("queued", self.hansa("add", "x", "--title", "Ship the falcon badge"))
+
+    def test_a_task_adding_a_line_with_a_forbidden_word_is_not_merged_and_hansa_says_where(self):
+        tid = self.done_with(env={"FAKE_WRITE": "the Falcon plan"})
+        tip = self.git_out("rev-parse", "main")
+        self.forbid("falcon")
+        said = self.refused("merge", tid)
+        self.assertIn(f"the change in {tid} holds words the principal keeps from going out", said)
+        self.assertIn('notes.txt: the Falcon plan  ("falcon")', said)
+        self.assertIn(f"hansa retry {tid} --fresh", said)
+        self.assertIn("ask the principal", said)
+        self.assertIn("Nothing was merged", said)
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual(self.desk.meta(tid)["state"], "done")
+        self.forbid()  # nothing changes when the list is empty
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_a_forbidden_word_in_a_file_name_an_author_or_the_merge_message_stops_a_merge(self):
+        tid = self.done_with(env={"FAKE_HELLO": "falcon-notes.txt"})
+        self.forbid("Falcon")
+        self.assertIn("file name: falcon-notes.txt", self.refused("merge", tid))
+        self.forbid("osprey")
+        s = self.desk.settings()
+        s["lanes"]["a"]["identity"] = "Osprey Bot <bot@example.com>"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.done_with()
+        said = self.refused("merge", tid)
+        self.assertIn("author: Osprey Bot <bot@example.com>", said)
+        self.assertIn("merge author and committer: Osprey Bot <bot@example.com>", said)
+        self.forbid("heron")
+        s = self.desk.settings()
+        s["lanes"]["a"].pop("identity")
+        s["lanes"]["a"]["merge_message"] = "Merge {task} into heron: {title}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertIn(f"merge message: Merge {tid} into heron", self.refused("merge", tid))
+        self.forbid()
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_a_merge_check_does_not_land_a_merge_that_holds_a_forbidden_word(self):
+        tid = self.done_with(check="true", env={"FAKE_WRITE": "the falcon plan"})
+        tip = self.move_main()  # so it needs a merge check
+        self.assertIn("is not merged yet", self.hansa("merge", tid))
+        self.forbid("falcon")  # set while the merge check waits
+        m = self.settle_merge(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertIn("notes.txt: the falcon plan", m["merge_check_result"]["note"])
+        self.assertIn("nothing was merged", m["merge_check_result"]["note"])
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+
     def test_what_a_worker_prints_stays_out_of_the_task_folder_until_hansa_removes_keys(self):
         key = "sk-test-printed-0321"
         s = self.desk.settings()
