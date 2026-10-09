@@ -549,6 +549,10 @@ here; work that needs code changed or a browser goes to a worker.
   "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p "$TMPDIR"`. hansa adds a line saying so, and one for
   Maven's 407 (`407` and `proxy authentication` on a line with Maven's own words), to a failed check, merge
   check or try step whose output shows it.
+- On Linux a lane's setup, check and merge check get TMPDIR on the desk's disk, a folder of their own in
+  the desk's `.hansa/tmp/` that no other run can read, removed when the command ends: what a build writes
+  there takes the desk's free space, not memory. Java reads it as writable. A desk whose path holds a
+  space gets the run's folder in `/tmp` instead. docs/linux-server.md has the rest.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or

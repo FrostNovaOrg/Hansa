@@ -32,7 +32,7 @@ page gives.
 
 ## What a lane's commands meet in Linux's sandbox
 
-Two things a lane's commands meet in the sandbox there (bubblewrap), which
+What a lane's commands meet in the sandbox there (bubblewrap), which
 `hansa explain lane` repeats:
 - **The mount table can call a writable folder read-only.** The sandbox mounts
   `/` read-only and binds the worktree, the lane's write list and a worker's
@@ -42,16 +42,38 @@ Two things a lane's commands meet in the sandbox there (bubblewrap), which
   (or `/tmp`, when that is a file system of its own) and says true; `findmnt`
   and `df` name that mount too. Trust the error of the write itself. A project
   that uses `FileStore.isReadOnly()` to tell "read-only file system" from "no
-  permission" reports the wrong cause there. The TMPDIR of the setup, check,
-  merge check and preview is a tmpfs of its own, which Java reads as writable:
-  hansa makes `hansa-tmpfs` in the command's temporary folder and lists it as
-  not readable, srt hides it under an empty tmpfs, writable inside, and the
-  prelude hansa runs before the command makes it TMPDIR (and Java's
-  `java.io.tmpdir`). What is written there is in memory and goes when the
-  command ends. Where srt mounts nothing there, TMPDIR stays the run's folder.
-  The worktree and the write list cannot be given such a mount: they must be
-  the folders outside, and srt binds only those, so there trust the write. A
-  worker's own temporary folder is Claude Code's, and stays as it is.
+  permission" reports the wrong cause there. The TMPDIR of the setup, check
+  and merge check is not such a bind, and Java reads it as writable; see the
+  next point. The worktree and the write list cannot be given a mount of
+  their own: they must be the folders outside, and srt binds only those, so
+  there trust the write. A worker's own temporary folder is Claude Code's, and
+  stays as it is.
+- **A lane command's TMPDIR is a folder of its own on the desk's disk.** Each
+  setup, check and merge check gets two folders, made for it alone (mode 700)
+  and removed when it ends: the run's folder in the system's temporary folder
+  (`/tmp/hansa-check-*`), which srt is given as `TMPDIR` and
+  `CLAUDE_CODE_TMPDIR` and keeps its sockets in, and the command's own,
+  `.hansa/tmp/hansa-check-*` (`hansa-setup-*` for a setup) in the desk, which
+  the run's folder links to as `hansa-tmp`. The prelude hansa runs before the
+  command follows that link and makes the folder TMPDIR (and Java's
+  `java.io.tmpdir`); inside, `CLAUDE_CODE_TMPDIR` stays the run's folder.
+  Every run's sandbox hides `.hansa` under an empty tmpfs, and srt binds a
+  folder the command may write back over it from the disk: so no other run (a
+  worker, another lane's check, this task's other command) can read it, and
+  it is a mount of its own, writable in the mount table, whose parent is
+  another device, which is how Java's `FileStore.isReadOnly()` reads it as
+  writable. `findmnt` and `df` there name the desk's file system, with its
+  size and free space. What is written there takes the desk's disk, not
+  memory: it used to be a tmpfs srt mounted in the run's folder, as big as
+  half the machine's memory, which a build's temporary files (a Java suite's
+  fonts, some 2.7 GB in one run) filled with "No space left on device",
+  taking memory the build itself needed. hansa removes the folder when the
+  command ends, or, for a command that was stopped, when its task or try
+  ends. Where the prelude finds no folder it may write there,
+  TMPDIR stays the run's folder; where the desk's path holds a space, a
+  TMPDIR many build tools break on, hansa makes no such folder and TMPDIR is
+  the run's folder too (read-only to Java, as a bind). macOS is as
+  before: TMPDIR is the run's folder.
 - **git there does not list the sandbox's placeholders.** Where a path it
   protects is missing, the sandbox mounts an empty file at the top of the
   worktree (`.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`,
@@ -87,7 +109,7 @@ Two things a lane's commands meet in the sandbox there (bubblewrap), which
   account's settings (`HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`); a test
   starts a dozen of them at once with the same `$$`. One pair stays in TMPDIR
   per distinct set of settings, until the temporary folder goes at the end of
-  the run (a lane command's tmpfs, at its own end). A command that empties
+  the run (a lane command's own, at its own end). A command that empties
   TMPDIR while it runs (a cleanup) takes them with it: it and the commands
   sharing that TMPDIR list the placeholders until their next start.
   The empty files the sandbox puts under `.claude/` are still listed there, and

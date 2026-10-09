@@ -15,7 +15,8 @@ Layout (everything under one directory):
     .hansa/                 runtime state: provider cooling, heartbeat, web token and port, and runs/<id>/
                          (what a task's processes write, until hansa publishes it without keys);
                          releases.json and releases/<id>.log (hansa release: the requests, the
-                         principal's answers, and each release's output without keys)
+                         principal's answers, and each release's output without keys); on Linux
+                         tmp/<run>/ (the TMPDIR of a lane's setup, check or merge check, while it runs)
 """
 from __future__ import annotations
 

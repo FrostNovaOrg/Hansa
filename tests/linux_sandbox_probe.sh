@@ -6,7 +6,7 @@
 # at most 14 lines, within the 15 of a log that hansa lane try prints: 1 for TMPDIR, 3 for each folder, at most 2
 # for Java and at most 5 for git. It changes nothing in the worktree and always exits 0, so the lane's try reads
 # as passed and the log holds the answers.
-echo "TMPDIR=${TMPDIR:-} (expect it to end in /hansa-tmpfs, a tmpfs of its own)"
+echo "TMPDIR=${TMPDIR:-} (expect the desk's .hansa/tmp/hansa-check-*, a folder on disk mounted on its own)"
 src=${TMPDIR:-/tmp}/HansaProbe.java
 cat >"$src" <<'EOF' 2>/dev/null || src=
 import java.nio.file.*;

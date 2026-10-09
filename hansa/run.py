@@ -78,13 +78,13 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 # Its git commands run only while the worktree's .git file still holds the line git wrote for it (see
 # check_git_file); otherwise the worker does not start, and hansa's finish says what happened.
 # sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <.git line> <temporary folder> <srt> <srt settings>
-#   <worker command...>
+#   <its own temporary folder> <worker command...> (the two folders of run_tmp, both removed after it)
 SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
 line=$4
 rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null 2>&1 3>&-
   echo $? >&3; } | cat >"$2"; } 3>&1 )
 [ "$rc" = 0 ] || {
-  rm -rf "$5"
+  rm -rf "$5" "$8"
   ! ok || [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
   echo "hansa: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
 ok || { echo "hansa: the worktree's .git file was changed during the lane's setup; hansa ran no git there" >>"$3"; exit 96; }
@@ -92,9 +92,9 @@ if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -q -m "hansa: what the lane's setup changed" >>"$2" 2>&1
   echo "hansa: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
 fi
-rm -rf "$5"
+rm -rf "$5" "$8"
 : > "$2.done"
-shift 7; exec "$@"
+shift 8; exec "$@"
 """)
 # A follow-up made with `hansa retry --update` whose merge of the base conflicts: hansa merges the base again
 # here, after the lane's setup (which sets aside what it changes, and could not with a merge half done), and
@@ -108,27 +108,27 @@ shift 3; exec "$@"
 """)
 # The lane's check, in srt; its exit code goes to a file, so a restarted server can still read it.
 # Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
-# sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings>
-CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; echo $? > "$2"; } | cat; rm -rf "$3"'
+# sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings> <its own temporary folder>
+CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; echo $? > "$2"; } | cat; rm -rf "$3" "$6"'
 # `hansa lane try`: the lane's setup, then its check, each in srt as for a task; the first that fails ends it.
 # Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
 # and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
-# sh -c TRY_SCRIPT <token> <folder> <srt> [<name> <command> <srt settings> <temporary folder>]...
+# sh -c TRY_SCRIPT <token> <folder> <srt> [<name> <command> <srt settings> <temporary folder> <its own>]...
 TRY_SCRIPT = ("""d=$1 srt=$2
 run() {
   t0=$(date +%s)
   rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- /bin/sh -c "$2" </dev/null 2>&1 3>&-
     echo $? >&3; } | cat >"$d/$1.log"; } 3>&1 )
-  rm -rf "$4"
+  rm -rf "$4" "$5"
   echo "$rc $(( $(date +%s) - t0 ))" >"$d/$1.exit"
   [ "$rc" = 0 ]
 }
 shift 2
-while [ $# -ge 4 ]; do
-  run "$1" "$2" "$3" "$4" || break
-  shift 4
+while [ $# -ge 5 ]; do
+  run "$1" "$2" "$3" "$4" "$5" || break
+  shift 5
 done
-while [ $# -ge 4 ]; do rm -rf "$4"; shift 4; done
+while [ $# -ge 5 ]; do rm -rf "$4" "$5"; shift 5; done
 """)
 KEY_REST_MINUTES = 24 * 60  # until the principal changes the key (saving a key clears the rest)
 # or logs in (then a check that answers clears it)
@@ -553,8 +553,10 @@ LINUX_SANDBOX_NOTES = (
     "on Linux, inside the sandbox, what the mount table says (Java's FileStore.isReadOnly, findmnt, df) can call a "
     "writable folder read-only: the worktree, the lane's write list and a worker's temporary folder are writable "
     "binds inside the read-only / (or /tmp) of the same file system, and Java takes the mount of the folder above "
-    "them; trust the error of the write itself. The TMPDIR of each of the lane's commands hansa runs in srt is a "
-    "tmpfs of its own (in memory, gone when the command ends), which Java reads as writable",
+    "them; trust the error of the write itself. The TMPDIR of each of the lane's commands hansa runs in srt (setup, "
+    "check, merge check) is a folder of its own on the desk's disk, in .hansa/tmp, which no other run can read "
+    "and which hansa removes when the command ends; srt mounts it on its own, so Java reads it as writable, and "
+    "findmnt and df name the desk's file system for it",
     "git in the sandbox (in the lane's commands and the workers') does not list the empty "
     "files the sandbox puts at the top of the worktree for what it protects (" + ", ".join(SANDBOX_PLACEHOLDERS)
     + "): its excludes file there adds them, anchored at the top, to the account's own, through a global config "
@@ -2151,16 +2153,21 @@ if [ -n "$hansa_t" ] && [ -n "$hansa_p" ] && [ -n "$hansa_h" ]; then
 fi
 unset hansa_t hansa_p hansa_r hansa_c hansa_u hansa_w hansa_h hansa_o hansa_f hansa_q; unset -f hansa_x
 """
-# The folder in a setup's, check's, merge check's or preview's temporary folder that srt on Linux mounts a tmpfs
-# of its own over: srt_settings makes it and lists it in denyRead, and srt hides a read-denied folder that is
-# there under an empty tmpfs, writable inside (bubblewrap's --tmpfs, in the user namespace srt always makes).
-# Bound from the same file system as its parent, the run's folder would be read-only to Java: FileStore finds a
-# folder's mount by walking up while the device stays the same, so it takes the read-only /tmp or / that the
-# writable bind sits in. A tmpfs is a device of its own, with a writable entry of its own in the mount table.
-SANDBOX_TMPFS = "hansa-tmpfs"
+# Where, on Linux, a setup's, check's or merge check's TMPDIR is: a folder of its own on disk, in the desk's
+# .hansa/RUN_TMP_DIR (run_tmp), linked from the run's temporary folder as RUN_TMP_LINK. The run's folder, in the
+# system's temporary folder, stays srt's (its sockets want a short path) and the command's CLAUDE_CODE_TMPDIR.
+# Java must read TMPDIR as writable: FileStore finds a folder's mount by walking up while the device stays the
+# same, so a writable bind of a folder whose parent is the same file system is read-only to it (it takes the
+# read-only / or /tmp the bind sits in). Every run's sandbox hides .hansa (desk_private) under an empty tmpfs, and
+# srt binds a write-list entry inside a hidden folder back over it, from the folder on disk: so this one is a
+# mount of its own, writable in the mount table, whose parent is another device (that tmpfs), and no other run's
+# sandbox can read it. It used to be a tmpfs srt mounted in the run's folder: the same answer for Java, but in
+# memory, up to half the machine's, which a build's temporary files filled.
+RUN_TMP_DIR = "tmp"
+RUN_TMP_LINK = "hansa-tmp"
 # What runs in the sandbox on Linux before JAVA_PRELUDE (sandbox_prelude). First, the command's TMPDIR moves to
-# the run folder's SANDBOX_TMPFS when srt mounted a tmpfs there (another device than the folder's, and writable);
-# otherwise it stays the run's folder. Then git there is given an excludes file in $TMPDIR, hansa-git-excludes-*: the
+# where the run folder's RUN_TMP_LINK leads when that is a folder it may write (srt bound it); otherwise it stays
+# the run's folder. Then git there is given an excludes file in $TMPDIR, hansa-git-excludes-*: the
 # excludes git would read with no repository and no command's settings (core.excludesFile from the system's and the
 # account's config, else $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore), then each of SANDBOX_PLACEHOLDERS
 # anchored at the top, so git status there does not list the empty files the sandbox mounts (a build script that
@@ -2183,9 +2190,9 @@ SANDBOX_TMPFS = "hansa-tmpfs"
 # until TMPDIR goes. Nothing is added twice (HANSA_GIT_EXCLUDES, in this TMPDIR), what cannot be done is skipped, and
 # nothing is printed; POSIX sh, as JAVA_PRELUDE.
 LINUX_PRELUDE = r"""hansa_t=${TMPDIR:-}
-if [ -n "$hansa_t" ] && [ -d "$hansa_t/""" + SANDBOX_TMPFS + r"""" ] && [ -w "$hansa_t/""" + SANDBOX_TMPFS + r"""" ] \
-   && [ "$(stat -c %d "$hansa_t/""" + SANDBOX_TMPFS + r"""" 2>/dev/null)" != "$(stat -c %d "$hansa_t" 2>/dev/null)" ]; then
-  TMPDIR=${hansa_t%/}/""" + SANDBOX_TMPFS + r"""; export TMPDIR
+if [ -n "$hansa_t" ] && [ -L "${hansa_t%/}/""" + RUN_TMP_LINK + r"""" ]; then
+  hansa_t=$(cd -P "${hansa_t%/}/""" + RUN_TMP_LINK + r"""" 2>/dev/null && pwd -P) || hansa_t=
+  if [ -n "$hansa_t" ] && [ -d "$hansa_t" ] && [ -w "$hansa_t" ]; then TMPDIR=$hansa_t; export TMPDIR; fi
 fi
 hansa_t=${TMPDIR:-}
 case ${HANSA_GIT_EXCLUDES:-} in "${hansa_t%/}"/hansa-git-excludes-*) hansa_t= ;; esac
@@ -2400,45 +2407,64 @@ def design_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, branch
     return settings
 
 
-def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str, local: bool = False) -> dict:
+def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str, local: bool = False,
+                 own: str = "") -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
-    worktree, the temporary folder `tmp` and the lane's write list. local: with local binding whatever the
-    lane's network list says (a preview hansa starts, and nothing else). On Linux the folder SANDBOX_TMPFS is
-    made in `tmp` and read-denied, so srt mounts a tmpfs of its own there, the command's TMPDIR (LINUX_PRELUDE):
-    what it writes there stays in memory and goes when the command ends."""
+    worktree, the temporary folder `tmp`, the command's own on disk (`own`, run_tmp) and the lane's write list.
+    local: with local binding whatever the lane's network list says (a preview hansa starts, and nothing else)."""
     hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
     if local or any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True
-    tmpfs = []
-    if account.LINUX:
-        (Path(tmp) / SANDBOX_TMPFS).mkdir(mode=0o700, parents=True, exist_ok=True)  # srt mounts a tmpfs only over one that is there
-        tmpfs = full_paths([Path(tmp) / SANDBOX_TMPFS])
-    return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp]) + fs["allowWrite"],
-                                               "denyRead": fs["denyRead"] + tmpfs, "denyWrite": fs["denyWrite"]}}
+    mine = [wt, tmp, *([own] if own and own != tmp else [])]
+    return {"network": network, "filesystem": {"allowWrite": full_paths(mine) + fs["allowWrite"],
+                                               "denyRead": fs["denyRead"], "denyWrite": fs["denyWrite"]}}
+
+
+def run_tmp(desk: Desk, name: str) -> tuple:
+    """The temporary folders of one lane command (`name`: setup, check, preview), each made for it alone (mode 700):
+    (the run's folder, in the system's temporary folder, for srt and the command's CLAUDE_CODE_TMPDIR; the folder
+    for its TMPDIR). On Linux the second is on disk, in the desk's .hansa/RUN_TMP_DIR, which every run's sandbox
+    hides, and the run's folder links to it as RUN_TMP_LINK, which LINUX_PRELUDE follows (see RUN_TMP_DIR); both
+    are removed when the command ends. Elsewhere, and where the desk's path holds a space (a TMPDIR many build
+    tools break on, and JAVA_PRELUDE leaves alone), both are the run's folder."""
+    tmp = tempfile.mkdtemp(prefix=f"hansa-{name}-")
+    if not account.LINUX or re.search(r"\s", str(desk.state_dir)):
+        return tmp, tmp
+    try:
+        root = desk.state_dir / RUN_TMP_DIR
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        own = tempfile.mkdtemp(prefix=f"hansa-{name}-", dir=root)
+        os.symlink(own, Path(tmp) / RUN_TMP_LINK)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return tmp, own
 
 
 def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path, local: bool = False) -> tuple:
     """What a lane's setup, check or preview (`name`) runs in: (srt, its settings file in the task's raw folder,
-    a temporary folder made for this run, for the command's TMPDIR). srt ignores the TMPDIR it is given
-    and sets its own from CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the folder.
-    Whoever runs the command removes the folder after it; finish and finish_check remove one left behind.
-    srt is tried first with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs.
-    local: local binding for this one command (srt_settings)."""
+    a temporary folder made for this run, the command's own (run_tmp: on Linux on disk, the TMPDIR LINUX_PRELUDE
+    gives it; elsewhere the same folder)). srt ignores the TMPDIR it is given and sets its own from
+    CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the run's folder. Whoever runs the command
+    removes both after it; finish and finish_check remove what is left behind (sandbox_tmp). srt is tried first
+    with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs. local: local binding for
+    this one command (srt_settings)."""
     try:
         check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    tmp = tempfile.mkdtemp(prefix=f"hansa-{name}-")
+    tmp, own = run_tmp(desk, name)
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
-    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, local))
-    desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), tmp]})
+    desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), *dict.fromkeys([tmp, own])]})
+    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, local, own))
     try:
         srt = try_srt(desk, f, tmp, wt)
     except SrtCannotRun:
-        shutil.rmtree(tmp, ignore_errors=True)
+        for x in (tmp, own):
+            shutil.rmtree(x, ignore_errors=True)
         raise
-    return srt, str(f), tmp
+    return srt, str(f), tmp, own
 
 
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
@@ -3378,10 +3404,10 @@ def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict
         return argv
     raw = desk.raw_dir(tid)
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
-    srt, settings, tmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
+    srt, settings, tmp, own = in_srt(desk, tid, "setup", lane, pname, p, wt)
     line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
     return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", in_sandbox(desk, lane, lane["setup"]), str(raw / "setup.log"), str(raw / "run.err"),
-            line, tmp, srt, settings, *argv]
+            line, tmp, srt, settings, own, *argv]
 
 
 def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
@@ -3402,7 +3428,7 @@ def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: di
                                   "why": "hansa does not start a preview on Linux (hansa explain lane)"})
         return argv
     try:
-        srt, settings, tmp = in_srt(desk, tid, "preview", lane, pname, p, wt, local=True)
+        srt, settings, tmp, _ = in_srt(desk, tid, "preview", lane, pname, p, wt, local=True)  # macOS: one folder
     except Exception as e:  # noqa: BLE001 - the task goes on without it, told why
         why = desk.redact(str(e))[:600]
         argv[i] += PREVIEW_FAILED_NOTE.format(preview=shown, why=why)
@@ -4211,12 +4237,12 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         if meta.get("cancel"):
             return None
         wt, pname = Path(meta.get("worktree") or desk.worktrees_dir / lane_name), meta.get("provider", "")
-        srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
+        srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
         env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
         desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
             proc = subprocess.Popen(["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "check.exit"), tmp,
-                                     srt, settings], cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                     srt, settings, own], cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
     desk.event("check_started", task=tid, lane=lane_name)
@@ -4555,14 +4581,14 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
             return None
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
-        srt, settings, tmp = in_srt(desk, tid, "check", lane, pname, p, wt)
+        srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, p, wt)
         argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, command), str(raw / "merge-check.exit"), tmp, srt,
-                settings]
+                settings, own]
         if lane.get("setup"):
-            ssrt, ssettings, stmp = in_srt(desk, tid, "setup", lane, pname, p, wt)
+            ssrt, ssettings, stmp, sown = in_srt(desk, tid, "setup", lane, pname, p, wt)
             argv = ["/bin/sh", "-c", SETUP_SCRIPT, token, in_sandbox(desk, lane, lane["setup"]), str(raw / "merge-setup.log"),
                     str(raw / "merge-check.err"), expected_git_line(desk, wt) or "(unknown, so no git runs here)",
-                    stmp, ssrt, ssettings, *argv]
+                    stmp, ssrt, ssettings, sown, *argv]
         env = {**base_env(), "HANSA_TASK": tid, "TERM": "dumb", "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
               "own": own_merge_check(lane), "message_note": said,
@@ -4756,10 +4782,10 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
                  **({"merge_check": merge_command(lane)} if t.get("merge") else {"check": lane.get("check", "")})}
         for step, command in steps.items():
             if command:
-                tmp = tempfile.mkdtemp(prefix=f"hansa-{step}-")
-                write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp))
-                args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp]
-                tmps.append(tmp)
+                tmp, own = run_tmp(desk, step)
+                tmps += dict.fromkeys([tmp, own])
+                write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp, own=own))
+                args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp, own]
         env = {**base_env(), "TERM": "dumb"}
         try:  # srt first, with the first step's settings (as in_srt): when it cannot run, nothing runs
             srt = try_srt(desk, args[2], args[3], wt) if args else srt_bin()
