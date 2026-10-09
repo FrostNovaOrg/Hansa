@@ -58,6 +58,16 @@ session or release. What already runs goes on, a running task's check and a resu
 It starts again by itself once every volume has the floor and 1 GB more free, so that it does not stop and start
 at every round around the line. A release asked meanwhile waits, approved, and goes once there is space.
 
+The floor holds for each volume by its own size. A volume smaller than four times the floor has a quarter of its
+size as its floor: on a Linux server that mounts `/tmp` as a tmpfs (systemd's default size is half the memory), an
+8 GB machine has a 3.9 GB `/tmp`, which under the default floor of 10 GB holds back only under about 1 GB free,
+not always. The margin it needs before `hansa serve` starts again is scaled with it, to no more than a quarter of
+that volume's floor (about 0.1 GB there). A volume of four times the floor or more (40 GB under the default) keeps
+the floor as set, and so does a volume whose total size is not known. Where a volume's floor is not the setting,
+the `DISK LOW` line, what a queued task, merge or release says, `hansa explain server` and the page give the one
+that applies to it (`floor 1.0 GB for this 3.9 GB volume`), and say how much each volume needs before it starts
+again.
+
 Each place is looked at on its own. One that cannot be looked at (a lane's repository in a folder the account
 cannot read, say) is left out, and only it: the others are measured and hold as before, and `hansa status`, the
 page and `hansa explain server` say which place cannot be looked at, since when and why, and that the free space
@@ -67,8 +77,8 @@ while it fails, and `hansa status` says so with what the last look that worked m
 when it changes, not each round, and the coordinator's session hears it.
 
 The floor is the coordinator's, as concurrency is: `hansa disk-floor` shows it with the free space of the desk's
-volume, `hansa disk-floor 20` sets it to 20 GB (default 10; 0 turns it off). The page shows it and cannot change
-it.
+volume, `hansa disk-floor 20` sets it to 20 GB (default 10; 0 turns it off for every volume). It is one number:
+a small volume's own floor follows from it, as above. The page shows it and cannot change it.
 
 Free space rather than lower the floor. A lane whose builds leave large outputs in its worktree (`target/`,
 `build/`, `node_modules/`, a compiler's cache), or fill a cache of its own (a Maven or pip cache on its write

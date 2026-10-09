@@ -2235,7 +2235,8 @@ def cmd_disk_floor(a):
     print(f"disk floor: {disk.floor_text(old)} -> {disk.floor_text(gb)}"
           + (": hansa serve starts things however little space is free" if not gb else
              f": hansa serve starts nothing new while a volume it writes on has less free, and starts again once each "
-             f"has {gb + disk.MARGIN:g} GB"))
+             f"has {gb + disk.MARGIN:g} GB; a volume smaller than {disk.SMALL * gb:g} GB has a quarter of its size as "
+             f"its floor instead, and a margin scaled with it (no more than a quarter of that floor)"))
 
 
 def cmd_notes(a):
@@ -2652,6 +2653,13 @@ def main(argv=None):
     p.add_argument("n", nargs="?", type=int)
     p = add("disk-floor", cmd_disk_floor, "show, or set, the free space (GB) under which hansa serve starts nothing "
             "new (default 10; 0: off)")
+    p.description = ("Show, or set, the floor of free space (GB): while a volume hansa serve or its runs write on has "
+                     "less free than its floor, hansa serve starts nothing new, and it starts again once each has its "
+                     "floor and a margin more (1 GB). The floor holds for each volume by its own size: a volume "
+                     "smaller than four times the floor (a tmpfs /tmp, say) has a quarter of its size as its floor (a "
+                     "3.9 GB /tmp about 1 GB under the default 10), and a margin scaled with it, no more than a "
+                     "quarter of that floor; a volume of four times the floor or more, or whose size is not known, "
+                     "keeps the floor as set. One number for every volume: default 10; 0 turns it off.")
     p.add_argument("gb", nargs="?", type=float, metavar="GB")
     p = add("cost", cmd_cost, "tokens and what they are worth")
     p.description = ("Tokens and what they are worth: the workers' runs, and the coordinator's own session with its "

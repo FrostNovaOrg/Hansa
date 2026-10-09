@@ -1152,7 +1152,7 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
     from . import disk
     low = disk.held(desk)
     if low:
-        return (f"等磁盘空出来：有卷的剩余空间低于下限（{disk.floor_text(disk.floor(s))}），hansa serve 暂不开始新的事"
+        return (f"等磁盘空出来：有卷的剩余空间低于下限（{disk.floor_zh(disk.floor(s), low)}），hansa serve 暂不开始新的事"
                 if zh else "waits: " + disk.short_text(desk, low))
     gone = not_looking(desk)
     if zh:

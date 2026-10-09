@@ -5,9 +5,12 @@ off). Each round hansa serve looks at the free space (shutil.disk_usage) of each
 (places: the desk's folder, each lane's repository and worktree, the folder worker runs get their temporary folders
 in and hansa serve's own TMPDIR, where the setups', checks' and tries' are made; on Linux also the desk's .hansa/tmp,
 where those commands' own TMPDIR is, run.run_tmp: on the desk's volume, but named). While any of them has less free than
-the floor, it starts no new task, verification, try, merge or merge check, design session or release; what already
+its floor, it starts no new task, verification, try, merge or merge check, design session or release; what already
 runs goes on (a worker's resume and its task's check are part of a task that runs). It starts again once every
-volume has the floor and MARGIN GB more free, so that it does not flap. What it saw is in .hansa/disk.json (look),
+volume has its floor and its margin more free (MARGIN GB), so that it does not flap. A volume's floor is the
+setting, but a volume smaller than SMALL times it (a tmpfs /tmp of 3.9 GB, say) gets 1/SMALL of its size instead
+(vol_floor: about 1 GB there), and its margin is scaled with it, to no more than 1/SMALL of that floor
+(vol_margin); a volume whose total size is not known keeps the setting. The setting stays one number. What it saw is in .hansa/disk.json (look),
 which hansa status, the page and hansa explain server read; going under and coming back over are events (disk_low,
 disk_ok), which the coordinator's session hears once each (notify), and disk_low runs the principal's alert once
 (alert.from_event). Each place is looked at on its own (measure): one that cannot be (a folder above it the account
@@ -38,6 +41,7 @@ GB = 10 ** 9
 DEFAULT_FLOOR = 10  # GB
 MOST_FLOOR = 100000  # GB: a floor past this is a typo
 MARGIN = 1  # GB over the floor every volume needs before hansa serve starts things again
+SMALL = 4  # a volume smaller than this many times the floor gets 1/SMALL of its size as its floor
 STARTS = "no new task, verification, try, merge or merge check, design session or release"
 TRIM_AFTER = 30 * 86400  # a task that ended this long ago has its kept logs trimmed
 TRIM_KEEP = 256 * 1024  # bytes of a trimmed log kept, its end
@@ -61,6 +65,36 @@ def gb(n) -> str:
 
 def floor_text(fl) -> str:
     return "off" if not fl else f"{fl:g} GB"
+
+
+def _total(v: dict):
+    t = v.get("total")
+    return t if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0 else None
+
+
+def vol_floor(fl, v: dict) -> float:
+    """The floor in GB that holds for volume v (as measure gives it) under the setting fl: fl, or for a volume
+    smaller than SMALL times fl, 1/SMALL of its size. fl where its total size is not known, and 0 (off) for 0."""
+    t = _total(v)
+    return fl if not fl or t is None or t >= SMALL * fl * GB else t / SMALL / GB
+
+
+def vol_margin(fl, v: dict) -> float:
+    """The GB over its floor volume v needs before hansa serve starts again: MARGIN, scaled with a volume's own
+    floor where that is not the setting, and then no more than 1/SMALL of it."""
+    vf = vol_floor(fl, v)
+    return MARGIN if vf == fl else min(MARGIN * vf / fl, vf / SMALL)
+
+
+def vol_bar(fl, v: dict) -> float:
+    """The free bytes volume v needs for hansa serve to start again once it held back."""
+    return (vol_floor(fl, v) + vol_margin(fl, v)) * GB
+
+
+def own_floor(fl, v: dict) -> str:
+    """'floor 1.0 GB for this 3.9 GB volume' for a volume whose floor is not the setting; '' for one whose is."""
+    vf = vol_floor(fl, v)
+    return "" if vf == fl else f"floor {gb(vf * GB)} for this {gb(_total(v))} volume"
 
 
 def places(desk: Desk, s: dict) -> list:
@@ -136,8 +170,21 @@ def record(desk: Desk) -> dict:
     return r if isinstance(r, dict) else {}
 
 
-def volume_text(v: dict) -> str:
-    return f"{v.get('mount')} ({', '.join(v.get('what') or [])}) has {gb(v.get('free') or 0)} free"
+def volume_text(v: dict, fl=None) -> str:
+    """The volume, the places on it and its free space; with fl, the setting, also its own floor where that is not
+    fl (own_floor)."""
+    own = own_floor(fl, v) if fl else ""
+    return (f"{v.get('mount')} ({', '.join(v.get('what') or [])}) has {gb(v.get('free') or 0)} free"
+            + (f" ({own})" if own else ""))
+
+
+def again_text(fl, low: list) -> str:
+    """How much free each volume needs before hansa serve starts again: 'every volume has 11.0 GB free', or where
+    a volume of low has a floor of its own, each low one's amount (the others have theirs already)."""
+    if all(vol_floor(fl, v) == fl for v in low):
+        return f"every volume has {gb((fl + MARGIN) * GB)} free"
+    return ("every volume has its own floor and margin free (" + "; ".join(
+        f"{v.get('mount')} {gb(vol_bar(fl, v))}" for v in low) + ")")
 
 
 def place_text(f: dict) -> str:
@@ -145,25 +192,25 @@ def place_text(f: dict) -> str:
 
 
 def look(desk: Desk, s: dict) -> dict:
-    """hansa serve's look, each round: the volumes, and which hold it back (low). Under the floor it holds back; once
-    holding back, it goes on until every volume has the floor and MARGIN more. Says each change once, as an event:
+    """hansa serve's look, each round: the volumes, and which hold it back (low). Under its floor (vol_floor) a volume
+    holds back; once holding back, it goes on until every volume has its floor and its margin (vol_margin) more. Says each change once, as an event:
     of the floor (disk_low, disk_ok), and of the places that cannot be looked at (disk_look_failed, disk_look_ok:
     which, and when they can be looked at again), as the event log is never trimmed. Returns the record it wrote."""
     fl = floor(s)
     was = record(desk)
     was_low = bool(was.get("low"))
     vols, failed = measure(desk, s, was)
-    bar = (fl + (MARGIN if was_low else 0)) * GB
-    low = [v for v in vols if v["free"] < bar] if fl else []
+    bar = lambda v: vol_bar(fl, v) if was_low else vol_floor(fl, v) * GB
+    low = [v for v in vols if v["free"] < bar(v)] if fl else []
     at = now()
     rec = {"pid": os.getpid(), "at": at, "measured": at, "floor": fl, "volumes": vols, "low": low,
            "since": (was.get("since") if was_low else at) if low else None, "failed": failed}
     desk.state_dir.mkdir(exist_ok=True)
     write_json(record_file(desk), rec)
     if low and not was_low:
-        desk.event("disk_low", floor=fl, volumes=[volume_text(v) for v in low])
+        desk.event("disk_low", floor=fl, volumes=[volume_text(v, fl) for v in low], again=again_text(fl, low))
     elif was_low and not low:
-        desk.event("disk_ok", floor=fl, volumes=[volume_text(v) for v in vols])
+        desk.event("disk_ok", floor=fl, volumes=[volume_text(v, fl) for v in vols])
     key = lambda f: (f.get("what"), f.get("path"))
     old = failed_places(was)
     new = [f for f in failed if key(f) not in {key(x) for x in old}]
@@ -216,7 +263,8 @@ def unknown_lines(desk: Desk, rec: dict | None = None) -> list:
     err = rec.get("error")
     if isinstance(err, dict):
         last = rec.get("last_low") if isinstance(rec.get("last_low"), list) else []
-        known = (f"last measured {_when(rec['measured'])}: " + ("; ".join(volume_text(v) for v in last)
+        fl = rec.get("floor") if isinstance(rec.get("floor"), (int, float)) else None
+        known = (f"last measured {_when(rec['measured'])}: " + ("; ".join(volume_text(v, fl) for v in last)
                  + ", under the floor then" if last else "every volume over the floor then")
                  if isinstance(rec.get("measured"), (int, float)) else "free space never measured")
         out.append(f"disk: hansa serve could not look at free space since {_when(err.get('since'))} ({err.get('text')})"
@@ -230,16 +278,29 @@ def unknown_lines(desk: Desk, rec: dict | None = None) -> list:
 def held_text(desk: Desk, low: list, fl=None) -> str:
     """Why hansa serve starts nothing new, in a line."""
     fl = floor(desk.settings()) if fl is None else fl
-    under = [v for v in low if (v.get("free") or 0) < fl * GB]
-    said = "; ".join(volume_text(v) + ("" if v in under else f", not yet {gb((fl + MARGIN) * GB)}") for v in low)
-    return (f"DISK LOW: {said} (floor {floor_text(fl)}): hansa serve starts {STARTS} until every volume has "
-            f"{gb((fl + MARGIN) * GB)} free; what runs goes on · hansa explain server")
+    own = any(vol_floor(fl, v) != fl for v in low)
+    said = "; ".join(volume_text(v, fl) + (f" (floor {floor_text(fl)})" if own and vol_floor(fl, v) == fl else "")
+                     + ("" if (v.get("free") or 0) < vol_floor(fl, v) * GB else f", not yet {gb(vol_bar(fl, v))}")
+                     for v in low)
+    return (f"DISK LOW: {said}" + ("" if own else f" (floor {floor_text(fl)})") + f": hansa serve starts {STARTS} "
+            f"until {again_text(fl, low)}; what runs goes on · hansa explain server")
 
 
 def short_text(desk: Desk, low: list) -> str:
     """For a queued task, merge or release: why it waits, in a clause."""
-    return (f"hansa serve starts nothing new while free space is under the floor ({floor_text(floor(desk.settings()))}"
+    fl = floor(desk.settings())
+    if any(vol_floor(fl, v) != fl for v in low):
+        return ("hansa serve starts nothing new while free space is under its floor: " + "; ".join(
+            volume_text(v, fl) + ("" if own_floor(fl, v) else f" (floor {floor_text(fl)})") for v in low))
+    return (f"hansa serve starts nothing new while free space is under the floor ({floor_text(fl)}"
             f"): {'; '.join(volume_text(v) for v in low)}")
+
+
+def floor_zh(fl, low: list) -> str:
+    """The floor for the Chinese line of what waits: the setting, or each low volume's own."""
+    if all(vol_floor(fl, v) == fl for v in low):
+        return floor_text(fl)
+    return "；".join(f"{v.get('mount')} {gb(vol_floor(fl, v) * GB)}" for v in low)
 
 
 def desk_free(desk: Desk):
@@ -253,9 +314,11 @@ def desk_free(desk: Desk):
 
 def desk_line(desk: Desk, s: dict) -> str:
     """For hansa status: the free space of the desk's volume, and the floor."""
-    free, _ = desk_free(desk)
+    free, total = desk_free(desk)
     fl = floor(s)
+    own = own_floor(fl, {"total": total}) if fl else ""
     return (f"disk: {gb(free) if free is not None else '? GB'} free on the desk's volume · floor {floor_text(fl)}"
+            + (" (" + own.replace("this", "the desk's", 1) + ")" if own else "")
             + ("" if fl else " (hansa serve starts things however little is free)") + " (hansa disk-floor)")
 
 
@@ -269,7 +332,9 @@ def explain_lines(desk: Desk, s: dict) -> list:
         f"floor, it starts {STARTS}, and says so here, in hansa status and on the page; what already runs goes on. "
         f"It tells your session once when a volume goes under the floor and once when all are back, and runs the "
         f"principal's alert command once. It starts again by itself once every volume has the floor and {MARGIN} GB "
-        f"more free. Free space by removing what builds left (a lane whose builds leave large outputs in its "
+        f"more free. A volume smaller than {SMALL} times the floor (a tmpfs /tmp, say) has a quarter of its size as "
+        f"its floor instead, and a margin scaled with it, no more than a quarter of that floor; a volume whose size "
+        f"is not known keeps the floor as set. Free space by removing what builds left (a lane whose builds leave large outputs in its "
         f"worktree, or fill a cache of its own, should clean them in its setup), or set the floor with hansa "
         f"disk-floor GB (default {DEFAULT_FLOOR}; 0 turns it off).",
         f"  floor: {floor_text(fl)}"]
@@ -279,7 +344,7 @@ def explain_lines(desk: Desk, s: dict) -> list:
         rec = {**rec, "failed": failed}
     except Exception:  # noqa: BLE001 - what hansa serve's last look recorded, which says it failed
         vols = []
-    lines += [f"  {volume_text(v)}" for v in vols]
+    lines += [f"  {volume_text(v, fl)}" for v in vols]
     lines += [f"  {x}" for x in unknown_lines(desk, rec)]
     lines += [f"  now: {held_text(desk, low, fl)}"] if low else []
     return lines

@@ -80,7 +80,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
-| `hansa disk-floor [GB]` | show, or set, the free space under which `hansa serve` starts nothing new (default 10 GB; 0 turns it off; see What you change) |
+| `hansa disk-floor [GB]` | show, or set, the free space under which `hansa serve` starts nothing new (default 10 GB, a quarter of a volume's size on one smaller than four times it; 0 turns it off; see What you change) |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model\|provider]` | tokens and what they are worth at the principal's prices; with `--json`, `--rows` adds every row |
 | `hansa ask "<request>"` | put a request on the principal's page; answering it there closes it |
 | `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
@@ -541,7 +541,13 @@ here; work that needs code changed or a browser goes to a worker.
   principal's alert runs once. A place it cannot look at (a folder the account
   cannot read) is left out alone and said so, as is a look that fails: you are
   told once, and then once it can look again. It starts again by itself once every volume has
-  the floor and 1 GB more free. Free space rather than lower the floor: a lane
+  the floor and 1 GB more free. The floor holds for each volume by its own
+  size: one smaller than four times the floor (a tmpfs `/tmp` of 3.9 GB, say)
+  has a quarter of its size as its floor (about 1 GB there), and a margin
+  scaled with it, no more than a quarter of that floor; one whose size is not
+  known keeps the floor as set. Where a volume's floor is not the setting,
+  `hansa status`, what waits, the page and `hansa explain server` say the one
+  that applies (`floor 1.0 GB for this 3.9 GB volume`). Free space rather than lower the floor: a lane
   whose builds leave large outputs in its worktree (`target/`, `build/`,
   `node_modules/`), or fill a cache of its own, should clean them in its setup.
   A task's folder keeps what its setup, check and merge check printed; once a
