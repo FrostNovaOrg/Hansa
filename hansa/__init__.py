@@ -14,6 +14,43 @@ from pathlib import Path
 __version__ = "0.5.0a1"
 _handed = os.environ.pop("HANSA_BUILD", "")  # root's answer to build(), read once and not passed on to what this starts
 
+# What carries a Claude Code session's identity or messaging into a process started from it (its Bash tool, a
+# tmux it opened, the ! prefix): with the inbox's socket and token a process can post into other sessions as that
+# session. hansa takes every one of them out of its own environment as it starts, so nothing it starts (a release's
+# command, the alert command, a design session, the preview, the account's hansa, git and its hooks ...) gets
+# them, and keeps them here (SESSION) for what hansa's notifying needs, where it needs it (notify.py): the command
+# run from the session reads CLAUDE_PID, to record which session asked, and CLAUDE_CODE_MESSAGING_SOCKET, the
+# inbox `hansa notify on` gives its follower on the command line; the account's hansa is given CLAUDE_PID alone
+# (account.py). By name, and by rule: every CLAUDE_CODE_MESSAGING_*, CLAUDE_CODE_SESSION_* and CLAUDE_CODE_CHILD_*.
+# Not CLAUDE_ENV_FILE: hansa gives its workers one of its own, the lane's env (run.py), through hansa's own process.
+SESSION_NAMES = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_EFFORT",
+                 "CLAUDE_AGENT_SDK_VERSION", "AI_AGENT")
+SESSION_PREFIXES = ("CLAUDE_CODE_MESSAGING_", "CLAUDE_CODE_SESSION_", "CLAUDE_CODE_CHILD_")
+
+
+def session_var(name: str) -> bool:
+    """Whether this environment variable carries a Claude Code session's identity or messaging."""
+    return name in SESSION_NAMES or name.startswith(SESSION_PREFIXES)
+
+
+def without_session(env) -> dict:
+    """A copy of this environment without a Claude Code session's variables."""
+    return {k: v for k, v in env.items() if not session_var(k)}
+
+
+SESSION = {k: os.environ.pop(k) for k in [k for k in os.environ if session_var(k)]}
+
+
+def session_vars() -> list:
+    """The names of the session's variables hansa was started with (or that were set in its environment since),
+    sorted: none outside a Claude Code session."""
+    return sorted({*SESSION, *(k for k in os.environ if session_var(k))})
+
+
+def session_value(name: str) -> str:
+    """One of the session's variables, as hansa was started with it."""
+    return os.environ.get(name) or SESSION.get(name, "")
+
 
 @functools.lru_cache(maxsize=1)
 def build() -> str:

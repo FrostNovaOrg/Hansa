@@ -691,6 +691,17 @@ here; work that needs code changed or a browser goes to a worker.
   has HANSA_TASK=<id> in its environment or the run's folder in its arguments or TMPDIR.
   Limit: a process that leaves every marker (`env -i`, another folder, a session of
   its own) between two of serve's rounds, its parent ended by the next, escapes.
+- Nothing hansa starts gets a Claude Code session's identity or inbox (CLAUDE_CODE_MESSAGING_*,
+  CLAUDE_CODE_SESSION_*, CLAUDE_CODE_CHILD_*, CLAUDECODE, CLAUDE_PID and the like): every hansa command
+  takes them out of its own environment as it starts, and only hansa's notifying uses them (which session
+  asked, and the inbox `hansa notify on` posts to). When `hansa status` says hansa serve was started inside
+  a Claude Code session, it runs without them all the same; tell the principal it is better restarted from
+  a plain shell of theirs.
+- The page's address carries its token, which approves releases: it is the principal's alone. `hansa web`
+  refuses in any Claude Code session, the `!` prefix's shell and a tmux a session opened included, and says
+  how the principal opens the page from a terminal of their own; never ask for the address or the token.
+  `--file` refuses a file in the desk's `.hansa/` or `secrets/` (the token, alerts waiting with a release's
+  one-time code, the keys), wherever a link leads.
 - Workers do not commit: when one ends, hansa commits its changes on its branch as
   one commit named after the task. A verification's scratch changes are set
   aside, never committed.

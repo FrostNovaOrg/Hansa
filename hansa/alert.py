@@ -42,6 +42,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import without_session
 from .desk import Desk, now, read_json, write_json
 
 KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "test")
@@ -205,7 +206,7 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, c
     writes to a relative path lands nowhere hansa keeps or anyone but the principal reads. codes: the one-time codes the text holds;
     then none of what the command printed is kept (tail is empty, withheld says why), as it may echo a code in any
     form."""
-    env = {**os.environ, "HANSA_ALERT_KIND": kinds}
+    env = {**without_session(os.environ), "HANSA_ALERT_KIND": kinds}
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
     timed_out, code, out = False, None, b""
