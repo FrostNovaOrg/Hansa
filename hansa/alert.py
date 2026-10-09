@@ -22,7 +22,12 @@ only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
 there is no retry: the next alert tries again. A
 release_waiting alert carries the release's one-time code (release.new_code), which goes nowhere else: its queue
-entry is gone once sent, and none of what the command printed for such an alert is kept (only how it ended).
+entry is gone once sent, and none of what the command printed for such an alert is kept (only how it ended). A phone
+shows the first hundred characters or so, so the code and what to do with it come right after the desk's name:
+"[hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator
+in the conversation (this release only, once, 24 hours; send it nowhere else), or answer on the page · main at
+08e2cfc99f, 8 commit(s), command: ...; note: ..."; several in one run: "[hansa] desk NAME: 3 alerts · #1 code K7P3QX
+· #2 code M4R8TW", then one line each, those holding a code first.
 That folder is removed when the command ends, and what a stopped
 or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
 verifiers and design sessions, so a leftover that holds the alert's text is never theirs to read. The text is in English: the page has no language setting (it
@@ -151,14 +156,17 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
     if not r:
         return ""
     target = r.get("target") or ""  # "": the lane's one unnamed target, its release command
-    head = (f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} "
-            f"({r.get('base')} at {str(r.get('commit') or '')[:10]})")
-    if waiting:  # the code first, so that no cut of a long text takes it
-        return (f"{head} waits for your yes on the page"
-                + (f", or say code {code} to the coordinator in the conversation (it answers this release only, once, "
-                   f"for {release.CODE_LIFE // 3600} hours; send it nowhere else)" if code else "")
-                + f": {r.get('count', 0)} commit(s), command: {r.get('command')}"
-                + (f"; note: {r['note']}" if r.get("note") else ""))
+    at = f"{r.get('base')} at {str(r.get('commit') or '')[:10]}"
+    rest = (f"{r.get('count', 0)} commit(s), command: {r.get('command')}"
+            + (f"; note: {r['note']}" if r.get("note") else ""))
+    if waiting and code:  # the code and what to do with it first: a phone shows the first hundred characters or so,
+        # and no cut of a long text takes it
+        return (f"release #{r['id']} (lane {r.get('lane')}, target {target or '(unnamed)'}) · code {code}: to release "
+                f"it, give this code to the coordinator in the conversation (this release only, once, "
+                f"{release.CODE_LIFE // 3600} hours; send it nowhere else), or answer on the page · {at}, {rest}")
+    head = f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} ({at})"
+    if waiting:
+        return f"{head} waits for your yes on the page: {rest}"
     return f"{head}: {release.state_text(desk, r)}"
 
 
@@ -196,11 +204,14 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     held: how many of them the limit of MOST_RUNS runs an hour held back."""
     items = sorted(items, key=lambda x: not x.get("code"))  # those holding a code first: no cut takes it
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
+    codes = [x for x in items if x.get("code")]
     head = f"[hansa] desk {desk.root.name}"
-    if held:
-        head += f" ({held} held back by the limit of {MOST_RUNS} runs an hour)"
-    text = (f"{head}: {lines[0]}" if len(lines) == 1 else
-            f"{head}: {len(lines)} alerts\n" + "\n".join(f"- {x}" for x in lines))
+    held_text = f" ({held} held back by the limit of {MOST_RUNS} runs an hour)" if held else ""
+    if len(lines) == 1:  # a code stays early: what was held back is said after it
+        text = f"{head}: {lines[0]}{held_text}" if codes else f"{head}{held_text}: {lines[0]}"
+    else:  # the first line gives each waiting release's number and code, before what was held back
+        text = (f"{head}: {len(lines)} alerts" + "".join(f" · #{x.get('release')} code {x['code']}" for x in codes)
+                + held_text + "\n" + "\n".join(f"- {x}" for x in lines))
     text = desk.redact(text)
     return text if len(text) <= MOST_TEXT else text[:MOST_TEXT - 1] + "…"
 

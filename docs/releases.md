@@ -174,7 +174,19 @@ coordinator, workers, verifiers and design sessions; removed when the command en
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
 `release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `test`; comma-separated when several go out together)
 and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
-characters; a release's text names its lane and target. It has 30 seconds; its own exit ends the run, even if it leaves a
+characters; a release's text names its lane and target. A phone shows the
+first hundred characters or so, so the alert for a release that waits with a
+code gives the code, and what to do with it, right after the desk's name:
+
+    [hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator in the conversation (this release only, once, 24 hours; send it nowhere else), or answer on the page · main at 08e2cfc99f, 8 commit(s), command: ...; note: ...
+
+When several alerts go out in one run, the first line also gives each
+waiting release's number and code (`[hansa] desk NAME: 3 alerts · #1 code
+K7P3QX · #2 code M4R8TW`), and the lines holding a code come first, each
+starting as a single one does. A release that waits with no code (no alert
+command when it began to wait) reads `release #1 of lane a, target staging
+(main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
+...`. The cut at 1,000 characters never takes a code. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
 within 20 seconds of each other go out in one run, one run at a time, and at
 most 20 runs an hour: beyond that, alerts are held and go out together in one

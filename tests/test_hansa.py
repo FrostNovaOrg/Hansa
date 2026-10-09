@@ -15677,8 +15677,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.hansa("release", "a", "first")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
-        self.assertIn("release #1 of lane a, target (unnamed) (main at", self.alerted(out)[-1]["text"])
-        self.assertIn("waits for your yes on the page", self.alerted(out)[-1]["text"])
+        self.assertIn("release #1 (lane a, target (unnamed)) · code ", self.alerted(out)[-1]["text"])
+        self.assertIn("or answer on the page · main at", self.alerted(out)[-1]["text"])
         release.void(self.desk, 1, "the test says so")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
@@ -15916,14 +15916,14 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         alert.send_due(self.desk, gather=0)
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
-        self.assertIn("release #2 of lane a, target test (main at", a["text"])
-        self.assertIn("waits for your yes on the page", a["text"])
+        self.assertIn("release #2 (lane a, target test) · code ", a["text"])
+        self.assertIn("or answer on the page · main at", a["text"])
         # a target that was never ticked waits for the yes from the start, named
         self.hansa("release", "a", "prod")
         alert.send_due(self.desk, gather=0)
         a = self.alerted(out)[-1]
         self.assertEqual(a["kind"], "release_waiting")
-        self.assertIn("release #3 of lane a, target prod (main at", a["text"])
+        self.assertIn("release #3 (lane a, target prod) · code ", a["text"])
 
     # -- the one-time code of a release's alert --
 
@@ -15952,7 +15952,9 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertRegex(code, "^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$")
         [q] = alert.queued(self.desk)
         self.assertEqual(q["kind"], "release_waiting")
-        self.assertIn(f"or say code {code} to the coordinator", q["text"])
+        self.assertIn(f"· code {code}: to release it, give this code to the coordinator in the conversation (this "
+                      "release only, once, 24 hours; send it nowhere else), or answer on the page · main at", q["text"])
+        self.assertTrue(q["text"].startswith(f"release #1 (lane a, target (unnamed)) · code {code}:"))
         # only a keyed hash is kept, with a key in secrets/
         r = release.get(self.desk, 1)
         self.assertNotIn(code, json.dumps(r))
@@ -15962,7 +15964,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertEqual(self.desk.keys(), {})  # not a provider's key
         self.assertIn("waits to go out", release.page_rows(self.desk, self.desk.settings())[0]["code"])
         alert.send_due(self.desk, gather=0)
-        self.assertIn(f"say code {code} to the coordinator", self.alerted(out)[-1]["text"])
+        self.assertIn(f"code {code}: to release it, give this code to the coordinator", self.alerted(out)[-1]["text"])
         row = release.page_rows(self.desk, self.desk.settings())[0]
         self.assertTrue(row["code_sent"])
         self.assertIn("went out in the principal's alert", row["code"])
@@ -15974,6 +15976,40 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         code = self.queued_code(2)
         alert.send_due(self.desk, gather=0)
         self.assertIn(code, self.alerted(out)[-1]["text"])
+
+    def test_a_release_code_comes_within_the_first_80_characters_of_the_alert(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.assertLessEqual(len(self.desk.root.name), 12)  # short names, as the claim is about them
+        self.with_targets(test="true", prod="true")
+        # one alert: the code, then what to do with it, right after the desk's name
+        self.hansa("release", "a", "test", "a note")
+        code = self.queued_code(1)
+        alert.send_due(self.desk, gather=0)
+        text = self.alerted(out)[-1]["text"]
+        self.assertIn(f"code {code}", text[:80])
+        self.assertTrue(text.startswith(f"[hansa] desk {self.desk.root.name}: release #1 (lane a, target test) · "
+                                        f"code {code}: to release it, give this code to the coordinator"), text)
+        self.assertIn("; note: a note", text)
+        # several in one run, what was held back too: the first line gives each waiting release's number and code
+        self.desk.add_ask("y" * 300)
+        self.hansa("release", "a", "prod")
+        self.hansa("release", "a", "test")
+        codes = {rid: self.queued_code(rid) for rid in (2, 3)}
+        t = time.time()
+        write_json(alert.last_file(self.desk), {"runs": [t - 10] * alert.MOST_RUNS, "held_since": t - 5})
+        alert.send_due(self.desk, gather=0, capped=False)
+        text = self.alerted(out)[-1]["text"]
+        first = text.splitlines()[0]
+        self.assertRegex(first, rf"^\[hansa\] desk {self.desk.root.name}: \d alerts · #")
+        for rid, c in codes.items():
+            self.assertIn(f"#{rid} code {c}", text[:80])
+            self.assertIn(f"\n- release #{rid} (lane a, target {'prod' if rid == 2 else 'test'}) · code {c}: to release "
+                          "it, give this code to the coordinator", text)
+        self.assertIn("held back by the limit of 20 runs an hour)", first)
+        lines = text.splitlines()[1:]  # those holding a code come first
+        self.assertEqual([" · code " in x for x in lines], [True, True] + [False] * (len(lines) - 2))
+        self.assertIn("- request #", text)
 
     def test_a_release_code_appears_nowhere_else_hansa_writes(self):
         from hansa import alert, release, web

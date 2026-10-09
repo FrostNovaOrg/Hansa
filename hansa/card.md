@@ -352,7 +352,10 @@ to a public repository, a deploy to production) waits for the principal:
   resumed. Tell the principal in the conversation that it waits. A new
   request for the same target replaces one still waiting.
 - The principal answers on the page, or in the conversation with the
-  one-time code their alert carries (6 characters; only when they have an
+  one-time code their alert carries (6 characters, right after the desk's
+  name: `release #1 (lane a, target staging) · code K7P3QX: to release it, give
+  this code to the coordinator ...`; a plain yes in the conversation does not
+  count: ask for the code or the page; only when they have an
   alert command: without one, the page alone answers, and `hansa status` and
   `hansa explain` say which). When the principal gives you a code, pass it:
   `hansa release yes ID CODE`, or `hansa release no ID CODE [reason]` to
