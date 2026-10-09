@@ -3,7 +3,8 @@
 The floor (settings `disk_floor`, in GB; the coordinator's, with hansa disk-floor; default DEFAULT_FLOOR; 0 turns it
 off). Each round hansa serve looks at the free space (shutil.disk_usage) of each volume it and its runs write on
 (places: the desk's folder, each lane's repository and worktree, the folder worker runs get their temporary folders
-in and hansa serve's own TMPDIR, where the setups', checks' and tries' are made). While any of them has less free than
+in and hansa serve's own TMPDIR, where the setups', checks' and tries' are made; on Linux also the desk's .hansa/tmp,
+where those commands' own TMPDIR is, run.run_tmp: on the desk's volume, but named). While any of them has less free than
 the floor, it starts no new task, verification, try, merge or merge check, design session or release; what already
 runs goes on (a worker's resume and its task's check are part of a task that runs). It starts again once every
 volume has the floor and MARGIN GB more free, so that it does not flap. What it saw is in .hansa/disk.json (look),
@@ -24,11 +25,13 @@ touched.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
 
+from . import account
 from .desk import Desk, now, read_json, write_json
 
 GB = 10 ** 9
@@ -62,7 +65,7 @@ def floor_text(fl) -> str:
 
 def places(desk: Desk, s: dict) -> list:
     """What hansa serve and its runs write on, (what, path): the desk's folder first."""
-    from .run import WORKER_TMP_ROOT
+    from .run import RUN_TMP_DIR, WORKER_TMP_ROOT
     out = [("the desk's folder", desk.root)]
     for name, ln in sorted((s.get("lanes") or {}).items()):
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
@@ -70,6 +73,8 @@ def places(desk: Desk, s: dict) -> list:
         out.append((f"lane {name}'s worktree", desk.worktrees_dir / name))
     out.append(("the runs' temporary folders", Path(WORKER_TMP_ROOT)))
     out.append(("hansa serve's TMPDIR", Path(tempfile.gettempdir())))
+    if account.LINUX and not re.search(r"\s", str(desk.state_dir)):  # where lane commands' TMPDIR is (run.run_tmp)
+        out.append(("lane commands' TMPDIR", desk.state_dir / RUN_TMP_DIR))
     return out
 
 

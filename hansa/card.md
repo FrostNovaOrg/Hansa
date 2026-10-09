@@ -52,9 +52,9 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 ## Commands
 | command | what it does |
 |---|---|
-| `hansa status` | whether `hansa serve` runs and the web page's address and port, lanes, running, queued (and why it waits), waiting for review, failed, providers, usage in the last 24 h |
+| `hansa status` | whether `hansa serve` runs and the web page's address and port, lanes, running (each run's provider, model and effort), queued (and why it waits), waiting for review, failed, providers, usage in the last 24 h |
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--max-turns N] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--max-turns` sets this one task's ceiling of turns instead of its lane's; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
-| `hansa show <id> [--full \| --report \| --check]` | the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; for a check or merge check that failed, the failing tests (names and tracebacks, by the markers of unittest, pytest, JUnit/Surefire, go test, jest and Gradle) or the errors that kept them from running (Maven's compile errors, go's build errors) lifted out of its output, then always its last 15 lines; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report); `--check`: the whole output of its last check and merge check, keys removed |
+| `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | the provider, model and effort its run started with, the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; for a check or merge check that failed, the failing tests (names and tracebacks, by the markers of unittest, pytest, JUnit/Surefire, go test, jest and Gradle) or the errors that kept them from running (Maven's compile errors, go's build errors) lifted out of its output, then always its last 15 lines; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report); `--check`: its last check and its last merge check, each apart: how it ended, the file with its whole output and that file's size, and its last 20 lines, under a first line that says what follows; `--check-log` / `--merge-check-log`: that one's whole output alone, keys removed |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
 | `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. Use it to read; a git command of your own with `push` in it is refused. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded) |
@@ -86,7 +86,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
 | `hansa notes [PATH]` | the files under the desk's `notes/`, each with its size, lines and headings (with line numbers) |
 | `hansa notes archive FILE HEADING [--to OTHER]` | move the section of `notes/FILE` under the heading matching HEADING (its text, whole or a start that matches one heading; with #s in front, as in `"## Round 1"`, only a heading of that level), up to the next heading of the same or a higher level, to the end of `notes/archive/FILE` (or `notes/OTHER`), with a line saying when; refused, changing nothing, when it matches no heading or several |
-| `hansa help` | this card |
+| `hansa help [command]` | this card; with a command, that command's help, as `hansa <command> --help` prints it |
 
 Add `--json` to `status` or `cost` for machine-readable output. `hansa <command> --help`
 gives all of a command's options.
@@ -97,8 +97,9 @@ make Claude Code ask the principal. hansa's own options make them unneeded:
 `hansa git L show REV:A REV:B` shows several files in one call,
 `hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once, and
 `hansa show ID --report` and `hansa diff ID --stat` keep the output short, and
-`hansa show ID --check` gives a check's whole output when its lines in `hansa
-show` are not enough.
+`hansa show ID --check` gives the end of each check's output and its file, and
+`--check-log` or `--merge-check-log` one whole, when the lines in `hansa show`
+are not enough.
 The principal can let you read folders outside the desk without asking (`hansa
 explain` lists them); ask with `hansa ask` when you keep needing one.
 
@@ -163,7 +164,11 @@ commands add no command a worker could not run anyway; what they add for workers
 and verifiers is the web tools they list.
 A command the worker says was refused, or a network call that failed, is usually
 the sandbox doing its job: fix it in the task (ask for less, or leave the
-download to the setup) or in the lane, never by switching the sandbox off. A failed check shows its last
+download to the setup) or in the lane, never by switching the sandbox off. Claude Code
+refuses a `bash -c "..."` it cannot check, such as one that runs `rm`: workers and
+verifiers are told to put such a probe (a line taken from a build script, say) in a
+script file in their temporary folder and run it with `sh`, which runs in any lane,
+one with no allowed commands too; ask for it that way in a task. A failed check shows its last
 lines; send the task back with `hansa retry`. A check that "could not run" never
 ran: the machine could not start `srt`, and the task is not judged on it; a check
 that failed printing nothing at all usually could not start either. That is the
@@ -511,7 +516,8 @@ here; work that needs code changed or a browser goes to a worker.
   it off; the page shows it, and cannot change it). Each round `hansa serve`
   looks at the free space of each volume it and its runs write on: the desk's
   folder, each lane's repository and worktree, the folder worker runs get their
-  temporary folders in (`/tmp`) and its own TMPDIR. While any has less free than
+  temporary folders in (`/tmp`) and its own TMPDIR (on Linux lane commands'
+  TMPDIR, the desk's `.hansa/tmp`, too). While any has less free than
   the floor it starts no new task, verification, try, merge or merge check,
   design session or release; what already runs goes on (a running task's
   check too). `hansa status` says which volume, its free space and the floor
@@ -574,6 +580,10 @@ here; work that needs code changed or a browser goes to a worker.
   "${TMPDIR:-/tmp}/name.XXXXXX"` or `mktemp -d -p "$TMPDIR"`. hansa adds a line saying so, and one for
   Maven's 407 (`407` and `proxy authentication` on a line with Maven's own words), to a failed check, merge
   check or try step whose output shows it.
+- On Linux a lane's setup, check and merge check get TMPDIR on the desk's disk, a folder of their own in
+  the desk's `.hansa/tmp/` that no other run can read, removed when the command ends: what a build writes
+  there takes the desk's free space, not memory. Java reads it as writable. A desk whose path holds a
+  space gets the run's folder in `/tmp` instead. docs/linux-server.md has the rest.
 - A lane's write list (`hansa lane set L write PATH ...`, full paths such as
   `/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
   write besides the worktree and their temporary folder. Use it when a build or
@@ -699,6 +709,11 @@ here; work that needs code changed or a browser goes to a worker.
   got: model replies so far, minutes since it last did anything, its last note.
   Some providers take minutes per reply; a task is stuck only when nothing has
   happened for a long while. Turns and tokens are recorded when it ends.
+- `hansa show <id>` and `hansa status` give the effort a run was started with and where it came
+  from: the task's `--effort`, else the provider's default (the page), else none, which leaves it to
+  claude's own default (a design session: the desk's design setting, then the coordinator's on its
+  provider, then the provider's). Lanes have no effort of their own. On a provider whose endpoint is not
+  Claude's own (`compatible`), they add that it may ignore effort: some do.
 - Each task stops at its lane's ceiling of turns and minutes (`hansa explain lane L`).
   The ceiling is set high, so reaching it means the task was too big or unclear,
   or the worker got stuck. The task then fails, and its report is the worker's
@@ -716,6 +731,18 @@ here; work that needs code changed or a browser goes to a worker.
   has HANSA_TASK=<id> in its environment or the run's folder in its arguments or TMPDIR.
   Limit: a process that leaves every marker (`env -i`, another folder, a session of
   its own) between two of serve's rounds, its parent ended by the next, escapes.
+- Nothing hansa starts gets a Claude Code session's identity or inbox (CLAUDE_CODE_MESSAGING_*,
+  CLAUDE_CODE_SESSION_*, CLAUDE_CODE_CHILD_*, CLAUDECODE, CLAUDE_PID and the like): every hansa command
+  takes them out of its own environment as it starts, and only hansa's notifying uses them (which session
+  asked, and the inbox `hansa notify on` posts to). When `hansa status` says hansa serve was started inside
+  a Claude Code session, it runs without them all the same; tell the principal it is better restarted from
+  a plain shell of theirs.
+- The page's address carries its token, which approves releases: it is the principal's alone. `hansa web`
+  refuses in any Claude Code session, the `!` prefix's shell and a tmux a session opened included, and says
+  how the principal opens the page from a terminal of their own; never ask for the address or the token.
+  `--file` refuses a file in the desk's `.hansa/` or `secrets/` (the token, alerts waiting with a release's
+  one-time code, the keys), wherever a link leads, a hard link to one too, and `--file -` refuses one
+  redirected to standard input (`< .hansa/web-token`); a pipe or a here-document is fine.
 - Workers do not commit: when one ends, hansa commits its changes on its branch as
   one commit named after the task. A verification's scratch changes are set
   aside, never committed.

@@ -32,6 +32,7 @@ of the desk. Desk-wide events go to every follower.
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -47,7 +48,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, disk
+from . import account, disk, session_value, without_session
 from .desk import Desk, now, read_json, write_json
 from .run import alive, claude_bin, proc_start, server_state, srt_needed, srt_record
 
@@ -62,7 +63,7 @@ KEY = re.compile(r"^[0-9]+-[0-9a-f]{8}$")
 def session_here():
     """The Claude Code session this command was run from: {pid, start}, or None outside one (a shell, the
     page, a worker). The start time tells the session from a later process given the same pid."""
-    pid = os.environ.get("CLAUDE_PID", "")
+    pid = session_value("CLAUDE_PID")
     if not pid.isdigit() or os.environ.get("HANSA_TASK"):
         return None
     return {"pid": int(pid), "start": proc_start(int(pid))}
@@ -607,7 +608,7 @@ def _restart(state: dict) -> None:
     it was. Returns only when it could not."""
     if "notify-follow" not in sys.argv:
         return
-    env = {**os.environ, "HANSA_NOTIFY_RESUME": json.dumps(state)}
+    env = {**without_session(os.environ), "HANSA_NOTIFY_RESUME": json.dumps(state)}
     sys.stdout.flush()
     try:
         os.execve(sys.executable, [sys.executable, "-m", "hansa", *sys.argv[1:]], env)
@@ -725,6 +726,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         except Exception as e:  # noqa: BLE001 - the register then shows it as gone quiet, which it is
             _say(f"could not record the end: {e}")
         write_json(priv / f"{key}.state.json", {**read_json(priv / f"{key}.state.json", {}), "ended": now()})
+        if gone(sess):  # not when hansa notify off ends it: the session still runs, its inbox with it
+            remove_inbox(sock)
         held.close()
 
 
@@ -1106,7 +1109,7 @@ def clear_text(c, t: float = 0) -> str:
 def spawn(desk: Desk, args: list, log: Path) -> None:
     """Start `hansa ARGS` detached: a session of its own, not the caller's child, keeping none of the caller's
     files open (so the caller's tool call ends at once), its output going to log."""
-    env = dict(os.environ)
+    env = without_session(os.environ)  # the follower is given its session and inbox on its command line
     here = str(Path(__file__).resolve().parent.parent)
     env["PYTHONPATH"] = here + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     argv = [sys.executable, "-m", "hansa", "--desk", str(desk.root), *args]
@@ -1176,6 +1179,7 @@ def socket_path(pid: int) -> str:
             continue
         if stat.S_IMODE(st.st_mode) & 0o077:
             os.chmod(d, 0o700)
+        os.utime(d)  # in use again: run.sweep_tmp removes only an empty one left alone for an hour
         path = os.path.join(d, f"c{pid}.sock")
         try:
             if stat.S_ISSOCK(os.lstat(path).st_mode):  # left by an earlier process with this pid
@@ -1184,6 +1188,19 @@ def socket_path(pid: int) -> str:
             pass
         return path
     raise RuntimeError("there is no short folder only this account can open for the session's inbox")
+
+
+def remove_inbox(sock: str) -> None:
+    """Once its session has ended: the inbox socket_path gave it, and its folder when no other session's inbox is
+    in it. An inbox elsewhere (the session's own --messaging-socket-path) is left as it is."""
+    d = os.path.dirname(sock)
+    if os.path.basename(d) != f"hansa-{os.getuid()}":
+        return
+    with contextlib.suppress(OSError):
+        if stat.S_ISSOCK(os.lstat(sock).st_mode):
+            os.unlink(sock)
+    with contextlib.suppress(OSError):
+        os.rmdir(d)  # only when empty
 
 
 def clear_said(pid: int, window: str, running: bool = False) -> str:
@@ -1201,7 +1218,7 @@ def clear_said(pid: int, window: str, running: bool = False) -> str:
 
 
 def turn_on(desk: Desk, clear: str = "") -> str:
-    sess, sock = session_here(), os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", "")
+    sess, sock = session_here(), session_value("CLAUDE_CODE_MESSAGING_SOCKET")
     if clear:
         try:
             parse_window(clear)

@@ -128,6 +128,10 @@ A desk has one `hansa serve`. More than one desk on a machine: each desk's `hans
 cd ~/desk && hansa web     # prints the page's address, with a token; keep this terminal open
 ```
 
+Run `hansa web` and `hansa serve` from a terminal of your own, not from a Claude Code session: `hansa web`
+refuses there, as the token would land in the session's context, and `hansa serve` drops the session's
+identity from its environment and says so ([details](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)).
+
 From your own computer, open the page of a desk on another machine through an SSH tunnel (for a desk on
 another port, tunnel that port instead):
 
@@ -162,8 +166,8 @@ does not hear it; only you can change that.
 
 The coordinator runs these; you can run them too. Every coordinator command is in
 [`hansa/card.md`](hansa/card.md), which `hansa help` prints. `hansa --help` lists every command, the
-principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` gives
-all of a command's options.
+principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` (or
+`hansa help <command>`) gives all of a command's options.
 
 | Command | What it does |
 |---|---|

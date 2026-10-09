@@ -42,7 +42,8 @@ looks like an empty box: it may send the guess as if you wrote it.
 Desks run builds and tests many times a day, and a full disk breaks everything on the machine, the desk's own
 records among them. So `hansa serve` keeps a floor of free space. Each round it looks at the free space of each
 volume it and its runs write on: the desk's folder, each lane's repository and worktree, the folder worker runs get
-their temporary folders in (`/tmp`) and its own TMPDIR (where the setups', checks' and tries' are made). While any
+their temporary folders in (`/tmp`) and its own TMPDIR (where the setups', checks' and tries' are made; on Linux
+their own TMPDIR is in the desk's `.hansa/tmp`, on the desk's volume, which is named as a place too). While any
 of them has less free than the floor, it starts no new task, verification, try, merge or merge check, design
 session or release. What already runs goes on, a running task's check and a resumed worker among it. It says why:
 
@@ -88,6 +89,7 @@ pruned past a size, keeps the worktree from growing with every task.
 | A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
 | Each lane's worktree | `worktrees/<lane>/`, `worktrees/<lane>-design/` | the repository's checkout, and what builds leave in it (see above) |
 | A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
+| A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |
 
 Since a task's logs are not capped, once a day `hansa serve` trims those of every task that ended (merged,
 cancelled, failed or replaced) more than 30 days ago: each of the logs above (not the text, record, report or

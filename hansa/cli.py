@@ -9,13 +9,14 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
 
-from . import account, alert, build, cost, installed_text, notes, notify, release, views
+from . import account, alert, build, cost, installed_text, notes, notify, release, session_vars, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
@@ -25,7 +26,7 @@ from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_h
                   lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, record_serve_locale, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -151,14 +152,70 @@ def no_publish_with_options() -> list:
                for between in (" ", " * ")])
 
 
+def _kept_folder(args, f, st=None) -> str:
+    """The desk's folder kept from every agent that this file is in, wherever a link leads (.hansa or secrets),
+    or that holds a hard link to one of its secrets (st: the file's stat, when it is open already); '' when it is
+    in neither, or there is no desk."""
+    try:
+        desk = Desk.find(getattr(args, "desk", None))
+    except SystemExit:
+        return ""
+    real = os.path.realpath(f) if f else ""
+    for d in (desk.state_dir, desk.secrets_dir):
+        top = os.path.realpath(d)
+        if real and (real == top or real.startswith(top.rstrip(os.sep) + os.sep)):
+            return d.name
+    try:
+        st = st or os.stat(f)
+    except (OSError, TypeError):
+        return ""
+    held = [desk.state_dir / "web-token", desk.state_dir / "alerts.json"]
+    held += [Path(r, n) for r, _, ns in os.walk(desk.secrets_dir) for n in ns]
+    for s in held:
+        try:
+            if os.path.samestat(st, os.stat(s)):
+                return s.parent.name if s.parent == desk.state_dir else desk.secrets_dir.name
+        except OSError:
+            pass
+    return ""
+
+
+def _stdin_kept(args) -> str:
+    """_kept_folder for standard input when a shell redirected a file to it (< .hansa/web-token); a pipe or a
+    here-document is never refused."""
+    try:
+        st = os.fstat(sys.stdin.fileno())
+    except (OSError, ValueError):
+        return ""
+    if not stat.S_ISREG(st.st_mode):
+        return ""
+    path = ""
+    try:
+        if hasattr(fcntl, "F_GETPATH"):  # macOS
+            path = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0].decode()
+        else:  # Linux
+            path = os.readlink("/proc/self/fd/0")
+    except (OSError, UnicodeDecodeError):
+        pass  # the inode tells it all the same
+    return _kept_folder(args, path, st)
+
+
 def _text(args) -> str:
     if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
+        kept = _stdin_kept(args)
+        if kept:
+            raise SystemExit(f"hansa: standard input is a file in the desk's {kept}/, which no agent reads, and its "
+                             f"text would go into the desk for them; nothing was changed")
         return sys.stdin.read()
     if getattr(args, "file", None):
         f = Path(args.file)
         if not f.is_file():
             raise SystemExit(f"hansa: {args.file} " + ("is a folder, not a file" if f.is_dir() else "does not exist")
                              + "; nothing was changed")
+        kept = _kept_folder(args, f)
+        if kept:  # the page's token, the queued alerts with a release's one-time code, the keys: none goes into a task
+            raise SystemExit(f"hansa: {args.file} is in the desk's {kept}/, which no agent reads, and its text would go "
+                             f"into the desk for them; nothing was changed")
         try:
             return f.read_text(encoding="utf-8")
         except OSError as e:
@@ -290,6 +347,8 @@ def cmd_status(a):
 def cmd_show(a):
     desk = Desk.find(a.desk)
     print(views.report_text(desk, a.id) if a.report else views.check_output_text(desk, a.id) if a.check
+          else views.check_log_text(desk, a.id) if a.check_log
+          else views.check_log_text(desk, a.id, merge=True) if a.merge_check_log
           else views.show_text(desk, a.id, full=a.full))
 
 
@@ -392,7 +451,7 @@ def cmd_git(a):
             check_git_file(desk, cwd, ln["repo"])
         except RuntimeError as e:
             raise SystemExit(f"hansa: {e}")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = {k: v for k, v in without_session(os.environ).items() if not k.startswith("GIT_")}
     env.update(GIT_PAGER="cat", PAGER="cat", GIT_EDITOR="false", EDITOR="false", VISUAL="false",
                GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="false", SSH_ASKPASS="false")
     # the repository's own config may still name programs to run: an fsmonitor, diff.external, textconv drivers,
@@ -1085,6 +1144,7 @@ def cmd_serve(a):
                          f"started twice. Stop that one first if you want to restart it")
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
     record_serve_locale(desk)  # the locale its lanes' commands get, for hansa explain lane to say
+    dropped = record_serve_session(desk)  # a Claude Code session's identity, which nothing it starts gets
     alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
@@ -1105,6 +1165,8 @@ def cmd_serve(a):
     d = Dispatcher(desk)
     desk.event("server_started", port=port)
     print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port} (run `hansa web` for the address)", flush=True)
+    if dropped:
+        print(f"hansa serve: {serve_session_text(dropped)}", file=sys.stderr, flush=True)
     srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks
     desk.event("srt_tried", found=srt.get("found"), path=srt.get("path"), ran=srt.get("ran"), said=srt.get("said"))
     problem = views.srt_problem(desk, desk.settings())
@@ -1133,6 +1195,13 @@ def cmd_web(a):
     if os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK"):
         raise SystemExit("hansa: the web page is for the principal; agents use the other commands")
     desk = Desk.find(a.desk)
+    if session_vars():  # an ordinary Claude Code session, or the shell of its ! prefix: the address would be in its context
+        port, me = a.port or web_port(desk), Path(__file__).resolve().parent.parent / "bin" / "hansa"
+        raise SystemExit(f"hansa: hansa web prints the page's address with its token, which approves releases, and it "
+                         f"runs inside a Claude Code session here ({', '.join(session_vars())} set), whose context would "
+                         f"keep it; nothing was printed. The principal opens the page from a terminal of their own, "
+                         f"not one Claude Code started: from their computer, ssh -L {port}:127.0.0.1:{port} HOST "
+                         f"{shlex.quote(str(me))} --desk {shlex.quote(str(desk.root))} web; on this machine, hansa web")
     print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/?t={desk.web_token()}", flush=True)
     print("Keep this window open while you use the page; close it or press Ctrl+C when you are done.", flush=True)
     # This holds an ssh tunnel to the page open. Its input ends when the connection does (a closed
@@ -1168,7 +1237,7 @@ def cmd_coordinator(a):
                          "(letters, digits and ._:-/[], not starting with -)")
     if effort not in EFFORTS:
         raise SystemExit(f"hansa: the coordinator's effort {effort!r} is not one of {', '.join(EFFORTS[1:])}")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+    env = {k: v for k, v in without_session(os.environ).items() if not k.startswith("ANTHROPIC_")}
     # only the variables provider_env sets for the provider, by name: others (HOME, PATH, and CLAUDE_*
     # ones that change how Claude Code runs commands) are not the desk owner's to set for root
     given = plan.get("env") if isinstance(plan.get("env"), dict) else {}
@@ -2160,6 +2229,13 @@ def cmd_notes(a):
 
 
 def cmd_help(a):
+    if a.command:  # hansa help verify: what hansa verify --help prints
+        p = a.commands.get(a.command)
+        if not p:
+            raise SystemExit(f"hansa: no command {a.command}; hansa help alone prints the agent card, and hansa --help "
+                             "lists the commands")
+        p.print_help()
+        return
     print(CARD.read_text(encoding="utf-8"))
 
 
@@ -2238,8 +2314,11 @@ def main(argv=None):
     g.add_argument("--full", action="store_true", help="the whole text and the whole report")
     g.add_argument("--report", action="store_true", help="the report alone, whole (for a verification, its verdict "
                                                          "and its report)")
-    g.add_argument("--check", action="store_true", help="the whole output of the task's last check and of its last "
-                                                        "merge check, keys removed")
+    g.add_argument("--check", action="store_true", help="the task's last check and its last merge check, each apart: "
+                   "how it ended, the file with its whole output and its size, and its last lines, keys removed")
+    g.add_argument("--check-log", action="store_true", help="the whole output of the task's last check, keys removed")
+    g.add_argument("--merge-check-log", action="store_true", help="the whole output of the task's last merge check, "
+                                                                  "keys removed")
     p = add("diff", cmd_diff, "a task's changes against its base")
     p.add_argument("id")
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
@@ -2579,7 +2658,8 @@ def main(argv=None):
     add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
         "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "
         "window of hours, local time, when it is idle and nobody is typing (it needs tmux)")
-    add("help", cmd_help, "print the agent card")
+    p = add("help", cmd_help, "print the agent card; with a command, that command's help")
+    p.add_argument("command", nargs="?", help="a command, such as verify: its help, as hansa verify --help prints it")
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--by", type=int, required=True)
@@ -2604,6 +2684,7 @@ def main(argv=None):
     elif extra:
         ap.error(f"unrecognized arguments: {' '.join(extra)}")
     a.rest = rest
+    a.commands = sub.choices
     if not getattr(a, "fn", None):
         ap.print_help()
         return 0

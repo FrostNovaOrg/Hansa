@@ -9,6 +9,8 @@
 @media (prefers-color-scheme: dark) { :root { --bg:#151514; --fg:#ecebe6; --muted:#a3a29c; --line:#2f2e2b; --card:#1e1e1c; --accent:#8ab4e0; --warn:#e0a458; --bad:#f28b82; --ok:#81c995; } }
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.55 system-ui,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif; background:var(--bg); color:var(--fg); }
+/* a command, path or ref of any length breaks inside its box rather than widening it past the page */
+body, td, label, code, .mono { overflow-wrap:anywhere; }
 header { display:flex; gap:14px; align-items:center; flex-wrap:wrap; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:2; }
 nav { display:flex; gap:4px; }
 nav button { border:none; background:none; padding:6px 10px; border-radius:6px; color:var(--muted); }
@@ -17,7 +19,7 @@ main { max-width:1100px; margin:0 auto; padding:16px; }
 section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:14px; }
 h2 { font-size:15px; margin:0 0 8px; }
 h3 { font-size:14px; margin:12px 0 6px; }
-.scroll { overflow-x:auto; }
+.scroll { overflow-x:auto; max-width:100%; }
 table { width:100%; border-collapse:collapse; }
 th, td { text-align:left; padding:6px 8px; border-top:1px solid var(--line); vertical-align:top; }
 th { color:var(--muted); font-weight:500; border-top:none; white-space:nowrap; }
@@ -28,15 +30,22 @@ button { font:inherit; padding:4px 10px; border:1px solid var(--line); border-ra
 button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 button.link { border:none; background:none; color:var(--accent); padding:0; text-decoration:underline; }
 .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-.grid { display:grid; grid-template-columns: max-content 1fr; gap:6px 12px; align-items:center; }
+/* grid and flex children may shrink below their content, so nothing pushes a control out of the page */
+.row > *, .grid > *, .facts > * { min-width:0; }
+.grid { display:grid; grid-template-columns: fit-content(22em) minmax(0, 1fr); gap:6px 12px; align-items:center; }
 .muted { color:var(--muted); } .bad { color:var(--bad); } .ok { color:var(--ok); } .warn { color:var(--warn); }
 .mono { font:13px/1.45 ui-monospace,Menlo,monospace; }
-pre { white-space:pre-wrap; word-break:break-word; margin:0; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .lane { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:8px 0; }
-.facts { display:grid; grid-template-columns: minmax(0, 24em) 1fr; gap:6px 12px; align-items:start; }
+.facts { display:grid; grid-template-columns: minmax(0, 24em) minmax(0, 1fr); gap:6px 12px; align-items:start; }
 .facts > .muted { font-size:13px; }
 .bar { position:sticky; bottom:0; background:var(--bg); padding:10px 0; }
-@media (max-width:640px) { main { padding:10px; } .grid, .facts { grid-template-columns:1fr; } th, td { padding:5px 4px; } }
+/* one release target's tick: the box keeps its size, the words beside it wrap */
+.tick { display:flex; gap:6px; align-items:baseline; margin:2px 0; cursor:pointer; }
+.tick > input { flex:none; margin:0; }
+.tick > span { min-width:0; }
+img { max-width:100%; }
+@media (max-width:640px) { main { padding:10px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:5px 4px; } }
 </style>
 </head>
 <body>
@@ -118,6 +127,7 @@ const T = ZH ? {
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
+  releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令、它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，勾就不再算数）",
@@ -192,6 +202,7 @@ const T = ZH ? {
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
+  releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command, the target it must follow or the way it runs (fixed), changes)",
@@ -430,21 +441,29 @@ function alertSection() {
 }
 /* an entry of the releases without asking: [lane, target]; a lane name alone, or no target, is the lane's unnamed one */
 const listedKey = x => typeof x === "string" ? [x, ""] : [x.lane, x.target || ""];
-/* one tick per release target of each lane (its release command is its one unnamed target), and per entry on the
-   list that no lane has now; a tick for one target never covers another */
+/* the release targets each lane has now: its named ones, or its release command as its one unnamed target ("") */
+const laneTargets = l => l && l.targets && Object.keys(l.targets).length ? Object.keys(l.targets) : l && l.release ? [""] : [];
+const targetGone = (lane, t) => !laneTargets(S.lanes[lane]).includes(t);
+/* one tick per release target of each lane, and per entry on the list that no lane has now, said as such with
+   the command it had when saved, so it can be unticked; a tick for one target never covers another */
 function releaseTicks() {
   const rows = [];
-  for (const [lane, l] of Object.entries(S.lanes))
-    (l.targets && Object.keys(l.targets).length ? Object.keys(l.targets) : l.release ? [""] : []).forEach(t => rows.push([lane, t]));
+  for (const [lane, l] of Object.entries(S.lanes)) laneTargets(l).forEach(t => rows.push([lane, t]));
   (S.releases_without_asking || []).map(listedKey).forEach(([lane, t]) => {
     if (!rows.some(([a, b]) => a === lane && b === t)) rows.push([lane, t]); });
   const same = (lane, t) => x => { const [a, b] = listedKey(x); return a === lane && b === t; };
   if (!rows.length) return h("span", {class:"muted"}, T.none);
-  return h("div", {}, rows.map(([lane, t]) => h("label", {style:"display:block"},
-    h("input", {type:"checkbox", checked:(S.releases_without_asking || []).some(same(lane, t)), onchange: e => {
-      S.releases_without_asking = (S.releases_without_asking || []).filter(x => !same(lane, t)(x));
-      if (e.target.checked) S.releases_without_asking.push({lane, target:t}); }}),
-    " " + lane + (t ? ` · ${T.releaseTarget} ${t}` : ""))));
+  return h("div", {}, rows.map(([lane, t]) => {
+    const was = targetGone(lane, t) ? (S.releases_without_asking || []).filter(same(lane, t))
+      .map(x => typeof x === "object" ? x.command ?? x.release ?? "" : "").find(x => x) ?? "" : null;
+    return h("label", {class:"tick", "data-lane":lane, "data-target":t},
+      h("input", {type:"checkbox", checked:(S.releases_without_asking || []).some(same(lane, t)), onchange: e => {
+        S.releases_without_asking = (S.releases_without_asking || []).filter(x => !same(lane, t)(x));
+        if (e.target.checked) S.releases_without_asking.push({lane, target:t}); }}),
+      h("span", {}, lane + (t ? ` · ${T.releaseTarget} ${t}` : ""),
+        was == null ? null : h("span", {class:"warn"}, " — " + T.releaseGone,
+          h("div", {class:"muted"}, was ? [T.releaseGoneWas, h("span", {class:"mono"}, was)] : T.releaseGoneUnknown))));
+  }));
 }
 function renderSettings(problems) {
   const newProv = h("input", {placeholder:T.newName});
@@ -506,8 +525,8 @@ function renderSettings(problems) {
          target's command and the target it must follow); one ticked here, or taken back in, is recorded as it is
          when Save is pressed */
       T.releasesWithoutAsking, releaseTicks(),
-      ...(RELEASE_UNMATCHED.length ? [T.releaseUnmatched, h("div", {},
-        h("ul", {}, RELEASE_UNMATCHED.map(u => h("li", {class:"bad"}, `${u.lane}${u.target ? ` · ${T.releaseTarget} ${u.target}` : ""}: ${(ZH && u.why_zh) || u.why}`))),
+      ...(RELEASE_UNMATCHED.some(u => !u.gone) ? [T.releaseUnmatched, h("div", {},
+        h("ul", {}, RELEASE_UNMATCHED.filter(u => !u.gone).map(u => h("li", {class:"bad"}, `${u.lane}${u.target ? ` · ${T.releaseTarget} ${u.target}` : ""}: ${(ZH && u.why_zh) || u.why}`))),
         h("button", {onclick: e => { S.releases_without_asking = (S.releases_without_asking || []).map(listedKey).map(([lane, target]) => ({lane, target}));
           e.target.disabled = true; }}, T.releaseTakeBack))] : []),
       T.releaseForbidden, h("textarea", {placeholder:"internal-only", oninput: e => {
