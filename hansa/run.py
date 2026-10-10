@@ -4709,13 +4709,18 @@ def rethink_text(desk: Desk, m: dict) -> str:
     return RETHINK.format(n=n) if n >= 2 else ""
 
 
+def merge_result_lane(m: dict, lane_name: str | None) -> dict:
+    """Record the execution lane only when it differs from the task's own lane."""
+    return {"lane": lane_name} if lane_name and lane_name != m.get("lane") else {}
+
+
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
     """Nothing was merged: the task goes back to waiting for review, with the result saying why. A merge that
     needed no check and waited its turn (plain) says so in its result (waited): no check ran for it."""
     plain = ((desk.meta(tid).get("merge_check") or {}).get("plain"))
     check_lane = (desk.meta(tid).get("merge_check") or {}).get("lane")
-    if result and check_lane and check_lane != desk.meta(tid).get("lane"):
-        result = {**result, "lane": check_lane}
+    if result:
+        result = {**result, **merge_result_lane(desk.meta(tid), check_lane)}
     if plain and result:
         result = {**result, "waited": True}
     m = desk.change(tid, lambda x: None if x["state"] != "merging" else
@@ -4846,7 +4851,8 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         command = merge_command(lane)
         if not command:  # the check and merge check were taken away meanwhile: nothing to run
             land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
-                                   "at": now(), "seconds": 0, "tail": [], "message_note": said, "lane": lane_name})
+                                   "at": now(), "seconds": 0, "tail": [], "message_note": said,
+                                   **merge_result_lane(m, lane_name)})
             return None
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
@@ -4902,7 +4908,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         except GitFileChanged as e:
             note = git_file_changed(desk, tid, e)
     result = {"ok": code == 0 and not note, "exit": code, "note": note, "command": mc.get("command", ""),
-              **({"lane": mc["lane"]} if mc.get("lane") and mc["lane"] != m.get("lane") else {}),
+              **merge_result_lane(m, mc.get("lane")),
               **({"own": True} if mc.get("own") else {}),
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),

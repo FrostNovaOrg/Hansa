@@ -3388,6 +3388,25 @@ class DeskTest(unittest.TestCase):
         self.assertIn("still broken", views.show_text(self.desk, tid))
         self.assertNotIn("lane", m["merge_check_result"])
 
+    def test_a_queued_merge_with_its_checks_removed_records_no_lane(self):
+        d, tid = self.merge_check_lane(check="true", merge_check="test -f hello.txt")
+        self.hansa("merge", tid)
+        self.assertEqual(self.desk.meta(tid)["merge_check"]["phase"], "queued")
+        self.hansa("lane", "set", "a", "check", "none")
+        self.hansa("lane", "set", "a", "merge_check", "none")
+        calls = len(self.srt_calls())
+        m = self.settle_merge(d, tid)
+        result = m["merge_check_result"]
+        self.assertEqual((m["state"], result["ok"], result["command"]), ("merged", True, ""))
+        self.assertEqual(self.git_out("rev-parse", "main"), result["commit"])
+        self.assertEqual(len(self.srt_calls()), calls)
+        self.assertNotIn("lane", result)
+        events = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                  if e.get("task") == tid and "merge" in e["event"]]
+        self.assertEqual([e["event"] for e in events], ["merge_check_queued", "task_merged"])
+        for event in events:
+            self.assertNotIn("lane", event)
+
     def merge_check_lane(self, **fields):
         """Lane a with these fields set (None takes one out), and one finished task on it."""
         s = self.desk.settings()
