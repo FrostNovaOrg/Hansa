@@ -79,12 +79,13 @@ def task_runs(m: dict) -> list:
     return sorted(out, key=lambda r: r["when"])
 
 
-def worker_rows(desk: Desk, since: float) -> list:
+def worker_rows(desk: Desk, since: float, s: dict | None = None, tasks: list | None = None) -> list:
     """One row per model of each run of each task that ended in the window. A run's turns, and the run itself
-    (runs), are on its first row, so that they add up."""
-    s = desk.settings()
+    (runs), are on its first row, so that they add up. s, tasks: the desk's settings and tasks, when the caller
+    has read them already."""
+    s = desk.settings() if s is None else s
     rows = []
-    for m in desk.tasks():
+    for m in desk.tasks() if tasks is None else tasks:
         seat = {"design": "design", "verify": "verify"}.get(m.get("kind"), "worker")
         for run in task_runs(m):
             when = run["when"]

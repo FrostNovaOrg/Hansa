@@ -962,7 +962,7 @@ def cmd_wait(a):
     if not done_already and not any(map(live, watch)) and not open_asks:
         print("nothing is queued or running and no request to the principal is open: nothing to wait for")
         return
-    if not views.status(desk)["server_up"]:
+    if server_state(desk)["state"] == "gone":  # as hansa status's server_up says it
         print("note: hansa serve is not running, so no task will start or finish until it is")
     end = time.time() + a.timeout * 60
     while True:
@@ -1326,12 +1326,15 @@ def cmd_coordinator(a):
 
 def no_read_paths(desk: Desk, plan: dict, theirs: str = "") -> tuple:
     """What the plan says the principal keeps workers from reading, as the session may be denied it, and what was
-    said of the entries left out: what the desk's owner found (coordinator_desk), then the same checks again."""
+    said of the entries left out: what the desk's owner found (coordinator_desk), then, as root on the account's
+    desk, the same checks again."""
     given = plan.get("no_read") if isinstance(plan.get("no_read"), list) else []
     refused = plan.get("no_read_refused") if isinstance(plan.get("no_read_refused"), list) else []
     said = [x for x in refused if isinstance(x, str)]
+    if not theirs:  # the desk is this user's: coordinator_desk made the plan in this process, with these checks
+        return [x for x in given if isinstance(x, str)], said
     # root does not read the account's settings: the account's hansa looked at the lanes' repositories
-    good, more, stops = deny_parts(given, desk.root, None if theirs else desk.settings()["lanes"])
+    good, more, stops = deny_parts(given, desk.root, None)
     if stops:  # as coordinator_desk: a path the plan gives that cannot be written as a rule stops the session
         raise SystemExit(f"hansa: {stop_text(stops)}")
     return good, [*said, *(m for m in more if m not in said)]

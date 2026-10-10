@@ -10,12 +10,12 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, release
-from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
-                  lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_reason, write_list)
+                  lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_looks, waiting_reason, write_list)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -499,8 +499,10 @@ def status(desk: Desk) -> dict:
     last = last_round(desk)
     server = server_state(desk)
     day = time.time() - 86400  # the last 24 h, each thing by when it happened: not reset at midnight
-    rows = cost.worker_rows(desk, day)  # by when the run ended
-    no_read = no_read_parts(s, desk.root)
+    rows = cost.worker_rows(desk, day, s, tasks)  # by when the run ended
+    no_read = no_read_parts_shown(s, desk.root)
+    queued = [m for m in tasks if m["state"] == "queued"]
+    looks = waiting_looks(desk, s, tasks, server) if queued else None  # once for all of them
     return {
         "desk": str(desk.root),
         "build": build(),
@@ -554,7 +556,7 @@ def status(desk: Desk) -> dict:
                     "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
-                    "waiting": waiting_reason(desk, s, m, busy)} for m in tasks if m["state"] == "queued"],
+                    "waiting": waiting_reason(desk, s, m, busy, looks)} for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
                      "minutes": _mins((m.get("merge_check") or {}).get("started")),
@@ -1328,7 +1330,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
     if what == "states":
         return "\n".join(f"{k:<10} {v}" for k, v in STATES.items())
     if what == "server":
-        rec = srt_record(desk)
+        rec, server = srt_record(desk), server_state(desk)
         seen = ("hansa serve has not tried srt yet" if not rec else
                 "hansa serve tried srt" + (f" at {srt_when(rec)}" if srt_when(rec) else "") + ": "
                 + ("it ran" + (f" ({rec.get('path')})" if rec.get("path") else "") if rec.get("ran") else
@@ -1338,8 +1340,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "`hansa serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
             "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
             "desk: a second one refuses to start.",
-            f"  now: {server_text(server_state(desk))}",
-            f"  {page_text(page_of(desk, server_state(desk)))}",
+            f"  now: {server_text(server)}",
+            f"  {page_text(page_of(desk, server))}",
             "What it starts outside a worker's sandbox (a release's command, the alert command, design sessions, the "
             "preview, git) runs with its environment, less what carries a Claude Code session's identity or "
             f"messaging ({', '.join(p + '*' for p in SESSION_PREFIXES)}, {', '.join(SESSION_NAMES)}): with those a "

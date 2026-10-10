@@ -271,15 +271,14 @@ function shotStrip(id, names, n) {
     return h("a", {href:src, target:"_blank", title:x}, h("img", {src, alt:x, style:"max-width:320px;max-height:220px;border:1px solid var(--line, #ccc)"}));
   })));
 }
-async function designBlock(m) {
-  const r = await api("/api/task?id=" + m.id);
+function designBlock(m) {
   return h("div", {class:"lane"}, h("div", {class:"row"}, taskLink(m.id), h("strong", {}, m.title), h("span", {class:"muted"}, `${m.lane} · ${m.minutes} ${T.minutes}`)),
     m.progress ? h("div", {class:"muted"}, T.progressFmt(m.progress.replies, m.progress.idle_min)) : null,
-    h("div", {}, T.join + "：", h("code", {}, m.join)), shotStrip(m.id, r.shots, 6));
+    h("div", {}, T.join + "：", h("code", {}, m.join)), shotStrip(m.id, m.shots, 6));
 }
 async function loadStatus() {
   const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);
-  const designs = await Promise.all((st.design || []).map(designBlock));
+  const designs = (st.design || []).map(designBlock);
   $("#state").textContent = (st.paused ? T.paused + ": " + st.paused : T.dispatchOn) + " · "
     + (st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
        : st.server_up ? T.serverUp : T.serverDown)

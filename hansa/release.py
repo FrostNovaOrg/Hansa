@@ -514,33 +514,38 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
 def stale(desk: Desk, s: dict, r: dict, zh: bool = False) -> str:
     """Why a release is no longer what the principal saw (the lane or its target gone, the target's command or
     the lane's base branch changed, the base branch moved); '' when it still is. zh: in Chinese, for the page."""
+    return stale_both(desk, s, r)[zh]
+
+
+def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
+    """stale in English and in Chinese, from one look (one git rev-parse): (English, Chinese)."""
     ln = s["lanes"].get(r.get("lane"))
     if not ln:
-        return f"工作线 {r.get('lane')} 已不在桌面上" if zh else f"lane {r.get('lane')} is no longer on the desk"
+        return f"lane {r.get('lane')} is no longer on the desk", f"工作线 {r.get('lane')} 已不在桌面上"
     target = r.get("target") or ""
     t = lane_targets(ln).get(target)
     if t is None and target:
-        return (f"工作线 {r['lane']} 已没有发布目标 {target}" if zh else
-                f"lane {r['lane']} has no release target {target} any more")
+        return (f"lane {r['lane']} has no release target {target} any more",
+                f"工作线 {r['lane']} 已没有发布目标 {target}")
     if ((t or {}).get("command") or "") != r.get("command"):
-        now_as, then = (t or {}).get("command") or ("（无）" if zh else "(none)"), r.get("command")
-        return (f"{what_zh(r)} 的发布命令在请求之后改了：现在是 {now_as!r}，不是 {then!r}" if zh else
-                f"{what(r)}'s release command changed since it was asked: it is now {now_as!r}, not {then!r}")
+        now_as, now_zh, then = (t or {}).get("command") or "(none)", (t or {}).get("command") or "（无）", r.get("command")
+        return (f"{what(r)}'s release command changed since it was asked: it is now {now_as!r}, not {then!r}",
+                f"{what_zh(r)} 的发布命令在请求之后改了：现在是 {now_zh!r}，不是 {then!r}")
     if bool((t or {}).get("fixed")) != bool(r.get("fixed")):
-        return (f"{what_zh(r)} 的运行方式（--fixed，固定检出）在请求之后改了" if zh else
-                f"how {what(r)} runs (--fixed: from a fixed checkout, or in the repository) changed since it was asked")
+        return (f"how {what(r)} runs (--fixed: from a fixed checkout, or in the repository) changed since it was asked",
+                f"{what_zh(r)} 的运行方式（--fixed，固定检出）在请求之后改了")
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
-        return (f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了" if zh else
-                f"lane {r['lane']}'s repository or base branch changed since it was asked")
+        return (f"lane {r['lane']}'s repository or base branch changed since it was asked",
+                f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了")
     try:
         tip = git("rev-parse", "--verify", f"refs/heads/{r['base']}^{{commit}}", cwd=r["repo"])
     except (RuntimeError, OSError) as e:
-        return desk.redact(f"{r['base']} 在 {r['repo']} 里读不出来（{e}）" if zh else
-                           f"{r['base']} cannot be read in {r['repo']} ({e})")[:400]
+        return (desk.redact(f"{r['base']} cannot be read in {r['repo']} ({e})")[:400],
+                desk.redact(f"{r['base']} 在 {r['repo']} 里读不出来（{e}）")[:400])
     if tip != r.get("commit"):
-        return (f"{r['base']} 在请求之后动了：现在在 {tip[:10]}，不是 {r['commit'][:10]}" if zh else
-                f"{r['base']} moved since it was asked: it is at {tip[:10]} now, not {r['commit'][:10]}")
-    return ""
+        return (f"{r['base']} moved since it was asked: it is at {tip[:10]} now, not {r['commit'][:10]}",
+                f"{r['base']} 在请求之后动了：现在在 {tip[:10]}，不是 {r['commit'][:10]}")
+    return "", ""
 
 
 def void(desk: Desk, rid, why: str, states=("waiting", "approved"), why_zh: str = "") -> dict | None:
@@ -892,7 +897,7 @@ def _not_ready(desk: Desk, s: dict, r: dict) -> tuple | None:
         return ()
     if r.get("without_asking") and desk.paused():  # while paused, only a release the principal said yes to
         return ()
-    why, why_zh = stale(desk, s, r), stale(desk, s, r, zh=True)
+    why, why_zh = stale_both(desk, s, r)
     if not why:  # the order, again: the target it must follow sent out this commit
         why = before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"])
         why_zh = why and before_it(desk, s, r["lane"], target, r["repo"], r["base"], r["commit"], zh=True)
@@ -1343,6 +1348,6 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         row["what"], row["what_zh"] = state_text(desk, r, s), state_text(desk, r, s, zh=True)
         row["tail"] = (r.get("tail") or [])[-TAIL:]
         if r.get("state") == "waiting":
-            row["moved"], row["moved_zh"] = stale(desk, s, r), stale(desk, s, r, zh=True)
+            row["moved"], row["moved_zh"] = stale_both(desk, s, r)
         out.append(row)
     return out

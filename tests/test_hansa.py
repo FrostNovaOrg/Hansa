@@ -1269,6 +1269,15 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.hansa_out("show", other, "--check"), f"{other}: no check has run on it\n")
         self.assertEqual(self.hansa_out("show", other, "--merge-check-log"), f"{other}: no merge check has run on it\n")
 
+    def test_explain_server_asks_once_whether_hansa_serve_runs(self):
+        from hansa import run
+        asked = []
+        with unittest.mock.patch("hansa.views.server_state", lambda d: asked.append(1) or run.server_state(d)):
+            said = views.explain_text(self.desk, "server")
+        self.assertEqual(len(asked), 1)
+        self.assertIn("now: server NOT running", said)
+        self.assertIn("web page: not served now, since hansa serve is not running", said)
+
     def test_status_and_explain_say_where_the_web_page_is(self):
         st = views.status(self.desk)
         self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "stuck": False, "answers": True,
@@ -5110,6 +5119,21 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "wait"])
         self.assertIn("nothing to wait for", out.getvalue())
 
+    def test_wait_asks_only_whether_hansa_serve_runs(self):
+        self.desk.new_task("Add hello.txt")
+        out = io.StringIO()
+        with unittest.mock.patch("hansa.views.status", side_effect=AssertionError("a whole status was built")), \
+                contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "wait", "--timeout", "0", "--every", "0.1"])
+        self.assertIn("note: hansa serve is not running, so no task will start or finish until it is", out.getvalue())
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "wait", "--timeout", "0", "--every", "0.1"])
+        self.assertNotIn("hansa serve is not running", out.getvalue())
+
     # -- hansa posts to a coordinator's session (hansa/notify.py) ------------------------------------------
     def session(self):
         """A stand-in for a Claude Code session: a process that runs until it is stopped, and its inbox path."""
@@ -7018,6 +7042,27 @@ class DeskTest(unittest.TestCase):
         rules = cli.own_folder_rules({"HOME": str(home)})
         self.assert_own_folder_closed(rules, home.resolve() / ".claude", dot=home.resolve() / ".claude.json")
         self.assertTrue(self.covered(rules, "Read", f"{home.resolve()}/.claude/stats.json"))
+
+    def test_starting_the_coordinator_on_its_own_desk_checks_what_workers_may_not_read_once(self):
+        from hansa import desk as hdesk
+        secret = str(self.tmp.resolve() / "keys")
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [secret, str(self.repo.resolve())]  # one kept, one left out
+        write_json(self.desk.settings_path, s)
+        looks, started, err = [], {}, io.StringIO()
+        real = hdesk.deny_parts
+
+        def counted(*a, **k):
+            looks.append(a[0])
+            return real(*a, **k)
+        with unittest.mock.patch("hansa.desk.deny_parts", counted), unittest.mock.patch("hansa.cli.deny_parts", counted), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv)), \
+                unittest.mock.patch("os.chdir"), unittest.mock.patch("hansa.notify.start", lambda *x, **k: None), \
+                contextlib.redirect_stderr(err):
+            main(["--desk", str(self.desk.root), "coordinator"])
+        self.assertEqual(looks, [[secret, str(self.repo.resolve())]])
+        self.assertIn(f"Read(/{secret})", " ".join(started["argv"]))  # denied to the session all the same
+        self.assertEqual(err.getvalue().count(f"workers cannot be kept from reading {self.repo.resolve()}"), 1)
 
     def test_coordinator_start_brings_the_desks_permissions_up_to_date(self):
         echo = self.tmp / "echo-claude"
@@ -9953,6 +9998,44 @@ class DeskTest(unittest.TestCase):
             for x in ("NO_READ_STOP = r.no_read_stop", "section(T.noReadStop", "st.no_read_stop"):
                 self.assertIn(x, (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
 
+    def test_status_and_the_page_look_at_what_workers_may_not_read_once_a_minute_and_runs_every_time(self):
+        from hansa import desk as hdesk, run
+        secret = str(self.tmp.resolve() / "keys")
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [secret]
+        write_json(self.desk.settings_path, s)
+        looks = []
+        real = hdesk.no_read_parts
+
+        def counted(*a, **k):
+            looks.append(1)
+            return real(*a, **k)
+        with unittest.mock.patch("hansa.desk.no_read_parts", counted):
+            st = views.status(self.desk)
+            views.status(self.desk)
+            public_settings(self.desk)
+            self.assertEqual(len(looks), 1)  # the polls and Settings share one look
+            st["no_read_left_out"].append("changed by a caller")  # a copy: what is kept is not changed
+            self.assertEqual(views.status(self.desk)["no_read_left_out"], [])
+            s["workers_may_not_read"] = [secret, str(self.repo.resolve())]  # the list changed: looked at again
+            write_json(self.desk.settings_path, s)
+            self.assertEqual(len(views.status(self.desk)["no_read_left_out"]), 1)
+            self.assertEqual(len(looks), 2)
+            (self.desk.root / "worktrees" / "x").mkdir(parents=True)  # a worktree made: again
+            views.status(self.desk)
+            self.assertEqual(len(looks), 3)
+            with unittest.mock.patch.dict(os.environ, {"PATH": f"/opt/elsewhere{os.pathsep}{os.environ['PATH']}"}):
+                views.status(self.desk)  # another PATH: again
+            self.assertEqual(len(looks), 4)
+            with unittest.mock.patch("hansa.desk.time.monotonic", return_value=time.monotonic() + hdesk.NO_READ_KEEP):
+                views.status(self.desk)  # a minute on: again
+            self.assertEqual(len(looks), 5)
+        # a run checks the list itself as it starts, whatever the page has kept
+        with unittest.mock.patch("hansa.desk.no_read_parts", counted), \
+                unittest.mock.patch("hansa.run.no_read_parts", counted):
+            run.no_read(self.desk)
+        self.assertEqual(len(looks), 6)
+
     def test_an_entry_left_out_for_a_lanes_repository_is_said_in_status_and_on_the_page(self):
         s = self.desk.settings()
         s["workers_may_not_read"] = [str(self.repo.resolve())]
@@ -12652,6 +12735,29 @@ class DeskTest(unittest.TestCase):
         why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
         self.assertIn("but `hansa serve` is not running", why)
 
+    def test_status_reads_the_tasks_once_and_what_the_queued_ones_wait_on_once(self):
+        from hansa import run
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        ids = [self.desk.new_task(f"Task {i}") for i in range(4)] + [self.desk.new_task("Talk", lane="a", kind="design")]
+        alone = {t: waiting_reason(self.desk, self.desk.settings(), self.desk.meta(t), set()) for t in ids}
+        reads = {"tasks": 0, "paused": 0, "server": 0}
+        tasks, paused, server = Desk.tasks, Desk.paused, run.server_state
+
+        def count(name, fn):
+            def f(*a, **k):
+                reads[name] += 1
+                return fn(*a, **k)
+            return f
+        with unittest.mock.patch.object(Desk, "tasks", count("tasks", tasks)), \
+                unittest.mock.patch.object(Desk, "paused", count("paused", paused)), \
+                unittest.mock.patch("hansa.run.server_state", count("server", server)), \
+                unittest.mock.patch("hansa.views.server_state", count("server", server)):
+            st = views.status(self.desk)
+        self.assertEqual(reads, {"tasks": 1, "paused": 2, "server": 1})  # paused: the status's own, and the waiting lines'
+        self.assertEqual({m["id"]: m["waiting"] for m in st["queued"]}, alone)  # as each says it alone
+
     @design_as_on_mac
     def test_hansa_design_says_what_the_waiting_lines_say_when_the_server_does_not_look(self):
         from hansa import run
@@ -13215,6 +13321,52 @@ class DeskTest(unittest.TestCase):
             for httpd, _, _ in servers:
                 httpd.shutdown()
                 httpd.server_close()
+
+    def test_the_pages_status_gives_each_design_session_its_screenshots(self):
+        from hansa import web
+        did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
+        self.desk.update(did, state="running", started=now())
+        shots = self.desk.tasks_dir / did / "browser"
+        shots.mkdir()
+        (shots / "old.png").write_bytes(b"x")
+        os.utime(shots / "old.png", (1, 1))
+        (shots / "new.png").write_bytes(b"x")
+        (shots / "notes.txt").write_text("not a picture")
+        [row] = web._status(self.desk)["design"]
+        self.assertEqual((row["id"], row["shots"]), (did, ["new.png", "old.png"]))
+        self.assertNotIn("shots", views.status(self.desk)["design"][0])  # hansa status --json is as it was
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        block = ui[ui.index("function designBlock"):ui.index("async function loadStatus")]
+        self.assertIn("shotStrip(m.id, m.shots, 6)", block)
+        self.assertNotIn("/api/task", block)  # no request of its own at each poll
+
+    def test_the_latest_events_are_read_from_the_end_of_the_log_as_the_whole_log_gives_them(self):
+        from hansa import web
+        for i in range(3000):
+            self.desk.event("filler", i=i, said="é 中 line\u2028apart" if i % 7 == 0 else "x" * (i % 50))
+        with open(self.desk.events_path, "a", encoding="utf-8") as fh:
+            fh.write("not json\n")
+        whole = self.desk.events_path.read_text(encoding="utf-8").splitlines()
+        for n in (1, 3, 60, 200):
+            self.assertEqual(web._last_lines(self.desk.events_path, n), whole[-n:])
+            self.assertEqual(web._last_lines(self.desk.events_path, n, block=37), whole[-n:])  # cut inside characters
+            want = []  # as from the whole log: a line that is not an event (a part of one cut at \u2028) left out
+            for x in reversed(whole[-n:]):
+                with contextlib.suppress(ValueError):
+                    want.append(json.loads(x))
+            self.assertEqual(web._events(self.desk, n), want)
+        self.assertEqual(web._events(self.desk, 60)[0]["i"], 2999)  # newest first
+        opened = []
+        real = open
+
+        def reading(path, mode="r", *a, **k):
+            opened.append(mode)
+            return real(path, mode, *a, **k)
+        with unittest.mock.patch("builtins.open", reading), \
+                unittest.mock.patch.object(Path, "read_text", side_effect=AssertionError("the whole log was read")):
+            web._events(self.desk, 60)
+        self.assertEqual(opened, ["rb"])
+        self.assertEqual([e["i"] for e in web._events(self.desk, 2, "filler")], [2999, 2998])  # by kind: the whole log
 
     def test_the_page_cannot_change_lanes_or_concurrency(self):
         skip_unless_ports(self)
@@ -14435,6 +14587,25 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(any("holds the key of demo" in x for x in self.desk.save_settings(s)))
         self.hansa("lane", "set", "a", "release", "./deploy --token-file ~/.config/deploy/token")  # a key read by the tool
         self.assertEqual(self.desk.settings()["lanes"]["a"]["release"], "./deploy --token-file ~/.config/deploy/token")
+
+    def test_the_page_looks_once_at_whether_a_waiting_release_still_applies_for_both_languages(self):
+        from hansa import release
+        self.with_release("true")
+        self.hansa("release", "a")
+        self.commit_in_repo("b.txt", "b\n")
+        asked = []
+        real = release.git
+
+        def git(*a, **k):
+            asked.append(a)
+            return real(*a, **k)
+        with unittest.mock.patch("hansa.release.git", git):
+            [row] = views.status(self.desk)["releases"]
+        self.assertEqual(len([a for a in asked if a[0] == "rev-parse"]), 1)
+        r = release.get(self.desk, 1)
+        self.assertEqual((row["moved"], row["moved_zh"]),
+                         (release.stale(self.desk, self.desk.settings(), r), release.stale(self.desk, self.desk.settings(), r, zh=True)))
+        self.assertIn("main moved since it was asked", row["moved"])
 
     def test_the_chinese_page_has_a_releases_state_and_why_it_no_longer_applies_in_chinese(self):
         from hansa import release
