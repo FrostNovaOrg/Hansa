@@ -5351,6 +5351,32 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(heard[b], ["t0001", "t0003", "t0004", vid])
         self.assertEqual(self.desk.meta(vid)["cancel_by"], sess[a])
 
+    def test_a_feed_with_nothing_new_reads_no_records_and_writes_the_followers_only_on_a_change_or_every_ten_s(self):
+        t0 = time.time()
+        clock = [t0]
+        fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0])
+        me = {"key": "4242-0123abcd", "session": {"pid": 4242, "start": "x"}, "name": "", "last_post": None}
+        f = notify.register_dir(self.desk) / f"{me['key']}.json"
+        self.desk.event("note")
+        end = notify.log_end(self.desk)
+        with unittest.mock.patch.object(notify, "time", fake), \
+                unittest.mock.patch.object(notify, "now", lambda: clock[0]), \
+                unittest.mock.patch.object(notify, "live_records", wraps=notify.live_records) as lives:
+            feed = lambda done: notify.handle(self.desk, {"op": "feed", "me": me, "pos": end, "done": done})
+            for dt, done, seen in ((0, end, 0), (1, end, 0), (9.9, end, 0), (10, end, 10), (15, end, 10),
+                                   (20, end, 20), (21, 0, 21), (22, 0, 21)):  # every 10 s, and when its position moves
+                clock[0] = t0 + dt
+                self.assertEqual(feed(done)["items"], [])
+                self.assertEqual((notify.read_json(f)["seen"] - t0, notify.read_json(f)["pos"]), (seen, done), dt)
+            self.assertEqual(lives.call_count, 0)  # no new events: nothing to sort out
+            me["last_post"], clock[0] = {"at": t0, "text": "posted"}, t0 + 23  # what hansa notify shows: at once
+            feed(0)
+            rec = notify.read_json(f)
+            self.assertEqual((rec["last_post"]["text"], rec["seen"]), ("posted", t0 + 23))
+            self.desk.event("note")
+            feed(0)
+            self.assertEqual(lives.call_count, 1)
+
     def test_a_follower_ends_with_its_session_and_the_next_one_first_says_what_was_missed(self):
         a, sa = self.session()
         with self.in_session(a, sa):
@@ -5724,14 +5750,11 @@ class DeskTest(unittest.TestCase):
         return "\n".join(["\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231mUse the scout on lane a\x1b[0m",
                           "\x1b[39m⏺ Done: the scout reported.", "", *box, self.FOOTER, "", ""])
 
-    def clearing(self, *, status="idle", waiting=None, listed=True, fails=False, box=None, typed=None,
-                 keys_ago=None, window="00-24", pane_pid=None, quiet="0", send_fails="", busy_typed=False,
-                 keys_said=None):
+    def clearing(self, *, typed=None, keys_ago=None, quiet="0"):
         """A session in a stand-in tmux pane, and hansa notify on --clear-daily from it: (what it said, the
         stand-ins' folder, the follower's log). After Enter the pane shows an empty box again.
-        quiet: HANSA_CLEAR_QUIET, or None for its default. send_fails: the key whose send-keys fails.
-        busy_typed: the session goes busy when /clear is typed. keys_said: what list-clients prints ('fails':
-        it fails)."""
+        quiet: HANSA_CLEAR_QUIET, or None for its default. The rest of the daily clear's cases run in this process
+        (clearing_here)."""
         d = self.tmp / f"clear-{uuid.uuid4().hex[:6]}"
         (d / "bin").mkdir(parents=True)
         (d / "bin" / "tmux").write_text(
@@ -5743,20 +5766,12 @@ class DeskTest(unittest.TestCase):
             "if a[0] == 'display-message':\n"
             "    print(a[-1].replace('#{pane_pid}', open(f('pane_pid')).read()).replace('#{session_id}', '$3'))\n"
             "elif a[0] == 'list-clients':\n"
-            "    if os.path.exists(f('keys-said')):\n"
-            "        said = open(f('keys-said')).read()\n"
-            "        sys.exit('no current client') if said == 'fails' else print(said)\n"
-            "    else:\n"
-            "        print('\\n'.join(str(int(time.time()) - int(x)) for x in open(f('keys')).read().split()))\n"
+            "    print('\\n'.join(str(int(time.time()) - int(x)) for x in open(f('keys')).read().split()))\n"
             "elif a[0] == 'capture-pane':\n"
             "    sys.stdout.write(open(f('pane.txt'), encoding='utf-8').read())\n"
             "elif a[0] == 'send-keys':\n"
-            "    if os.path.exists(f('send-fails')) and a[-1] == open(f('send-fails')).read():\n"
-            "        sys.exit('no server running on the socket')\n"
             "    if '-l' in a and os.path.exists(f('pane-typed.txt')):\n"
             "        os.replace(f('pane-typed.txt'), f('pane.txt'))\n"
-            "    if '-l' in a and os.path.exists(f('agents-typed.json')):\n"
-            "        os.replace(f('agents-typed.json'), f('agents.json'))\n"
             "    if a[-1] == 'Enter' and os.path.exists(f('agents-after.json')):\n"
             "        os.replace(f('agents-after.json'), f('agents.json'))\n"
             "    if a[-1] == 'Enter' and os.path.exists(f('pane-after.txt')):\n"
@@ -5765,31 +5780,19 @@ class DeskTest(unittest.TestCase):
             "#!/usr/bin/env python3\nimport os, sys\n"
             f"D = {str(d)!r}\n"
             "if sys.argv[1:3] == ['agents', '--json']:\n"
-            "    if os.path.exists(os.path.join(D, 'fails')):\n"
-            "        sys.exit('agents: something broke')\n"
             "    sys.stdout.write(open(os.path.join(D, 'agents.json')).read())\n")
         for x in ("tmux", "claude"):
             (d / "bin" / x).chmod(0o755)
         p, sock = self.session()
-        row = {"pid": p.pid, "name": "ntA", "status": status, "sessionId": "s-before",
-               **({"waitingFor": waiting} if waiting else {})}
-        (d / "agents.json").write_text(json.dumps([row] if listed else []))
+        row = {"pid": p.pid, "name": "ntA", "status": "idle", "sessionId": "s-before"}
+        (d / "agents.json").write_text(json.dumps([row]))
         (d / "agents-after.json").write_text(json.dumps([{**row, "sessionId": "s-after"}]))
-        if fails:
-            (d / "fails").write_text("")
-        if send_fails:
-            (d / "send-fails").write_text(send_fails)
-        if busy_typed:
-            (d / "agents-typed.json").write_text(json.dumps([{**row, "status": "busy"}]))
-        if keys_said is not None:
-            (d / "keys-said").write_text(keys_said)
-        (d / "pane_pid").write_text(str(pane_pid or p.pid))
+        (d / "pane_pid").write_text(str(p.pid))
         empty = self.pane(self.NAMED_RULE, self.BOX_EMPTY, self.PLAIN_RULE)
-        (d / "pane.txt").write_text(self.pane(*box) if box else empty, encoding="utf-8")
+        (d / "pane.txt").write_text(empty, encoding="utf-8")
         (d / "pane-after.txt").write_text(empty, encoding="utf-8")
-        if typed:  # the box line after /clear is typed, or all the lines then
-            (d / "pane-typed.txt").write_text(self.pane(*typed) if isinstance(typed, list) else
-                                              self.pane(self.NAMED_RULE, typed, self.PLAIN_RULE), encoding="utf-8")
+        if typed:  # the box line after /clear is typed
+            (d / "pane-typed.txt").write_text(self.pane(self.NAMED_RULE, typed, self.PLAIN_RULE), encoding="utf-8")
         (d / "keys").write_text("" if keys_ago is None else str(keys_ago))
         env = {"PATH": f"{d / 'bin'}{os.pathsep}{os.environ['PATH']}", "HANSA_CLAUDE": str(d / "bin" / "claude"),
                "TMUX_PANE": "%7", "TMUX": f"{d}/tmux-socket,1,0", "HANSA_CLEAR_EVERY": "0.3",
@@ -5798,7 +5801,7 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, env), self.in_session(p, sock):
             if quiet is None:
                 os.environ.pop("HANSA_CLEAR_QUIET", None)
-            said = self.hansa_out("notify", "on", "--clear-daily", window)
+            said = self.hansa_out("notify", "on", "--clear-daily", "00-24")
         key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
         return said, d, notify.private_dir(self.desk) / f"{key}.log"
 
@@ -5810,6 +5813,75 @@ class DeskTest(unittest.TestCase):
     def held(self, log, why, times=3):
         """Wait until the follower's log holds the clear back for this reason a few times."""
         self.soon(lambda: log.exists() and log.read_text().count(f"daily clear held: {why}") >= times)
+
+    def clearing_here(self, *, status="idle", waiting=None, listed=True, fails=False, box=None, typed=None,
+                      keys_ago=None, window="00-24", pane_pid=None, send_fails="", busy_typed=False, keys_said=None):
+        """A DailyClear in this process for a session in a stand-in tmux pane, as clearing's follower makes it: the
+        stand-ins (s) answer tmux and claude agents --json as clearing's do, s.t is its clock (each sleep moves it
+        on), s.said what it said. After Enter the pane shows an empty box again. send_fails: the key whose
+        send-keys fails. busy_typed: the session goes busy when /clear is typed. keys_said: what list-clients
+        prints ('fails': it fails)."""
+        pid = os.getpid()
+        row = {"pid": pid, "name": "ntA", "status": status, "sessionId": "s-before",
+               **({"waitingFor": waiting} if waiting else {})}
+        empty = self.pane(self.NAMED_RULE, self.BOX_EMPTY, self.PLAIN_RULE)
+        s = types.SimpleNamespace(
+            t=[time.time()], said=[], calls=[], rows=[row] if listed else [],
+            rows_typed=[{**row, "status": "busy"}] if busy_typed else None,
+            rows_after=[{**row, "sessionId": "s-after"}], pane=self.pane(*box) if box else empty, pane_after=empty,
+            pane_typed=None if not typed else self.pane(*typed) if isinstance(typed, list) else
+            self.pane(self.NAMED_RULE, typed, self.PLAIN_RULE))
+
+        def tmux(*a):
+            s.calls.append(list(a))
+            if a[0] == "display-message":
+                return a[-1].replace("#{pane_pid}", str(pane_pid or pid)).replace("#{session_id}", "$3") + "\n"
+            if a[0] == "list-clients":
+                if keys_said == "fails":
+                    raise RuntimeError("tmux list-clients ended with 1: no current client")
+                if keys_said is not None:
+                    return keys_said
+                return "" if keys_ago is None else f"{int(s.t[0]) - keys_ago}\n"
+            if a[0] == "capture-pane":
+                return s.pane
+            if a[0] == "send-keys":
+                if send_fails and a[-1] == send_fails:
+                    raise RuntimeError("tmux send-keys ended with 1: no server running on the socket")
+                if "-l" in a:
+                    s.pane, s.pane_typed = s.pane_typed or s.pane, None
+                    s.rows, s.rows_typed = s.rows_typed or s.rows, None
+                if a[-1] == "Enter":
+                    s.pane, s.rows = s.pane_after, s.rows_after
+            return ""
+
+        def session_row(p):
+            if fails:
+                raise RuntimeError("claude agents --json ended with 1: agents: something broke")
+            return next((x for x in s.rows if x["pid"] == p), None)
+
+        def sleep(x):
+            s.t[0] += x
+        say = unittest.mock.patch.object(notify, "_say", side_effect=s.said.append)
+        say.start()
+        self.addCleanup(say.stop)
+        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%7"}), \
+                unittest.mock.patch.object(notify, "started_at", return_value=1.0):  # a session of long ago
+            c = notify.DailyClear(window, pid, tmux=tmux, session_row=session_row, clock=lambda: s.t[0], sleep=sleep,
+                                  every=60, quiet=0)
+        s.tmux = tmux
+        return c, s
+
+    def ticks(self, c, s, n):
+        """n of the follower's rounds, a minute apart."""
+        for _ in range(n):
+            c.tick(0, False)
+            s.t[0] += c.every
+
+    def sent_here(self, s) -> list:
+        return [x[3:] for x in s.calls if x[0] == "send-keys"]
+
+    def held_here(self, s, why) -> int:
+        return "\n".join(s.said).count(f"daily clear held: {why}")
 
     def test_daily_clear_types_clear_then_enter_when_the_session_is_idle_and_nobody_types(self):
         said, d, log = self.clearing(typed=self.BOX_TYPED, keys_ago=200)
@@ -5840,13 +5912,14 @@ class DeskTest(unittest.TestCase):
                                 r"tmux failed \(tmux send-keys ended with 1: no server running on the socket\)"),
                                ("something else", {"typed": "\x1b[39m❯\xa0/clea"}, r"the box read '/clea'")):
             with self.subTest(name):
-                _, d, log = self.clearing(**kw)
-                self.soon(lambda: "/clear may be left in the box" in log.read_text())
-                self.soon(lambda: re.search(rf"daily clear 00-24: /clear typed at \d\d:\d\d, but then {what}: "
-                                            r"/clear may be left in the box", self.hansa_out("notify")))
-                (d / "pane.txt").write_text((d / "pane-after.txt").read_text(encoding="utf-8"), encoding="utf-8")
-                time.sleep(2.5)  # the box is empty again, and still no second try that day
-                self.assertEqual(self.keys_sent(d), [["-l", "/clear"], *([["Enter"]] if "send_fails" in kw else [])])
+                c, s = self.clearing_here(**kw)
+                self.ticks(c, s, 2)
+                self.assertIn("/clear may be left in the box", s.said[-1])
+                self.assertRegex(notify.clear_text(c.rec, s.t[0]), rf"daily clear 00-24: /clear typed at \d\d:\d\d, "
+                                                                   rf"but then {what}: /clear may be left in the box")
+                s.pane = s.pane_after
+                self.ticks(c, s, 3)  # the box is empty again, and still no second try that day
+                self.assertEqual(self.sent_here(s), [["-l", "/clear"], *([["Enter"]] if "send_fails" in kw else [])])
 
     def test_daily_clear_types_nothing_unless_claude_agents_shows_the_session_idle(self):
         for kw, why in (({"status": "busy"}, "the session is 'busy', not idle"),
@@ -5856,15 +5929,17 @@ class DeskTest(unittest.TestCase):
                         ({"listed": False}, "claude agents --json lists no session with pid"),
                         ({"fails": True}, "claude agents --json ended with 1: agents: something broke")):
             with self.subTest(**kw):
-                _, d, log = self.clearing(typed=self.BOX_TYPED, **kw)
-                self.held(log, why)
-                self.assertEqual(self.keys_sent(d), [])
+                c, s = self.clearing_here(typed=self.BOX_TYPED, **kw)
+                self.ticks(c, s, 3)
+                self.assertEqual(self.held_here(s, why), 3)
+                self.assertEqual(self.sent_here(s), [])
 
     def test_daily_clear_types_only_into_an_empty_input_box(self):
-        _, d, log = self.clearing(box=[self.RULE, '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m', self.RULE],
+        c, s = self.clearing_here(box=[self.RULE, '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m', self.RULE],
                                   typed=self.BOX_TYPED)  # a dimmed placeholder: empty
-        self.soon(lambda: "cleared the session" in log.read_text())
-        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["Enter"]])
+        self.ticks(c, s, 2)
+        self.assertIn("cleared the session", s.said[-1])
+        self.assertEqual(self.sent_here(s), [["-l", "/clear"], ["Enter"]])
         dialog = ["\x1b[38;5;244m Do you want to make this edit?\x1b[39m",
                   "\x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m1.\x1b[39m \x1b[38;5;153mYes\x1b[39m",
                   "  \x1b[38;5;246m2.\x1b[39m No"]
@@ -5874,31 +5949,36 @@ class DeskTest(unittest.TestCase):
                 ("a box of lines", [self.RULE, "\x1b[39m❯\xa0first line", "  second line", self.RULE],
                  "no input box alone at the bottom of the pane")):
             with self.subTest(name):
-                _, d, log = self.clearing(box=box, typed=self.BOX_TYPED)
-                self.held(log, why)
-                self.assertEqual(self.keys_sent(d), [])
+                c, s = self.clearing_here(box=box, typed=self.BOX_TYPED)
+                self.ticks(c, s, 4)
+                self.assertEqual(self.held_here(s, why), 3)  # after the first idle reading
+                self.assertEqual(self.sent_here(s), [])
 
     def test_daily_clear_waits_while_someone_pressed_a_key_lately(self):
-        _, d, log = self.clearing(typed=self.BOX_TYPED, keys_ago=30)
-        self.held(log, "a key was pressed in a terminal on the session's tmux session 30 s ago")
-        self.assertEqual(self.keys_sent(d), [])
+        c, s = self.clearing_here(typed=self.BOX_TYPED, keys_ago=30)
+        self.ticks(c, s, 4)
+        self.assertEqual(self.held_here(s, "a key was pressed in a terminal on the session's tmux session 30 s ago"), 3)
+        self.assertEqual(self.sent_here(s), [])
 
     def test_daily_clear_counts_a_key_press_time_tmux_cannot_give_as_busy(self):
         for said, why in (("now", "could not read when a key was last pressed (invalid literal"),
                           ("fails", "could not read when a key was last pressed (tmux list-clients ended with 1: "
                                     "no current client)")):
             with self.subTest(said):
-                _, d, log = self.clearing(typed=self.BOX_TYPED, keys_said=said)
-                self.held(log, why)
-                self.assertEqual(self.keys_sent(d), [])
+                c, s = self.clearing_here(typed=self.BOX_TYPED, keys_said=said)
+                self.ticks(c, s, 4)
+                self.assertEqual(self.held_here(s, why), 3)
+                self.assertEqual(self.sent_here(s), [])
 
     def test_daily_clear_takes_its_clear_back_when_the_session_went_busy_as_it_typed(self):
-        _, d, log = self.clearing(typed=self.BOX_TYPED, busy_typed=True)
-        self.soon(lambda: "the /clear was taken back" in log.read_text())
-        self.assertIn("daily clear held: after /clear was typed the box read '/clear' and the session was not idle: "
-                      "the session is 'busy', not idle; no Enter; the /clear was taken back", log.read_text())
-        self.held(log, "the session is 'busy', not idle", 2)
-        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["BSpace"] * 6])
+        c, s = self.clearing_here(typed=self.BOX_TYPED, busy_typed=True)
+        self.ticks(c, s, 2)
+        self.assertEqual(s.said[-1], "daily clear held: after /clear was typed the box read '/clear' and the "
+                                     "session was not idle: the session is 'busy', not idle; no Enter; the /clear "
+                                     "was taken back")
+        self.ticks(c, s, 2)
+        self.assertEqual(self.held_here(s, "the session is 'busy', not idle"), 2)
+        self.assertEqual(self.sent_here(s), [["-l", "/clear"], ["BSpace"] * 6])
 
     def test_daily_clear_says_what_it_knows_when_typing_or_taking_back_clear_fails(self):
         failed = r"tmux failed \(tmux send-keys ended with 1: no server running on the socket\)"
@@ -5914,12 +5994,13 @@ class DeskTest(unittest.TestCase):
                  rf"daily clear 00-24: /clear typed at \d\d:\d\d, but then {failed}; it is not known how many of "
                  r"the six backspaces taking it back went through: /clear may be left in the box")):
             with self.subTest(name):
-                _, d, log = self.clearing(**kw)
-                self.soon(lambda: re.search(logged, log.read_text()))
-                self.soon(lambda: re.search(shown, self.hansa_out("notify")))
-                self.assertNotIn("the /clear was taken back", log.read_text())
-                time.sleep(1.5)  # no other try that day
-                self.assertEqual(self.keys_sent(d), [["-l", "/clear"], *([["BSpace"] * 6] if name != "typing" else [])])
+                c, s = self.clearing_here(**kw)
+                self.ticks(c, s, 2)
+                self.assertRegex(s.said[-1], logged)
+                self.assertRegex(notify.clear_text(c.rec, s.t[0]), shown)
+                self.assertNotIn("the /clear was taken back", "\n".join(s.said))
+                self.ticks(c, s, 3)  # no other try that day
+                self.assertEqual(self.sent_here(s), [["-l", "/clear"], *([["BSpace"] * 6] if name != "typing" else [])])
 
     def daily(self, every="60"):
         """A DailyClear for window 00-24 in this process, on pane %7 of pid 1; what it says is left out."""
@@ -6058,35 +6139,43 @@ class DeskTest(unittest.TestCase):
                                                    r"session was seen$")
 
     def test_daily_clear_takes_its_clear_back_when_the_box_reads_more_than_that(self):
-        _, d, log = self.clearing(typed="\x1b[39m❯\xa0half-typed words\x1b[38;5;153m/clear\x1b[39m")
-        self.soon(lambda: "the /clear was taken back" in log.read_text())
-        self.held(log, "there are words in the input box", 2)  # the next checks find the words and wait
-        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["BSpace"] * 6])
+        c, s = self.clearing_here(typed="\x1b[39m❯\xa0half-typed words\x1b[38;5;153m/clear\x1b[39m")
+        self.ticks(c, s, 2)
+        self.assertIn("the /clear was taken back", s.said[-1])
+        self.ticks(c, s, 3)
+        self.assertEqual(self.held_here(s, "there are words in the input box"), 2)  # the next checks find the words
+        self.assertEqual(self.sent_here(s), [["-l", "/clear"], ["BSpace"] * 6])
 
     def test_daily_clear_leaves_it_for_the_day_when_the_box_cannot_be_read_after_clear_is_typed(self):
-        _, d, log = self.clearing(typed=[self.NAMED_RULE, "\x1b[39m❯\xa0/clear", "\x1b[39m  /clear  Clear the "
+        c, s = self.clearing_here(typed=[self.NAMED_RULE, "\x1b[39m❯\xa0/clear", "\x1b[39m  /clear  Clear the "
                                          "conversation", "  /compact  Compact it", self.PLAIN_RULE])
-        self.soon(lambda: "/clear may be left in the box" in log.read_text())
-        self.assertEqual(len([x for x in (d / "calls.jsonl").read_text().splitlines() if "capture-pane" in x]),
+        t0 = s.t[0]
+        self.ticks(c, s, 2)
+        self.assertIn("/clear may be left in the box", s.said[-1])
+        self.assertEqual(len([x for x in s.calls if x[0] == "capture-pane"]),
                          1 + 1 + notify.TYPED_READS)  # the check, then the reads over two seconds after typing
-        self.soon(lambda: re.search(r"daily clear 00-24: /clear typed at \d\d:\d\d, but then the input box could not be "
-                                    r"read: /clear may be left in the box", self.hansa_out("notify")))
-        (d / "pane.txt").write_text((d / "pane-after.txt").read_text(encoding="utf-8"), encoding="utf-8")
-        time.sleep(2.5)  # the box is empty again, and still no second try that day
-        self.assertEqual(self.keys_sent(d), [["-l", "/clear"]])
+        self.assertEqual(s.t[0] - t0, 2 * c.every + (1 + notify.TYPED_READS) * notify.TYPED_WAIT)
+        self.assertRegex(notify.clear_text(c.rec, s.t[0]), r"daily clear 00-24: /clear typed at \d\d:\d\d, but "
+                                                           r"then the input box could not be read: /clear may be left "
+                                                           r"in the box")
+        s.pane = s.pane_after
+        self.ticks(c, s, 3)  # the box is empty again, and still no second try that day
+        self.assertEqual(self.sent_here(s), [["-l", "/clear"]])
 
     def test_daily_clear_types_nothing_outside_its_window_or_outside_the_sessions_pane(self):
         h = time.localtime().tm_hour
-        said, d, log = self.clearing(typed=self.BOX_TYPED, window=f"{(h + 2) % 24:02d}-{(h + 3) % 24:02d}")
-        self.soon(lambda: f"outside the window {(h + 2) % 24:02d}-" in log.read_text())
-        time.sleep(1)
-        self.assertEqual(self.keys_sent(d), [])
-        said, d, log = self.clearing(typed=self.BOX_TYPED, pane_pid=1)  # the pane runs something else
-        self.assertIn("The daily clear is off: the session (pid ", said)
-        self.soon(lambda: "daily clear 00-24: off: the session" in log.read_text())
-        self.assertRegex(self.hansa_out("notify"), r"daily clear 00-24: off \(the session \(pid \d+\) does not run in")
-        time.sleep(1)
-        self.assertEqual(self.keys_sent(d), [])
+        c, s = self.clearing_here(typed=self.BOX_TYPED, window=f"{(h + 2) % 24:02d}-{(h + 3) % 24:02d}")
+        self.ticks(c, s, 3)
+        self.assertIn(f"daily clear: outside the window {(h + 2) % 24:02d}-", "\n".join(s.said))
+        self.assertEqual(self.sent_here(s), [])
+        c, s = self.clearing_here(typed=self.BOX_TYPED, pane_pid=1)  # the pane runs something else
+        self.assertRegex(s.said[0], r"^daily clear 00-24: off: the session \(pid \d+\) does not run in tmux pane %7")
+        self.assertRegex(notify.clear_text(c.rec), r"daily clear 00-24: off \(the session \(pid \d+\) does not run in")
+        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%7"}), \
+                unittest.mock.patch.object(notify, "tmux", s.tmux):
+            self.assertIn("The daily clear is off: the session (pid ", notify.clear_said(os.getpid(), "00-24", True))
+        self.ticks(c, s, 3)
+        self.assertEqual(self.sent_here(s), [])
 
     def test_notify_on_twice_from_one_session_starts_one_follower(self):
         with self.assertRaises(SystemExit) as e:  # not from a Claude Code session: it says why, starts nothing
