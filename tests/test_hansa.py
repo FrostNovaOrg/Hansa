@@ -8505,6 +8505,46 @@ class DeskTest(unittest.TestCase):
         self.assertIn(str(wt / ".git"), deny)
         self.assertIn(str(wt.resolve() / ".git"), deny)  # with links resolved too (/var is /private/var on macOS)
 
+    def test_a_start_asks_git_for_a_worktrees_folders_once_unless_its_git_file_changes(self):
+        from hansa import run
+        wt, other = self.tmp / "wt", self.tmp / "other"
+        for w in (wt, other):
+            sh("git", "worktree", "add", "--detach", str(w), cwd=self.repo)
+        mine, theirs = (wt / ".git").read_text(), (other / ".git").read_text()
+        asked = []
+        real = run.git
+
+        def git(*args, cwd, env=None):
+            asked.append(args)
+            return real(*args, cwd=cwd, env=env)
+
+        @run.git_folders_kept
+        def a_start():
+            first = run.git_folders(wt)
+            for _ in range(3):
+                run.git_write_deny(wt)
+                run.git_needs_open(wt)
+                self.assertEqual(run.git_folders(wt), first)
+            n = len(asked)
+            (wt / ".git").write_text(theirs)  # another git folder: never answered from what was kept
+            moved = run.git_folders(wt)
+            self.assertEqual(len(asked), n + 2)
+            (wt / ".git").write_text(mine)
+            return first, moved, n
+        with unittest.mock.patch("hansa.run.git", git):
+            first, moved, n = a_start()
+            self.assertEqual(n, 2)  # once, for all the builds
+            self.assertEqual(moved, run.git_folders(other))
+            self.assertNotEqual(first[1].resolve(), moved[1].resolve())
+            asked.clear()
+            run.git_folders(wt)
+            run.git_folders(wt)
+            self.assertEqual(len(asked), 4)  # outside a start nothing is kept
+        key = run._git_folders_key(wt)
+        commondir = first[1] / "commondir"
+        commondir.write_text(commondir.read_text() + "\n")
+        self.assertNotEqual(run._git_folders_key(wt), key)  # nor when the commondir it leads to changes
+
     def test_the_git_paths_the_sandbox_keeps_are_made_when_missing(self):
         # on Linux the sandbox puts a device nobody can open where a listed path is missing, and git fails on it
         from hansa import run
@@ -8765,11 +8805,36 @@ class DeskTest(unittest.TestCase):
         good, left = run.write_list(self.desk, s["lanes"]["a"])
         self.assertEqual(good, [], path)
         self.assertTrue(len(left) == 1 and left[0].startswith("left out of this run: ") and why in left[0], (path, left))
+        if getattr(self, "left_out", None) is None:
+            self.not_in_the_sandbox([path])
+        else:  # within left_out_together: the sandbox is built once, for all of them
+            self.left_out.append(path)
+        return told[0]
+
+    @contextlib.contextmanager
+    def left_out_together(self):
+        """The paths refused_and_left_out is given meanwhile, kept out of a sandbox built once for them all as it
+        ends, within what the test has set around it (the home folder, the environment)."""
+        before, self.left_out = getattr(self, "left_out", None), []
+        try:
+            yield
+            self.not_in_the_sandbox(self.left_out)
+        finally:
+            self.left_out = before
+
+    def not_in_the_sandbox(self, paths):
+        """A write list of `paths`, saved before the fence was there: none reaches the worker's or srt's sandbox,
+        which take their list from write_list."""
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [str(x) for x in paths]
+        write_json(self.desk.settings_path, s)
+        self.assertEqual(run.write_list(self.desk, s["lanes"]["a"])[0], [], paths)
         p = s["providers"]["claude"]
         for fs in (run.sandbox_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo)["sandbox"]["filesystem"],
                    run.srt_settings(self.desk, s["lanes"]["a"], "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
-            self.assertNotIn(str(path), fs.get("allowWrite", []))
-        return told[0]
+            for x in paths:
+                self.assertNotIn(str(x), fs.get("allowWrite", []))
 
     def programs_elsewhere(self):
         """Stand-ins for the programs hansa runs, installed as they are on a real machine; the PATH that finds them."""
@@ -8826,7 +8891,7 @@ class DeskTest(unittest.TestCase):
                gitp / "libexec": "git's own programs", gitp / "lib": "which holds what git loads when it starts",
                gitp / "etc" / "gitconfig": "the settings git reads for the whole system",
                gitp / "etc": "the settings git reads for the whole system"}
-        with as_home(home, PATH=path, XDG_CACHE_HOME="/srv/x/tools/xdg-cache"):
+        with as_home(home, PATH=path, XDG_CACHE_HOME="/srv/x/tools/xdg-cache"), self.left_out_together():
             for x, why in bad.items():
                 told = self.refused_and_left_out(x, why)
                 self.assertIn("outside the sandbox" if "git reads" not in why else "a command git runs", told)
@@ -8874,14 +8939,15 @@ class DeskTest(unittest.TestCase):
                 Path(sysconfig.get_paths()["purelib"]): loads, Path(site.getsitepackages()[0]) / "pkg": loads,
                 Path(package.__file__).resolve().parent: "hansa's own code",
                 Path(package.__file__).resolve().parent / "sub": "hansa's own code"}
-        with as_home(home):
+        with as_home(home), self.left_out_together():
             for x, why in {**bad, **mods}.items():
                 self.assertIn("it would open", self.refused_and_left_out(x, why))
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".m2"), str(home / ".zshenv")])
             self.assertIn(shell, str(e.exception.code))
             with unittest.mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "xdg"), "ZDOTDIR": str(self.tmp / "z"),
-                                                       "BASH_ENV": str(self.tmp / "env.sh")}):
+                                                       "BASH_ENV": str(self.tmp / "env.sh")}), \
+                    self.left_out_together():
                 for x, why in {self.tmp / "xdg" / "git": git, self.tmp / "xdg" / "tmux": tmux,
                                self.tmp / "z" / ".zshenv": shell, self.tmp / "env.sh": shell}.items():
                     self.refused_and_left_out(x, why)
@@ -8905,7 +8971,7 @@ class DeskTest(unittest.TestCase):
                   ".m2/repository", ".m2/repository/org", ".gradle/caches", ".npm/_cacache", ".pnpm-store",
                   ".local/share/pnpm/store", ".cargo/registry", ".cargo/git/db", ".nuget/packages", ".ivy2/cache",
                   ".conan2/p", ".bun/install/cache"]
-        with as_home(home):
+        with as_home(home), self.left_out_together():
             for x in [home / n for n in hidden + caches] + [self.tmp.resolve() / "lbun", self.tmp.resolve() / "lpip"]:
                 told = self.refused_and_left_out(x, only)
                 self.assertIn("such as ~/work/cache: a user's caches", told)
@@ -8955,7 +9021,7 @@ class DeskTest(unittest.TestCase):
         home = (self.tmp / "home").resolve()
         (home / "work").mkdir(parents=True)
         (home / "work" / "lgo").symlink_to(home / "go")
-        with as_home(home):
+        with as_home(home), self.left_out_together():
             for top in ("go", "miniconda3", "anaconda3", "miniforge3", "mambaforge"):
                 for x in (home / top, home / top / "pkg" / "mod", home / top / "bin"):
                     told = self.refused_and_left_out(x, f"it would open {home / top}, ")
@@ -9440,7 +9506,7 @@ class DeskTest(unittest.TestCase):
     def test_more_tool_homes_are_refused_and_explain_says_a_malformed_write_list_in_one_line(self):
         home = (self.tmp / "home").resolve()
         home.mkdir()
-        with as_home(home):
+        with as_home(home), self.left_out_together():
             for top, what in (("miniconda", "a conda install"), ("anaconda", "a conda install"),
                               ("micromamba", "a conda install"), ("sdk", "where Go keeps the Go versions it downloads")):
                 self.assertIn(what, self.refused_and_left_out(home / top / "bin", f"it would open {home / top}, "))
@@ -9461,7 +9527,7 @@ class DeskTest(unittest.TestCase):
         tools = (self.tmp / "srv" / "tools").resolve()
         (tools / "bin").mkdir(parents=True)
         (self.tmp / "lbin").symlink_to(tools / "bin")
-        with as_home(home, PATH=f"{bin_}:{tools / 'bin'}:/usr/bin:/bin"):
+        with as_home(home, PATH=f"{bin_}:{tools / 'bin'}:/usr/bin:/bin"), self.left_out_together():
             for x, d in {bin_ / "git": bin_, bin_ / "sub" / "x": bin_, tools / "bin" / "git": tools / "bin",
                          tools / "bin" / "new" / "tool": tools / "bin",
                          self.tmp.resolve() / "lbin" / "git": tools / "bin"}.items():  # a git hansa would run
@@ -9499,7 +9565,7 @@ class DeskTest(unittest.TestCase):
                "/nix/store": "/nix", "/snap/node": "/snap", "/var/lib/x": "/var/lib",
                "/opt/local": "/opt/local", "/opt/local/var/macports/build": "/opt/local", "/opt/local/bin/git": "/opt/local",
                "/opt/X11": "/opt/X11", "/opt/X11/lib": "/opt/X11", "/opt/X11/share/cache": "/opt/X11"}
-        with as_home(home, PATH=f"{prefix / 'bin'}:/usr/bin:/bin"):
+        with as_home(home, PATH=f"{prefix / 'bin'}:/usr/bin:/bin"), self.left_out_together():
             for x, top in bad.items():
                 if sys.platform == "darwin" and str(x).startswith("/home/"):  # there /home is the system's own
                     top = self.refused_and_left_out(x, "") and "/usr"
@@ -9552,7 +9618,7 @@ class DeskTest(unittest.TestCase):
         for d in (home / ".ssh", other / ".ssh", home / "Library" / "Keychains"):
             d.mkdir(parents=True)
         p = self.desk.settings()["providers"]["claude"]
-        with as_home(home), unittest.mock.patch.dict(os.environ, {"HOME": str(other)}):
+        with as_home(home), unittest.mock.patch.dict(os.environ, {"HOME": str(other)}), self.left_out_together():
             self.assertEqual(os.path.expanduser("~"), str(other))
             self.refused_and_left_out(home, f"it would open {home}, the home folder of the user hansa runs as")
             self.refused_and_left_out(home / ".ssh", f"it would open {home / '.ssh'}, a login or key")
