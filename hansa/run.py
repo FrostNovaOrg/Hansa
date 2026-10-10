@@ -1422,10 +1422,11 @@ def background_left(home: Path, sid: str, after: int = 0) -> list:
 
 
 def report_after_notices(home: Path, sid: str):
-    """(report, what it wrote after) when the session ended on turns a background notice opened
-    (a watch it started timing out, say): Claude Code then takes its answer to the notice as the
-    result, and the report is its last message before the first of those notices. None when the
-    session did not end so, or its record cannot be read."""
+    """(report, [what it wrote in each later turn]) when the session ended on turns a background notice
+    opened (a watch it started timing out, say): Claude Code then takes its answer to the last notice as
+    the result, and the report is its last message before the first of those notices. Whether or not it
+    used tools in those turns, what it wrote there is kept, in order: a correction, or the real report
+    of a worker that ended a turn waiting. None when the session did not end so, or its record cannot be read."""
     rows = _rows(home, sid)
     if rows is None:
         return None
@@ -1439,26 +1440,25 @@ def report_after_notices(home: Path, sid: str):
         return [c["text"].strip() for c in blocks(d, "text") if isinstance(c.get("text"), str) and c["text"].strip()]
 
     # A turn opens on a user row with turnOrigin; tool results are user rows without it. A notice
-    # that came in while the worker was busy, or after which it went on working, is part of the work:
-    # only a notice that opened a turn after the worker had stopped, and that it only answered, is after the report.
+    # that came in while the worker was busy is part of the work: only a notice that opened a turn after
+    # the worker had stopped is after the report.
     openers = [i for i, d in enumerate(rows) if d.get("type") == "user" and d.get("turnOrigin")]
-    cut, end = None, len(rows)
+    cuts = []  # the turns those notices opened, by their first row
     while openers and rows[openers[-1]]["turnOrigin"] == "task_notification":
         i = openers.pop()
-        stopped = i > 0 and rows[i - 1].get("type") == "assistant" and not blocks(rows[i - 1], "tool_use")
-        if not stopped or any(blocks(d, "tool_use") for d in rows[i:end]):
+        if not (i > 0 and rows[i - 1].get("type") == "assistant" and not blocks(rows[i - 1], "tool_use")):
             break
-        cut, end = i, i
-    if cut is None:
+        cuts.insert(0, i)
+    if not cuts:
         return None
-    said = [(i, (rows[i].get("message") or {}).get("id")) for i in range(cut) if texts(rows[i])]
+    said = [(i, (rows[i].get("message") or {}).get("id")) for i in range(cuts[0]) if texts(rows[i])]
     if not said:
         return None
     last_id = said[-1][1]
     ids = [i for i, mid in said if mid == last_id] if last_id else [said[-1][0]]
     report = "\n\n".join(t for i in ids for t in texts(rows[i]))
-    later = "\n\n".join(t for d in rows[cut:] for t in texts(d))
-    return report, later
+    later = ["\n\n".join(t for d in rows[i:j] for t in texts(d)) for i, j in zip(cuts, cuts[1:] + [len(rows)])]
+    return report, [x for x in later if x]
 
 
 def progress_of(desk: Desk, m: dict) -> dict:
@@ -4170,7 +4170,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                        config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
         if p and not designing and not stopped else None
     if late:
-        report = late[0] + (LATE_NOTE + late[1] if late[1] else "")
+        report = late[0] + "".join(LATE_NOTE + x for x in late[1])
     if stopped and not result.strip() and p:
         notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
                             meta.get("session_id", ""))
