@@ -5095,6 +5095,15 @@ class Dispatcher:
         self.swept = 0.0  # when it last swept hansa's leftover empty folders in the temporary folder (sweep_tmp)
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
         self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
+        self.read = None  # (desk.writes, the tasks) as this round last read them; None at the start of a round
+
+    def tasks(self) -> list:
+        """The desk's tasks, read once a round and again only after this process changed one (Desk.writes): a
+        change writes what it read again under the lock (Desk.change), so a list read earlier in the round cannot
+        make it wrong."""
+        if self.read is None or self.read[0] != self.desk.writes:
+            self.read = (self.desk.writes, self.desk.tasks())
+        return self.read[1]
 
     def sandbox_waits(self, ln: str, s: dict, group: str = "work") -> bool:
         """Whether a lane's tasks of this group (sandbox_group) wait for their sandbox: held by this server (hold)
@@ -5110,7 +5119,7 @@ class Dispatcher:
         """Stop a run whose session record says its sandbox could not start before any of its Bash calls succeeded
         (sandbox_start_failure): Claude Code's own copy of the sandbox can refuse what srt's try let through. Its
         task is held when it ends (finish), without using a try."""
-        for m in self.desk.tasks():
+        for m in self.tasks():
             sid = m.get("session_id") or ""
             if m["state"] != "running" or m.get("phase") or not m.get("pid") or m.get("sandbox_failed") \
                     or not sid or sid in self.sandbox_seen or m.get("cancel"):
@@ -5256,7 +5265,7 @@ class Dispatcher:
                 del self.merge_procs[tid]
                 stop(proc.pid, "", proc)
                 finish_merge_check(desk, tid)
-        for m in desk.tasks():
+        for m in self.tasks():
             mc = m.get("merge_check") or {}
             if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
                 continue
@@ -5281,7 +5290,7 @@ class Dispatcher:
                                 if x["state"] == "merging" else None)
                 else:
                     finish_merge_check(desk, m["id"])
-        for m in desk.tasks():
+        for m in self.tasks():
             mc = m.get("merge_check") or {}
             if m["state"] != "merging" or mc.get("phase") != "running":
                 continue
@@ -5292,7 +5301,7 @@ class Dispatcher:
         if not starting:
             return
         from .release import holds_repo, releases
-        tasks = desk.tasks()
+        tasks = self.tasks()
         busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
         free = s["concurrency"] - sum(map(lane_occupied, tasks))
         # one merge check at a time per repository and base branch, in the order the merges were asked: one
@@ -5428,6 +5437,7 @@ class Dispatcher:
 
     def tick(self) -> None:
         desk = self.desk
+        self.read = None  # what another process changed since the last round is read again
         s = desk.settings()
         desk.state_dir.mkdir(exist_ok=True)
         beat(desk)
@@ -5441,14 +5451,14 @@ class Dispatcher:
             self.swept = time.time()
             sweep_tmp()
         low = self.disk(s)
-        self.record(desk.tasks())
+        self.record(self.tasks())
         for tid, proc in list(self.procs.items()):
             if has_ended(proc):
                 del self.procs[tid]
                 stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
                 self.ended(tid, proc.returncode)
                 beat(desk)
-        for m in desk.tasks():
+        for m in self.tasks():
             if m["state"] != "running" or m["id"] in self.procs:
                 continue
             if m.get("phase") == "starting":  # an earlier server stopped while it prepared this task
@@ -5457,7 +5467,7 @@ class Dispatcher:
                 self.check(m, s)
             elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
                 self.ended(m["id"], None)
-        for m in desk.tasks():
+        for m in self.tasks():
             if m["state"] != "running":
                 continue
             limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
@@ -5469,13 +5479,13 @@ class Dispatcher:
         self.sandbox_watch(s)
         self.tries(s, starting=not low)
         from .release import tick as releases
-        releases(desk, s, self.release_procs, starting=not low)  # before merge checks: a yes waits for none only queued
+        releases(desk, s, self.release_procs, starting=not low, tasks=self.tasks)  # before merge checks: a yes waits for none only queued
         self.merge_checks(s, starting=not low)
         beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
         if desk.paused() or low:  # free space under the floor: what runs goes on, nothing new starts
             return
-        designing = {m["lane"] for m in desk.tasks() if m["state"] == "running" and m.get("kind") == "design"}
-        for m in desk.tasks():  # a design session has its own worktree and waits on the principal
+        designing = {m["lane"] for m in self.tasks() if m["state"] == "running" and m.get("kind") == "design"}
+        for m in self.tasks():  # a design session has its own worktree and waits on the principal
             if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
                     and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s, "design"):
                 try:
@@ -5486,10 +5496,10 @@ class Dispatcher:
                     not_started(desk, m["id"], e)
                 else:
                     designing.add(m["lane"])
-        running = [m for m in desk.tasks() if lane_occupied(m)]
+        running = [m for m in self.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
         busy = {m["lane"] for m in running} | tried_lanes(desk)
-        for m in desk.tasks():
+        for m in self.tasks():
             if free <= 0:
                 break
             if m["state"] != "queued" or m.get("kind") == "design":

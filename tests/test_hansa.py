@@ -1726,6 +1726,27 @@ class DeskTest(unittest.TestCase):
                          pid=None, launch=token, **fields)
         return tid, orphan
 
+    def test_an_idle_round_reads_the_tasks_once_and_the_releases_once_for_each_of_their_rounds(self):
+        from hansa import release
+        for i in range(3):  # a desk with a history, and nothing to do
+            self.desk.update(self.desk.new_task(f"Task {i}", lane="a"), state="merged", merged=time.time())
+        release._write(self.desk, [{"id": 1, "lane": "a", "state": "done", "repo": str(self.repo)}])
+        d = Dispatcher(self.desk)
+        d.tick()  # the first round also does what a server does once
+        with unittest.mock.patch.object(self.desk, "tasks", wraps=self.desk.tasks) as tasks, \
+                unittest.mock.patch.object(release, "releases", wraps=release.releases) as releases:
+            d.tick()
+            self.assertEqual(tasks.call_count, 1)  # not once for each thing the round looks at
+            self.assertEqual(releases.call_count, 2)  # the releases' round (release.tick), and the merge checks'
+            # a task added by another process is seen in the next round; one this round changes, in the rest of it
+            tid = self.desk.new_task("Add hello.txt", lane="a")
+            d.tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "running")
+            self.assertEqual(tasks.call_count, 2)
+            self.assertEqual([m["state"] for m in d.tasks() if m["id"] == tid], ["running"])
+            self.assertEqual(tasks.call_count, 3)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+
     def test_a_worker_started_just_before_the_server_stopped_is_taken_over(self):
         tid, orphan = self.orphan_starting()
         Dispatcher(self.desk).tick()
@@ -14197,6 +14218,27 @@ class DeskTest(unittest.TestCase):
         d.tick()
         self.assertEqual(sum(1 for e in self.events("disk_look_ok") if e.get("error")), 1)
         self.assertNotIn("could not look at", self.hansa("status"))
+
+    def test_the_disk_record_is_written_only_when_what_its_readers_use_changes(self):
+        from hansa import disk
+        d = Dispatcher(self.desk)
+        at = time.mktime((2026, 1, 5, 10, 0, 0, 0, 0, -1))  # a round's look, by the clock
+        with unittest.mock.patch("hansa.disk.now", lambda: at):
+            d.tick()
+            self.assertEqual(set(disk.record(self.desk)), {"measured", "floor", "low", "failed"})
+            with unittest.mock.patch("hansa.disk.write_json", wraps=disk.write_json) as written, \
+                    unittest.mock.patch("hansa.disk._mount", wraps=disk._mount) as mounts:
+                at += 30  # the same minute, the same free space: nothing to write, nor any mount to look up again
+                d.tick()
+                self.assertEqual((written.call_count, mounts.call_count), (0, 0))
+                at += 30  # the minute status shows as when it last measured
+                d.tick()
+                self.assertEqual(written.call_count, 1)
+                self.free = 2 * 10 ** 9  # under the floor
+                d.tick()
+                self.assertEqual(written.call_count, 2)
+        self.assertEqual(disk.record(self.desk)["measured"], at)
+        self.assertTrue(disk.held(self.desk))
 
     def test_serve_trims_the_logs_of_tasks_that_ended_over_30_days_ago_and_keeps_the_rest_whole(self):
         from hansa import disk

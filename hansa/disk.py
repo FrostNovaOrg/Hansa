@@ -112,20 +112,27 @@ def places(desk: Desk, s: dict) -> list:
     return out
 
 
-def _volume_of(p: Path):
-    """(device, mount, usage) of the volume path p is on: the path's, or where it is not there yet the nearest
-    folder above it that is (a worktree not made yet is on its parent's volume). Raises OSError when it cannot be
-    looked at (a folder above it the account cannot read, say)."""
+def _volume_of(p: Path) -> tuple:
+    """(device, path) of the volume path p is on: the path's, or where it is not there yet the nearest folder above
+    it that is (a worktree not made yet is on its parent's volume), and that folder. Raises OSError when it cannot
+    be looked at (a folder above it the account cannot read, say)."""
     p = Path(os.path.abspath(p))
     while True:
         try:
-            dev = os.stat(p).st_dev
-            break
+            return os.stat(p).st_dev, p
         except (FileNotFoundError, NotADirectoryError):
             if p == p.parent:
                 raise
             p = p.parent
-    return dev, _mount(p), shutil.disk_usage(p)
+
+
+MOUNTS = {}  # (device, folder): its mount, as _mount found it; looked up once in a process
+
+
+def _mount_of(dev, p: Path) -> str:
+    if (dev, p) not in MOUNTS:
+        MOUNTS[(dev, p)] = _mount(p)
+    return MOUNTS[(dev, p)]
 
 
 def _mount(p: Path) -> str:
@@ -144,12 +151,14 @@ def measure(desk: Desk, s: dict, was: dict | None = None) -> tuple:
     vols, failed = {}, []
     for what, p in places(desk, s):
         try:
-            dev, mount, u = _volume_of(p)
+            dev, at = _volume_of(p)
+            u = shutil.disk_usage(at)
+            v = vols.get(dev) or {"mount": _mount_of(dev, at), "what": [], "free": u.free, "total": u.total}
         except Exception as e:  # noqa: BLE001 - this place is left out; the rest are measured
             failed.append({"what": what, "path": str(p), "error": desk.redact(f"{type(e).__name__}: {e}")[:300],
                            "since": before.get((what, str(p))) or now()})
             continue
-        v = vols.setdefault(dev, {"mount": mount, "what": [], "free": u.free, "total": u.total})
+        vols[dev] = v
         if what not in v["what"]:
             v["what"].append(what)
         v["free"] = min(v["free"], u.free)
@@ -195,18 +204,18 @@ def look(desk: Desk, s: dict) -> dict:
     """hansa serve's look, each round: the volumes, and which hold it back (low). Under its floor (vol_floor) a volume
     holds back; once holding back, it goes on until every volume has its floor and its margin (vol_margin) more. Says each change once, as an event:
     of the floor (disk_low, disk_ok), and of the places that cannot be looked at (disk_look_failed, disk_look_ok:
-    which, and when they can be looked at again), as the event log is never trimmed. Returns the record it wrote."""
+    which, and when they can be looked at again), as the event log is never trimmed. Returns its record, which it
+    writes only when what its readers use changes (written)."""
     fl = floor(s)
     was = record(desk)
     was_low = bool(was.get("low"))
     vols, failed = measure(desk, s, was)
     bar = lambda v: vol_bar(fl, v) if was_low else vol_floor(fl, v) * GB
     low = [v for v in vols if v["free"] < bar(v)] if fl else []
-    at = now()
-    rec = {"pid": os.getpid(), "at": at, "measured": at, "floor": fl, "volumes": vols, "low": low,
-           "since": (was.get("since") if was_low else at) if low else None, "failed": failed}
-    desk.state_dir.mkdir(exist_ok=True)
-    write_json(record_file(desk), rec)
+    rec = {"measured": now(), "floor": fl, "low": low, "failed": failed}
+    if not written(was, rec):
+        desk.state_dir.mkdir(exist_ok=True)
+        write_json(record_file(desk), rec)
     if low and not was_low:
         desk.event("disk_low", floor=fl, volumes=[volume_text(v, fl) for v in low], again=again_text(fl, low))
     elif was_low and not low:
@@ -224,6 +233,15 @@ def look(desk: Desk, s: dict) -> dict:
     return rec
 
 
+def written(was: dict, rec: dict) -> bool:
+    """Whether the record on file (was) already says what rec does to its readers (held, unknown_lines, and
+    look_failed, which keeps it): the same fields and values, measured in the same minute (as _when shows it),
+    and no failed look on it."""
+    minute = lambda t: time.localtime(t)[:5] if isinstance(t, (int, float)) else None
+    return set(was) == set(rec) and all(was[k] == rec[k] for k in rec if k != "measured") \
+        and minute(was["measured"]) == minute(rec["measured"])
+
+
 def look_failed(desk: Desk, error: str) -> None:
     """hansa serve's look failed as a whole (not one place: a fault in it, or its record cannot be written): while
     it fails nothing is held back, and its record says so, with what the last look that worked measured, so that
@@ -235,7 +253,7 @@ def look_failed(desk: Desk, error: str) -> None:
     if not same:
         desk.event("disk_look_failed", error=error)
     write_json(record_file(desk), {
-        **was, "pid": os.getpid(), "at": now(), "low": [], "since": None,
+        **was, "low": [],
         "error": {"text": error, "since": old.get("since") if same else now()},
         "last_low": was.get("last_low") if old else (was.get("low") or [])})
 
