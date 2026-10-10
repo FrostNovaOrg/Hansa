@@ -303,9 +303,10 @@ desk's task commits and merges.
 
 `python3 -m unittest tests.test_hansa` (uses a stand-in for `claude`; no model is called).
 Before each push the maintainers run the whole suite on macOS and on Linux. Every push to `alpha` or `main`
-runs, on GitHub's macOS machine, the tests a sandboxed run cannot (those that listen on the loopback or run the
-real sandbox); every pull request runs the whole suite on Ubuntu and macOS, with Python 3.9 and the newest:
-`.github/workflows/tests.yml`. Before you change anything, read [CONTRIBUTING.md](CONTRIBUTING.md).
+runs, on GitHub's Ubuntu machine, the tests a sandboxed run cannot (those that listen on the loopback or make a
+Unix socket); every pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest. Only a run
+started by hand adds macOS and the real sandbox on it; start one before a release whose changes touch the
+sandbox or the web page: `.github/workflows/tests.yml`. Before you change anything, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

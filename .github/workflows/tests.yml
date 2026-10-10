@@ -1,23 +1,27 @@
 # hansa's test suite on GitHub's machines. No secrets: the suite uses stand-ins for claude and srt, and needs no login.
 #
-# What runs when, and why:
-# - A push to alpha or main runs, on one macOS machine with the newest Python, only the tests a sandboxed run
+# What runs when, and why. GitHub's macOS minutes count ten times, so no macOS job runs unless someone starts one:
+# - A push to alpha or main runs, on one Ubuntu machine with the newest Python, only the tests a sandboxed run
 #   cannot (HANSA_TESTS_ONLY_UNSANDBOXED=1; the rest skip): the maintainers run the whole suite on macOS, in
-#   hansa's sandbox, for every change, and on Linux before every push, and GitHub's macOS minutes count ten times.
-# - A pull request, or a run started by hand (workflow_dispatch), runs the whole suite on Ubuntu and macOS, with
-#   Python 3.9 and the newest.
-# Those tests are the ones that call skip_in_sandbox or skip_unless_ports (tests/test_hansa.py): they listen on
-# the loopback, make a Unix socket or run the real srt. Unlike a sandboxed run, ports on the loopback work here,
-# so the tests that serve the web page run too; HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not.
-# So do Unix sockets, which srt on Linux refuses: HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one
-# fail rather than skip too. Both jobs set both.
-# On macOS the real srt is installed too, and one test runs it with the sandbox settings hansa gives a worker,
-# a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip without it): that the
-# sandbox starts, leaves open what git needs (the worktree's own folder, a design session's branch ref and
+#   hansa's sandbox, for every change, and on Linux before every push.
+# - A pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest.
+# - A run started by hand (workflow_dispatch) runs the whole suite on Ubuntu and macOS, with Python 3.9 and the
+#   newest, and the real srt on macOS. Only that run tests the real srt on macOS: start it (Actions, tests, Run
+#   workflow) before a release whose changes touch the sandbox (the settings hansa gives srt or a worker's
+#   sandbox) or the web page.
+# The tests a sandboxed run cannot run are the ones that call skip_in_sandbox or skip_unless_ports
+# (tests/test_hansa.py): they listen on the loopback, make a Unix socket or run the real srt. Unlike a sandboxed
+# run, ports on the loopback work here, on Ubuntu and on macOS, so the tests that serve the web page run too;
+# HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not. So do Unix sockets, which srt on Linux refuses:
+# HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one fail rather than skip too. Both jobs set both.
+# On macOS (a run started by hand) the real srt is installed too, and one test runs it with the sandbox settings
+# hansa gives a worker, a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip
+# without it): that the sandbox starts, leaves open what git needs (the worktree's own folder, a design session's branch ref and
 # objects/) and keeps the rest (other worktrees' folders, the shared settings and hooks, new files atop the
 # common folder such as commondir, other refs, and names next to the open ones), and that hansa's own try of
-# each sandbox passes. The stand-in cannot show how the operating system reads them. Not on Linux: bubblewrap needs unprivileged
-# user namespaces, which GitHub's Ubuntu machines restrict (AppArmor) unless the machine's settings are changed.
+# each sandbox passes. The stand-in cannot show how the operating system reads them. Not on Linux: bubblewrap
+# needs unprivileged user namespaces, which GitHub's Ubuntu machines restrict (AppArmor) unless the machine's
+# settings are changed.
 name: tests
 
 on:
@@ -35,15 +39,15 @@ concurrency:
 
 jobs:
   unsandboxed:
-    name: macOS, Python 3.x, the tests a sandbox cannot run
+    name: Ubuntu, Python 3.x, the tests a sandbox cannot run
     if: github.event_name == 'push'
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       HANSA_TESTS_ONLY_UNSANDBOXED: "1"
       HANSA_TESTS_NEED_PORTS: "1"
       HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
-      HANSA_TESTS_NEED_SRT: "1"
+      # not HANSA_TESTS_NEED_SRT: bubblewrap is restricted on GitHub's Ubuntu machines (above)
     steps:
       - uses: actions/checkout@v5
         with:
@@ -51,8 +55,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
-      - name: Install srt, the sandbox runtime
-        run: npm install -g @anthropic-ai/sandbox-runtime
       - name: Run the tests
         run: python3 -m unittest -v tests.test_hansa
 
@@ -64,7 +66,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS only in a run started by hand
+        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
         python: ["3.9", "3.x"]  # the lowest hansa supports, and the newest
     env:
       HANSA_TESTS_NEED_PORTS: "1"

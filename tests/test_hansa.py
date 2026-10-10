@@ -11016,7 +11016,8 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(m.get("held"))
 
     def test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should(self):
-        # srt itself (installed on GitHub's macOS machines, with HANSA_TESTS_NEED_SRT=1); elsewhere it skips
+        # srt itself (installed on GitHub's macOS machines in a run started by hand, with HANSA_TESTS_NEED_SRT=1);
+        # elsewhere it skips
         from hansa import run
         path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
                                if d and not (Path(d) / "srt").resolve() == (self.tmp / "bin" / "srt").resolve())
