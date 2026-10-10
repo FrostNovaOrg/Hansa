@@ -324,7 +324,7 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
         {"type": "assistant", "message": {"id": mid, "content": [
             {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": "cat build.log"}}]}},
         {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": uid}]}}]
-    if kind == "waiting":
+    if kind in ("waiting", "waiting-busy"):
         report = "Waiting for the build to end."
     rows.append(say("a3", report + verdict("FAKE_VERDICT_REPORT")))
     late = kind == "late"
@@ -337,6 +337,23 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     elif kind == "late-twice":
         rows += [notice("bw1"), say("a4", "That notice is the watch."), notice("bw2"), *tool("a5", "u5"),
                  say("a6", "The suite ended too: it passes." + verdict("FAKE_VERDICT_LATE"))]
+    elif kind in ("busy-end", "busy-later"):  # a second notice comes in while it works in the first notice's turn;
+        rows += [notice("bw1"), say("a4", "Reading the build's output."), *tool("a4", "u4"), notice("bw2"),
+                 say("a5", "Correction: the build's output shows two tests fail.")]
+        if kind == "busy-later":  # and a third opens a turn after it stopped
+            rows += [notice("bw3"), say("a6", "That notice is the watch.")]
+    elif kind == "waiting-busy":  # it ends a turn waiting; its real work after the notice starts a job of its own,
+        said, result = BG_BASH("bq7w2")  # which ends while it is still working
+        rows += [notice("bw1"), say("a4", "Building again."),
+                 {"type": "assistant", "message": {"id": "a4", "content": [{"type": "tool_use", "id": "u6", "name": "Bash",
+                     "input": {"description": "Build again", "command": "make", "run_in_background": True}}]}},
+                 {"type": "user", "message": {"role": "user", "content": [
+                     {"type": "tool_result", "tool_use_id": "u6", "content": [{"type": "text", "text": said}]}]},
+                  "toolUseResult": result},
+                 *tool("a5", "u7"),
+                 {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
+                     "role": "user", "content": BG_NOTICE("bq7w2", "")}},
+                 say("a6", "Report: the build passes; fixed the badge.")]
     with open(rec, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
     if os.environ.get("FAKE_TRANSCRIPT_STOPPED"):  # stopped at the turn limit, with no result
@@ -11947,6 +11964,151 @@ class DeskTest(unittest.TestCase):
             f"\n- {new}: done, not verified; its note: \"bring it up to date\"; "], ["merged into it"])
         self.assertEqual(text.count("Added hello.txt. Checked it exists."), 1)  # the previous report only
 
+    # Which round a follow-up is, and when to rethink it (run.rounds_line, run.rethink_text): each chain, by each
+    # round's latest verdict, oldest first ("dnh": does not hold; None: not verified; "": verified, no verdict),
+    # what hansa show's rounds line counts and when the sentence is in show and the notice:
+    # | rounds | verdicts                 | show's rounds line                 | the sentence                       |
+    # | 1      | dnh                      | none: no follow-up                 | never                              |
+    # | 2      | dnh, dnh                 | round 2; 1 of them                 | "2 times"                          |
+    # | 2      | holds, dnh               | round 2; 0                         | no: one such verdict               |
+    # | 2      | None, dnh                | round 2; 0                         | no                                 |
+    # | 2      | dnh, holds               | round 2; 1                         | no: the latest holds               |
+    # | 3      | dnh, holds, dnh          | round 3; 1                         | "2 times"                          |
+    # | 3      | holds, "", dnh           | round 3; 0                         | no                                 |
+    # | 3      | dnh, dnh, holds          | round 3; 2                         | no: the latest holds               |
+    # | 3      | dnh, dnh, None           | round 3; 2                         | no: the latest is not verified yet |
+    # | 3      | dnh, dnh, dnh            | round 3; 2                         | "3 times"; gone once sent back     |
+    # | 2      | dnh, dnh, made before ended_as | round 2; 1                   | "2 times"                          |
+    # | 2      | the same, its first round gone | round 2 or later; none left; 0 | no: only one is known            |
+    # The first ten: test_a_follow_up_says_its_round_and_when_to_rethink_it; the last two:
+    # test_the_rounds_of_a_chain_made_before_ended_as_count_what_is_known.
+    SENTENCE = ("This task has not held {} times. Before sending it back again, rethink it: make it smaller, ask for "
+                "less, or start again from the base.")
+
+    def chain(self, verdicts) -> tuple:
+        """A chain of rounds of ORIGINAL, one per verdict, each ended done and verified with it (None: not verified,
+        "": no verdict), each but the last sent back: (the ids, oldest first, the last round's verification)."""
+        ids, vid = [self.desk.new_task(self.ORIGINAL, lane="a")], None
+        for k, verdict in enumerate(verdicts):
+            vid = self.ended(ids[-1], "done", f"R{k}: the report of round {k}.", verdict)
+            if k < len(verdicts) - 1:
+                ids.append(self.follow_up(ids[-1], f"N{k}")[0])
+        return ids, vid
+
+    def assert_rethink(self, tid, vid, times):
+        """The sentence, with times, in hansa show of tid and of its verification vid, and in the notice of vid's end;
+        times None: in none of them."""
+        notice = notify._item(self.desk, {"event": "task_finished", "task": vid, "state": "done"})[1] if vid else ""
+        for text in (views.show_text(self.desk, tid), views.show_text(self.desk, vid) if vid else "", notice):
+            if times:
+                self.assertEqual(text.count(self.SENTENCE.format(times)), 1, text)
+            else:
+                self.assertNotIn("This task has not held", text)
+
+    def rounds_line(self, tid) -> list:
+        lines = views.show_text(self.desk, tid).splitlines()
+        found = [x for x in lines if x.startswith("rounds: ")]
+        if found:  # near the top: right after what the state means
+            self.assertTrue(lines[lines.index(found[0]) - 1].startswith("meaning: "), lines)
+        return found
+
+    def test_a_follow_up_says_its_round_and_when_to_rethink_it(self):
+        dnh = "does not hold"
+        for verdicts, before, times in (([dnh], 0, None), ([dnh, dnh], 1, 2), (["holds", dnh], 0, None),
+                                        ([None, dnh], 0, None), ([dnh, "holds"], 1, None),
+                                        ([dnh, "holds", dnh], 1, 2), (["holds", "", dnh], 0, None),
+                                        ([dnh, dnh, "holds"], 2, None), ([dnh, dnh, None], 2, None),
+                                        ([dnh, dnh, dnh], 2, 3)):
+            with self.subTest(verdicts):
+                ids, vid = self.chain(verdicts)
+                self.assertEqual(self.rounds_line(ids[-1]), [] if len(ids) == 1 else [
+                    f"rounds: this is round {len(ids)}; earlier rounds, oldest first: {', '.join(ids[:-1])}; "
+                    f"a verification judged {before} of them \"does not hold\""])
+                self.assert_rethink(ids[-1], vid, times)
+        # sent back all the same: true no longer, so said no longer; the new round counts all three
+        new, _ = self.follow_up(ids[-1], "smaller")
+        self.assert_rethink(ids[-1], vid, None)
+        self.assertEqual(self.rounds_line(new), [f"rounds: this is round 4; earlier rounds, oldest first: "
+                                                 f"{', '.join(ids)}; a verification judged 3 of them \"does not hold\""])
+        self.assert_rethink(new, None, None)
+
+    def test_the_rounds_of_a_chain_made_before_ended_as_count_what_is_known(self):
+        tid = self.desk.new_task(self.ORIGINAL, lane="a")
+        self.ended(tid, "done", "OLD REPORT 1", "does not hold")
+        old = self.desk.new_task(self.ORIGINAL + f"\n\n---\nFollow-up to {tid} (done). What to change: OLD NOTE 1",
+                                 parent=tid, lane="a")
+        self.desk.update(tid, state="replaced", replaced_by=old)  # as hansa did then: no ended_as, no note.md
+        vid = self.ended(old, "done", "OLD REPORT 2", "does not hold")
+        self.assertEqual(self.rounds_line(old), [f"rounds: this is round 2; earlier rounds, oldest first: {tid}; a "
+                                                 f"verification judged 1 of them \"does not hold\""])
+        self.assert_rethink(old, vid, 2)
+        shutil.rmtree(self.desk.tasks_dir / tid)  # its first round is gone: only what is left is counted
+        self.assertEqual(self.rounds_line(old), [f"rounds: this is round 2 or later (the rounds before {old} are "
+                                                 f"gone); earlier rounds, oldest first: none left; a verification "
+                                                 f"judged 0 of them \"does not hold\""])
+        self.assert_rethink(old, vid, None)
+
+    # What a worker and a verifier are told the lane's check already runs (run.around_note, cli._check_ran):
+    # | who                                   | told                                                    | test   |
+    # | a worker on a lane with a check       | hansa runs it after, with the command; run only the tests of the change | test_a_worker_is_told_the_check_runs_after_it_so_it_runs_only_its_tests |
+    # | a worker on a lane without one        | nothing new                                             | the same |
+    # | a verification, the check passed      | the command, passed, when; need not be run again        | test_a_verification_is_told_how_the_tasks_last_check_ended |
+    # | a verification, the check failed      | the command, failed, when; need not be run again        | the same |
+    # | a verification, the task has no check | that it has none                                        | the same |
+    def test_a_worker_is_told_the_check_runs_after_it_so_it_runs_only_its_tests(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        for check in ("test -f README.md", ""):
+            s = self.desk.settings()
+            s["lanes"]["a"].update(check=check, env={"FAKE_SHOW_ARGV": str(seen)})
+            self.assertEqual(self.desk.save_settings(s), [])
+            self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        given, bare = [a[a.index("--append-system-prompt") + 1] for a in map(json.loads, seen.read_text().splitlines())]
+        self.assertIn("\n- After you end, hansa runs the lane's check here, in the same sandbox, and judges the task by "
+                      "it: `test -f README.md`\n- So run yourself only the tests related to your change, not the "
+                      "whole check.\n", given)
+        self.assertIn("\n- This lane has no check command: hansa runs nothing here after you end.\n", bare)
+        self.assertNotIn("related to your change", bare)
+        self.assertEqual(run.around_note(self.desk, {"check": ""}, {}),
+                         "- This lane has no check command: hansa runs nothing here after you end.\n")
+
+    def test_a_verification_is_told_how_the_tasks_last_check_ended(self):
+        d = Dispatcher(self.desk)
+        for check, how in (("test -f README.md", "passed at {}"), ("false", "failed at {} (exit 1)"), ("", None)):
+            with self.subTest(check=check):
+                s = self.desk.settings()
+                s["lanes"]["a"]["check"] = check
+                self.assertEqual(self.desk.save_settings(s), [])
+                m = self.settle(d, self.desk.new_task("Add hello.txt"))
+                self.assertEqual(m["state"], "done", m)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    main(["--desk", str(self.desk.root), "verify", m["id"]])
+                text = (self.desk.tasks_dir / self.desk.meta(m["id"])["verify"] / "task.md").read_text()
+                if how:
+                    when = time.strftime("%Y-%m-%d %H:%M",
+                                         time.localtime(m["check_started"] + m["check"]["seconds"]))
+                    said = (f"\nThe task's last check, which hansa ran on it: `{check}`. It {how.format(when)}. "
+                            f"The whole check need not be run again unless you need to.\n")
+                else:
+                    said = f"\nTask {m['id']} has no check: hansa ran none on it.\n"
+                    self.assertNotIn("need not be run again", text)
+                self.assertEqual(text.count(said), 1, text)
+                self.assertLess(text.index(said), text.index(f"## Task {m['id']} as it was given"))
+
+    def test_a_key_saved_after_a_note_that_held_it_is_removed_from_the_note(self):
+        later = "sk-noted-later-0731"
+        tid = self.desk.new_task(self.ORIGINAL, lane="a")
+        self.ended(tid, "done", "R0")
+        new, _ = self.follow_up(tid, f"upload with {later} as before")
+        note = self.desk.tasks_dir / new / "note.md"
+        self.assertEqual(note.read_text(), f"upload with {later} as before\n")  # not a key yet
+        self.desk.write_key("mimo", later)
+        self.assertEqual(note.read_text(), "upload with [key of mimo] as before\n")
+        self.ended(new, "done", "R1")
+        _, text = self.follow_up(new, "next")  # the next round quotes the note as it is now
+        self.assertIn(f"\n- {new}: done, not verified; its note: \"upload with [key of mimo] as before\"; ", text)
+        self.assertNotIn(later, text)
+
     def test_browser_is_given_to_one_task_at_a_time(self):
         with self.assertRaises(SystemExit):  # no browser set up: refuse, queue nothing
             main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
@@ -12486,6 +12648,25 @@ class DeskTest(unittest.TestCase):
     # |   in both (different), on no notice turn                  |                                                   |
     # | stopped at the turn limit, on a notice turn               | test_a_stopped_run_and_a_design_session_keep_their_report_after_notices |
     # | a design session, on a notice turn                        | the same                                          |
+    # | on a notice turn in which a second notice came while it worked | test_a_notice_that_comes_while_the_worker_works_in_a_notice_turn_is_part_of_that_turn |
+    # | the same, then a later notice turn                        | the same                                          |
+    # | waiting first; its real work starts a job that ends mid-turn | the same                                       |
+    def test_a_notice_that_comes_while_the_worker_works_in_a_notice_turn_is_part_of_that_turn(self):
+        from hansa import run
+        late, report = run.LATE_NOTE, "Report: fixed the badge; the tests pass."
+        cases = {  # before, the report was lost; the correction was taken as the report; the report was lost
+            "busy-end": report + late + "Reading the build's output.\n\nCorrection: the build's output shows two "
+                                        "tests fail.\n",
+            "busy-later": report + late + "Reading the build's output.\n\nCorrection: the build's output shows two "
+                                          "tests fail." + late + "That notice is the watch.\n",
+            "waiting-busy": "Waiting for the build to end." + late + "Building again.\n\nReport: the build passes; "
+                                                                     "fixed the badge.\n"}
+        for kind, want in cases.items():
+            with self.subTest(kind):
+                self.assertEqual(self.transcript_run(kind), want)
+                self.assertNotIn("background work was still running",
+                                 views.show_text(self.desk, self.desk.tasks()[-1]["id"]))
+
     def test_what_a_worker_writes_after_a_notice_follows_its_report_whatever_it_did_there(self):
         late = "\n\n(Written after that, when a background notice came in:)\n\n"
         cases = {
