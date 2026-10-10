@@ -170,6 +170,8 @@ design session starts its own preview, as before.
 check blocks it unless the coordinator says `--despite-check` (recorded), and
 so does a verification that does not hold.
 
+A [merge lane](desk.md) serves its repository and base's checks with its own worktree, sandbox, env, setup, command and limit; otherwise they use the task's lane as below. With a merge lane, a command of its own means its merge command differs from the task lane's check, which the task already passed.
+
 - **When it merges at once.** When the lane's base has not moved since the task
   was made and the lane has no merge check of its own (below), or when the lane
   has neither a check nor a `merge_check`, `hansa merge` merges at once. A lane

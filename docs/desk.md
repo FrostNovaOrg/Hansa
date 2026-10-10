@@ -63,6 +63,8 @@ it was trimmed, when, and how big it was. The task's record notes it, and `hansa
 trimmed, when, and their size before. A task still open, or one that ended less than 30 days ago, keeps all of
 its logs; the event log is not touched.
 
+For long merge checks and busy task lanes, add a merge lane with `hansa lane add m --like a`, give it its own caches through `write` and `env`, then set `hansa lane set m merge_lane true` (unset or false: ordinary). One per repository and base, it takes no work and uses its own worktree, sandbox, env, setup, merge command and limit, keeping the task lane free and its merge message and identity. The lane is chosen when the check starts; unmarking or removing it while queued restores the task lane. Merge checks still run in order, one at a time per repository and base, taking a concurrency slot before new work. With every slot busy, a merge check waits for the next task to end anywhere, and that task's lane waits about one merge check. Raising concurrency by one removes the wait if the machine can run a merge check beside the lanes' work.
+
 ## Hearing from hansa
 
 hansa posts to the coordinator's Claude Code session through the session's

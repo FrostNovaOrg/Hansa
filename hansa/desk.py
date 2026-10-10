@@ -395,6 +395,7 @@ def validate(s: dict, root=None, page: bool = False) -> list:
     if not isinstance(lanes, dict):
         p.append("lanes must be an object")
         lanes = {}
+    merge_lanes = {}
     for name, ln in lanes.items():
         at = f"lane {name}"
         if not NAME.match(name):
@@ -404,11 +405,20 @@ def validate(s: dict, root=None, page: bool = False) -> list:
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
                            "preview", "preview_wait_s", "setup", "release", "targets", "release_files", "max_turns",
-                           "timeout_min", "merge_timeout_min", "note", "identity", *MESSAGE_FIELDS}
+                           "timeout_min", "merge_timeout_min", "merge_lane", "note", "identity", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
             p.append(f"{at}: repo must be an absolute path")
+        if not isinstance(ln.get("merge_lane", False), bool):
+            p.append(f"{at}: merge_lane must be true or false")
+        elif ln.get("merge_lane") and isinstance(ln.get("repo"), str):
+            target = (resolved(ln["repo"]) or ln["repo"], ln.get("base") or "main")
+            if target in merge_lanes:
+                p.append(f"{at}: lane {merge_lanes[target]} is already the merge lane for this repository and "
+                         f"base {target[1]}; at most one merge lane serves each repository and base")
+            else:
+                merge_lanes[target] = name
         order = ln.get("providers")
         if not isinstance(order, list) or not order:
             p.append(f"{at}: list at least one provider")
@@ -2144,6 +2154,13 @@ class Desk:
             page = by == "page" and new.get("lanes") == old.get("lanes")
             problems = (validate(new, self.root, page=page) + self.keys_in_release(old, new)
                         + self.keys_in_alert(old, new) + answer_names(old, new))
+            lanes = new.get("lanes")
+            for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
+                if isinstance(ln, dict) and ln.get("merge_lane") and not (old["lanes"].get(name) or {}).get("merge_lane"):
+                    work = [m["id"] for m in self.tasks() if m.get("lane") == name and m["state"] in ("queued", "running")]
+                    if work:
+                        problems.append(f"lane {name}: cannot become a merge lane while {', '.join(work)} is queued "
+                                        "or running there; a merge lane takes no work")
             if problems:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -2324,6 +2341,9 @@ class Desk:
         if not text:
             raise ValueError("the task text is empty")
         with self.lock():  # a key saved meanwhile is either known here or scrubbed from the task after
+            lane = opts.get("lane")
+            if self.settings()["lanes"].get(lane, {}).get("merge_lane"):
+                raise SystemExit(f"hansa: lane {lane} is a merge lane and takes no work; nothing was queued")
             text = self.redact(text)  # a worker never gets a key in its task
             self.tasks_dir.mkdir(exist_ok=True)
             ids = [int(d.name[1:]) for d in self.tasks_dir.iterdir() if d.name[1:].isdigit()]
