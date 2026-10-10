@@ -3172,6 +3172,30 @@ class DeskTest(unittest.TestCase):
                          f"it passes. The merge check is queued: waits for lane m, held by a try. Wait for it: hansa "
                          f"wait {tid} (hansa show {tid} says where it is; hansa cancel {tid} stops it)\n")
 
+    def test_merge_lane_merge_check_text_makes_the_sentence_hansa_merge_says(self):
+        from hansa import run
+        _, tid = self.merge_lane_task()
+        m = {**self.desk.meta(tid), "state": "merging", "merge_check": {"phase": "queued"}}
+        moved = {**m, "merge_check": {"phase": "queued", "moves": 1}}
+        busy = [{"id": "t9", "state": "running", "lane": "m"}]
+        full = [{"id": f"t{i}", "state": "running", "lane": "a"} for i in range(3)]  # concurrency 3
+        for got, said in (
+                ((m, busy), "The merge check is queued: waits for lane m, busy with t9."),
+                ((m, full), "The merge check is queued: waits for a free concurrency slot."),
+                ((m, []), "The merge check is queued: `hansa serve` is not running."),
+                ((moved, busy), "The merge check is queued (again: main moved while it was checked): waits for lane "
+                                "m, busy with t9.")):
+            with self.subTest(said=said):
+                self.assertEqual(views.merge_check_text(self.desk, *got, sentence=True), said)
+                self.assertEqual(views.merge_check_text(self.desk, *got),  # the line hansa status and show give
+                                 said[4:-1].replace(" is queued", " queued", 1))
+        run.write_try(self.desk, "m", {"id": "y1", "phase": "queued", "asked": now(), "merge": True})
+        self.assertEqual(views.merge_check_text(self.desk, m, [], sentence=True),
+                         "The merge check is queued: waits for lane m, held by a try.")
+        self.assertEqual(views.merge_check_text(self.desk, moved, [], sentence=True),
+                         "The merge check is queued (again: main moved while it was checked): waits for lane m, "
+                         "held by a try.")
+
     def test_merge_lane_refuses_tasks_verifications_designs_and_retries(self):
         _, tid = self.merge_lane_task()
         before = len(self.desk.tasks())
@@ -3898,6 +3922,19 @@ class DeskTest(unittest.TestCase):
         # a merge check commits as the task's lane, so a merge lane's own identity is never compared
         out = self.hansa("lane", "add", "m", "--like", "a", "--merge-lane", "true", "--identity", "Em <m@example.org>")
         self.assertNotIn("commits as", out)
+
+    def test_lane_add_and_set_leave_a_merge_lanes_identity_out_of_the_comparison(self):
+        repo = self.repo.resolve()
+        self.hansa("lane", "set", "a", "identity", "Ada Lane <ada@example.org>")
+        self.hansa("lane", "add", "m", "--like", "a", "--merge-lane", "true", "--identity", "Em <m@example.org>")
+        for args in (("lane", "add", "c", "--like", "a"),
+                     ("lane", "add", "d", "--repo", str(self.repo), "--identity", "Ada Lane <ada@example.org>"),
+                     ("lane", "set", "d", "identity", "Ada Lane <ada@example.org>")):
+            with self.subTest(args=args):
+                self.assertNotIn("commits as", self.hansa(*args))  # m, the merge lane, differs: nothing is said
+        out = self.hansa("lane", "set", "d", "identity", "Dee <d@example.org>")
+        self.assertIn(f"\nLane d commits as Dee <d@example.org>, unlike the other lanes on {repo}: a, c commit as "
+                      f"Ada Lane <ada@example.org>. Set it with: hansa lane set d identity \"Name <email>\"\n", out)
 
     def move_main(self, repo=None):
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved",
