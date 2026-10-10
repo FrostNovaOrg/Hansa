@@ -301,8 +301,7 @@ def held_text(desk: Desk, low: list, fl=None) -> str:
                      + ("" if (v.get("free") or 0) < vol_floor(fl, v) * GB else f", not yet {gb(vol_bar(fl, v))}")
                      for v in low)
     return (f"DISK LOW: {said}" + ("" if own else f" (floor {floor_text(fl)})") + f": hansa serve starts {STARTS} "
-            f"until {again_text(fl, low)}; what runs goes on · hansa explain server · "
-            "hansa help free-space")
+            f"until {again_text(fl, low)}; what runs goes on · hansa explain server")
 
 
 def short_text(desk: Desk, low: list) -> str:
@@ -366,6 +365,7 @@ def explain_lines(desk: Desk, s: dict) -> list:
     lines += [f"  {volume_text(v, fl)}" for v in vols]
     lines += [f"  {x}" for x in unknown_lines(desk, rec)]
     lines += [f"  now: {held_text(desk, low, fl)}"] if low else []
+    lines += ["  More: hansa help free-space"]
     return lines
 
 

@@ -83,8 +83,8 @@ TOPICS = {
                          "what the principal sets, what the coordinator sets, and what runs outside the worker"),
     "commits": ("who-changes-what.md", "Commit messages and identity", "the messages and the identity of the "
                 "commits hansa makes"),
-    "session-identity": ("who-changes-what.md", "A Claude Code session's identity, and the page's token", "how "
-                         "what a process started from a Claude Code session inherits from it, and the page's token"),
+    "session-identity": ("who-changes-what.md", "A Claude Code session's identity, and the page's token", "what "
+                         "a process started from a Claude Code session inherits from it, and the page's token"),
 }
 # explain targets that moved to hansa help, and the form that replaces each: still answered, for one release
 EXPLAIN_RETIRED = {"states": "hansa help states"}

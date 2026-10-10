@@ -811,8 +811,7 @@ def sandbox_held_text(h: dict) -> str:
             + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
                "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
             + f"; this holds {SANDBOX_GROUPS[sandbox_group(h.get('kind') or '')]}, which start by themselves once a "
-              "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server; more: hansa help "
-              "sandbox-probe)")
+              "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server)")
 
 
 def sandbox_clear(desk: Desk, lane_name: str, group: str) -> None:

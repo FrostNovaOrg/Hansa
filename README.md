@@ -139,8 +139,8 @@ another port, tunnel that port instead):
 ssh -L 8765:127.0.0.1:8765 HOST /path/to/hansa/bin/hansa --desk /path/to/desk web
 ```
 
-`hansa status` and `hansa explain` say the address and port the page is served on, and whether `hansa serve`
-serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
+`hansa status` and `hansa explain server` say the address and port the page is served on, and whether
+`hansa serve` serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
 Anthropic API, with its key), their models and effort defaults, and the prices hansa counts tokens at. A new
 desk starts with one provider, `claude`: the Claude Code login of the account hansa runs as.
 `hansa check` sends one tiny request through each provider to see that it answers. The page follows the
@@ -184,7 +184,7 @@ principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `ha
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
 | `hansa ask "<request>"` | Put a request on the principal's page |
 | `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
-| `hansa explain [lane L \| provider P \| task ID \| states \| server \| notify]` | What a setting or state means, and where it comes from |
+| `hansa explain [lane L \| provider P \| task ID \| server \| notify]` | This desk's current settings and state, and where each comes from |
 
 ## What keeps it safe
 

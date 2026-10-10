@@ -7883,6 +7883,39 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch("hansa.cli.DOCS", self.tmp / "no-docs"), self.assertRaises(SystemExit) as e:
             self.hansa_out("help", "free-space")
         self.assertIn("read the section \"Free space\" of docs/desk.md in hansa's repository", str(e.exception.code))
+        # no page for people says that a target explain no longer covers is explain's, nor that bare explain gives
+        # what only hansa explain server now says
+        for f in files:
+            if f.suffix == ".md":
+                text = f.read_text(encoding="utf-8")
+                for forms in re.findall(r"hansa explain \[([^\]]*)\]", text):
+                    self.assertEqual([x for x in re.split(r"[\s\\|]+", forms) if x in cli.EXPLAIN_RETIRED], [], f.name)
+                self.assertEqual(re.findall(r"`hansa explain`[^.;]{0,60}?\b(?:address|host|port|web page)\b", text),
+                                 [], f.name)
+
+    def test_no_hansa_help_pointer_reaches_the_page_or_the_alerts(self):
+        """The principal reads the page and the alerts, not the command line: hansa help is for the coordinator."""
+        from hansa import alert, disk, run
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"], True)
+        tid = self.desk.new_task("Add more")
+        run.hold(self.desk, tid, "a", "the sandbox could not start: x", "", "worker")
+        low = [{"mount": "/", "what": ["the desk's folder"], "free": 10 ** 9, "size": 10 ** 12}]
+        with unittest.mock.patch.object(disk, "held", return_value=low):
+            st = views.status(self.desk)
+            shown = views.status_text(st)
+            explained = self.hansa_out("explain", "server")
+            waiting = run.waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
+        self.assertTrue(st["disk"]["low_text"].startswith("DISK LOW"))
+        alert.from_event(self.desk, "disk_low", {"floor": 10, "volumes": [st["disk"]["low_text"]]})
+        sent = [x["text"] for x in alert.queued(self.desk)]
+        self.assertEqual(sorted({x["kind"] for x in alert.queued(self.desk)}), ["disk", "sandbox"])
+        for text in [json.dumps(st), waiting, *sent]:  # what the page and the alerts show
+            self.assertNotIn("hansa help", text)
+        # the coordinator's own commands keep them, as a sentence of their own
+        self.assertIn(". More: hansa help free-space", shown)
+        self.assertIn("\n      More: hansa help sandbox-probe", shown)
+        self.assertIn("  More: hansa help sandbox-probe\n", explained)
+        self.assertIn("  More: hansa help free-space\n", explained)
 
     def test_hansa_removes_the_empty_folders_it_makes_in_the_temporary_folder(self):
         from hansa import run

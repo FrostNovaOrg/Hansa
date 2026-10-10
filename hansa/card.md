@@ -830,4 +830,4 @@ this card: rules for a lane's workers go in its brief
 | `linux-sandbox` | what a lane's commands meet in Linux's sandbox |
 | `who-changes-what` | what the principal sets, what the coordinator sets, and what runs outside the worker |
 | `commits` | the messages and the identity of the commits hansa makes |
-| `session-identity` | how what a process started from a Claude Code session inherits from it, and the page's token |
+| `session-identity` | what a process started from a Claude Code session inherits from it, and the page's token |
