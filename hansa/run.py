@@ -5813,9 +5813,10 @@ def quiet_text(seconds: int) -> str:
     return f"{mins} minute{'s' if mins != 1 else ''}" if mins else f"{seconds} seconds"
 
 
-def not_looking(desk: Desk) -> str:
-    """Why hansa serve will not look at the desk within seconds, in a clause; '' when it will (up or busy)."""
-    st = server_state(desk)
+def not_looking(desk: Desk, st: dict | None = None) -> str:
+    """Why hansa serve will not look at the desk within seconds, in a clause; '' when it will (up or busy).
+    st: server_state, when the caller has it already."""
+    st = server_state(desk) if st is None else st
     return ("`hansa serve` is not running" if st["state"] == "gone" else
             f"`hansa serve` is busy or stuck: no round finished for {quiet_text(st['quiet'])}"
             if st["state"] == "stuck" else "")
@@ -5841,27 +5842,36 @@ def disk_short(desk: Desk) -> str:
     return disk.short_text(desk, low) if low else ""
 
 
-def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
-    """Why a queued task is not running yet, in one line."""
+def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict | None = None) -> dict:
+    """What waiting_reason reads of the desk, read once for every queued task of one hansa status. tasks,
+    server: the desk's tasks and server_state, when the caller has them already."""
+    return {"tasks": desk.tasks() if tasks is None else tasks, "paused": desk.paused(), "disk": disk_short(desk),
+            "held": sandbox_held(desk), "not_looking": not_looking(desk, server),
+            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]}}
+
+
+def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None = None) -> str:
+    """Why a queued task is not running yet, in one line. looks: waiting_looks, for many tasks at once."""
+    lk = looks or waiting_looks(desk, s)
     if m.get("kind") == "design":
-        other = [x["id"] for x in desk.tasks() if x.get("kind") == "design" and x["state"] == "running"
+        other = [x["id"] for x in lk["tasks"] if x.get("kind") == "design" and x["state"] == "running"
                  and x.get("lane") == m.get("lane")]
-        held = sandbox_held(desk).get(m.get("lane"), {}).get("design")
+        held = lk["held"].get(m.get("lane"), {}).get("design")
         return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
                 else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
                 else f"HELD: lane {m.get('lane')} cannot open a design session, {sandbox_held_text(held)}" if held
-                else disk_short(desk) if disk_short(desk)
-                else "opens when `hansa serve` next looks (within seconds)" if not not_looking(desk)
-                else f"opens once `hansa serve` gets through its rounds; {not_looking(desk)}")
-    if desk.paused():
+                else lk["disk"] if lk["disk"]
+                else "opens when `hansa serve` next looks (within seconds)" if not lk["not_looking"]
+                else f"opens once `hansa serve` gets through its rounds; {lk['not_looking']}")
+    if lk["paused"]:
         return "dispatch is paused"
-    if disk_short(desk):
-        return disk_short(desk)
+    if lk["disk"]:
+        return lk["disk"]
     lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
     if not lanes:
         return "no lanes in settings"
     why = []
-    held = sandbox_held(desk)
+    held = lk["held"]
     for ln in lanes:
         if ln not in s["lanes"]:
             why.append(f"lane {ln} is not in settings")
@@ -5872,11 +5882,11 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set) -> str:
         if ln in busy:
             why.append(f"lane {ln} is busy")
             continue
-        probs = {p: "refused this task" if p in refused_by(m) else provider_problem(desk, s, p)
+        probs = {p: "refused this task" if p in refused_by(m) else lk["problems"][p]
                  for p in s["lanes"][ln]["providers"]}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
-            why_not = not_looking(desk)
+            why_not = lk["not_looking"]
             return (f"ready for lane {ln} on {ready[0]}, but {why_not}" if why_not else
                     f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)")
         why.append(f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})")

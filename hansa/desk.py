@@ -1763,6 +1763,27 @@ def no_read_parts(s: dict, root=None) -> tuple:
     return good, [x + (LEFT_OUT_NOTE if x in lane_held else PATH_LEFT_OUT_NOTE) for x in said if x not in stops], stops
 
 
+NO_READ_KEEP = 60  # seconds a look of no_read_parts_shown serves the page and hansa status
+_NO_READ_SEEN: dict = {}
+
+
+def no_read_parts_shown(s: dict, root=None) -> tuple:
+    """no_read_parts for what is only shown (hansa status, the page's polls and its Settings): the same look is
+    used again for NO_READ_KEEP seconds while the list, the lanes, the PATH and the desk's worktrees are what they
+    were. Each run checks the list itself as it starts (run.py), so nothing rests on this copy."""
+    wts = Path(root) / "worktrees" if root else None
+    try:
+        names = sorted(os.listdir(wts)) if wts else []
+    except OSError:
+        names = None
+    key = json.dumps([str(root), s.get("workers_may_not_read", []), s.get("lanes"), os.environ.get("PATH", ""),
+                      names, account_home(), tempfile.gettempdir(), sys.platform], sort_keys=True, default=str)
+    seen = _NO_READ_SEEN.get(str(root))
+    if not seen or seen[0] != key or time.monotonic() - seen[1] >= NO_READ_KEEP:
+        seen = _NO_READ_SEEN[str(root)] = (key, time.monotonic(), no_read_parts(s, root))
+    return tuple(list(x) for x in seen[2])
+
+
 LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to the runs of that lane and every other (workers, "
                  "verifiers, setups, checks, design sessions, the coordinator) until the principal and the coordinator "
                  "settle it")
@@ -2445,7 +2466,7 @@ def public_settings(desk: Desk) -> dict:
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
     # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
-    kept, not_kept, stops = no_read_parts(s, desk.root)
+    kept, not_kept, stops = no_read_parts_shown(s, desk.root)
     skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)[1]
     # saved entries of what workers may not read that no run applies now (a lane's repository under one, say)
     # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:

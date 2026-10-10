@@ -18,6 +18,7 @@ import hashlib
 import http.cookies
 import http.server
 import json
+import os
 import re
 import threading
 import urllib.parse
@@ -40,13 +41,37 @@ def _shots(desk, tid: str) -> list:
     return [f.name for f in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)]
 
 
+def _status(desk: Desk) -> dict:
+    """hansa status for the page: each design session with its screenshots, which the page shows."""
+    st = views.status(desk)
+    return {**st, "design": [{**m, "shots": _shots(desk, m["id"])} for m in st["design"]]}
+
+
+def _last_lines(path, n: int, block: int = 65536) -> list:
+    """The last n lines of a file, as read_text().splitlines()[-n:] gives them, read from its end: the log grows
+    with the desk, and the page asks for its latest events every few seconds."""
+    with open(path, "rb") as fh:
+        end = at = fh.seek(0, os.SEEK_END)
+        data = b""
+        while at > 0:
+            at = max(0, at - block)
+            fh.seek(at)
+            data = fh.read(end - at)
+            # a line before the last n, whole or not, so that each of those n starts where it does in the file
+            if at and len(data.decode("utf-8", errors="replace").splitlines()) > n:
+                break
+    if at:  # cut where a character may go on: the rest of it, in the line that is left out
+        data = data[next((i for i in range(min(4, len(data))) if not 0x80 <= data[i] < 0xC0), 0):]
+    return data.decode("utf-8").splitlines()[1 if at else 0:][-n:]
+
+
 def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
     """The latest n events, newest first; with kinds (comma-separated), the latest n of those kinds in
     the whole log."""
     if not desk.events_path.exists():
         return []
     kinds = {k for k in kind.split(",") if k}
-    lines = desk.events_path.read_text(encoding="utf-8").splitlines()
+    lines = desk.events_path.read_text(encoding="utf-8").splitlines() if kinds else _last_lines(desk.events_path, n)
     out = []
     for line in reversed(lines if kinds else lines[-n:]):
         try:
@@ -133,7 +158,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if url.path == "/":
                 return self._send(200, UI.read_bytes(), "text/html; charset=utf-8", cookie=True)
             if url.path == "/api/status":
-                return self._send(200, views.status(desk))
+                return self._send(200, _status(desk))
             if url.path == "/api/settings":
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
