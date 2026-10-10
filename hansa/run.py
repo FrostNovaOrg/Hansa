@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import contextvars
 import errno
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -590,6 +592,26 @@ class SandboxRefused(RuntimeError):
         super().__init__(why or f"the sandbox could not start: {said}" + (f" (refused: {part})" if part else ""))
 
 
+# what git_folders found within one start (git_folders_kept), by _git_folders_key; None outside one
+_GIT_FOLDERS: contextvars.ContextVar = contextvars.ContextVar("git_folders", default=None)
+
+
+def git_folders_kept(fn):
+    """`fn`, one start of a run (worker, verifier, design session, setup and check, merge check, lane try): it builds
+    the sandbox several times, and each build asks git_folders several times for the same two folders, so they
+    are worked out once there. The .git file is still checked before each git command (check_git_file)."""
+    @functools.wraps(fn)
+    def kept(*args, **kwargs):
+        if _GIT_FOLDERS.get() is not None:  # within a start already
+            return fn(*args, **kwargs)
+        token = _GIT_FOLDERS.set({})
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _GIT_FOLDERS.reset(token)
+    return kept
+
+
 def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
     """srt's settings for a try of the sandbox Claude Code gets (`box`, the "sandbox" of sandbox_settings or
     design_sandbox): its filesystem and network, the worktree and the temporary folder `tmp` written, and, in a
@@ -838,6 +860,7 @@ def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: s
     desk.event("sandbox_held", task=tid, lane=lane_name, run=kind, why=why, part=part, alert=new)
 
 
+@git_folders_kept
 def sandbox_retry(desk: Desk, s: dict) -> list:
     """As hansa serve starts: try again the sandbox of each lane's held runs (sandbox_held), a worker's in the
     lane's worktree or a design session's in its design worktree, so a hold made by earlier code or settings
@@ -1508,9 +1531,42 @@ def git_write_deny(wt: Path, committing: str = "") -> list:
 
 def git_folders(wt: Path) -> tuple:
     """(the repository's common git folder, the worktree's own). A main checkout has no folder of its own
-    (and no commondir or gitdir): its folder is the common one."""
+    (and no commondir or gitdir): its folder is the common one. Within one start (git_folders_kept) asked of
+    git once for each state of the worktree's .git and the commondir it leads to (_git_folders_key)."""
+    kept = _GIT_FOLDERS.get()
+    key = _git_folders_key(wt) if kept is not None else None
+    if key is not None and key in kept:
+        return kept[key]
     common = Path(wt) / git("rev-parse", "--git-common-dir", cwd=wt)  # relative to wt, or absolute
-    return common, Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
+    out = common, Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
+    if key is not None and key == _git_folders_key(wt):  # not changed while git was asked
+        kept[key] = out
+    return out
+
+
+def _git_folders_key(wt: Path):
+    """What git's answer to git_folders rests on, read as plain files and never through git: the worktree's path,
+    its .git (a file's bytes, a folder's identity) and the commondir of the git folder it leads to. None when
+    one cannot be read: then git is asked."""
+    wt = Path(wt).absolute()
+    dot = wt / ".git"
+    try:
+        st = os.lstat(dot)
+        if stat.S_ISREG(st.st_mode):
+            with os.fdopen(os.open(dot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as fh:
+                held = fh.read(4097)
+            text = held.decode("utf-8", "replace").strip()
+            admin = Path(text[len("gitdir:"):].strip()) if text.startswith("gitdir:") else None
+            admin = wt / admin if admin is not None and not admin.is_absolute() else admin
+        elif stat.S_ISDIR(st.st_mode):
+            held, admin = ("folder", st.st_dev, st.st_ino), dot
+        else:
+            return None
+        common = admin / "commondir" if admin is not None else None
+        there = common.read_bytes() if common is not None and common.is_file() else b""
+    except OSError:
+        return None
+    return str(wt), held, there
 
 
 def _git_folder_deny(wt: Path, committing: str = "") -> list:
@@ -3637,6 +3693,7 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
     return "".join(x + "\n" for x in out)
 
 
+@git_folders_kept
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
     cancelled while hansa prepared it."""
@@ -3827,6 +3884,7 @@ def add_usage(a: dict, b: dict) -> dict:
     return out
 
 
+@git_folders_kept
 def design_command(desk: Desk, tid: str):
     """The interactive Claude Code run for a design session: (argv, env, directory).
     Built inside the session's own terminal (hansa.session), so no key is on a command line."""
@@ -3884,6 +3942,7 @@ def design_command(desk: Desk, tid: str):
     return with_setup(desk, tid, argv, lane, pname, p, wt), env, wt
 
 
+@git_folders_kept
 def start_design(desk: Desk, tid: str, lane_name: str) -> None:
     """Open a design session: an interactive Claude Code run in tmux, in the lane's design
     worktree, which the principal joins. It ends when they leave it with /exit."""
@@ -4322,6 +4381,7 @@ def keep_lost_run(desk: Desk, m: dict) -> dict:
         "why": "hansa serve stopped while it started this run; the task went back to the queue"}]}
 
 
+@git_folders_kept
 def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     """Run the lane's check command in the worktree, in srt with the lane's sandbox, after the worker is
     done; None when the task was cancelled first. The exit code goes to a file, so a restarted server
@@ -4638,6 +4698,7 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
     return None
 
 
+@git_folders_kept
 def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     """Merge a task onto the base's current tip in the lane's worktree, then run the lane's setup (if it has
     one) and merge check command (merge_command) there, in srt, as the check after a task. Returns the process;
@@ -4853,6 +4914,7 @@ def end_try(desk: Desk, lane_name: str, result: dict) -> dict:
     return t
 
 
+@git_folders_kept
 def start_try(desk: Desk, lane_name: str, lane: dict):
     """Start a queued try of the lane; None when there is none, or it ended at once (the lane is busy)."""
     d = desk.state_dir / "tries" / lane_name
