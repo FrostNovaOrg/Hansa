@@ -2069,6 +2069,9 @@ class Desk:
         self._mutex = threading.RLock()  # the desk lock, within this process
         self._held = 0
         self._lock_file = None
+        # how many times this process wrote a task's or a release's record: a list of them read before it changed
+        # may be out of date (hansa serve reads the tasks and the releases once a round, and again only after this)
+        self.writes = 0
 
     @classmethod
     def find(cls, explicit: str | None = None) -> "Desk":
@@ -2211,6 +2214,7 @@ class Desk:
                 continue
             if key in text:
                 text = text.replace(key, f"[key of {provider}]")
+                self.writes += f.name == "meta.json"
                 write_json(f, json.loads(text)) if f.name in ("meta.json", "asks.json") \
                     else f.write_text(text, encoding="utf-8")
 
@@ -2314,6 +2318,7 @@ class Desk:
             if isinstance(own, dict) and own.get("repo") and not meta.get("repo"):  # its lane's repository now:
                 meta["repo"] = resolved(own["repo"]) or own["repo"]  # a lane made again elsewhere is not the task's
             write_json(d / "meta.json", meta)
+            self.writes += 1
         self.event("task_added", task=tid, lane=meta["lane"], **({"browser": True} if meta.get("browser") else {}))
         return tid
 
@@ -2336,6 +2341,7 @@ class Desk:
                 return None
             m.update(fields)
             write_json(self.tasks_dir / tid / "meta.json", m)
+            self.writes += 1
         return m
 
     def transition(self, tid: str, states, **fields) -> dict | None:

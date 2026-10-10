@@ -94,6 +94,7 @@ def get(desk: Desk, rid) -> dict | None:
 def _write(desk: Desk, rs: list) -> None:
     desk.state_dir.mkdir(exist_ok=True)
     write_json(releases_file(desk), rs)
+    desk.writes += 1
 
 
 def change(desk: Desk, rid, decide) -> dict | None:
@@ -867,13 +868,13 @@ def drop_checkout(desk: Desk, rid, repo) -> None:
             pass
 
 
-def sweep_checkouts(desk: Desk) -> None:
+def sweep_checkouts(desk: Desk, rs: list | None = None) -> None:
     """Remove the checkouts of releases that no longer run: left by a server that stopped, or a start that
-    failed."""
+    failed. rs: the releases as read already."""
     d = desk.state_dir / "release-checkouts"
     if not d.is_dir():
         return
-    rs = {str(r.get("id")): r for r in releases(desk)}
+    rs = {str(r.get("id")): r for r in (releases(desk) if rs is None else rs)}
     for x in d.iterdir():
         r = rs.get(x.name) or {}
         if r.get("state") not in ("starting", "running"):
@@ -1068,14 +1069,24 @@ def _recover(desk: Desk, r: dict) -> None:
     finish(desk, r["id"])
 
 
-def tick(desk: Desk, s: dict, procs: dict, starting: bool = True) -> None:
+def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider). A release
     asked to stop gets TERM, then KILL after STOP_GRACE seconds, and is finished once nothing of it runs. What a
     running release's command starts is recorded each round, and what of it still runs is stopped at its end. None
-    starts while starting is False (free space under the floor): an approved one waits, and goes once there is space."""
-    for r in releases(desk):
+    starts while starting is False (free space under the floor): an approved one waits, and goes once there is space.
+    tasks: what gives the desk's tasks as this round read them (Dispatcher.tasks); else they are read here."""
+    read = []
+
+    def rs() -> list:  # read once a round, and again only after this process changed a release (Desk.writes)
+        if not read or read[0] != desk.writes:
+            read[:] = [desk.writes, releases(desk)]
+        return read[1]
+    if not procs and not any(r.get("state") in ("approved", "starting", "running") for r in rs()):
+        sweep_checkouts(desk, rs())  # none open: only what a server that stopped left
+        return
+    for r in rs():
         if r.get("state") == "running":
             r = _record_started(desk, r)
         if r.get("state") in ("starting", "running") and r.get("stop_asked"):
@@ -1088,7 +1099,7 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True) -> None:
             del procs[rid]
             stop(proc.pid, "", proc)  # what it left running in its group ends with it
             finish(desk, rid)
-    for r in releases(desk):
+    for r in rs():
         if r["id"] in procs:
             continue
         if r.get("state") == "running" and not alive(r.get("pid"), r.get("pid_start", "")):
@@ -1097,20 +1108,21 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True) -> None:
             finish(desk, r["id"])
         elif r.get("state") == "starting":
             _recover(desk, r)
-    for r in releases(desk):
+    for r in rs():
         if r.get("state") != "running" or r.get("timed_out"):
             continue
         limit, whose = minutes(s, r)
         if time.time() - (r.get("started") or time.time()) > 60 * limit:
             change(desk, r["id"], lambda x: {"timed_out": True, "limit_min": limit, "limit_of": whose})
             stop(r.get("pid"), r.get("pid_start", ""), procs.get(r["id"]))
-    sweep_checkouts(desk)
-    if not starting:
+    sweep_checkouts(desk, rs())
+    approved = sorted((r for r in rs() if r.get("state") == "approved"), key=lambda r: r["id"])
+    if not starting or not approved:
         return
-    tasks = desk.tasks()
+    tasks = (tasks or desk.tasks)()
     # one at a time per repository, fixed or not: two releases of one repository may send to the same place
-    held = {r.get("repo") for r in releases(desk) if r.get("state") in ("starting", "running")}
-    for r in sorted((r for r in releases(desk) if r.get("state") == "approved"), key=lambda r: r["id"]):
+    held = {r.get("repo") for r in rs() if r.get("state") in ("starting", "running")}
+    for r in approved:
         if r.get("repo") in held or (not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)):
             continue
         try:
