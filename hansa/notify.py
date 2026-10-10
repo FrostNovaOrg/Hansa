@@ -53,6 +53,7 @@ from .desk import Desk, now, read_json, write_json
 from .run import alive, claude_bin, proc_start, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
+SEEN_EVERY = 10  # a feed that changes nothing else in the follower's record writes its seen this often
 MOST_LINES = 10  # past this many events in one message, the rest are counted, and hansa status has them
 POST_WAIT = 60  # seconds a post is tried again while the inbox is not there yet
 KEEP_DAYS = 7  # ended followers' records are kept this long
@@ -445,8 +446,10 @@ def handle(desk: Desk, req: dict) -> dict:
         return {}
     if op == "feed":
         events, pos = read_log(desk, int(req.get("pos") or 0))
-        items = items_for(desk, events, me)
-        _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or 0), "seen": now(), "ended": None})
+        items = items_for(desk, events, me) if events else []
+        rec = {**old, **me, "pos": int(req.get("done") or 0), "ended": None}
+        if {**rec, "seen": None} != {**old, "seen": None} or time.time() - (old.get("seen") or 0) >= SEEN_EVERY:
+            _write_record(desk, key, {**rec, "seen": now()})  # else nothing changed but seen, and it is recent
         return {"pos": pos, "items": items, **_server(desk), "srt_ran": _srt_ran(desk)}
     if op == "end":
         _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or old.get("pos") or 0), "seen": now(),
@@ -862,14 +865,14 @@ def started_at(pid: int):
         return None
 
 
-def clear_pane(pid: int) -> tuple:
+def clear_pane(pid: int, run=None) -> tuple:
     """The tmux pane the session runs in (TMUX_PANE, whose process is the session or runs it): (pane, ''), or
-    ('', why the daily clear cannot be done)."""
+    ('', why the daily clear cannot be done). run: what runs tmux (default tmux)."""
     pane = os.environ.get("TMUX_PANE", "")
     if not pane:
         return "", "the session does not run in tmux (TMUX_PANE is not set), and hansa types the /clear through tmux"
     try:
-        top = int(tmux("display-message", "-p", "-t", pane, "#{pane_pid}").strip())
+        top = int((run or tmux)("display-message", "-p", "-t", pane, "#{pane_pid}").strip())
     except (RuntimeError, ValueError) as e:
         return "", f"tmux could not say which process runs in pane {pane} ({e})"
     p, seen = int(pid), set()
@@ -902,11 +905,11 @@ def box_text(capture: str):
     return box[2:] if box.startswith("❯\xa0") else None
 
 
-def idle_reading(pid: int) -> tuple:
+def idle_reading(pid: int, row_of=None) -> tuple:
     """(True, its sessionId) when `claude agents --json` shows the session idle with nothing waiting for an
-    answer; (False, why not) otherwise, and when it cannot say."""
+    answer; (False, why not) otherwise, and when it cannot say. row_of: what reads it (default session_row)."""
     try:
-        row = session_row(pid)
+        row = (row_of or session_row)(pid)
     except RuntimeError as e:
         return False, str(e)
     if row is None:
@@ -922,23 +925,39 @@ class DailyClear:
     """A follower's daily /clear of its session. Its record (rec) goes into the register, for hansa notify:
     window, pane, off (why it cannot be done), began (when the session started; None when that cannot be read), day,
     state (cleared / unconfirmed / left), at, held (the last reason), left (what hansa met when it typed /clear and
-    left it)."""
+    left it). tmux, session_row, clock and sleep stand in for the module's tmux and session_row and for time.time
+    and time.sleep (tests); every and quiet for HANSA_CLEAR_EVERY and HANSA_CLEAR_QUIET."""
 
-    def __init__(self, window: str, pid: int, rec=None):
+    def __init__(self, window: str, pid: int, rec=None, *, tmux=None, session_row=None, clock=None, sleep=None,
+                 every=None, quiet=None):
         self.window, self.pid = window, pid
-        self.every = float(os.environ.get("HANSA_CLEAR_EVERY") or CLEAR_EVERY)
-        self.quiet = float(os.environ.get("HANSA_CLEAR_QUIET") or CLEAR_QUIET)
+        self._tmux, self._row, self._clock, self._sleep = tmux, session_row, clock, sleep
+        self.every = float(every if every is not None else os.environ.get("HANSA_CLEAR_EVERY") or CLEAR_EVERY)
+        self.quiet = float(quiet if quiet is not None else os.environ.get("HANSA_CLEAR_QUIET") or CLEAR_QUIET)
         if isinstance(rec, dict) and rec.get("window") == window:  # restarted on new code: as it was
             self.rec = rec
             if "began" not in rec:  # a record from before hansa kept the session's start
                 rec["began"] = started_at(pid)
         else:
-            pane, why = clear_pane(pid)
+            pane, why = clear_pane(pid, self.tmux)
             self.rec = {"window": window, "pane": pane, "off": why or None, "began": None if why else started_at(pid)}
             _say(f"daily clear {window}: " + (f"off: {why}" if why else f"on, through tmux pane {pane}"))
             if not why:
-                self.new_today(time.time())
+                self.new_today(self.time())
         self.next, self.idle_since, self.inside, self.sid = 0.0, None, None, ""
+
+    # looked up when called, so a test may stand in for the module's own
+    def tmux(self, *args) -> str:
+        return (self._tmux or tmux)(*args)
+
+    def row(self, pid: int):
+        return (self._row or session_row)(pid)
+
+    def time(self) -> float:
+        return self._clock() if self._clock else time.time()
+
+    def sleep(self, s: float) -> None:
+        return self._sleep(s) if self._sleep else time.sleep(s)
 
     def new_today(self, t: float) -> None:
         """A session this follower has no record of the day for, started inside today's window after it opened:
@@ -958,7 +977,7 @@ class DailyClear:
 
     def tick(self, last_post: float, pending: bool) -> None:
         """Called on each round of the follower; checks once every minute, in the window."""
-        t = time.time()
+        t = self.time()
         if self.rec.get("off") or t < self.next:
             return
         self.next = t + self.every
@@ -981,7 +1000,7 @@ class DailyClear:
 
     def why_not(self, t: float, last_post: float, pending: bool) -> str:
         """Why the session is not to be cleared now; '' when every condition holds."""
-        ok, said = idle_reading(self.pid)
+        ok, said = idle_reading(self.pid, self.row)
         if not ok:
             self.idle_since = None
             return said
@@ -996,14 +1015,14 @@ class DailyClear:
                 f"hansa posted to the session {int(t - last_post)} s ago"
         pane = self.rec["pane"]
         try:
-            where = tmux("display-message", "-p", "-t", pane, "#{session_id}").strip()
-            keys = [int(x) for x in tmux("list-clients", "-t", where, "-F", "#{client_activity}").split()]
+            where = self.tmux("display-message", "-p", "-t", pane, "#{session_id}").strip()
+            keys = [int(x) for x in self.tmux("list-clients", "-t", where, "-F", "#{client_activity}").split()]
         except (RuntimeError, ValueError) as e:
             return f"could not read when a key was last pressed ({e})"
         if keys and t - max(keys) < KEYS_QUIET:
             return f"a key was pressed in a terminal on the session's tmux session {int(t - max(keys))} s ago"
         try:
-            box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
+            box = box_text(self.tmux("capture-pane", "-p", "-e", "-t", pane))
         except RuntimeError as e:
             return f"could not read the pane ({e})"
         if box is None:
@@ -1028,32 +1047,32 @@ class DailyClear:
         self.idle_since = None  # whatever happens, two idle readings again before the next try
         step = "typing"  # what tmux was doing when it failed
         try:
-            tmux("send-keys", "-t", pane, "-l", "/clear")
+            self.tmux("send-keys", "-t", pane, "-l", "/clear")
             step = ""
             for _ in range(1 + TYPED_READS):  # a box that cannot be read yet: again, for about two seconds
-                time.sleep(TYPED_WAIT)
-                box = box_text(tmux("capture-pane", "-p", "-e", "-t", pane))
+                self.sleep(TYPED_WAIT)
+                box = box_text(self.tmux("capture-pane", "-p", "-e", "-t", pane))
                 if box is not None:
                     break
             if box is None:  # what hansa typed may be there still; not typed again today
                 return self.left("the input box could not be read")
-            ok, said = idle_reading(self.pid)
+            ok, said = idle_reading(self.pid, self.row)
             if box.rstrip(" ") != "/clear" or not ok:
                 if not box.rstrip(" ").endswith("/clear"):  # where its /clear went is not known: left as it is
                     return self.left(f"the box read {box!r}")
                 step = "back"
-                tmux("send-keys", "-t", pane, *["BSpace"] * 6)  # take it back; whatever else is there stays
+                self.tmux("send-keys", "-t", pane, *["BSpace"] * 6)  # take it back; whatever else is there stays
                 self.hold(f"after /clear was typed the box read {box!r} and the session "
                           f"{'was idle' if ok else 'was not idle: ' + said}; no Enter; the /clear was taken back")
                 return
-            tmux("send-keys", "-t", pane, "Enter")
+            self.tmux("send-keys", "-t", pane, "Enter")
         except RuntimeError as e:
             return self.left(f"tmux failed ({e})", step)
-        end, sid = time.time() + CLEARED_WAIT, ""
-        while time.time() < end:
-            time.sleep(0.5)
+        end, sid = self.time() + CLEARED_WAIT, ""
+        while self.time() < end:
+            self.sleep(0.5)
             try:
-                sid = str((session_row(self.pid) or {}).get("sessionId") or "")
+                sid = str((self.row(self.pid) or {}).get("sessionId") or "")
             except RuntimeError:
                 continue
             if sid and sid != self.sid:
