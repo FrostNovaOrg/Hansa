@@ -10,7 +10,7 @@ import os
 import sys
 import traceback
 
-from .desk import Desk
+from .desk import Desk, write_text
 from .run import design_command
 
 
@@ -21,7 +21,7 @@ def main() -> int:
         os.chdir(cwd)
         os.execvpe(argv[0], argv, env)
     except Exception:  # noqa: BLE001 - whatever stops the start is kept for hansa show
-        (desk.raw_dir(tid) / "run.err").write_text(traceback.format_exc(), encoding="utf-8")
+        write_text(desk.raw_dir(tid) / "run.err", traceback.format_exc())
     return 1
 
 

@@ -4,7 +4,10 @@
 
 ### Where a desk's files are
 
-Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py). Keys live
+Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
+A write that fails leaves the previous file, with its permissions, and no temporary file.
+The event log is only appended to. Readers skip a damaged line, and the next event starts
+on a line of its own. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the
 provider's endpoint, as that worker's environment. hansa replaces a key with
 `[key of <provider>]` wherever it would otherwise show, and refuses to merge a

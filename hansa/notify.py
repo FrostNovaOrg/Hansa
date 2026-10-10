@@ -49,7 +49,7 @@ import uuid
 from pathlib import Path
 
 from . import account, disk, session_value, without_session
-from .desk import Desk, now, read_json, write_json
+from .desk import Desk, event_record, now, read_json, write_json
 from .run import alive, claude_bin, proc_start, rethink_text, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
@@ -167,11 +167,8 @@ def read_log(desk: Desk, pos: int, most: int = 8 << 20):
     cut = data.rfind(b"\n") + 1
     events = []
     for line in data[:cut].splitlines():
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(e, dict):
+        e = event_record(line)
+        if e is not None:
             events.append(e)
     return events, pos + cut
 

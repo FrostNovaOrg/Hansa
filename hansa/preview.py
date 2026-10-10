@@ -27,10 +27,11 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hansa import run  # noqa: E402
-from hansa.desk import Desk  # noqa: E402
+from hansa.desk import Desk, write_text  # noqa: E402
 
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL")  # as hansa.run.BASE_ENV, without TMPDIR
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # the worker's own key, never shown in its instructions
@@ -152,9 +153,8 @@ def main() -> int:
 
     def save():  # whole or not at all: hansa may read it meanwhile
         with rec_lock:
-            with open(state + ".new", "w") as f:
-                json.dump({**rec, "seen": {str(p): s for p, s in seen_procs.items()}}, f)
-            os.replace(state + ".new", state)
+            write_text(Path(state), json.dumps({**rec, "seen": {str(p): s for p, s in seen_procs.items()}}),
+                       follow_symlinks=False)
     save()  # before anything else: hansa can stop the group even if this is stopped first
     stopping, done = [], threading.Event()
 
