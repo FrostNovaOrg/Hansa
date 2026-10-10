@@ -316,12 +316,33 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
         if kind.endswith("-noticed"):
             rows += [{"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
                 "role": "user", "content": BG_NOTICE("bk3j9x", "") if cmd else BG_NOTICE("a7f2c1", "")}}]
-    rows.append(say("a3", report))
+    # "late-tool": in a notice's turn it reads a tool's output, then corrects its report; "late-twice": two notice
+    # turns; "waiting": it ends a turn waiting, and does the real work and report after the notice. FAKE_VERDICT_REPORT
+    # and FAKE_VERDICT_LATE: a verdict at the end of its report, and of the last thing it writes after
+    verdict = lambda name: "\nVERDICT: " + os.environ[name] if os.environ.get(name) else ""
+    tool = lambda mid, uid: [
+        {"type": "assistant", "message": {"id": mid, "content": [
+            {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": "cat build.log"}}]}},
+        {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": uid}]}}]
+    if kind == "waiting":
+        report = "Waiting for the build to end."
+    rows.append(say("a3", report + verdict("FAKE_VERDICT_REPORT")))
     late = kind == "late"
     if late:
         rows += [notice("baxumxafe"), say("a4", "That notice is the watch. My report above is still my final report.")]
+    elif kind in ("late-tool", "waiting"):
+        rows += [notice("bw1"), say("a4", "Reading the build's output."), *tool("a4", "u4"),
+                 say("a5", ("Correction: the build's output shows two tests fail." if kind == "late-tool" else
+                            "Report: the build passes; fixed the badge.") + verdict("FAKE_VERDICT_LATE"))]
+    elif kind == "late-twice":
+        rows += [notice("bw1"), say("a4", "That notice is the watch."), notice("bw2"), *tool("a5", "u5"),
+                 say("a6", "The suite ended too: it passes." + verdict("FAKE_VERDICT_LATE"))]
     with open(rec, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
+    if os.environ.get("FAKE_TRANSCRIPT_STOPPED"):  # stopped at the turn limit, with no result
+        print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 9,
+                          "session_id": sid}))
+        sys.exit(1)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 5, "session_id": sid,
                       "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
                       **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
@@ -11796,6 +11817,136 @@ class DeskTest(unittest.TestCase):
             self.settle(d, new)
             tid = new
 
+    # What a follow-up's worker is given (cli._follow_up_start), each case and the test that covers it:
+    # | case                                                    | test                                                   |
+    # | the plain form, the first follow-up, previous not verified | test_a_follow_up_gives_the_original_one_line_per_earlier_round_this_note_and_two_reports |
+    # | --fresh                                                 | the same (its second follow-up)                        |
+    # | the third follow-up of a chain (and the fourth, fifth, sixth) | the same                                         |
+    # | previous verified: does not hold, holds, unsure, no verdict with a report, no report | the same          |
+    # | a chain whose first rounds were made before this change | test_a_follow_up_of_a_chain_made_before_notes_were_recorded_says_only_what_is_known |
+    # | --update, and the plain form from the previous commit   | test_a_follow_up_with_update_or_from_the_previous_commit_is_built_the_same_way |
+    ORIGINAL = "Add a week badge to the list page.\n\nKeep it in the header."
+
+    def ended(self, tid, state, report, verdict=None, vreport=""):
+        """Task tid ended in this state with this report; verified, when verdict is given ("" for none), by a
+        verification that ended with that verdict and vreport (none: no report). The verification's id, else None."""
+        self.desk.update(tid, state=state)
+        (self.desk.tasks_dir / tid / "result.md").write_text(report + "\n")
+        if verdict is None:
+            return None
+        vid = self.desk.new_task(f"Verify {tid}", kind="verify", parent=tid, lane="a")
+        self.desk.update(vid, state="done", verdict=verdict)
+        if vreport:
+            (self.desk.tasks_dir / vid / "result.md").write_text(vreport + "\n")
+        self.desk.update(tid, verify=vid)
+        return vid
+
+    def follow_up(self, tid, *args) -> tuple:
+        """hansa retry tid with these arguments: (the follow-up's id, its text)."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "retry", tid, *args])
+        new = self.desk.meta(tid)["replaced_by"]
+        return new, (self.desk.tasks_dir / new / "task.md").read_text()
+
+    def assert_follow_up(self, new, text, rounds, note, carried, not_carried):
+        """The follow-up's text: the original task once, one line per earlier round (ids in rounds, oldest first),
+        this note whole, what is carried and nothing that is not; hansa show --full gives exactly it."""
+        self.assertEqual(text.count(self.ORIGINAL), 1)
+        self.assertTrue(text.startswith(self.ORIGINAL + "\n\n---\nThe earlier rounds of this task, oldest first:\n"))
+        self.assertEqual(re.findall(r"^- (t\d+): .*; its whole text: hansa show \1 --full$", text, re.M), rounds)
+        self.assertEqual(len(re.findall(r"^- t\d+: ", text, re.M)), len(rounds))
+        self.assertIn("\nTheir notes and reports are not carried beyond these lines: what still holds of an earlier "
+                      "note is said again in this round's note.\n", text)
+        self.assertIn(f"\nFollow-up to {rounds[-1]} (", text)
+        self.assertIn(f"What to change: {note}\n", text)
+        for x in carried:
+            self.assertIn(x, text)
+        for x in not_carried:
+            self.assertNotIn(x, text)
+        shown = views.show_text(self.desk, new, full=True)
+        self.assertIn("\n".join(("  " + x).rstrip() for x in text.strip().splitlines()),
+                      "\n".join(x.rstrip() for x in shown.splitlines()))
+
+    def test_a_follow_up_gives_the_original_one_line_per_earlier_round_this_note_and_two_reports(self):
+        tid = self.desk.new_task(self.ORIGINAL, lane="a")
+        chain, texts = [tid], {}
+        # each round: how the previous attempt ended, its verification's verdict (None: not verified) and report,
+        # and the form of the follow-up
+        plan = [("done", None, "", ()), ("failed", "does not hold", "V1 found the badge missing", ("--fresh",)),
+                ("done", "holds", "V2 saw the badge", ()), ("done", "unsure", "V3 could not start the page", ()),
+                ("done", "", "", ()), ("done", "", "V5 wrote no verdict", ())]
+        for k, (state, verdict, vreport, form) in enumerate(plan):
+            prev = chain[-1]
+            vid = self.ended(prev, state, f"R{k}: the report of round {k}.", verdict, vreport)
+            note = f"N{k} start of the note. " + "x" * 200 + f" N{k}-TAIL"
+            texts.update({t: (self.desk.tasks_dir / t / "task.md").read_text() for t in chain})
+            new, text = self.follow_up(prev, *form, note)
+            earlier = [f"N{j}-TAIL" for j in range(k)] + [f"R{j}:" for j in range(k)] + \
+                [p[2] for p in plan[:k] if p[2]]
+            carried = [f"The previous attempt's report:\nR{k}: the report of round {k}."]
+            if vreport:
+                carried.append(f"The report of {vid}, the verification of the previous attempt (a worker who ran the "
+                               f"change to see whether it holds; its verdict: {verdict or 'none'}):\n{vreport}")
+            else:
+                earlier.append("the verification of the previous attempt")
+            self.assert_follow_up(new, text, chain, note, carried, earlier)
+            how = state + (", not verified" if verdict is None else
+                           f", verified by {vid} (verdict: {verdict or 'none'})")
+            self.assertIn(f"\n- {prev}: {how}; ", text)
+            self.assertIn(f"\n- {tid}: ", text)
+            self.assertIn("; the original task, above; ", text)
+            for j, t in enumerate(chain[1:]):  # each earlier follow-up's line: the start of its note, cut
+                self.assertIn(f"\n- {t}: ", text)
+                self.assertIn(f"; its note: \"N{j} start of the note. {'x' * 128} ...\"; its whole text: "
+                              f"hansa show {t} --full\n", text)
+            self.assertEqual({t: (self.desk.tasks_dir / t / "task.md").read_text() for t in chain}, texts)  # kept
+            self.assertEqual(self.desk.meta(prev)["state"], "replaced")
+            chain.append(new)
+        self.assertIn(f"\n- {chain[1]}: failed, verified by ", text)  # how it ended, though replaced since
+        self.assertNotIn("You start from", text)  # nothing ran: no commit to start from
+
+    def test_a_follow_up_of_a_chain_made_before_notes_were_recorded_says_only_what_is_known(self):
+        tid = self.desk.new_task(self.ORIGINAL, lane="a")
+        self.ended(tid, "done", "OLD REPORT 1")
+        old = self.desk.new_task(self.ORIGINAL + f"\n\n---\nFollow-up to {tid} (done). What to change: OLD NOTE 1"
+                                 + "\nThe previous attempt's report:\nOLD REPORT 1", parent=tid, lane="a")
+        self.desk.update(tid, state="replaced", replaced_by=old)  # as hansa did then: no record of how it ended
+        self.ended(old, "done", "OLD REPORT 2")
+        new, text = self.follow_up(old, "the new note")
+        self.assert_follow_up(new, text, [tid, old], "the new note", ["OLD REPORT 2"], ["OLD NOTE 1", "OLD REPORT 1"])
+        self.assertIn(f"\n- {tid}: replaced, not verified; the original task, above; ", text)
+        self.assertIn(f"\n- {old}: done, not verified; its note was not recorded on its own (it was sent back before "
+                      f"hansa recorded notes); its whole text: hansa show {old} --full\n", text)
+        self.ended(new, "failed", "NEW REPORT 3")
+        third, text = self.follow_up(new)  # no note this time
+        self.assertEqual(text.count(self.ORIGINAL), 1)
+        self.assertEqual(re.findall(r"^- (t\d+): ", text, re.M), [tid, old, new])
+        self.assertIn(f"\n- {new}: failed, not verified; its note: \"the new note\"; ", text)
+        self.assertIn(f"\nFollow-up to {new} (failed).\nThe previous attempt's report:\nNEW REPORT 3", text)
+        for x in ("OLD NOTE 1", "OLD REPORT", "What to change"):
+            self.assertNotIn(x, text)
+        self.ended(third, "done", "REPORT 4")
+        _, text = self.follow_up(third, "fourth")
+        self.assertIn(f"\n- {third}: done, not verified; no note; its whole text: hansa show {third} --full\n", text)
+
+    def test_a_follow_up_with_update_or_from_the_previous_commit_is_built_the_same_way(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task(self.ORIGINAL)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        new, text = self.follow_up(tid, "--update", "bring it up to date")
+        self.assert_follow_up(new, text, [tid], "bring it up to date", [
+            "The previous attempt's report:\nAdded hello.txt. Checked it exists.",
+            f"\nYou start from the previous attempt's last commit ({m['head'][:10]}), with main as it is now merged "
+            f"into it."], [])
+        m2 = self.settle(d, new)
+        self.assertEqual(m2["state"], "done", m2)
+        third, text = self.follow_up(new, "keep", "going")
+        self.assert_follow_up(third, text, [tid, new], "keep going", [
+            f"\nYou start from the previous attempt's last commit ({m2['head'][:10]}).",
+            f"\n- {new}: done, not verified; its note: \"bring it up to date\"; "], ["merged into it"])
+        self.assertEqual(text.count("Added hello.txt. Checked it exists."), 1)  # the previous report only
+
     def test_browser_is_given_to_one_task_at_a_time(self):
         with self.assertRaises(SystemExit):  # no browser set up: refuse, queue nothing
             main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
@@ -12322,6 +12473,93 @@ class DeskTest(unittest.TestCase):
 
     def test_a_report_with_no_notice_after_it_is_unchanged(self):
         self.assertEqual(self.transcript_run("plain"), "Report: fixed the badge; the tests pass.\n")
+
+    # How a run's report is made when its session ends on turns background notices opened (run.report_after_notices),
+    # each case and the test that covers it:
+    # | the session ends                                          | test                                              |
+    # | on no notice turn                                         | test_a_report_with_no_notice_after_it_is_unchanged |
+    # | on a notice turn answered without tools                   | test_a_report_followed_by_a_background_notice_is_kept |
+    # | on a notice turn with tool use, then a correction         | test_what_a_worker_writes_after_a_notice_follows_its_report_whatever_it_did_there |
+    # | on two notice turns                                       | the same                                          |
+    # | waiting first, then the real report after a notice        | the same                                          |
+    # | with a verdict only in the report, only in the correction, | test_a_verifications_verdict_is_the_last_in_its_report_and_what_followed_it |
+    # |   in both (different), on no notice turn                  |                                                   |
+    # | stopped at the turn limit, on a notice turn               | test_a_stopped_run_and_a_design_session_keep_their_report_after_notices |
+    # | a design session, on a notice turn                        | the same                                          |
+    def test_what_a_worker_writes_after_a_notice_follows_its_report_whatever_it_did_there(self):
+        late = "\n\n(Written after that, when a background notice came in:)\n\n"
+        cases = {
+            "late-tool": "Report: fixed the badge; the tests pass." + late + "Reading the build's output.\n\n"
+                         "Correction: the build's output shows two tests fail.\n",
+            "late-twice": "Report: fixed the badge; the tests pass." + late + "That notice is the watch." + late
+                          + "The suite ended too: it passes.\n",
+            "waiting": "Waiting for the build to end." + late + "Reading the build's output.\n\n"
+                       "Report: the build passes; fixed the badge.\n"}
+        for kind, want in cases.items():
+            with self.subTest(kind):
+                self.assertEqual(self.transcript_run(kind), want)
+                self.assertIn(want.strip(), views.show_text(self.desk, self.desk.tasks()[-1]["id"], full=True)
+                              .replace("\n  ", "\n"))
+
+    def verification_transcript_run(self, kind: str, **env) -> dict:
+        """A verification run on mimo whose stand-in writes a session record of this kind; its meta."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": kind, **env}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        vid = self.desk.new_task("Verify the badge", kind="verify", lane="a")
+        return self.settle(Dispatcher(self.desk), vid)
+
+    def test_a_verifications_verdict_is_the_last_in_its_report_and_what_followed_it(self):
+        for kind, report, late, verdict in (("late-tool", "holds", "", "holds"),
+                                            ("late-tool", "", "does not hold", "does not hold"),
+                                            ("late-tool", "holds", "does not hold", "does not hold"),
+                                            ("late-twice", "does not hold", "holds", "holds"),
+                                            ("waiting", "", "unsure", "unsure"),
+                                            ("plain", "holds", "", "holds")):
+            with self.subTest(kind=kind, report=report, late=late):
+                m = self.verification_transcript_run(kind, FAKE_VERDICT_REPORT=report, FAKE_VERDICT_LATE=late)
+                self.assertEqual((m["state"], m["verdict"]), ("done", verdict), m)
+                text = (self.desk.tasks_dir / m["id"] / "result.md").read_text()
+                if report:  # the report first, then what followed it
+                    self.assertIn(f"VERDICT: {report}" + ("\n" if kind == "plain" else "\n\n(Written after that"), text)
+                if late:
+                    self.assertTrue(text.endswith(f"VERDICT: {late}\n"), text)
+
+    @design_as_on_mac
+    def test_a_stopped_run_and_a_design_session_keep_their_report_after_notices(self):
+        from hansa import run
+        self.transcript_run("plain")  # sets lane a up on mimo
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "late-tool", "FAKE_TRANSCRIPT_STOPPED": "1"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Fix the badge again"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertEqual((self.desk.tasks_dir / m["id"] / "result.md").read_text(), run.STOPPED_NOTE + "\n\n".join(
+            ["Starting a watch.", "The watch said the tests pass.", "Report: fixed the badge; the tests pass.",
+             "Reading the build's output.", "Correction: the build's output shows two tests fail."]) + "\n")
+        # a design session whose record ends on a notice turn with tool use: its last message, as before
+        did = self.desk.new_task("Make the badge bigger")
+        self.desk.update(did, lane="a", provider="mimo", worktree=self.design_worktree(did), session_id="sid-late",
+                         model_asked="mimo-x", kind="design")
+        rec = run.config_home(self.desk, "mimo", self.desk.settings()["providers"]["mimo"]) / "projects" / "-design" \
+            / "sid-late.jsonl"
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "content": [{"type": "text", "text": t}]}}
+        rows = [{"type": "user", "turnOrigin": "sdk", "message": {"role": "user", "content": "Shape it"}},
+                say("d1", "Here is the plan."),
+                {"type": "user", "turnOrigin": "task_notification", "message": {
+                    "role": "user", "content": "<task-notification> <task-id>bw1</task-id> completed"}},
+                {"type": "assistant", "message": {"id": "d2", "content": [
+                    {"type": "tool_use", "id": "u1", "name": "Bash", "input": {"command": "cat out.log"}}]}},
+                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "u1"}]}},
+                say("d3", "The build passed.")]
+        rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        with unittest.mock.patch("hansa.run.end_design"):
+            run.finish(self.desk, did, 0)
+        self.assertEqual((self.desk.tasks_dir / did / "result.md").read_text(), run.DESIGN_NOTE + "The build passed.\n")
 
     def test_without_a_session_record_the_report_is_the_last_message(self):
         tid = self.desk.new_task("Add hello.txt")

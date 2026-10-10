@@ -797,9 +797,9 @@ def _retry(desk: Desk, a) -> None:
         raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     if a.file and a.note:
         raise SystemExit("hansa: give the note as words or with --file, not both. Nothing was queued")
-    old = (desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
     note = (_text(a) if a.file else " ".join(a.note)).strip()
-    text = old + f"\n\n---\nFollow-up to {a.id} ({m['state']})." + (f" What to change: {note}" if note else "")
+    text = (_follow_up_start(desk, m) + f"\nFollow-up to {a.id} ({m['state']})."
+            + (f" What to change: {note}" if note else ""))
     report = desk.tasks_dir / a.id / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
         text += "\nThe previous attempt's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
@@ -824,13 +824,55 @@ def _retry(desk: Desk, a) -> None:
         opts.update(start_from=m["head"], base=m["base"])
         text += f"\nYou start from the previous attempt's last commit ({m['head'][:10]})."
     tid = desk.new_task(text, **opts)
+    (desk.tasks_dir / tid / NOTE_FILE).write_text(desk.redact(note) + "\n", encoding="utf-8")  # later rounds quote it
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
-        desk.update(a.id, state="replaced", replaced_by=tid)
+        desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
     print(f"{tid} queued as a follow-up to {a.id}" + (" from the base branch" if a.fresh else
                                                       f", with the current {base} merged into its branch when it starts "
                                                       f"(a conflict is left for the worker to settle)" if a.update else "")
           + (f". {_wait_for(desk, tid)}" if notify.hears_of(desk, tid) else "") + _waits(desk, tid))
+
+
+NOTE_FILE = "note.md"  # beside a follow-up's task.md: the note it was sent back with, on its own (empty: none)
+NOTE_START = 150  # how much of an earlier round's note its line quotes
+
+
+def _follow_up_start(desk: Desk, m: dict) -> str:
+    """The start of a follow-up's text to the task m: the original task (the chain's first, which is no follow-up),
+    then one line per earlier round, oldest first, m's own last. Earlier notes and reports are not carried whole:
+    each round keeps them in its own text (hansa show ID --full)."""
+    rounds, seen = [m], {m["id"]}
+    while rounds[0].get("parent") and rounds[0]["parent"] not in seen:
+        try:
+            r = desk.meta(rounds[0]["parent"])
+        except SystemExit:
+            break
+        if r.get("kind") == "verify":
+            break
+        seen.add(r["id"])
+        rounds.insert(0, r)
+    first = (desk.tasks_dir / rounds[0]["id"] / "task.md").read_text(encoding="utf-8").strip()
+    if rounds[0].get("parent"):  # the chain's first is gone: its text is the start of the earliest left
+        first = first.split("\n\n---\n")[0]
+    lines = []
+    for r in rounds:
+        state = m["state"] if r is m else r.get("ended_as") or r["state"]
+        vid = r.get("verify")
+        how = state + (f", verified by {vid} (verdict: {desk.meta(vid).get('verdict') or 'none'})" if vid
+                       else ", not verified")
+        f = desk.tasks_dir / r["id"] / NOTE_FILE
+        if not r.get("parent"):
+            said = "the original task, above"
+        elif not f.exists():
+            said = "its note was not recorded on its own (it was sent back before hansa recorded notes)"
+        else:
+            n = " ".join(f.read_text(encoding="utf-8").split())
+            said = f"its note: \"{n[:NOTE_START]}{' ...' if len(n) > NOTE_START else ''}\"" if n else "no note"
+        lines.append(f"- {r['id']}: {how}; {said}; its whole text: hansa show {r['id']} --full")
+    return (first + "\n\n---\nThe earlier rounds of this task, oldest first:\n" + "\n".join(lines)
+            + "\nTheir notes and reports are not carried beyond these lines: what still holds of an earlier note is "
+              "said again in this round's note.")
 
 
 def cmd_cancel(a):
@@ -2535,9 +2577,11 @@ def main(argv=None):
     p = add("retry", cmd_retry, "queue a follow-up to a task")
     p.add_argument("id")
     p.add_argument("note", nargs="*")
-    p.description = ("queue a follow-up to a task. Its worker is given the task, the note, the previous attempt's "
+    p.description = ("queue a follow-up to a task. Its worker is given the original task, one line per earlier round "
+                     "(its id, how it ended, the start of its note), this note, the previous attempt's "
                      "report and, when that attempt was verified, the latest verification's report whole, with its "
-                     "verdict, whatever the verdict was. The follow-up replaces the earlier task: the earlier "
+                     "verdict, whatever the verdict was. Earlier notes are not carried, so repeat in this note what "
+                     "still holds of them. The follow-up replaces the earlier task: the earlier "
                      "task is replaced at once (its verification, if one is open, closed), and the follow-up is the "
                      "one to review and merge.")
     p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
