@@ -412,11 +412,6 @@ otherwise run `hansa notify on` once. `hansa notify` shows which sessions it
 posts to. While it posts to yours, do not keep `hansa wait` running in the
 background. Tasks and requests you made come to you; those made elsewhere
 come to every session hansa posts to.
-Hansa replaces desk records, text and published output whole: a failed write keeps the previous file and
-its permissions, removes its temporary file, and keeps a run's raw source if publishing failed. The event
-log stays append-only. A failed append may leave a damaged line; readers skip it, and the next append starts
-a new line so its event is retained, including when commands append at the same time. Live process logs,
-lock files and commands' disposable scratch files keep their existing write behavior.
 Since hansa posts when a task, a verification or a merge ends and when the
 principal answers, you need no scheduled wakeups and no polling to find out:
 end your turn and wait. Each wakeup or poll is a turn that rereads the whole
