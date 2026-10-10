@@ -22,7 +22,7 @@ from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, den
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
-                  conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
+                  conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
@@ -842,16 +842,7 @@ def _follow_up_start(desk: Desk, m: dict) -> str:
     """The start of a follow-up's text to the task m: the original task (the chain's first, which is no follow-up),
     then one line per earlier round, oldest first, m's own last. Earlier notes and reports are not carried whole:
     each round keeps them in its own text (hansa show ID --full)."""
-    rounds, seen = [m], {m["id"]}
-    while rounds[0].get("parent") and rounds[0]["parent"] not in seen:
-        try:
-            r = desk.meta(rounds[0]["parent"])
-        except SystemExit:
-            break
-        if r.get("kind") == "verify":
-            break
-        seen.add(r["id"])
-        rounds.insert(0, r)
+    rounds = rounds_of(desk, m)
     first = (desk.tasks_dir / rounds[0]["id"] / "task.md").read_text(encoding="utf-8").strip()
     if rounds[0].get("parent"):  # the chain's first is gone: its text is the start of the earliest left
         first = first.split("\n\n---\n")[0]
@@ -951,7 +942,7 @@ def _verify(desk: Desk, a) -> None:
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
     note = " ".join(a.note).strip()
     sess = notify.session_here()
-    text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12])
+    text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12]) + _check_ran(desk, m)
             + (f"\nLook in particular at: {note}\n" if note else "")
             + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
     vid = desk.new_task(text, kind="verify", parent=a.id, lane=lane, effort=a.effort or "",
@@ -964,6 +955,22 @@ def _verify(desk: Desk, a) -> None:
           + f": a worker will run {a.id}'s change to see whether it holds. "
           + (_wait_for(desk, vid) if notify.hears_of(desk, vid) else f"Follow it with: hansa wait {vid}")
           + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
+
+
+def _check_ran(desk: Desk, m: dict) -> str:
+    """For a verification's text: the task's last check, as hansa ran it, so that its worker need not run the
+    whole of it again."""
+    chk = m.get("check") or {}
+    if not chk.get("command"):
+        return f"\nTask {m['id']} has no check: hansa ran none on it.\n"
+    cmd = desk.redact(chk["command"])
+    if chk.get("could_not_run"):
+        return f"\nhansa could not run the lane's check on task {m['id']} ({chk.get('note', '')}): `{cmd}`\n"
+    ended = (m.get("check_started") or 0) + (chk.get("seconds") or 0) if m.get("check_started") else None
+    when = f" at {time.strftime('%Y-%m-%d %H:%M', time.localtime(ended))}" if ended else ""
+    how = f"passed{when}" if chk.get("ok") else f"failed{when} ({chk.get('note') or 'exit ' + str(chk.get('exit'))})"
+    return (f"\nThe task's last check, which hansa ran on it: `{cmd}`. It {how}. The whole check need not be run "
+            f"again unless you need to.\n")
 
 
 def _same_repo(x: str, y: str) -> bool:

@@ -21,6 +21,9 @@ Details are under `hansa help <topic>`; `hansa help topics` lists them (and the 
    from hansa). Only when it does not, run `hansa wait` in the background.
 5. You review and merge, or send it back with what to change. If the base moved
    meanwhile, hansa checks the merge before it lands (see Merging).
+   When a task fails its verification a second time for the same kind of
+   reason, rethink it rather than sending it back again: make it smaller, ask
+   for less, or start again from the base.
 6. Releasing is the last step: `hansa release L` asks for the lane's base branch
    to go out, the principal says yes on the page, and only then does hansa run
    the lane's release command (see Releasing). You never push or deploy yourself:
@@ -62,7 +65,7 @@ Details are under `hansa help <topic>`; `hansa help topics` lists them (and the 
 | `hansa release --stop ID ["<reason>"]` | call release ID off: one not started yet is closed as stopped; a running one's command gets TERM, then KILL 30 s later, and is recorded as stopped (the server may be left half-switched) |
 | `hansa release L [TARGET] ["<note>"]` | ask for a release of lane L's base branch as it is now, by one of its release targets (TARGET is needed when the lane has more than one): hansa runs that target's command after the principal's yes on the page (see Releasing). `hansa release` alone lists the open and recent releases |
 | `hansa release yes\|no ID CODE [reason]` | pass on the principal's answer to release ID, said in the conversation with the one-time code of their alert (see Releasing); never guess a code |
-| `hansa retry <id> "<what to change>" [--fresh \| --update] [--effort high] [--browser]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the original task, one line per earlier round, this note, the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. Earlier notes are not carried, so repeat what still holds. `--file PATH` reads a long note from a file (`-`: standard input); `--effort` and `--browser` as for `hansa add`. Options may come before or after the note |
+| `hansa retry <id> "<what to change>" [--fresh \| --update] [--effort high] [--browser]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the original task, one line per earlier round, this note, the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. Earlier notes are not carried, so repeat what still holds. `hansa show` of a follow-up says which round it is, the earlier rounds and how many a verification found do not hold. `--file PATH` reads a long note from a file (`-`: standard input); `--effort` and `--browser` as for `hansa add`. Options may come before or after the note |
 | `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below); `--file PATH` reads the brief from a file (`-`: standard input) |
 | `hansa verify <id> ["what to look at"] [--lane L] [--effort high] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged. It runs on the task's own lane unless `--lane L` puts it on another lane on the same repository |
 | `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |

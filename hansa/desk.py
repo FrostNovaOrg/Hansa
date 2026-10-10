@@ -2218,7 +2218,7 @@ class Desk:
         self.event("key_set", provider=provider, by=by)
         self.ready_news()
 
-    PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
+    PUBLISHED = ("task.md", "note.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
                  "merge-setup.log", "merge-check.err")
 
     def scrub(self, key: str, provider: str) -> None:
