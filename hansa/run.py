@@ -1440,15 +1440,14 @@ def report_after_notices(home: Path, sid: str):
         return [c["text"].strip() for c in blocks(d, "text") if isinstance(c.get("text"), str) and c["text"].strip()]
 
     # A turn opens on a user row with turnOrigin; tool results are user rows without it. A notice
-    # that came in while the worker was busy is part of the work: only a notice that opened a turn after
-    # the worker had stopped is after the report.
+    # that came in while the worker was busy is part of the work, and the walk back goes past it: only a notice
+    # that opened a turn after the worker had stopped is after the report.
     openers = [i for i, d in enumerate(rows) if d.get("type") == "user" and d.get("turnOrigin")]
     cuts = []  # the turns those notices opened, by their first row
     while openers and rows[openers[-1]]["turnOrigin"] == "task_notification":
         i = openers.pop()
-        if not (i > 0 and rows[i - 1].get("type") == "assistant" and not blocks(rows[i - 1], "tool_use")):
-            break
-        cuts.insert(0, i)
+        if i > 0 and rows[i - 1].get("type") == "assistant" and not blocks(rows[i - 1], "tool_use"):
+            cuts.insert(0, i)
     if not cuts:
         return None
     said = [(i, (rows[i].get("message") or {}).get("id")) for i in range(cuts[0]) if texts(rows[i])]
@@ -3684,6 +3683,7 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
     else:
         out.append("- After you end, hansa runs the lane's check here, in the same sandbox, and judges the "
                    f"task by it: {shown(lane['check'], 'check')}")
+        out.append("- So run yourself only the tests related to your change, not the whole check.")
     if own_merge_check(lane):
         out.append("- Before it merges a task, not after the task ends, hansa runs the lane's merge check on the task "
                    "merged with the base branch, in this worktree and the same sandbox; a merge check that fails "
@@ -4614,6 +4614,66 @@ def unverified_note(desk: Desk, m: dict) -> str:
                 f"retries, has a verification that holds")
     return (f"nothing verified this change: {what}, and neither it nor any attempt it retries "
             f"({', '.join(x['id'] for x in earlier)}) has a verification that holds")
+
+
+RETHINK = ("This task has not held {n} times. Before sending it back again, rethink it: make it smaller, ask for "
+           "less, or start again from the base.")
+
+
+def rounds_of(desk: Desk, m: dict) -> list:
+    """The rounds of the task m (no verification) is the latest of, oldest first, m last: each follow-up's parent
+    is the attempt hansa retry sent back. Only those hansa still has: when the earliest left is itself a follow-up
+    (it has a parent), the rounds before it are gone."""
+    rounds, seen = [m], {m["id"]}
+    while rounds[0].get("parent") and rounds[0]["parent"] not in seen:
+        try:
+            r = desk.meta(rounds[0]["parent"])
+        except SystemExit:
+            break
+        if r.get("kind") == "verify":
+            break
+        seen.add(r["id"])
+        rounds.insert(0, r)
+    return rounds
+
+
+def _latest_verdict(desk: Desk, m: dict) -> str:
+    """The verdict of a task's latest verification; '' when it has none, or it is gone."""
+    try:
+        return (desk.meta(m["verify"]).get("verdict") or "") if m.get("verify") else ""
+    except SystemExit:
+        return ""
+
+
+def rounds_line(desk: Desk, m: dict) -> str:
+    """For hansa show of a follow-up: which round it is, the earlier rounds' ids, oldest first, and how many of
+    them their latest verification found do not hold, counting only what hansa still has. '' for a task that is
+    no follow-up."""
+    if m.get("kind") == "verify" or not m.get("parent"):
+        return ""
+    rounds = rounds_of(desk, m)
+    earlier = rounds[:-1]
+    which = (f"round {len(rounds)}" if not rounds[0].get("parent") else
+             f"round {len(rounds) + 1} or later (the rounds before {rounds[0]['id']} are gone)")
+    n = sum(_latest_verdict(desk, r) == "does not hold" for r in earlier)
+    return (f"rounds: this is {which}; earlier rounds, oldest first: "
+            f"{', '.join(r['id'] for r in earlier) or 'none left'}; a verification judged {n} of them "
+            f"\"does not hold\"")
+
+
+def rethink_text(desk: Desk, m: dict) -> str:
+    """RETHINK, for a follow-up in review (or the verification of one, the latest) whose latest verification
+    found it does not hold, when its rounds now have two or more such verdicts; '' otherwise."""
+    if m.get("kind") == "verify":
+        try:
+            parent = desk.meta(m.get("parent") or "-")
+        except SystemExit:
+            return ""
+        return rethink_text(desk, parent) if parent.get("verify") == m["id"] else ""
+    if not m.get("parent") or m.get("state") != "done" or _latest_verdict(desk, m) != "does not hold":
+        return ""
+    n = sum(_latest_verdict(desk, r) == "does not hold" for r in rounds_of(desk, m))
+    return RETHINK.format(n=n) if n >= 2 else ""
 
 
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:

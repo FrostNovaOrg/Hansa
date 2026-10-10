@@ -616,7 +616,7 @@ def _code_key(desk: Desk) -> bytes:
     f = code_key_file(desk)
     if not f.is_file():
         desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
-        write_text(f, secrets.token_hex(32), mode=0o600)
+        write_text(f, secrets.token_hex(32), mode=0o600, follow_symlinks=False)
     return f.read_text().strip().encode()
 
 

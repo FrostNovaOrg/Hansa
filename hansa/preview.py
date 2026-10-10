@@ -153,7 +153,8 @@ def main() -> int:
 
     def save():  # whole or not at all: hansa may read it meanwhile
         with rec_lock:
-            write_text(Path(state), json.dumps({**rec, "seen": {str(p): s for p, s in seen_procs.items()}}))
+            write_text(Path(state), json.dumps({**rec, "seen": {str(p): s for p, s in seen_procs.items()}}),
+                       follow_symlinks=False)
     save()  # before anything else: hansa can stop the group even if this is stopped first
     stopping, done = [], threading.Event()
 

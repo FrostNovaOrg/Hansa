@@ -50,7 +50,7 @@ from pathlib import Path
 
 from . import account, disk, session_value, without_session
 from .desk import Desk, event_record, now, read_json, write_json
-from .run import alive, claude_bin, proc_start, server_state, srt_needed, srt_record
+from .run import alive, claude_bin, proc_start, rethink_text, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
 SEEN_EVERY = 10  # a feed that changes nothing else in the follower's record writes its seen this often
@@ -209,8 +209,10 @@ def task_line(desk: Desk, m: dict) -> str:
         what = "merge" if (m.get("merge_check") or {}).get("plain") else "merge check"
         head += f" (its {what} is queued and waits for {ahead})" if ahead else f" (its {what} is queued or running)"
     from .views import background_note
+    rethink = rethink_text(desk, m) if m.get("kind") == "verify" else ""
     note = background_note(m)
-    return f"{head} · next: {_next_step(desk, tid)}" + (f" · {note}" if note else "")
+    return (f"{head}{' · ' + rethink if rethink else ''} · next: {_next_step(desk, tid)}"
+            + (f" · {note}" if note else ""))
 
 
 def _item(desk: Desk, e: dict):

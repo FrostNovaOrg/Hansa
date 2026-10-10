@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -295,19 +296,30 @@ def json_text(data) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
-def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
+def _write_target(path: Path) -> Path:
+    if path.is_symlink():
+        try:
+            return path.resolve()
+        except RuntimeError as e:  # Python 3.9 reports a link loop this way
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links", str(path)) from e
+    return path
+
+
+def write_bytes(path: Path, data: bytes, mode: int | None = None, *, follow_symlinks: bool = True) -> None:
     """Replace a file whole; preserve its mode and clean up even when writing or closing fails.
 
     New files use the caller's mode (otherwise 0666 under the umask). An explicit mode is for keys and
     other private files that hansa already made 0600. The temporary file is on the same filesystem.
+    Former in-place writers follow links; callers that already replaced files replace the link itself.
     """
-    if path.is_symlink():
-        path = path.resolve()
+    if follow_symlinks:
+        path = _write_target(path)
     if mode is None:
         try:
             mode = stat.S_IMODE(path.stat().st_mode)
-        except FileNotFoundError:
-            pass
+        except OSError as e:
+            if e.errno != errno.ENOENT and not (not follow_symlinks and e.errno == errno.ELOOP):
+                raise
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{_secrets.token_hex(4)}.tmp")
     made = False
     try:
@@ -323,12 +335,12 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
             tmp.unlink(missing_ok=True)
 
 
-def write_text(path: Path, text: str, mode: int | None = None) -> None:
-    write_bytes(path, text.encode("utf-8"), mode)
+def write_text(path: Path, text: str, mode: int | None = None, *, follow_symlinks: bool = True) -> None:
+    write_bytes(path, text.encode("utf-8"), mode, follow_symlinks=follow_symlinks)
 
 
 def write_json(path: Path, data) -> None:
-    write_text(path, json_text(data))
+    write_text(path, json_text(data), follow_symlinks=False)
 
 
 # Command wrappers define this shell helper so completion files need neither Python nor this module.
@@ -363,9 +375,7 @@ WRITE_FILE = r'''write_file() {
 
 def copy_file(src, dst):
     """copy2 for kept evidence, with a whole destination and no leftover temporary on failure."""
-    path = Path(dst)
-    if path.is_symlink():
-        path = path.resolve()
+    path = _write_target(Path(dst))
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
@@ -2320,13 +2330,13 @@ class Desk:
         if problem:
             raise ValueError(problem)
         with self.lock():  # a provider check compares and records under the same lock
-            write_text(f, value.strip() + "\n", mode=0o600)
+            write_text(f, value.strip() + "\n", mode=0o600, follow_symlinks=False)
             self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
             self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
         self.ready_news()
 
-    PUBLISHED = ("task.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
+    PUBLISHED = ("task.md", "note.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
                  "merge-setup.log", "merge-check.err")
 
     def scrub(self, key: str, provider: str) -> None:

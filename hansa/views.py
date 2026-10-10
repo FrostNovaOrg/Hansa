@@ -14,7 +14,7 @@ from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, event_record, no_re
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
-                  provider_problem, rest_minutes, rest_text, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  provider_problem, rest_minutes, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_looks, waiting_reason, write_list)
 
 STATES = {
@@ -920,6 +920,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    + ("it is open now" if m["state"] == "running" and m.get("phase") != "checking"
                       else "it comes back for review when they end it" if m["state"] == "queued" else meaning))
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
+    out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
         out.append(f"error: {m['error']}")
     out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
@@ -1067,6 +1068,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    + ("" if v["state"] in ("queued", "running") else f"; hansa show {v['task']} says what it ran"))
     if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
         out.append(f"verdict: {m.get('verdict') or 'none given'}")
+        out += [x for x in (rethink_text(desk, m),) if x]
     runs, usage = cost.task_runs(m), {}  # every try's, each once, as hansa cost counts them
     for r in runs:
         usage = add_usage(usage, r["usage"])

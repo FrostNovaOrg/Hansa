@@ -401,7 +401,7 @@ def _trim_one(f: Path, at: float) -> int | None:
     head = (f"[hansa trimmed this log on {time.strftime('%Y-%m-%d %H:%M', time.localtime(at))}: it was {size:,} "
             f"bytes; its last {len(tail):,} bytes follow]\n").encode()
     try:
-        write_bytes(f, head + tail)
+        write_bytes(f, head + tail, follow_symlinks=False)
     except OSError:
         return None
     return size
