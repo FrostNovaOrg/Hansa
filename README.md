@@ -165,7 +165,8 @@ does not hear it; only you can change that.
 ## Everyday commands
 
 The coordinator runs these; you can run them too. Every coordinator command is in
-[`hansa/card.md`](hansa/card.md), which `hansa help` prints. `hansa --help` lists every command, the
+[`hansa/card.md`](hansa/card.md), which `hansa help card` prints; `hansa help` alone lists the commands and
+the topics, and `hansa help <topic>` prints one from `docs/`. `hansa --help` lists every command, the
 principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` (or
 `hansa help <command>`) gives all of a command's options.
 
@@ -284,7 +285,7 @@ output.
 
 | Document | What is in it |
 |---|---|
-| [`hansa/card.md`](hansa/card.md) | The coordinator's whole interface: how work moves, every command, what it may change. `hansa help` prints it, and each desk holds a copy as `CLAUDE.md`. |
+| [`hansa/card.md`](hansa/card.md) | The coordinator's whole interface: how work moves, every command, what it may change. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
 | [Workers and the sandbox](docs/sandbox.md) | What workers, verifiers and design sessions may touch; git's folders; the sandbox try; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
 | [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits, browser tasks and the preview |

@@ -1,5 +1,9 @@
 # The desk: files, keys and notes
 
+## A desk's files
+
+### Where a desk's files are
+
 Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py). Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the
 provider's endpoint, as that worker's environment. hansa replaces a key with
@@ -8,10 +12,9 @@ change that holds one. The coordinator's permission rules are hansa's: they are
 in the desk's `.claude/settings.json` and come up to date whenever the
 coordinator starts. The principal's own rules go in `.claude/settings.local.json`.
 The coordinator creates and edits files under the desk's `notes/` without
-asking (its plan and findings, kept past a cleared session); everything else it
-edits asks as before, and the closed files stay closed. `hansa notes archive FILE HEADING`
-moves a finished section from a notes file to `notes/archive/FILE` without the
-coordinator typing it out again.
+asking (its plan and findings; how it keeps them short is at the end of
+[The daily clear](#the-daily-clear)); everything else it edits asks as before,
+and the closed files stay closed.
 
 The project's own rules (how it builds, what may never go out, who decides what)
 go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
@@ -36,6 +39,29 @@ guessed next message in the coordinator's input box (prompt suggestions); in a
 tmux capture without colors that grey guess looked typed. With an older
 Claude Code, where a grey line still shows there, the principal should not press
 Enter on what looks like an empty box: it may send the guess as if they wrote it.
+
+### Where a desk's files grow
+
+| What | Where | How big |
+|---|---|---|
+| A task's text, record, report and result | `tasks/<id>/task.md`, `meta.json`, `result.md`, `run.json` | a few KB to some tens of KB each; kept whole |
+| What a task's processes printed | `tasks/<id>/run.err` (the worker's errors), `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err` | whatever the lane's setup, check and merge check print: not capped while the task is open (a verbose build can print hundreds of MB) |
+| A preview's output | `tasks/<id>/preview.log`, `preview-before-resume.log` | at most 4 MB each, its first and last 2 MB |
+| A browser task's screenshots | `tasks/<id>/browser/` | as many as the worker takes; kept whole |
+| A lane's last try | `lanes/<lane>/try.log`, `merge-check-try.log` | at most 4 MB per step (its first and last 2 MB), replaced by the next try |
+| The event log | `events.jsonl` | a few hundred bytes per event, append-only; never trimmed |
+| A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
+| A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
+| Each lane's worktree | `worktrees/<lane>/`, `worktrees/<lane>-design/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |
+| A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
+| A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |
+
+Since a task's logs are not capped, once a day `hansa serve` trims those of every task that ended (merged,
+cancelled, failed or replaced) more than 30 days ago: each of the logs above (not the text, record, report or
+result, nor the screenshots) is cut to its last 256 KB, from the start of a line, under a first line that says
+it was trimmed, when, and how big it was. The task's record notes it, and `hansa show` says which logs were
+trimmed, when, and their size before. A task still open, or one that ended less than 30 days ago, keeps all of
+its logs; the event log is not touched.
 
 ## Hearing from hansa
 
@@ -116,8 +142,9 @@ So the coordinator keeps what must survive in the desk (tasks, requests, and
 its notes under `notes/`), not only in the conversation. It keeps the notes file
 it rereads each time it picks the work up short, since each reading costs it:
 the current work and open items only. It moves finished rounds to another file
-there that it does not reread, without asking the principal, with `hansa notes
-archive FILE HEADING`; `hansa notes` lists the files with their sizes and
+there that it does not reread, without asking the principal and without typing
+them out again, with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`
+unless `--to` names another); `hansa notes` lists the files with their sizes and
 headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 
 ## Free space
@@ -167,26 +194,3 @@ Free space rather than lower the floor. A lane whose builds leave large outputs 
 `build/`, `node_modules/`, a compiler's cache), or fill a cache of its own (a Maven or pip cache on its write
 list), should clean them in its setup, which runs before each task: `mvn -q clean` or `rm -rf build`, or a cache
 pruned past a size, keeps the worktree from growing with every task.
-
-## Where a desk's files grow
-
-| What | Where | How big |
-|---|---|---|
-| A task's text, record, report and result | `tasks/<id>/task.md`, `meta.json`, `result.md`, `run.json` | a few KB to some tens of KB each; kept whole |
-| What a task's processes printed | `tasks/<id>/run.err` (the worker's errors), `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err` | whatever the lane's setup, check and merge check print: not capped while the task is open (a verbose build can print hundreds of MB) |
-| A preview's output | `tasks/<id>/preview.log`, `preview-before-resume.log` | at most 4 MB each, its first and last 2 MB |
-| A browser task's screenshots | `tasks/<id>/browser/` | as many as the worker takes; kept whole |
-| A lane's last try | `lanes/<lane>/try.log`, `merge-check-try.log` | at most 4 MB per step (its first and last 2 MB), replaced by the next try |
-| The event log | `events.jsonl` | a few hundred bytes per event, append-only; never trimmed |
-| A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
-| A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
-| Each lane's worktree | `worktrees/<lane>/`, `worktrees/<lane>-design/` | the repository's checkout, and what builds leave in it (see above) |
-| A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
-| A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |
-
-Since a task's logs are not capped, once a day `hansa serve` trims those of every task that ended (merged,
-cancelled, failed or replaced) more than 30 days ago: each of the logs above (not the text, record, report or
-result, nor the screenshots) is cut to its last 256 KB, from the start of a line, under a first line that says
-it was trimmed, when, and how big it was. The task's record notes it, and `hansa show` says which logs were
-trimmed, when, and their size before. A task still open, or one that ended less than 30 days ago, keeps all of
-its logs; the event log is not touched.

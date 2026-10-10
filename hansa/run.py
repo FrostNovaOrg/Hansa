@@ -811,7 +811,8 @@ def sandbox_held_text(h: dict) -> str:
             + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
                "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
             + f"; this holds {SANDBOX_GROUPS[sandbox_group(h.get('kind') or '')]}, which start by themselves once a "
-              "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server)")
+              "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server; more: hansa help "
+              "sandbox-probe)")
 
 
 def sandbox_clear(desk: Desk, lane_name: str, group: str) -> None:
@@ -2681,7 +2682,7 @@ def words_text(tid: str, hits: list) -> str:
             f"merged: once on the base branch, its history would keep them\n{hits_text(hits)}\nTake them out with "
             f"hansa retry {tid} --fresh \"...\" (a retry that continues from {tid} keeps its commits; a word in the "
             f"title or in the lane's merge_message or identity: add the task again with another --title, or change "
-            f"the lane), or ask the principal about the words (hansa ask)")
+            f"the lane), or ask the principal about the words (hansa ask). More: hansa help forbidden-words")
 
 
 def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
@@ -2774,12 +2775,13 @@ MAVEN_WORDS = re.compile(r"Could not transfer artifact|Could not resolve|Failed 
 NOT_MAVEN = re.compile(r"npm ERR!|npm error|^\s*curl:|Received status code|Could not (GET|HEAD) '")  # npm, curl, Gradle
 MKTEMP_HINT = ("mktemp was refused: macOS's mktemp -d, mktemp -t PREFIX and a bare mktemp ignore TMPDIR and write "
                "under /var/folders, which a lane may not write; give it a template in TMPDIR instead: "
-               "mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\"")
+               "mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\" or mktemp -d -p \"$TMPDIR\". More: hansa help java")
 MKTEMP_OUTSIDE_HINT = ("mktemp was refused: the folder it writes in is outside what the lane may write; give it a "
-                       "template in TMPDIR: mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\"")
+                       "template in TMPDIR: mktemp -d \"${TMPDIR:-/tmp}/name.XXXXXX\". More: hansa help java")
 MAVEN_407_HINT = ("Maven got 407 Proxy Authentication Required: hansa gives Maven the sandbox's proxy through "
                   "MAVEN_ARGS (-gs <file>), and a build script that sets MAVEN_ARGS itself drops it (in bash "
-                  "MAVEN_ARGS=(-B) makes an array, which is not exported); keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-})")
+                  "MAVEN_ARGS=(-B) makes an array, which is not exported); keep it: MAVEN_ARGS=(-B ${MAVEN_ARGS:-}). "
+                  "More: hansa help java")
 
 
 def maven_407(line: str) -> bool:
@@ -3494,7 +3496,8 @@ def conflict_advice(tid: str, base: str, places: str, error: str = "") -> str:
     return (f"hansa: {tid} conflicts with {base}; nothing was merged.{where}"
             f"Next: hansa retry {tid} --update \"<how to settle the conflict>\" (a worker continues from {tid}'s "
             f"branch with the current {base} merged into it, and settles the conflict by editing the files); "
-            f"or, to redo the whole change: hansa retry {tid} --fresh \"<the same change on the current {base}>\"")
+            f"or, to redo the whole change: hansa retry {tid} --fresh \"<the same change on the current {base}>\". "
+            "More: hansa help merge-check")
 
 
 def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: str = "", ident=None) -> list:

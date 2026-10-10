@@ -258,7 +258,7 @@ spends no turns on cost.
 
 ## Task states
 
-`hansa explain states` prints these; they say the same.
+`hansa help states` prints this section.
 
 | State | What it means |
 |---|---|
