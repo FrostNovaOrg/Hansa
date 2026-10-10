@@ -365,6 +365,7 @@ def explain_lines(desk: Desk, s: dict) -> list:
     lines += [f"  {volume_text(v, fl)}" for v in vols]
     lines += [f"  {x}" for x in unknown_lines(desk, rec)]
     lines += [f"  now: {held_text(desk, low, fl)}"] if low else []
+    lines += ["  More: hansa help free-space"]
     return lines
 
 

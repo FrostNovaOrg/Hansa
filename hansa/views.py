@@ -601,7 +601,7 @@ def status_text(st: dict) -> str:
     out += [st["serve_session"]] if st.get("serve_session") else []
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
-    out += [st["disk"]["low_text"]] if (st.get("disk") or {}).get("low_text") else []
+    out += [st["disk"]["low_text"] + ". More: hansa help free-space"] if (st.get("disk") or {}).get("low_text") else []
     out += (st.get("disk") or {}).get("unknown") or []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
     out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
@@ -621,7 +621,8 @@ def status_text(st: dict) -> str:
                    + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else
                                      "UNABLE TO RUN" if "work" in (ln.get("held") or {}) else "free"))
                    + ("; its design sessions UNABLE TO RUN" if "design" in (ln.get("held") or {}) else "")
-                   + "".join(f"\n      {sandbox_held_text(h)}" for h in (ln.get("held") or {}).values()))
+                   + "".join(f"\n      {sandbox_held_text(h)}" for h in (ln.get("held") or {}).values())
+                   + ("\n      More: hansa help sandbox-probe" if ln.get("held") else ""))
     if st["running"]:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
@@ -705,7 +706,8 @@ def limit_wait(desk: Desk, m: dict) -> str:
     return (f"waits for the rest of {last['provider']} after its usage limit, until "
             f"{time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))}" + (f" ({how})" if how else "")
             + f"; it starts again then, or sooner on another provider of lane {m.get('lane') or 'any'} that is ready."
-            + (" That return used a try." if last.get("counted") else " That return used no try."))
+            + (" That return used a try." if last.get("counted") else " That return used no try.")
+            + " More: hansa help provider-limits")
 
 
 def markers_of(desk: Desk, m: dict) -> dict:
@@ -1395,6 +1397,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *([f"  {LINUX_TRY_NOTE[0].upper()}{LINUX_TRY_NOTE[1:]}."] if account.LINUX else []),
             *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, groups in sorted(sandbox_held(desk).items())
               for h in groups.values()],
+            "  More: hansa help sandbox-probe",
             *disk.explain_lines(desk, desk.settings())])
     if what == "notify":
         who = notify.names(desk)
@@ -1439,9 +1442,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "itself. hansa notify shows the window and today's state; the follower's log has each reason it held.",
             "  now: " + (", ".join(who) if who else "no session")])
     return "\n".join([
-        "What you can look up: hansa explain lane <name> | provider <name> | task <id> | states | server | notify",
+        "What you can look up: hansa explain lane <name> | provider <name> | task <id> | server | notify",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
-        page_text(page_of(desk, server_state(desk))),
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
         *read_lines(desk, s),

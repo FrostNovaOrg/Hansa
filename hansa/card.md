@@ -3,6 +3,7 @@
 You coordinate worker agents through `hansa`. This card is the whole interface:
 you never need to read hansa's code. If a command's output leaves you unsure what
 to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
+Details are under `hansa help <topic>`; `hansa help topics` lists them (and the table at the end).
 
 ## How work moves
 1. You queue a task: one change a worker can make and check on its own.
@@ -68,7 +69,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa notify [on \| off]` | list the sessions hansa posts to; `on` / `off`: start or stop posting to this session (see Hearing from hansa) |
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background only when hansa does not post to your session |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
-| `hansa explain [lane L [--all] \| provider P \| task ID \| states \| server \| notify]` | what a setting or state means and where it comes from; `notify`: how hansa posts to your session and which sessions it posts to; alone, also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
+| `hansa explain [lane L [--all] \| provider P \| task ID \| server \| notify]` | this desk's current settings and state, and where each comes from; `notify`: how hansa posts to your session and which sessions it posts to; `server`: also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, and its message forms when set |
 | `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--network HOST ...] [--allow RULE ...] [--release-files "PATH ..."]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one; `--network`: the hosts its workers, setup and check may reach (default: none). A lane without a check has its tasks merged untested |
 | `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release targets, release_files, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
@@ -86,7 +87,7 @@ to do next, that is a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa ask --close N "<why>"` | close open request #N yourself when it is done another way (the principal did it and said so in the conversation, say); the reason is required, and the page shows it as closed by the coordinator. Only you can: not workers, verifications or design sessions |
 | `hansa notes [PATH]` | the files under the desk's `notes/`, each with its size, lines and headings (with line numbers) |
 | `hansa notes archive FILE HEADING [--to OTHER]` | move the section of `notes/FILE` under the heading matching HEADING (its text, whole or a start that matches one heading; with #s in front, as in `"## Round 1"`, only a heading of that level), up to the next heading of the same or a higher level, to the end of `notes/archive/FILE` (or `notes/OTHER`), with a line saying when; refused, changing nothing, when it matches no heading or several |
-| `hansa help [command]` | this card; with a command, that command's help, as `hansa <command> --help` prints it |
+| `hansa help [command \| topic \| card \| topics]` | alone, the commands and the topics; with a command, that command's help, as `hansa <command> --help` prints it (`hansa help lane add` too); with a topic, its section of hansa's docs; `card`: this card; `topics`: the topics, one line each. What a task's states mean: `hansa help states` |
 
 Add `--json` to `status` or `cost` for machine-readable output. `hansa <command> --help`
 gives all of a command's options.
@@ -797,3 +798,36 @@ this card: rules for a lane's workers go in its brief
 (`hansa lane brief L`). If the file is missing, nothing loads and nothing breaks.
 
 @notes/PROJECT.md
+
+## More: hansa help TOPIC
+| Topic | What it holds |
+|---|---|
+| `workers-sandbox` | what workers, verifiers and design sessions may read, write and reach |
+| `git-folders` | what each run may write in git's folders, and what hansa checks before it runs git in a worktree |
+| `sandbox-probe` | the probe of the sandbox before a run, and what holds runs back when it fails |
+| `write-env` | the folders a lane's runs may write, and the environment they get |
+| `network-list` | the hosts a lane's runs may reach; localhost on Linux and on macOS |
+| `web-tools` | a lane's allow list: commands, WebFetch and WebSearch, and the rules it refuses |
+| `refused-paths` | the paths hansa refuses on a lane's lists |
+| `leftovers` | what hansa stops when a run ends, and what it leaves |
+| `release-flow` | how a release goes out: targets, the principal's answer and codes, fixed targets, stopping one |
+| `forbidden-words` | the word scan of the principal's forbidden words, at a release, a merge and a title |
+| `release-files` | release_files: the files a release runs outside the sandbox, and the verification a change to one needs |
+| `alerts` | the principal's alert command: what it is told, and when |
+| `time-limits` | a task's limits of turns and minutes, and work a worker leaves running in the background |
+| `provider-limits` | retries after a dropped connection, and a provider's rest after a usage limit |
+| `check-output` | where a check's and a merge check's output is kept, and how to read it |
+| `effort` | which effort a run gets, and where it comes from |
+| `browser` | a task with a browser, the browser tool and the lane's preview |
+| `merge-check` | merging, the merge check and conflicts |
+| `cost-figures` | what hansa cost counts, and what the figures mean |
+| `states` | a task's states and what each means |
+| `inbox` | how hansa posts to the coordinator's session, hansa wait, and the daily clear |
+| `free-space` | the floor of free space under which hansa serve starts nothing new |
+| `desk-files` | where a desk's files are (keys, settings, notes/, PROJECT.md) and where they grow |
+| `java` | Java and Maven in a lane: the proxy, the temporary folder, mktemp, Maven's 407, Mockito, the lane's settings |
+| `linux-root` | on a Linux server: the coordinator as root, the desk as an ordinary account |
+| `linux-sandbox` | what a lane's commands meet in Linux's sandbox |
+| `who-changes-what` | what the principal sets, what the coordinator sets, and what runs outside the worker |
+| `commits` | the messages and the identity of the commits hansa makes |
+| `session-identity` | what a process started from a Claude Code session inherits from it, and the page's token |

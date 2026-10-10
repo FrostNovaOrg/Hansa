@@ -1288,22 +1288,22 @@ class DeskTest(unittest.TestCase):
         lines = views.status_text({**st, "serve_code": "hansa serve runs old code: restart it",
                                    "alert_failed": "the alert command failed"}).splitlines()
         self.assertEqual(lines[1:4], ["hansa serve runs old code: restart it", "the alert command failed", says])
-        self.assertIn(says, self.hansa_out("explain"))
         self.assertIn(says, self.hansa_out("explain", "server"))
+        self.assertNotIn("http://", self.hansa_out("explain"))  # explain alone does not repeat it
         (self.desk.state_dir / "web-port").write_text("9001")
         (self.desk.state_dir / "web-host").write_text("0.0.0.0")
         with unittest.mock.patch("hansa.views.server_state", return_value={"state": "up", "pid": 1, "quiet": 0,
                                                                             "answers": True}):
             self.assertIn("web page: http://127.0.0.1:9001/ (it listens on every address), served now by hansa serve",
-                          self.hansa_out("explain"))  # an address one can open, not 0.0.0.0
+                          self.hansa_out("explain", "server"))  # an address one can open, not 0.0.0.0
         self.assertIn("it serves it at http://127.0.0.1:9001/ (it listens on every address) (where it last did)",
-                      self.hansa_out("explain"))
+                      self.hansa_out("explain", "server"))
         # a server whose rounds are stuck: its page answers while its process does, and not when that is stopped
         stuck = {"state": "stuck", "pid": 1, "quiet": 900, "answers": True}
         with unittest.mock.patch("hansa.views.server_state", return_value=stuck):
-            self.assertIn("served now by hansa serve, though its rounds are stuck", self.hansa_out("explain"))
+            self.assertIn("served now by hansa serve, though its rounds are stuck", self.hansa_out("explain", "server"))
         with unittest.mock.patch("hansa.views.server_state", return_value={**stuck, "answers": False}):
-            said = self.hansa_out("explain")
+            said = self.hansa_out("explain", "server")
         self.assertIn("web page: http://127.0.0.1:9001/ (it listens on every address), but hansa serve is not "
                       "answering now", said)
         self.assertNotIn("served now", said)
@@ -7791,10 +7791,131 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["verify", "--help"])
         self.assertEqual(self.hansa_out("help", "verify"), out.getvalue())
-        self.assertTrue(self.hansa_out("help").startswith("# Desk card"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["lane", "add", "--help"])
+        self.assertEqual(self.hansa_out("help", "lane", "add"), out.getvalue())
+        self.assertTrue(self.hansa_out("help", "card").startswith("# Desk card"))
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("help", "nosuch")
-        self.assertIn("no command nosuch", str(e.exception.code))
+        self.assertIn("no command or topic nosuch; hansa help topics lists the topics", str(e.exception.code))
+        # alone: an index, not the card: every command, then every topic with what it holds
+        index = self.hansa_out("help")
+        self.assertLessEqual(len(index.splitlines()), 40)
+        self.assertNotIn("# Desk card", index)
+        for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator"):
+            self.assertIn(name, index)
+        self.assertNotIn("notify-follow", index)  # the hidden ones stay hidden
+        self.assertIn(self.hansa_out("help", "topics"), index)
+        for name, (_, _, holds) in cli.TOPICS.items():
+            self.assertRegex(self.hansa_out("help", "topics"), rf"\n  {re.escape(name)} +{re.escape(holds)}\n")
+        # hansa coordinator --help is hansa's own help, and starts nothing
+        out = io.StringIO()
+        with unittest.mock.patch("hansa.cli.cmd_coordinator") as started, contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "coordinator", "--help"])
+        started.assert_not_called()
+        self.assertIn("--clear-daily HH-HH", out.getvalue())
+        self.assertIn("claude --help lists them", " ".join(out.getvalue().split()))
+        self.assertEqual(out.getvalue(), self.hansa_out("help", "coordinator"))
+        # explain states: still answered for one release, with the new form
+        said = self.hansa_out("explain", "states")
+        self.assertTrue(said.startswith("hansa explain states is now hansa help states"), said)
+        self.assertIn("replaced", said)
+
+    def test_every_hansa_help_pointer_leads_somewhere(self):
+        """Every hansa help WORD written in hansa's code, the card, the helpers' files, docs/ and the README is a
+        command or a topic; each topic's heading is there and prints text; no topic can be taken for a command,
+        a lane subcommand or an explain target; the card names every topic."""
+        with unittest.mock.patch("hansa.cli.cmd_help") as helped:
+            main(["help"])
+        a = helped.call_args[0][0]
+        commands, lane_subs = set(a.visible), set(a.lane_commands)
+        explain = next(x for x in a.commands["explain"]._actions if x.dest == "what")
+        targets = set(explain.choices) - set(cli.EXPLAIN_RETIRED)
+        top = Path(__file__).resolve().parent.parent
+        files = [*sorted((top / "hansa").glob("*.py")), top / "hansa" / "card.md",
+                 *sorted((top / "hansa" / "agents").glob("*.md")), *sorted((top / "docs").glob("*.md")),
+                 top / "README.md"]
+        said = {}
+        for f in files:
+            text = f.read_text(encoding="utf-8")
+            for w in re.findall(r"hansa help ([a-z][a-z0-9-]*)", text):
+                said.setdefault(w, set()).add(f.name)
+            for args in re.findall(r"see_more\(([^)]*)\)", text):  # the pointers cli.py writes out with see_more
+                for w in re.findall(r"[\"']([^\"']*)[\"']", args):
+                    said.setdefault(w, set()).add(f.name)
+        self.assertIn("forbidden-words", said)  # the scan finds them
+        self.assertIn("write-env", said)
+        wrong = {w: sorted(where) for w, where in said.items()
+                 if w not in commands | set(cli.TOPICS) | {"card", "topics"}}
+        self.assertEqual(wrong, {})
+        for name, (file, heading, _) in cli.TOPICS.items():
+            shown = cli.topic_text(name)
+            if heading:
+                self.assertRegex(shown.splitlines()[0], rf"^#+ {re.escape(heading)}$")
+            self.assertGreater(len(shown.splitlines()), 3, name)
+            self.assertEqual(self.hansa_out("help", name), shown + "\n")
+        # a topic is its heading down to the next one of the same or a higher level, subsections with it
+        inbox = cli.topic_text("inbox")
+        self.assertIn("### The daily clear", inbox)
+        self.assertNotIn("## Free space", inbox)
+        files_topic = cli.topic_text("desk-files")
+        self.assertIn("### Where a desk's files are", files_topic)
+        self.assertIn("### Where a desk's files grow", files_topic)
+        # no topic can be taken for something else
+        names = commands | lane_subs | targets | {"card", "topics"}
+        for t in cli.TOPICS:
+            for n in names:
+                self.assertNotIn(t, (n, n + "s", n + "es"), f"topic {t} and {n}")
+                self.assertFalse(n.startswith(t), f"topic {t} is a prefix of {n}")
+        card = (top / "hansa" / "card.md").read_text(encoding="utf-8")
+        self.assertEqual([t for t in cli.TOPICS if f"| `{t}` |" not in card], [])
+        self.assertIn("`hansa help topics` lists them", card.split("\n## ")[0])
+        # a refused lane change points to the topic of each field with a problem, once
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("lane", "set", "a", "network", "not a host!", "nor this!")
+        self.assertEqual(str(e.exception.code).count("More: "), 1)
+        self.assertTrue(str(e.exception.code).endswith("\nMore: hansa help network-list"), e.exception.code)
+        self.assertEqual([cli._save_topic(f"lane a: {x} ...") for x in ("write", "env", "allow", "release_files",
+                                                                       "release target t:", "identity")],
+                         ["write-env", "write-env", "web-tools", "release-files", "release-flow", ""])
+        # an install without docs/ says which file and heading to read
+        with unittest.mock.patch("hansa.cli.DOCS", self.tmp / "no-docs"), self.assertRaises(SystemExit) as e:
+            self.hansa_out("help", "free-space")
+        self.assertIn("read the section \"Free space\" of docs/desk.md in hansa's repository", str(e.exception.code))
+        # no page for people says that a target explain no longer covers is explain's, nor that bare explain gives
+        # what only hansa explain server now says
+        for f in files:
+            if f.suffix == ".md":
+                text = f.read_text(encoding="utf-8")
+                for forms in re.findall(r"hansa explain \[([^\]]*)\]", text):
+                    self.assertEqual([x for x in re.split(r"[\s\\|]+", forms) if x in cli.EXPLAIN_RETIRED], [], f.name)
+                self.assertEqual(re.findall(r"`hansa explain`[^.;]{0,60}?\b(?:address|host|port|web page)\b", text),
+                                 [], f.name)
+
+    def test_no_hansa_help_pointer_reaches_the_page_or_the_alerts(self):
+        """The principal reads the page and the alerts, not the command line: hansa help is for the coordinator."""
+        from hansa import alert, disk, run
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"], True)
+        tid = self.desk.new_task("Add more")
+        run.hold(self.desk, tid, "a", "the sandbox could not start: x", "", "worker")
+        low = [{"mount": "/", "what": ["the desk's folder"], "free": 10 ** 9, "size": 10 ** 12}]
+        with unittest.mock.patch.object(disk, "held", return_value=low):
+            st = views.status(self.desk)
+            shown = views.status_text(st)
+            explained = self.hansa_out("explain", "server")
+            waiting = run.waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
+        self.assertTrue(st["disk"]["low_text"].startswith("DISK LOW"))
+        alert.from_event(self.desk, "disk_low", {"floor": 10, "volumes": [st["disk"]["low_text"]]})
+        sent = [x["text"] for x in alert.queued(self.desk)]
+        self.assertEqual(sorted({x["kind"] for x in alert.queued(self.desk)}), ["disk", "sandbox"])
+        for text in [json.dumps(st), waiting, *sent]:  # what the page and the alerts show
+            self.assertNotIn("hansa help", text)
+        # the coordinator's own commands keep them, as a sentence of their own
+        self.assertIn(". More: hansa help free-space", shown)
+        self.assertIn("\n      More: hansa help sandbox-probe", shown)
+        self.assertIn("  More: hansa help sandbox-probe\n", explained)
+        self.assertIn("  More: hansa help free-space\n", explained)
 
     def test_hansa_removes_the_empty_folders_it_makes_in_the_temporary_folder(self):
         from hansa import run
@@ -16065,8 +16186,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         for x in ("alertCmd:", "alertTest:"):
             self.assertEqual(ui.count(x), 2, x)
         self.assertIn('"/api/alert/test"', ui)
-        self.assertNotIn("hansa alert", self.hansa("help"))
-        self.assertIn("the coordinator does not send them", self.hansa("help"))
+        self.assertNotIn("hansa alert", self.hansa("help", "card"))
+        self.assertIn("the coordinator does not send them", self.hansa("help", "card"))
 
     def test_each_kind_of_alert_reaches_the_command_with_its_text(self):
         from hansa import alert, release

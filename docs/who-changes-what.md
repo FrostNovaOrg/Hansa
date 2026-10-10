@@ -191,7 +191,7 @@ token, alerts waiting to go out with a release's one-time code, and the keys,
 and a file's text would go into the desk where agents read it.
 
 Nothing else hansa prints holds the token or a one-time code: `hansa serve`,
-`hansa status` and `hansa explain` give the page's host and port only; the
+`hansa status` and `hansa explain server` give the page's host and port only; the
 page logs no requests and answers one without the token with a fixed
 refusal; the event log, posts to a session and errors never carry either; a
 release's code is kept as a keyed hash, and an alert command's output is not

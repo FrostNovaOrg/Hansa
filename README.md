@@ -139,8 +139,8 @@ another port, tunnel that port instead):
 ssh -L 8765:127.0.0.1:8765 HOST /path/to/hansa/bin/hansa --desk /path/to/desk web
 ```
 
-`hansa status` and `hansa explain` say the address and port the page is served on, and whether `hansa serve`
-serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
+`hansa status` and `hansa explain server` say the address and port the page is served on, and whether
+`hansa serve` serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
 Anthropic API, with its key), their models and effort defaults, and the prices hansa counts tokens at. A new
 desk starts with one provider, `claude`: the Claude Code login of the account hansa runs as.
 `hansa check` sends one tiny request through each provider to see that it answers. The page follows the
@@ -165,7 +165,8 @@ does not hear it; only you can change that.
 ## Everyday commands
 
 The coordinator runs these; you can run them too. Every coordinator command is in
-[`hansa/card.md`](hansa/card.md), which `hansa help` prints. `hansa --help` lists every command, the
+[`hansa/card.md`](hansa/card.md), which `hansa help card` prints; `hansa help` alone lists the commands and
+the topics, and `hansa help <topic>` prints one from `docs/`. `hansa --help` lists every command, the
 principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` (or
 `hansa help <command>`) gives all of a command's options.
 
@@ -183,7 +184,7 @@ principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `ha
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
 | `hansa ask "<request>"` | Put a request on the principal's page |
 | `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
-| `hansa explain [lane L \| provider P \| task ID \| states \| server \| notify]` | What a setting or state means, and where it comes from |
+| `hansa explain [lane L \| provider P \| task ID \| server \| notify]` | This desk's current settings and state, and where each comes from |
 
 ## What keeps it safe
 
@@ -284,7 +285,7 @@ output.
 
 | Document | What is in it |
 |---|---|
-| [`hansa/card.md`](hansa/card.md) | The coordinator's whole interface: how work moves, every command, what it may change. `hansa help` prints it, and each desk holds a copy as `CLAUDE.md`. |
+| [`hansa/card.md`](hansa/card.md) | The coordinator's whole interface: how work moves, every command, what it may change. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
 | [Workers and the sandbox](docs/sandbox.md) | What workers, verifiers and design sessions may touch; git's folders; the sandbox try; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
 | [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits, browser tasks and the preview |
