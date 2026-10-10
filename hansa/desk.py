@@ -301,6 +301,8 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
     New files use the caller's mode (otherwise 0666 under the umask). An explicit mode is for keys and
     other private files that hansa already made 0600. The temporary file is on the same filesystem.
     """
+    if path.is_symlink():
+        path = path.resolve()
     if mode is None:
         try:
             mode = stat.S_IMODE(path.stat().st_mode)
@@ -329,14 +331,41 @@ def write_json(path: Path, data) -> None:
     write_text(path, json_text(data))
 
 
-# The command wrappers use the same writer for their completion files. Run this module as a script so
-# it works outside the desk and without a PYTHONPATH; neither the path nor the value holds a key.
-WRITE_FILE = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))}"
+# Command wrappers define this shell helper so completion files need neither Python nor this module.
+WRITE_FILE = r'''write_file() {
+  exit_file=$1 exit_links=0
+  while [ -L "$exit_file" ]; do
+    exit_links=$((exit_links + 1))
+    [ "$exit_links" -le 40 ] || return 1
+    exit_link=$(readlink "$exit_file") || return 1
+    case "$exit_link" in
+      /*) exit_file=$exit_link ;;
+      *) exit_file=$(dirname "$exit_file")/$exit_link ;;
+    esac
+  done
+  exit_tmp=$(umask 077; mktemp "$exit_file.XXXXXX") || return 1
+  if printf '%s\n' "$2" >"$exit_tmp" &&
+     { if [ -e "$exit_file" ]; then
+         exit_mode=$(stat -c '%a' "$exit_file" 2>/dev/null || stat -f '%Lp' "$exit_file") &&
+           chmod "$exit_mode" "$exit_tmp"
+       else
+         chmod =rw "$exit_tmp"
+       fi
+     } && mv -f "$exit_tmp" "$exit_file"; then
+    return 0
+  else
+    rm -f "$exit_tmp"
+    return 1
+  fi
+}
+'''
 
 
 def copy_file(src, dst):
     """copy2 for kept evidence, with a whole destination and no leftover temporary on failure."""
     path = Path(dst)
+    if path.is_symlink():
+        path = path.resolve()
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
@@ -2556,7 +2585,3 @@ def public_settings(desk: Desk) -> dict:
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}
-
-
-if __name__ == "__main__":  # completion files written by the shell wrappers
-    write_text(Path(sys.argv[1]), sys.argv[2] + "\n")

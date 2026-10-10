@@ -68,7 +68,7 @@ SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the ti
 TAIL = 15
 STOP_GRACE = 30  # seconds between the TERM a stopped release's command gets and the KILL to what still runs
 # $0 is the launch word, which finds the run again after hansa serve restarts; the exit code goes in a file
-SCRIPT = '/bin/sh -c "$1"; ' + WRITE_FILE + ' "$2" "$?"'
+SCRIPT = WRITE_FILE + '/bin/sh -c "$1"; write_file "$2" "$?"'
 # a hunk of a patch, or of a merge's combined diff (one more @ and one more -range per parent)
 HUNK = re.compile(r"^(@@+) ((?:-\d+(?:,\d+)? )+\+\d+(?:,\d+)?) @@")
 RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")

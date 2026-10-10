@@ -113,18 +113,18 @@ shift 3; exec "$@"
 # The lane's check, in srt; its exit code goes to a file, so a restarted server can still read it.
 # Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
 # sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings> <its own temporary folder>
-CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; ' + WRITE_FILE + ' "$2" "$?"; } | cat; rm -rf "$3" "$6"'
+CHECK_SCRIPT = WRITE_FILE + '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; write_file "$2" "$?"; } | cat; rm -rf "$3" "$6"'
 # `hansa lane try`: the lane's setup, then its check, each in srt as for a task; the first that fails ends it.
 # Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
 # and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
 # sh -c TRY_SCRIPT <token> <folder> <srt> [<name> <command> <srt settings> <temporary folder> <its own>]...
-TRY_SCRIPT = ("""d=$1 srt=$2
+TRY_SCRIPT = (WRITE_FILE + """d=$1 srt=$2
 run() {
   t0=$(date +%s)
   rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- /bin/sh -c "$2" </dev/null 2>&1 3>&-
     echo $? >&3; } | cat >"$d/$1.log"; } 3>&1 )
   rm -rf "$4" "$5"
-  """ + WRITE_FILE + """ "$d/$1.exit" "$rc $(( $(date +%s) - t0 ))"
+  write_file "$d/$1.exit" "$rc $(( $(date +%s) - t0 ))"
   [ "$rc" = 0 ]
 }
 shift 2

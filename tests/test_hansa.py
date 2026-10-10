@@ -712,7 +712,7 @@ def partial_write(path, after=None):
 # | Raw preview state, `preview.main.save` | Whole replacement with the existing JSON format; other-sites matrix |
 # | Git evidence `what-was-found.txt`, `run.git_file_changed` (two branches) | Whole writes; other-sites matrix, two rows |
 # | Git evidence `config` and files under `hooks/`, `desk.copy_file` used directly and by `copytree` | Whole copies, including copied metadata before replacement; private-files matrix covers both paths |
-# | Check and merge-check `.exit`, `run.CHECK_SCRIPT` | Whole writes through the shared writer; shell-completion matrix |
+# | Check and merge-check `.exit`, `run.CHECK_SCRIPT` | Whole writes through the shared shell helper; shell-completion matrix |
 # | Try `<step>.exit`, `run.TRY_SCRIPT` | Whole write, with the same exit code and elapsed seconds; shell-completion matrix |
 # | Release `<id>.exit`, `release.SCRIPT` | Whole write; shell-completion matrix |
 # | Notes source and archive destination, `notes._write` | Already whole replacements with cleanup and fsync; private-files matrix covers both paths |
@@ -972,52 +972,106 @@ class FailedWriteTest(unittest.TestCase):
                                  ["old", "whole but no newline"] if tail.startswith(b'{') else ["old"])
 
     def test_shell_completion_writers_matrix(self):
+        import resource
         from hansa import release, run
-        from hansa.desk import WRITE_FILE
         srt = self.root / "srt"
         srt.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
         srt.chmod(0o755)
-        fault = self.root / "fault.py"
-        fault.write_text("import sys\nfrom pathlib import Path\n"
-                         f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})\n"
-                         "from hansa.desk import write_text\nfrom tests.test_hansa import partial_write\n"
-                         "with partial_write(Path(sys.argv[1])):\n"
-                         "    write_text(Path(sys.argv[1]), sys.argv[2] + '\\n')\n")
-        fault_command = f"{shlex.quote(sys.executable)} {shlex.quote(str(fault))}"
         for label, source in (("check", run.CHECK_SCRIPT), ("try", run.TRY_SCRIPT), ("release", release.SCRIPT)):
+            self.assertNotIn(sys.executable, source, "completion must not start Python")
             for failing in (True, False):
-                with self.subTest(writer=label, partial=failing):
-                    folder = self.root / (label + str(failing))
-                    folder.mkdir()
-                    path = folder / ("setup.exit" if label == "try" else "exit")
-                    path.write_bytes(b"old exit record\n")
-                    path.chmod(0o600)
-                    script = self.root / "command.sh"
-                    script.write_text(source.replace(WRITE_FILE, fault_command) if failing else source)
-                    if label == "release":
-                        args = ["exit 127", str(path)]
-                    else:
-                        tmp, own = self.root / "command-tmp", self.root / "command-own"
-                        tmp.mkdir()
-                        own.mkdir()
-                        if label == "check":
-                            args = ["exit 127", str(path), str(tmp), str(srt), "unused", str(own)]
+                for destination in ("file", "link", "read-only", "new"):
+                    with self.subTest(writer=label, partial=failing, destination=destination):
+                        folder = self.root / (label + str(failing) + destination)
+                        folder.mkdir()
+                        path = folder / ("setup.exit" if label == "try" else "exit")
+                        if destination == "link":
+                            (folder / "targets").mkdir()
+                        target = folder / "targets" / "target" if destination == "link" else path
+                        if destination != "new":
+                            target.write_bytes(b"old exit record\n")
+                            target.chmod(0o400 if destination == "read-only" else 0o600)
+                        if destination == "link":
+                            path.symlink_to(target.relative_to(folder))
+                        script = self.root / "command.sh"
+                        script.write_text(source)
+                        if label == "release":
+                            args = ["exit 127", str(path)]
                         else:
-                            (folder / "setup.log").write_bytes(b"")  # a live log, not a replacement row
-                            args = [str(folder), str(srt), "setup", "exit 127", "unused", str(tmp), str(own)]
-                    before = set(folder.iterdir())
-                    # Run the actual wrapper in the foreground, from outside the checkout.
-                    result = subprocess.run(["/bin/sh", str(script), *args], cwd=self.root,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
-                    self.assertEqual(set(folder.iterdir()), before, "a temporary completion file was left")
-                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-                    if failing:
-                        self.assertIn("injected full disk", result.stderr)
-                        self.assertEqual(path.read_bytes(), b"old exit record\n")
-                    elif label == "try":
-                        self.assertRegex(path.read_text(), r"^127 [0-9]+\n$")
-                    else:
-                        self.assertEqual(path.read_bytes(), b"127\n")
+                            tmp, own = folder / "command-tmp", folder / "command-own"
+                            tmp.mkdir()
+                            own.mkdir()
+                            if label == "check":
+                                args = ["exit 127", str(path), str(tmp), str(srt), "unused", str(own)]
+                            else:
+                                (folder / "setup.log").write_bytes(b"")  # live log, not a replacement row
+                                args = [str(folder), str(srt), "setup", "exit 127", "unused", str(tmp), str(own)]
+                        before = set(folder.iterdir())
+
+                        def child_limits():
+                            os.umask(0o027)
+                            if failing:
+                                signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+                                resource.setrlimit(resource.RLIMIT_FSIZE, (1, 1))
+
+                        # The unchanged production script writes one byte before the kernel refuses more.
+                        result = subprocess.run(["/bin/sh", str(script), *args], cwd=self.root,
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                                preexec_fn=child_limits, timeout=10)
+                        if label != "release":
+                            self.assertFalse(tmp.exists())
+                            self.assertFalse(own.exists())
+                            before -= {tmp, own}
+                        expected = before | ({path} if destination == "new" and not failing else set())
+                        self.assertEqual(set(folder.iterdir()), expected, "a temporary completion file was left")
+                        if destination == "link":
+                            self.assertTrue(path.is_symlink())
+                            self.assertEqual(os.readlink(path), str(target.relative_to(folder)))
+                            self.assertEqual(set(target.parent.iterdir()), {target},
+                                             "a temporary file was left beside the link target")
+                        if failing:
+                            self.assertTrue(result.stderr, "the real completion write must fail")
+                            if destination == "new":
+                                self.assertFalse(path.exists())
+                                continue
+                            self.assertEqual(target.read_bytes(), b"old exit record\n")
+                        elif label == "try":
+                            self.assertRegex(target.read_text(), r"^127 [0-9]+\n$")
+                        else:
+                            self.assertEqual(target.read_bytes(), b"127\n")
+                        self.assertEqual(stat.S_IMODE(target.stat().st_mode),
+                                         0o640 if destination == "new" else
+                                         0o400 if destination == "read-only" else 0o600)
+
+    def test_symlinked_records_and_text_files(self):
+        from hansa.desk import copy_file, write_text
+        source = self.root / "source"
+        source.write_bytes(b"new text\n")
+        rows = (("record", lambda p: write_json(p, {"new": 1}), b'{\n  "new": 1\n}\n'),
+                ("text", lambda p: write_text(p, "new text\n"), b"new text\n"),
+                ("copy", lambda p: copy_file(source, p), b"new text\n"))
+        for label, write, contents in rows:
+            for relative in (True, False):
+                with self.subTest(writer=label, relative=relative):
+                    folder = self.root / (label + str(relative))
+                    folder.mkdir()
+                    target = folder / "target"
+                    target.write_bytes(b"old contents\n")
+                    target.chmod(0o600)
+                    link = self.root / (label + str(relative) + "-link")
+                    link.symlink_to(target.relative_to(self.root) if relative else target)
+                    link_name = os.readlink(link)
+                    before = set(self.root.iterdir())
+                    write(link)
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(os.readlink(link), link_name)
+                    self.assertEqual(target.read_bytes(), contents)
+                    self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+                    self.assertEqual(set(folder.iterdir()), {target})
+                    self.assertEqual(set(self.root.iterdir()), before)
+                    self.assert_failed_replacement(target, lambda: write(link))
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(os.readlink(link), link_name)
 
     def test_short_event_writes_are_completed(self):
         real_open = open
@@ -1051,13 +1105,22 @@ class FailedWriteTest(unittest.TestCase):
         self.assertEqual(pos, self.desk.events_path.stat().st_size)
 
     def test_partial_alert_error_append_then_good_event(self):
+        before, faults = [], []
         with contextlib.ExitStack() as stack:
             def alert_fails(*a):
-                stack.enter_context(partial_write(self.desk.events_path))
+                # Damage arrives after the primary event, so this append itself must separate the lines.
+                with open(self.desk.events_path, "ab") as fh:
+                    fh.write(b'{"event":"earlier broken"')
+                before.append(self.desk.events_path.read_bytes())
+                faults.append(stack.enter_context(partial_write(self.desk.events_path)))
                 raise RuntimeError("alert failed")
             with unittest.mock.patch("hansa.alert.from_event", alert_fails), self.assertRaises(OSError):
                 self.desk.event("ask", id=1)
         damaged = self.desk.events_path.read_bytes()
+        self.assertTrue(faults[0], "the fault must reach the alert_error append")
+        self.assertTrue(damaged.startswith(before[0]))
+        self.assertTrue(damaged[len(before[0]):].startswith(b'\n{"ts":'),
+                        "alert_error must start its own line before a later event can repair anything")
         self.desk.event("good")
         events, _ = notify.read_log(self.desk, 0)
         self.assertEqual([e["event"] for e in events], ["ask", "good"])
@@ -1079,44 +1142,86 @@ class FailedWriteTest(unittest.TestCase):
                                  "made with hansa lane add; last changed with hansa lane set a check")
 
     def test_two_processes_appending_while_one_fails(self):
+        import select
         self.desk.event("old")
         before = self.desk.events_path.read_bytes()
         fail = textwrap.dedent("""\
-            import sys
+            import fcntl, sys
+            from unittest.mock import patch
             from hansa.desk import Desk
             from tests.test_hansa import partial_write
             desk = Desk(sys.argv[1])
+            real_flock = fcntl.flock
+            def locking(fh, operation):
+                try:
+                    real_flock(fh, operation | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    print('blocked on lock', flush=True)
+                    real_flock(fh, operation)
             def hold():
                 print('partial written', flush=True)
                 sys.stdin.readline()
             try:
-                with partial_write(desk.events_path, hold):
+                with patch('fcntl.flock', locking), partial_write(desk.events_path, hold):
                     desk.event('broken', text='a long event that runs out of space')
             except OSError:
                 pass
         """)
         good = textwrap.dedent("""\
             import sys
+            from unittest.mock import patch
             from hansa.desk import Desk
             desk = Desk(sys.argv[1])
-            print('ready to append', flush=True)
-            for i in range(40):
+            real_open = open
+            class File:
+                def __init__(self, f):
+                    self.f = f
+                def __getattr__(self, name):
+                    return getattr(self.f, name)
+                def __enter__(self):
+                    return self
+                def __exit__(self, *exc):
+                    return self.f.__exit__(*exc)
+                def read(self, *a):
+                    tail = self.f.read(*a)
+                    print('tail read', flush=True)
+                    sys.stdin.readline()
+                    return tail
+            with patch('builtins.open', lambda *a, **kw: File(real_open(*a, **kw))):
+                desk.event('good', i=0)
+            print('good appended', flush=True)
+            sys.stdin.readline()
+            for i in range(1, 40):
                 desk.event('good', i=i)
         """)
         procs = []
+
+        def line(proc):
+            ready, _, _ = select.select([proc.stdout], [], [], 10)
+            self.assertTrue(ready, "appender did not reach the expected point")
+            return proc.stdout.readline().strip()
+
         try:
+            second = subprocess.Popen([sys.executable, "-c", good, str(self.root)], stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            procs.append(second)
+            self.assertEqual(line(second), "tail read")
             first = subprocess.Popen([sys.executable, "-c", fail, str(self.root)], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             procs.append(first)
-            self.assertEqual(first.stdout.readline().strip(), "partial written")
+            state = line(first)
+            self.assertIn(state, ("blocked on lock", "partial written"))
+            # With the lock A blocks while B holds its check/write window. Without it, A's partial
+            # line lands in that window, then B joins its good event to the partial line and loses it.
+            second.stdin.write("write\n")
+            second.stdin.flush()
+            self.assertEqual(line(second), "good appended")
+            if state == "blocked on lock":
+                self.assertEqual(line(first), "partial written")
             damaged = self.desk.events_path.read_bytes()
-            second = subprocess.Popen([sys.executable, "-c", good, str(self.root)], stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, text=True)
-            procs.append(second)
-            self.assertEqual(second.stdout.readline().strip(), "ready to append")
             _, err = first.communicate("release\n", timeout=10)
             self.assertEqual(first.returncode, 0, err)
-            _, err = second.communicate(timeout=10)
+            _, err = second.communicate("continue\n", timeout=10)
             self.assertEqual(second.returncode, 0, err)
             events, pos = notify.read_log(self.desk, 0)
             self.assertEqual([e["event"] for e in events], ["old"] + ["good"] * 40)
