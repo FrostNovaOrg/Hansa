@@ -3158,6 +3158,19 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("check after each task:", explained)
             self.assertNotIn("setup before each task:", explained)
             self.assertNotIn("before it merges any task", explained)
+            self.assertNotIn("per task:", explained)  # it takes no work; its merge check's limit is shown
+        self.assertIn("  per task: stopped at 300 turns or 240 minutes", self.hansa("explain", "lane", "a"))
+
+    def test_merge_lane_hansa_merge_says_in_a_sentence_what_its_merge_check_waits_for(self):
+        from hansa import run
+        _, tid = self.merge_lane_task()
+        run.write_try(self.desk, "m", {"id": "y1", "phase": "queued", "asked": now(), "merge": True})
+        out = self.hansa("merge", tid)
+        self.assertEqual(out, f"{tid} is not merged yet: lane m has a merge check of its own, which hansa runs before "
+                         f"every merge, not after each task. hansa merges {tid} onto main as it is now in lane m's "
+                         f"worktree, runs the lane's merge check (test -f hello.txt) there, and merges exactly that if "
+                         f"it passes. The merge check is queued: waits for lane m, held by a try. Wait for it: hansa "
+                         f"wait {tid} (hansa show {tid} says where it is; hansa cancel {tid} stops it)\n")
 
     def test_merge_lane_refuses_tasks_verifications_designs_and_retries(self):
         _, tid = self.merge_lane_task()
@@ -3844,6 +3857,47 @@ class DeskTest(unittest.TestCase):
         said = " ".join(helped.getvalue().split())
         self.assertIn("identity is Name <email>, the author and committer of every commit hansa makes", said)
         self.assertIn("never the account's global one", said)
+
+    def test_lane_add_and_set_say_when_a_lanes_identity_differs_from_another_lanes_on_its_repository(self):
+        repo = self.repo.resolve()
+        out = self.hansa("lane", "add", "c", "--repo", str(self.repo), "--identity", "Cee <c@example.org>")
+        self.assertIn(f"\nLane c commits as Cee <c@example.org>, unlike the other lanes on {repo}: a commits as "
+                      f"hansa <hansa@localhost>. Set it with: hansa lane set c identity \"Name <email>\"\n", out)
+        self.assertNotIn("commits as", self.hansa("lane", "set", "a", "identity", "Cee <c@example.org>"))
+        out = self.hansa("lane", "add", "d", "--repo", str(self.repo), "--identity", "Cee <c@example.org>")
+        self.assertNotIn("commits as", out)  # the same identity: nothing is said
+        out = self.hansa("lane", "set", "d", "identity", "Dee <d@example.org>")
+        self.assertIn(f"\nLane d commits as Dee <d@example.org>, unlike the other lanes on {repo}: a, c commit as "
+                      f"Cee <c@example.org>. Set it with: hansa lane set d identity \"Name <email>\"\n", out)
+
+    def test_lane_add_says_when_a_lane_without_an_identity_takes_another_from_the_repositorys_config(self):
+        repo = self.repo.resolve()
+        self.hansa("lane", "set", "a", "identity", "hansa <hansa@localhost>")
+        self.assertNotIn("commits as", self.hansa("lane", "add", "b", "--repo", str(self.repo)))  # hansa's own, as a
+        sh("git", "config", "--local", "user.name", "Repo Person", cwd=self.repo)
+        sh("git", "config", "--local", "user.email", "repo@example.org", cwd=self.repo)
+        out = self.hansa("lane", "add", "c", "--repo", str(self.repo))
+        self.assertIn(f"\nLane c commits as Repo Person <repo@example.org>, from the repository's own config (git "
+                      f"config --local user.name and user.email), not from the lane, unlike the other lanes on {repo}: "
+                      f"a commits as hansa <hansa@localhost>. Set it with: hansa lane set c identity \"Name <email>\"\n",
+                      out)  # b, with none either, commits as the repository's config says, as c does
+        self.assertEqual(views.explain_text(self.desk, "lane", "c").count("Repo Person <repo@example.org>, from the "
+                                                                          "repository's own config"), 1)
+
+    def test_lane_add_like_says_when_the_copys_identity_differs(self):
+        repo = self.repo.resolve()
+        self.hansa("lane", "set", "a", "identity", "Ada Lane <ada@example.org>")
+        self.assertNotIn("commits as", self.hansa("lane", "add", "c", "--like", "a"))
+        out = self.hansa("lane", "add", "d", "--like", "a", "--identity", "Dee <d@example.org>")
+        self.assertIn(f"\nLane d commits as Dee <d@example.org>, unlike the other lanes on {repo}: a, c commit as "
+                      f"Ada Lane <ada@example.org>. Set it with: hansa lane set d identity \"Name <email>\"\n", out)
+        out = self.hansa("lane", "add", "e", "--like", "a", "--identity", "none")
+        self.assertIn(f"\nLane e commits as hansa <hansa@localhost>, unlike the other lanes on {repo}: a, c commit as "
+                      f"Ada Lane <ada@example.org>; d commits as Dee <d@example.org>. Set it with: hansa lane set e "
+                      f"identity \"Name <email>\"\n", out)
+        # a merge check commits as the task's lane, so a merge lane's own identity is never compared
+        out = self.hansa("lane", "add", "m", "--like", "a", "--merge-lane", "true", "--identity", "Em <m@example.org>")
+        self.assertNotIn("commits as", out)
 
     def move_main(self, repo=None):
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved",

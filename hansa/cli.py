@@ -342,7 +342,7 @@ def _runs_when(desk: Desk, tid: str, base: str) -> str:
     lane = merge_check_lane(desk.settings(), m)
     if lane != m["lane"]:
         return (f"One merge check runs at a time on {base}, so it waits for {ahead}." if ahead else
-                views.merge_check_text(desk, m).replace("merge check queued", "The merge check is queued", 1) + ".")
+                views.merge_check_text(desk, m, sentence=True))
     return (f"One merge check runs at a time on {base}, so it waits for {ahead}, then runs when lane {lane} is "
             f"free." if ahead else f"It runs when lane {lane} is free.")
 
@@ -1763,6 +1763,29 @@ def _differs_from_siblings(name: str, ln: dict, lanes: dict) -> list:
     return lines
 
 
+def _identity_differs(name: str, lanes: dict) -> str:
+    """The line for a lane whose commits carry another identity, as hansa explain lane shows it, than another lane's
+    on its repository; '' when they match. Merge lanes are left out: a merge check commits as the task's lane."""
+    ln = lanes[name]
+    if ln.get("merge_lane"):
+        return ""
+    repo = str(Path(ln["repo"]).resolve())
+    who, email, where = lane_identity(ln)
+    mine, theirs = f"{who} <{email}>", {}
+    for n, x in sorted(lanes.items()):
+        if n != name and not x.get("merge_lane") and x.get("repo") and str(Path(x["repo"]).resolve()) == repo:
+            w, e, _ = lane_identity(x)
+            if f"{w} <{e}>" != mine:
+                theirs.setdefault(f"{w} <{e}>", []).append(n)
+    if not theirs:
+        return ""
+    local = (", from the repository's own config (git config --local user.name and user.email), not from the lane"
+             if where.startswith("the repository's own config") else "")
+    return (f"Lane {name} commits as {mine}{local}, unlike the other lanes on {repo}: "
+            + "; ".join(f"{', '.join(ns)} {'commits' if len(ns) == 1 else 'commit'} as {v}" for v, ns in theirs.items())
+            + f". Set it with: hansa lane set {name} identity \"Name <email>\"")
+
+
 def _changed_from(name: str, ln: dict, other: str, theirs: dict) -> list:
     """What a lane made with --like OTHER was given in place of OTHER's settings, one line per field."""
     blank = {"write": [], "check": "", "setup": "", **default_lane(ln["repo"], "main")}
@@ -1909,6 +1932,9 @@ def cmd_lane(a):
                                   f"them{' but ' + a.like if a.like else ''} (change it with hansa lane set {a.name} "
                                   f"FIELD ...):\n"
                                   + "\n".join(f"  {x}" for x in differs)))
+            identity = _identity_differs(a.name, new["lanes"])
+            if identity:
+                print(identity)
             if differs or changed:
                 print(f"try it: hansa lane try {a.name}")
             _say_forbidden(desk, a.name, ln)
@@ -1954,6 +1980,9 @@ def cmd_lane(a):
               f"and why. Ask for a release with: hansa release {a.name} \"<note>\"")
     if a.field == "release":
         _say_forbidden(desk, a.name, new["lanes"][a.name], "")
+    identity = _identity_differs(a.name, new["lanes"]) if a.field == "identity" else ""
+    if identity:
+        print(identity)
     if a.field == "network" and set(old) != set(value):  # the same hosts in another order change nothing
         desk.event("lane_network_changed", lane=a.name, old=old, new=value)
         print(f"The hosts the lane's workers may reach during a task changed: {_shown(old)} -> {_shown(value)}, so "

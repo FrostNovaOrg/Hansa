@@ -134,7 +134,13 @@ L identity "Name <email>"`, or `hansa lane add --identity`; copied by
 `hansa <hansa@localhost>`. An account's global or personal identity is never
 taken up by itself. A lane whose release goes to a public repository should
 have one set, on the lane or in the repository's config; `hansa explain lane
-L` shows the identity in use and where it comes from. Workers keep `hansa
+L` shows the identity in use and where it comes from. When `hansa lane add`
+(with or without `--like`) or `hansa lane set L identity` leaves a lane whose
+identity in use differs from another lane's on the same repository, it says
+so in one line: both identities, whether the lane's comes from the
+repository's local config rather than the lane, and `hansa lane set L
+identity "Name <email>"` to set it. Merge lanes are not compared: a merge
+check's commits carry the task lane's identity. Workers keep `hansa
 worker L` as theirs: they commit nothing (hansa does, from the index, with
 the lane's identity), so it only marks what a worker's git would record
 without a commit, and a commit a worker made against its rules stands out
