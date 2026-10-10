@@ -58,6 +58,7 @@ from pathlib import Path
 from . import without_session
 from .desk import WRITE_FILE, Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json, write_text
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
+                  run_running, save_stopped, serve_step,
                   merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
 OPEN = ("waiting", "approved", "starting", "running")
@@ -817,25 +818,39 @@ def _running(r: dict, pid=None) -> bool:
     return group_running(pid or r.get("pid")) or bool(_left(r))
 
 
-def _stopping(desk: Desk, r: dict, proc=None) -> None:
+def _stopping(desk: Desk, r: dict, proc=None, pending=None) -> None:
     """hansa serve's round for a running release asked to stop: TERM to its command's process group (and to what it
     started that left the group) once, then KILL to what still runs STOP_GRACE seconds later. A starting one has no
     command yet: the next round. One whose command had already ended (its exit file is written) gets no signal:
     finish records how it ended, and that the stop came after."""
+    pending = {} if pending is None else pending
+    key = ("release", r["id"])
+    with serve_step():
+        save_stopped(pending, key, r, lambda fields: change(desk, r["id"], lambda x: fields))
+    kept = pending.get(key)
+    if kept and kept[0] == (r.get("launch"), r.get("started")):
+        r = {**r, **kept[1]}
+    else:
+        r = get(desk, r["id"]) or r
     if not r.get("pid") or r.get("stop_late"):
         return
     if not r.get("termed"):
         if (log_dir(desk) / f"{r['id']}.exit").exists():
             change(desk, r["id"], lambda x: {"stop_late": now()} if x.get("state") in ("starting", "running") else None)
             return
-        r = _record_started(desk, r)
+        with serve_step():
+            r = _record_started(desk, r)
         _signal_group(r, signal.SIGTERM, proc)
         _signal_each(_left(r), signal.SIGTERM)
-        change(desk, r["id"], lambda x: {"termed": now()} if x.get("state") in ("starting", "running") else None)
+        save_stopped(pending, key, r,
+                     lambda fields: change(desk, r["id"], lambda x: fields if x.get("state") in ("starting", "running") else None),
+                     {"termed": now()})
     elif not r.get("killed") and time.time() - r["termed"] >= STOP_GRACE and _running(r):
         _signal_group(r, signal.SIGKILL, proc)
         _signal_each(_left(r), signal.SIGKILL)
-        change(desk, r["id"], lambda x: {"killed": now()} if x.get("state") in ("starting", "running") else None)
+        save_stopped(pending, key, r,
+                     lambda fields: change(desk, r["id"], lambda x: fields if x.get("state") in ("starting", "running") else None),
+                     {"killed": now()})
 
 
 def _signal_each(procs: dict, sig) -> None:
@@ -1015,7 +1030,6 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
         code = int((d / f"{rid}.exit").read_text().strip())
     except (OSError, ValueError):
         code = None
-    (d / f"{rid}.exit").unlink(missing_ok=True)
     with desk.lock():  # a key saved meanwhile is either known here or scrubbed after
         log = d / f"{rid}.log"
         text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
@@ -1038,6 +1052,7 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
                 "seconds": round(now() - (x.get("started") or now())), "pid": None, "pid_start": "",
                 **({"stop_late": x.get("stop_late") or now()} if late else {})}
     r = change(desk, rid, ending)
+    (d / f"{rid}.exit").unlink(missing_ok=True)
     if r and r["state"] == "stopped":
         desk.event("release_stopped", id=rid, lane=r.get("lane"), target=r.get("target") or "", commit=r.get("commit"),
                    by=r.get("stopped_by") or "", reason=r.get("stop_reason") or "", ran=ran, exit=code,
@@ -1070,7 +1085,7 @@ def _recover(desk: Desk, r: dict) -> None:
     finish(desk, r["id"])
 
 
-def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None) -> None:
+def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider). A release
@@ -1079,6 +1094,7 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None) ->
     starts while starting is False (free space under the floor): an approved one waits, and goes once there is space.
     tasks: what gives the desk's tasks as this round read them (Dispatcher.tasks); else they are read here."""
     read = []
+    pending = {} if pending is None else pending
 
     def rs() -> list:  # read once a round, and again only after this process changed a release (Desk.writes)
         if not read or read[0] != desk.writes:
@@ -1088,35 +1104,52 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None) ->
         sweep_checkouts(desk, rs())  # none open: only what a server that stopped left
         return
     for r in rs():
-        if r.get("state") == "running":
-            r = _record_started(desk, r)
-        if r.get("state") in ("starting", "running") and r.get("stop_asked"):
-            _stopping(desk, r, procs.get(r["id"]))
+        with serve_step():
+            if r.get("state") == "running":
+                with serve_step():
+                    r = _record_started(desk, r)
+            if r.get("state") in ("starting", "running") and r.get("stop_asked"):
+                with serve_step():
+                    _stopping(desk, r, procs.get(r["id"]), pending)
     for rid, proc in list(procs.items()):
-        if has_ended(proc):
-            r = get(desk, rid) or {}
-            if r.get("stop_asked") and r.get("termed") and _running(r, proc.pid):
-                continue  # what it started still ends its step: KILL after the grace
-            del procs[rid]
-            stop(proc.pid, "", proc)  # what it left running in its group ends with it
-            finish(desk, rid)
+        with serve_step():
+            if has_ended(proc):
+                r = get(desk, rid) or {}
+                if r.get("stop_asked") and r.get("termed") and _running(r, proc.pid):
+                    continue  # what it started still ends its step: KILL after the grace
+                stop(proc.pid, "", proc)  # what it left running in its group ends with it
+                save_stopped(pending, ("release", rid), r, lambda fields: change(desk, rid, lambda x: fields))
+                finish(desk, rid)
+                del procs[rid]
     for r in rs():
-        if r["id"] in procs:
-            continue
-        if r.get("state") == "running" and not alive(r.get("pid"), r.get("pid_start", "")):
-            if r.get("stop_asked") and r.get("termed") and _running(r):
+        with serve_step():
+            if r["id"] in procs:
                 continue
-            finish(desk, r["id"])
-        elif r.get("state") == "starting":
-            _recover(desk, r)
+            if r.get("state") == "running" and not alive(r.get("pid"), r.get("pid_start", "")):
+                if r.get("stop_asked") and r.get("termed") and _running(r):
+                    continue
+                save_stopped(pending, ("release", r["id"]), r, lambda fields: change(desk, r["id"], lambda x: fields))
+                finish(desk, r["id"])
+            elif r.get("state") == "starting":
+                _recover(desk, r)
     for r in rs():
-        if r.get("state") != "running" or r.get("timed_out"):
-            continue
-        limit, whose = minutes(s, r)
-        if time.time() - (r.get("started") or time.time()) > 60 * limit:
-            change(desk, r["id"], lambda x: {"timed_out": True, "limit_min": limit, "limit_of": whose})
-            stop(r.get("pid"), r.get("pid_start", ""), procs.get(r["id"]))
-    sweep_checkouts(desk, rs())
+        with serve_step():
+            if r.get("state") != "running":
+                continue
+            limit, whose = minutes(s, r)
+            if r.get("timed_out") or time.time() - (r.get("started") or time.time()) > 60 * limit:
+                proc = procs.get(r["id"])
+                if not run_running(r, proc):
+                    continue
+                try:
+                    if not r.get("timed_out"):
+                        save_stopped(pending, ("release", r["id"]), r,
+                                     lambda fields: change(desk, r["id"], lambda x: fields),
+                                     {"timed_out": True, "limit_min": limit, "limit_of": whose})
+                finally:
+                    stop(r.get("pid"), r.get("pid_start", ""), proc)
+    with serve_step():
+        sweep_checkouts(desk, rs())
     approved = sorted((r for r in rs() if r.get("state") == "approved"), key=lambda r: r["id"])
     if not starting or not approved:
         return
@@ -1124,20 +1157,21 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None) ->
     # one at a time per repository, fixed or not: two releases of one repository may send to the same place
     held = {r.get("repo") for r in rs() if r.get("state") in ("starting", "running")}
     for r in approved:
-        if r.get("repo") in held or (not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)):
-            continue
-        try:
-            proc = start(desk, r["id"])
-        except Exception as e:  # noqa: BLE001 - say: nothing went out, and the release says why
-            why = desk.redact(f"it could not start: {e}")[:600]
-            if change(desk, r["id"], lambda x: {"state": "failed", "problem": why, "ended": now()}
-                      if x.get("state") in ("approved", "starting") else None):
-                desk.event("release_ended", id=r["id"], lane=r.get("lane"), target=r.get("target") or "",
-                           commit=r.get("commit"), ok=False, exit=None, problem=why)
-            continue
-        if proc:
-            procs[r["id"]] = proc
-            held.add(r.get("repo"))
+        with serve_step():
+            if r.get("repo") in held or (not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)):
+                continue
+            try:
+                proc = start(desk, r["id"])
+            except Exception as e:  # noqa: BLE001 - say: nothing went out, and the release says why
+                why = desk.redact(f"it could not start: {e}")[:600]
+                if change(desk, r["id"], lambda x: {"state": "failed", "problem": why, "ended": now()}
+                          if x.get("state") in ("approved", "starting") else None):
+                    desk.event("release_ended", id=r["id"], lane=r.get("lane"), target=r.get("target") or "",
+                               commit=r.get("commit"), ok=False, exit=None, problem=why)
+                continue
+            if proc:
+                procs[r["id"]] = proc
+                held.add(r.get("repo"))
 
 
 # -- words ---------------------------------------------------------------------------------------------------------

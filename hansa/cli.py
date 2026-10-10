@@ -1342,7 +1342,10 @@ def cmd_serve(a):
             try:
                 d.tick()
             except Exception as e:  # noqa: BLE001 - keep serving; the error is on record
-                desk.event("server_error", error=str(e)[:300])
+                try:
+                    desk.event("server_error", error=str(e)[:300])
+                except OSError:  # a full disk may refuse the error record too
+                    pass
                 print(f"hansa serve: {e}", file=sys.stderr, flush=True)
             time.sleep(a.every)
     except KeyboardInterrupt:

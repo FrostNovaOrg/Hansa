@@ -4416,7 +4416,6 @@ def finish_check(desk: Desk, tid: str) -> dict:
         code = int(done.read_text().strip())
     except (OSError, ValueError):
         code = None
-    done.unlink(missing_ok=True)
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "check.log")  # what the check printed can hold a key the change holds
     log = (d / "check.log").read_text(encoding="utf-8", errors="replace") if (d / "check.log").exists() else ""
@@ -4433,6 +4432,7 @@ def finish_check(desk: Desk, tid: str) -> dict:
     m = desk.change(tid, lambda now_meta: {"state": "failed" if changed else "cancelled" if now_meta.get("cancel")
                                            else "done", "phase": "", "pid": None, "pid_start": "", "check": check,
                                            "error": changed or ("cancelled" if now_meta.get("cancel") else "")})
+    done.unlink(missing_ok=True)  # the exit remains recoverable until the end is recorded
     desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
     sweep(desk, tid)
     return desk.meta(tid)
@@ -4885,7 +4885,6 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         code = int((raw / "merge-check.exit").read_text().strip())
     except (OSError, ValueError):
         code = None
-    (raw / "merge-check.exit").unlink(missing_ok=True)
     (raw / "merge-setup.log.done").unlink(missing_ok=True)
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, *MERGE_FILES)  # what the check printed can hold a key the change holds
@@ -4911,11 +4910,16 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
     desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note, command=result["command"],
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
-    if mc.get("cancel"):
-        return end_merge_check(desk, tid, None)
-    if not result["ok"]:
-        return end_merge_check(desk, tid, result)
-    return land_merge(desk, tid, result)
+    try:
+        if mc.get("cancel"):
+            return end_merge_check(desk, tid, None)
+        if not result["ok"]:
+            return end_merge_check(desk, tid, result)
+        return land_merge(desk, tid, result)
+    finally:
+        ended = desk.meta(tid)
+        if ended["state"] != "merging" or (ended.get("merge_check") or {}).get("phase") not in ("starting", "running"):
+            (raw / "merge-check.exit").unlink(missing_ok=True)
 
 
 def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
@@ -5124,11 +5128,14 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
         note = git_file_changed(desk, f"try-{lane_name}", e)
     except RuntimeError as e:
         note = note or desk.redact(f"the worktree could not be put back clean: {e}")[:300]
-    shutil.rmtree(d, ignore_errors=True)
     ok = bool(steps) and all(x["exit"] == 0 for x in steps.values()) and not note
     log = keep_try_log(desk, lane_name, t, whole)
-    return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean,
-                                     **({"log": str(log)} if log else {})})
+    try:
+        return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean,
+                                         **({"log": str(log)} if log else {})})
+    finally:
+        if read_try(desk, lane_name).get("phase") == "done":
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def try_log(desk: Desk, lane_name: str, merge: bool = False) -> Path:
@@ -5249,6 +5256,44 @@ def stop(pid, start: str = "", proc=None) -> None:
         proc.poll()
 
 
+SERVE_ERRORS = contextvars.ContextVar("serve_errors", default=None)
+
+
+@contextlib.contextmanager
+def serve_step():
+    """A write failure holds back only this operation; serve reports it after the rest of the round.
+    Outside a serve round, callers still get the error immediately."""
+    try:
+        yield
+    except OSError as e:
+        errors = SERVE_ERRORS.get()
+        if errors is None:
+            raise
+        errors.append(e)
+
+
+def save_stopped(pending: dict, key, run: dict, save, fields=None) -> None:
+    """Keep a stop this server made until its mark can be saved, only for this launch. No inference after
+    a restart: these are in memory, and an already ended process never creates a mark."""
+    identity = (run.get("launch"), run.get("started"))
+    if fields is not None:
+        kept = pending.get(key)
+        if kept and kept[0] == identity:
+            fields = {**kept[1], **fields}
+        pending[key] = (identity, fields)
+    kept = pending.get(key)
+    if kept is None:
+        return
+    if kept[0] == identity:
+        save(kept[1])
+    pending.pop(key, None)
+
+
+def run_running(run: dict, proc=None) -> bool:
+    """An end awaiting its record is still finished, even if the round is now past its limit."""
+    return not has_ended(proc) if proc is not None else alive(run.get("pid"), run.get("pid_start", ""))
+
+
 class Dispatcher:
     """Starts queued tasks while lanes are free, and finishes the ones that ended."""
 
@@ -5258,6 +5303,7 @@ class Dispatcher:
         self.merge_procs = {}  # merge checks this server started
         self.try_procs = {}  # tries (hansa lane try) this server started, by lane
         self.release_procs = {}  # releases (hansa release) this server started, by id
+        self.pending_stops = {}  # stop marks whose writes failed, by kind/id and launch
         self.resting = None  # the providers resting at the last round; None before the first
         self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
@@ -5290,24 +5336,27 @@ class Dispatcher:
         (sandbox_start_failure): Claude Code's own copy of the sandbox can refuse what srt's try let through. Its
         task is held when it ends (finish), without using a try."""
         for m in self.tasks():
-            sid = m.get("session_id") or ""
-            if m["state"] != "running" or m.get("phase") or not m.get("pid") or m.get("sandbox_failed") \
-                    or not sid or sid in self.sandbox_seen or m.get("cancel"):
-                continue
-            p = s["providers"].get(m.get("provider") or "")
-            if not p:
-                continue
-            line, settled = sandbox_start_failure(config_home(self.desk, m["provider"], p), sid)
-            if settled:
-                self.sandbox_seen.add(sid)
-            if not line:
-                continue
-            self.desk.update(m["id"], sandbox_failed=self.desk.redact(line))
-            self.held[(m.get("lane"), sandbox_group(m.get("kind") or ""))] = json.dumps(s, sort_keys=True, default=str)
-            self.desk.event("sandbox_failed", task=m["id"], lane=m.get("lane"), line=self.desk.redact(line))
-            stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
+            with serve_step():
+                sid = m.get("session_id") or ""
+                if m["state"] != "running" or m.get("phase") or not m.get("pid") or m.get("sandbox_failed") \
+                        or not sid or sid in self.sandbox_seen or m.get("cancel"):
+                    continue
+                p = s["providers"].get(m.get("provider") or "")
+                if not p:
+                    continue
+                line, settled = sandbox_start_failure(config_home(self.desk, m["provider"], p), sid)
+                if settled:
+                    self.sandbox_seen.add(sid)
+                if not line:
+                    continue
+                self.desk.update(m["id"], sandbox_failed=self.desk.redact(line))
+                self.held[(m.get("lane"), sandbox_group(m.get("kind") or ""))] = json.dumps(s, sort_keys=True, default=str)
+                self.desk.event("sandbox_failed", task=m["id"], lane=m.get("lane"), line=self.desk.redact(line))
+                stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
 
     def ended(self, tid: str, returncode) -> None:
+        save_stopped(self.pending_stops, ("task", tid), self.desk.meta(tid),
+                     lambda fields: self.desk.update(tid, **fields))
         if self.desk.meta(tid).get("phase") == "checking":
             finish_check(self.desk, tid)
         else:
@@ -5431,43 +5480,59 @@ class Dispatcher:
         under the floor)."""
         desk = self.desk
         for tid, proc in list(self.merge_procs.items()):
-            if has_ended(proc):
-                del self.merge_procs[tid]
-                stop(proc.pid, "", proc)
-                finish_merge_check(desk, tid)
+            with serve_step():
+                if has_ended(proc):
+                    stop(proc.pid, "", proc)
+                    mc = self.desk.meta(tid).get("merge_check") or {}
+                    save_stopped(self.pending_stops, ("merge", tid), mc,
+                                 lambda fields: desk.update(tid, merge_check={**mc, **fields}))
+                    finish_merge_check(desk, tid)
+                    del self.merge_procs[tid]
         for m in self.tasks():
-            mc = m.get("merge_check") or {}
-            if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
-                continue
-            found, since = self.look(m["id"], mc.get("launch", ""), mc.get("started"),
-                                     mc.get("lookup_failing_since"), "merge check")
-            if since and mc.get("phase") == "starting":  # not started a second time: looked for again next tick
-                why = self.gave_up(since)
-                if why:
-                    end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": why})
-                else:
-                    desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "lookup_failing_since": since}}
-                                if x["state"] == "merging" and (x.get("merge_check") or {}).get("phase") == "starting"
-                                else None)
-                continue
-            if found and mc.get("phase") == "starting":  # an earlier server stopped right after starting it
-                desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found),
-                                                  "lookup_failing_since": None})
-            elif not found and not alive(mc.get("pid"), mc.get("pid_start", "")):
-                if mc.get("phase") == "starting":  # it never started: once more from the start
-                    desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued",
-                                                                    "lookup_failing_since": None}}
-                                if x["state"] == "merging" else None)
-                else:
-                    finish_merge_check(desk, m["id"])
+            with serve_step():
+                mc = m.get("merge_check") or {}
+                if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
+                    continue
+                found, since = self.look(m["id"], mc.get("launch", ""), mc.get("started"),
+                                         mc.get("lookup_failing_since"), "merge check")
+                if since and mc.get("phase") == "starting":  # not started a second time: looked for again next tick
+                    why = self.gave_up(since)
+                    if why:
+                        end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": why})
+                    else:
+                        desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "lookup_failing_since": since}}
+                                    if x["state"] == "merging" and (x.get("merge_check") or {}).get("phase") == "starting"
+                                    else None)
+                    continue
+                if found and mc.get("phase") == "starting":  # an earlier server stopped right after starting it
+                    desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found),
+                                                      "lookup_failing_since": None})
+                elif not found and not alive(mc.get("pid"), mc.get("pid_start", "")):
+                    if mc.get("phase") == "starting":  # it never started: once more from the start
+                        desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued",
+                                                                        "lookup_failing_since": None}}
+                                    if x["state"] == "merging" else None)
+                    else:
+                        save_stopped(self.pending_stops, ("merge", m["id"]), mc,
+                                     lambda fields: desk.update(m["id"], merge_check={**mc, **fields}))
+                        finish_merge_check(desk, m["id"])
         for m in self.tasks():
-            mc = m.get("merge_check") or {}
-            if m["state"] != "merging" or mc.get("phase") != "running":
-                continue
-            limit = 60 * merge_minutes(s["lanes"].get(occupied_lane(m), {}))
-            if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
-                desk.update(m["id"], merge_check={**mc, "timed_out": True})
-                stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
+            with serve_step():
+                mc = m.get("merge_check") or {}
+                if m["state"] != "merging" or mc.get("phase") != "running":
+                    continue
+                limit = 60 * merge_minutes(s["lanes"].get(occupied_lane(m), {}))
+                if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
+                    proc = self.merge_procs.get(m["id"])
+                    if not run_running(mc, proc):
+                        continue
+                    try:
+                        save_stopped(self.pending_stops, ("merge", m["id"]), mc,
+                                     lambda fields: desk.update(m["id"], merge_check={**mc, **fields}), {"timed_out": True})
+                    finally:
+                        stop(mc.get("pid"), mc.get("pid_start", ""), proc)
+                elif mc.get("cancel") and run_running(mc, self.merge_procs.get(m["id"])):
+                    stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
         if not starting:
             return
         from .release import holds_repo, releases
@@ -5482,48 +5547,49 @@ class Dispatcher:
         # from a fixed checkout of that commit holds nothing)
         releasing = {r.get("repo") for r in releases(desk) if holds_repo(r)}
         for m in sorted(tasks, key=merge_order):
-            if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
-                continue
-            ln = m.get("lane")
-            if ln not in s["lanes"]:
-                end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": f"lane {ln} is no longer in settings"})
-                continue
-            at = merge_target(s, ln)
-            if at in held or at[0] in releasing:
-                continue
-            if (m.get("merge_check") or {}).get("plain"):  # its turn: it needs neither the lane nor a slot
-                try:
-                    if plain_merge(desk, m["id"], s["lanes"][ln]) != "check":
-                        continue
-                except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
-                    end_merge_check(desk, m["id"], {"ok": False, "at": now(),
-                                                    "note": desk.redact(f"the merge could not be made: {e}")[:600]})
+            with serve_step():
+                if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
                     continue
-                m = desk.meta(m["id"])  # a merge check now, first in line
-            ln = merge_check_lane(s, m)
-            if ln in busy or free <= 0:
-                held.add(at)  # first in line: the ones after it wait for it
-                continue
-            try:
-                proc = start_merge_check(desk, m["id"], ln, s["lanes"][ln])
-            except SrtCannotRun as e:  # the machine's problem: nothing is merged, and nothing ran
-                remove_sandbox_tmp(desk, m["id"])
-                end_merge_check(desk, m["id"], {"ok": False, "at": now(), "could_not_run": True,
-                                                "command": merge_command(s["lanes"][ln]), "tail": [],
-                                                "note": desk.redact(f"could not run: {e}")[:600]})
-                continue
-            except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
-                remove_sandbox_tmp(desk, m["id"])
-                end_merge_check(desk, m["id"], {"ok": False, "at": now(),
-                                                "note": desk.redact(f"the merge check could not run: {e}")[:600]})
-                continue
-            if proc:
-                self.merge_procs[m["id"]] = proc
-                busy.add(ln)
-                held.add(at)
-                free -= 1
-            elif (desk.meta(m["id"]).get("merge_check") or {}).get("phase") == "queued":
-                held.add(at)  # merged at once onto a base that had moved: checked again, still first in line
+                ln = m.get("lane")
+                if ln not in s["lanes"]:
+                    end_merge_check(desk, m["id"], {"ok": False, "at": now(), "note": f"lane {ln} is no longer in settings"})
+                    continue
+                at = merge_target(s, ln)
+                if at in held or at[0] in releasing:
+                    continue
+                if (m.get("merge_check") or {}).get("plain"):  # its turn: it needs neither the lane nor a slot
+                    try:
+                        if plain_merge(desk, m["id"], s["lanes"][ln]) != "check":
+                            continue
+                    except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
+                        end_merge_check(desk, m["id"], {"ok": False, "at": now(),
+                                                        "note": desk.redact(f"the merge could not be made: {e}")[:600]})
+                        continue
+                    m = desk.meta(m["id"])  # a merge check now, first in line
+                ln = merge_check_lane(s, m)
+                if ln in busy or free <= 0:
+                    held.add(at)  # first in line: the ones after it wait for it
+                    continue
+                try:
+                    proc = start_merge_check(desk, m["id"], ln, s["lanes"][ln])
+                except SrtCannotRun as e:  # the machine's problem: nothing is merged, and nothing ran
+                    remove_sandbox_tmp(desk, m["id"])
+                    end_merge_check(desk, m["id"], {"ok": False, "at": now(), "could_not_run": True,
+                                                    "command": merge_command(s["lanes"][ln]), "tail": [],
+                                                    "note": desk.redact(f"could not run: {e}")[:600]})
+                    continue
+                except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
+                    remove_sandbox_tmp(desk, m["id"])
+                    end_merge_check(desk, m["id"], {"ok": False, "at": now(),
+                                                    "note": desk.redact(f"the merge check could not run: {e}")[:600]})
+                    continue
+                if proc:
+                    self.merge_procs[m["id"]] = proc
+                    busy.add(ln)
+                    held.add(at)
+                    free -= 1
+                elif (desk.meta(m["id"]).get("merge_check") or {}).get("phase") == "queued":
+                    held.add(at)  # merged at once onto a base that had moved: checked again, still first in line
 
     def tries(self, s: dict, starting: bool = True) -> None:
         """Finish tries that ended, stop those over the lane's time, finish those an earlier server left, and
@@ -5531,37 +5597,52 @@ class Dispatcher:
         free space under the floor)."""
         desk = self.desk
         for ln, proc in list(self.try_procs.items()):
-            if has_ended(proc):
-                del self.try_procs[ln]
-                stop(proc.pid, "", proc)
-                finish_try(desk, ln)
+            with serve_step():
+                if has_ended(proc):
+                    stop(proc.pid, "", proc)
+                    t = read_try(desk, ln)
+                    if t.get("phase") != "running":  # its end was saved before its event failed
+                        del self.try_procs[ln]
+                        continue
+                    save_stopped(self.pending_stops, ("try", ln), t, lambda fields: write_try(desk, ln, {**t, **fields}))
+                    finish_try(desk, ln)
+                    del self.try_procs[ln]
         d = desk.state_dir / "tries"
         for ln in sorted(f.stem for f in d.glob("*.json")) if d.is_dir() else []:
-            t = read_try(desk, ln)
-            if t.get("phase") == "running" and ln not in self.try_procs:
-                if not alive(t.get("pid"), t.get("pid_start", "")):  # started by an earlier server
-                    finish_try(desk, ln)
+            with serve_step():
+                t = read_try(desk, ln)
+                if t.get("phase") == "running" and ln not in self.try_procs:
+                    if not alive(t.get("pid"), t.get("pid_start", "")):  # started by an earlier server
+                        save_stopped(self.pending_stops, ("try", ln), t, lambda fields: write_try(desk, ln, {**t, **fields}))
+                        finish_try(desk, ln)
+                        continue
+                if t.get("phase") == "running":
+                    ln_s = s["lanes"].get(ln, {})
+                    limit = merge_minutes(ln_s) if t.get("merge") else ln_s.get("timeout_min", 240)
+                    if t.get("timed_out") or time.time() - (t.get("started") or time.time()) > 60 * limit:
+                        proc = self.try_procs.get(ln)
+                        if not run_running(t, proc):
+                            continue
+                        try:
+                            if not t.get("timed_out"):
+                                save_stopped(self.pending_stops, ("try", ln), t,
+                                             lambda fields: write_try(desk, ln, {**t, **fields}), {"timed_out": True})
+                        finally:
+                            stop(t.get("pid"), t.get("pid_start", ""), proc)
+                if t.get("phase") != "queued" or not starting:
                     continue
-            if t.get("phase") == "running" and not t.get("timed_out"):
-                ln_s = s["lanes"].get(ln, {})
-                limit = merge_minutes(ln_s) if t.get("merge") else ln_s.get("timeout_min", 240)
-                if time.time() - (t.get("started") or time.time()) > 60 * limit:
-                    write_try(desk, ln, {**t, "timed_out": True})
-                    stop(t.get("pid"), t.get("pid_start", ""), self.try_procs.get(ln))
-            if t.get("phase") != "queued" or not starting:
-                continue
-            if ln not in s["lanes"]:
-                end_try(desk, ln, {"ok": False, "steps": {}, "note": f"lane {ln} is no longer in settings"})
-                continue
-            try:
-                proc = start_try(desk, ln, s["lanes"][ln])
-            except Exception as e:  # noqa: BLE001 - srt missing, say: the try says why it did not run
-                for x in read_try(desk, ln).get("tmp", []):
-                    shutil.rmtree(x, ignore_errors=True)
-                end_try(desk, ln, {"ok": False, "steps": {}, "note": desk.redact(f"the try could not run: {e}")[:600]})
-                continue
-            if proc:
-                self.try_procs[ln] = proc
+                if ln not in s["lanes"]:
+                    end_try(desk, ln, {"ok": False, "steps": {}, "note": f"lane {ln} is no longer in settings"})
+                    continue
+                try:
+                    proc = start_try(desk, ln, s["lanes"][ln])
+                except Exception as e:  # noqa: BLE001 - srt missing, say: the try says why it did not run
+                    for x in read_try(desk, ln).get("tmp", []):
+                        shutil.rmtree(x, ignore_errors=True)
+                    end_try(desk, ln, {"ok": False, "steps": {}, "note": desk.redact(f"the try could not run: {e}")[:600]})
+                    continue
+                if proc:
+                    self.try_procs[ln] = proc
 
     def rests(self, s: dict) -> None:
         """A provider whose rest ran out is ready again with no save or check to say so: tell the open requests
@@ -5604,97 +5685,135 @@ class Dispatcher:
         running = [m for m in tasks if m["state"] == "running" and m.get("pid") and m.get("phase") != "starting"]
         table = process_table() if running else {}
         for m in running:
-            record_run(self.desk, m, table)
+            with serve_step():
+                record_run(self.desk, m, table)
 
     def tick(self) -> None:
+        errors = []
+        token = SERVE_ERRORS.set(errors)
+        try:
+            self._tick()
+        finally:
+            SERVE_ERRORS.reset(token)
+        if errors:
+            raise errors[0]
+
+    def _tick(self) -> None:
         desk = self.desk
         self.read = None  # what another process changed since the last round is read again
         s = desk.settings()
-        desk.state_dir.mkdir(exist_ok=True)
-        beat(desk)
-        self.rests(s)
-        if not self.retried:  # a hold an earlier server made, perhaps on earlier code: tried again, once
-            self.retried = True
-            for key in sandbox_retry(desk, s):
-                self.held[key] = json.dumps(s, sort_keys=True, default=str)
+        with serve_step():
+            desk.state_dir.mkdir(exist_ok=True)
             beat(desk)
-        if time.time() - self.swept >= TMP_SWEEP_AGE:
-            self.swept = time.time()
-            sweep_tmp()
-        low = self.disk(s)
-        self.record(self.tasks())
-        for tid, proc in list(self.procs.items()):
-            if has_ended(proc):
-                del self.procs[tid]
-                stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
-                self.ended(tid, proc.returncode)
+        with serve_step():
+            self.rests(s)
+        with serve_step():
+            if not self.retried:  # a hold an earlier server made, perhaps on earlier code: tried again, once
+                self.retried = True
+                for key in sandbox_retry(desk, s):
+                    self.held[key] = json.dumps(s, sort_keys=True, default=str)
                 beat(desk)
+        with serve_step():
+            if time.time() - self.swept >= TMP_SWEEP_AGE:
+                self.swept = time.time()
+                sweep_tmp()
+        low = []
+        with serve_step():
+            low = self.disk(s)
+        with serve_step():
+            self.record(self.tasks())
+        for tid, proc in list(self.procs.items()):
+            with serve_step():
+                if has_ended(proc):
+                    if desk.meta(tid).get("pid") != proc.pid:  # its end was saved before a later write failed
+                        del self.procs[tid]
+                        continue
+                    stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
+                    self.ended(tid, proc.returncode)
+                    if self.procs.get(tid) is proc:  # a resume replaced it with its own process
+                        del self.procs[tid]
+                    beat(desk)
         for m in self.tasks():
-            if m["state"] != "running" or m["id"] in self.procs:
-                continue
-            if m.get("phase") == "starting":  # an earlier server stopped while it prepared this task
-                self.recover(m)
-            elif m.get("phase") == "checking" and not m.get("pid"):
-                self.check(m, s)
-            elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
-                self.ended(m["id"], None)
+            with serve_step():
+                if m["state"] != "running" or m["id"] in self.procs:
+                    continue
+                if m.get("phase") == "starting":  # an earlier server stopped while it prepared this task
+                    self.recover(m)
+                elif m.get("phase") == "checking" and not m.get("pid"):
+                    self.check(m, s)
+                elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
+                    self.ended(m["id"], None)
         for m in self.tasks():
-            if m["state"] != "running":
-                continue
-            limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
-            over = time.time() - m.get("started", time.time()) > limit and m.get("kind") != "design"
-            if m.get("cancel") or over:  # a design session waits on the principal, so it has no time ceiling
-                if not m.get("cancel"):
-                    desk.update(m["id"], timed_out=True)
-                stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
-        self.sandbox_watch(s)
-        self.tries(s, starting=not low)
+            with serve_step():
+                if m["state"] != "running":
+                    continue
+                limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
+                over = time.time() - m.get("started", time.time()) > limit and m.get("kind") != "design"
+                if m.get("cancel") or over:  # a design session waits on the principal, so it has no time ceiling
+                    proc = self.procs.get(m["id"])
+                    if not run_running(m, proc):
+                        continue  # an end whose record failed, or one just before this observation
+                    try:
+                        if not m.get("cancel"):
+                            save_stopped(self.pending_stops, ("task", m["id"]), m,
+                                         lambda fields: desk.update(m["id"], **fields), {"timed_out": True})
+                    finally:
+                        stop(m.get("pid"), m.get("pid_start", ""), proc)
+        with serve_step():
+            self.sandbox_watch(s)
+        with serve_step():
+            self.tries(s, starting=not low)
         from .release import tick as releases
-        releases(desk, s, self.release_procs, starting=not low, tasks=self.tasks)  # before merge checks: a yes waits for none only queued
-        self.merge_checks(s, starting=not low)
-        beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
+        with serve_step():  # before merge checks: a yes waits for none only queued
+            releases(desk, s, self.release_procs, starting=not low, tasks=self.tasks, pending=self.pending_stops)
+        with serve_step():
+            self.merge_checks(s, starting=not low)
+        with serve_step():
+            beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
         if desk.paused() or low:  # free space under the floor: what runs goes on, nothing new starts
             return
         designing = {m["lane"] for m in self.tasks() if m["state"] == "running" and m.get("kind") == "design"}
         for m in self.tasks():  # a design session has its own worktree and waits on the principal
-            if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
-                    and not s["lanes"][m["lane"]].get("merge_lane") \
-                    and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s, "design"):
-                try:
-                    start_design(desk, m["id"], m["lane"])
-                except SandboxRefused as e:  # held, not failed: it starts once a try passes
-                    self.hold(m["id"], m["lane"], s, e)
-                except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
-                    not_started(desk, m["id"], e)
-                else:
-                    designing.add(m["lane"])
+            with serve_step():
+                if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
+                        and not s["lanes"][m["lane"]].get("merge_lane") \
+                        and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s, "design"):
+                    try:
+                        start_design(desk, m["id"], m["lane"])
+                    except SandboxRefused as e:  # held, not failed: it starts once a try passes
+                        self.hold(m["id"], m["lane"], s, e)
+                    except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
+                        not_started(desk, m["id"], e)
+                    else:
+                        designing.add(m["lane"])
         running = [m for m in self.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
         busy = {occupied_lane(m) for m in running} | tried_lanes(desk)
         for m in self.tasks():
-            if free <= 0:
-                break
-            if m["state"] != "queued" or m.get("kind") == "design":
-                continue
-            for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
-                if ln in busy or ln not in s["lanes"] or s["lanes"][ln].get("merge_lane") or self.sandbox_waits(ln, s):
+            with serve_step():
+                if free <= 0:
+                    break
+                if m["state"] != "queued" or m.get("kind") == "design":
                     continue
-                pname = next((p for p in s["lanes"][ln]["providers"]
-                              if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
-                if not pname:
-                    continue
-                try:
-                    proc = start(desk, m["id"], ln, pname)
-                except SandboxRefused as e:  # held, not failed: it starts once a try passes
-                    self.hold(m["id"], ln, s, e)
-                except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
-                    not_started(desk, m["id"], e)
-                else:
-                    if proc:
-                        self.procs[m["id"]] = proc
-                        busy.add(ln)
-                        free -= 1
-                break
+                for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
+                    if ln in busy or ln not in s["lanes"] or s["lanes"][ln].get("merge_lane") or self.sandbox_waits(ln, s):
+                        continue
+                    pname = next((p for p in s["lanes"][ln]["providers"]
+                                  if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
+                    if not pname:
+                        continue
+                    try:
+                        proc = start(desk, m["id"], ln, pname)
+                    except SandboxRefused as e:  # held, not failed: it starts once a try passes
+                        self.hold(m["id"], ln, s, e)
+                    except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
+                        not_started(desk, m["id"], e)
+                    else:
+                        if proc:
+                            self.procs[m["id"]] = proc
+                            busy.add(ln)
+                            free -= 1
+                    break
 
 
 ROUND_QUIET = 30  # seconds without a finished round after which hansa serve counts as busy
