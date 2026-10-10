@@ -13304,13 +13304,14 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual(self.desk.save_settings(s), [])
                 m = self.settle(d, self.desk.new_task("Add hello.txt"))
                 self.assertEqual(m["state"], "done", m)
+                if how:  # started 23:59:30 and took 90 s: it ended at 00:01 the next day, not at its start's 23:59
+                    self.desk.update(m["id"], check_started=time.mktime((2026, 3, 14, 23, 59, 30, 0, 0, -1)),
+                                     check={**m["check"], "seconds": 90})
                 with contextlib.redirect_stdout(io.StringIO()):
                     main(["--desk", str(self.desk.root), "verify", m["id"]])
                 text = (self.desk.tasks_dir / self.desk.meta(m["id"])["verify"] / "task.md").read_text()
                 if how:
-                    when = time.strftime("%Y-%m-%d %H:%M",
-                                         time.localtime(m["check_started"] + m["check"]["seconds"]))
-                    said = (f"\nThe task's last check, which hansa ran on it: `{check}`. It {how.format(when)}. "
+                    said = (f"\nThe task's last check, which hansa ran on it: `{check}`. It {how.format('2026-03-15 00:01')}. "
                             f"The whole check need not be run again unless you need to.\n")
                 else:
                     said = f"\nTask {m['id']} has no check: hansa ran none on it.\n"
