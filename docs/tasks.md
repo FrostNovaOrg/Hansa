@@ -1,7 +1,8 @@
 # How a task runs
 
-Time limits and resumes, retries after a dropped connection or a provider's usage limit, and tasks with a
-browser. The [README](../README.md#how-it-works) has the overview of a task's life.
+Time limits and resumes, retries after a dropped connection or a provider's usage limit, a check's output,
+effort, tasks with a browser, merging, what work costs, and the states a task goes through. The
+[README](../README.md#how-it-works) has the overview of a task's life.
 
 ## Time limits, and work left running in the background
 
@@ -15,21 +16,33 @@ less), so a command that hangs does not hold it for the whole limit. Workers
 are told these limits in minutes, to give the Bash tool's timeout (in
 milliseconds, up to the most) for a long build or suite, and to run it in the
 foreground, in one Bash call, never in the background while they end their
-turn. A worker that does end its turn while
+turn.
+
+A worker ends with a short report: its last message before a notice from its
+own background work (a watch it started timing out, say) opened another turn
+after it had stopped. Text it wrote answering such a notice follows the
+report, under a line saying it was written after, when a background notice
+came in. A worker that does end its turn while
 background work it started still runs is resumed once, in the same session,
 with a short message: that work was stopped with it, so it runs it again in the
-foreground, waits for it, then reports. A second time it is not resumed; `hansa
+foreground, waits for it, then reports; the report kept is the one it writes
+after the resume. A second time it is not resumed; `hansa
 show` then says what was still running. The time limit counts from the task's
 start, across both runs. When the task is queued again for a new try (after a
 dropped connection, say), that try starts with nothing of the earlier try's
 resume: it may be resumed once in its own right, and the earlier try's turns
-and tokens stay in its attempt record. For a browser task whose lane has a
+and tokens stay on the task's record of its tries. For a browser task whose lane has a
 preview, the first run's preview is stopped when that run ends, before hansa
 decides on the resume, and the resumed run gets one started again from the same
 worktree: never two at once. The first one's output is kept beside the second's
 (`preview-before-resume.log`, which `hansa show` names).
 
-## Retries after a dropped connection
+## Dropped connections and usage limits
+
+A run cut off by a dropped connection is tried again by itself; a provider that hits a usage limit rests,
+and its tasks move on or wait.
+
+### Retries after a dropped connection
 
 A run that ended on a dropped connection is tried once more by itself. hansa
 reads only Claude Code's own error lines for this: one that begins `API Error`
@@ -40,7 +53,8 @@ computer was asleep", one that ends `(ENETUNREACH)`, and the API's
 `overloaded_error`. A test that
 timed out, or a log line saying "overloaded", is the task's own failure.
 
-## When a provider hits a usage limit
+### When a provider hits a usage limit
+
 When a provider answers with a usage limit (HTTP 402 or 429, or the wording of one), it rests: no task
 starts on it until the rest ends, and a task stopped by the limit moves to the next ready provider of its
 lane, or waits for one.
@@ -60,9 +74,11 @@ lane, or waits for one.
   limit again right after each rest cannot hold a task forever. Any other failure counts as before.
   `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
   when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
+- **A refusal is not a limit.** A provider that refuses one task (its content filter) does not rest: that
+  task alone moves to the lane's next provider.
 - **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
-  dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on its
-  attempt record; a run an earlier `hansa serve` started and lost track of is read from its session record
+  dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on the
+  task's record of its tries; a run an earlier `hansa serve` started and lost track of is read from its session record
   as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
   the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
   and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
@@ -91,8 +107,16 @@ passes it on, but some such endpoints do not act on it.
 
 ## Browser tasks and the preview
 
-A task or verification with a browser (`hansa add --browser`, `hansa verify
---browser`) on a lane with a `preview` (the command that starts the app, such
+A task or verification with a browser (`hansa add --browser`, `hansa retry
+--browser`, `hansa verify --browser`) gets a browser for that task's worker
+alone, and no other, through the browser tool the principal sets on the page,
+with no saved logins. The worker reads a page's text directly; charts, images
+and drawings it can see only in screenshots, which hansa keeps with the task
+(`tasks/<id>/browser/`). The page it looks at must be reachable from this
+machine. If the principal has not set up a browser, hansa says so and queues
+nothing.
+
+Such a task on a lane with a `preview` (the command that starts the app, such
 as `npm run dev`) gets the app started for it. On macOS hansa starts the
 preview itself before the worker: in the lane's worktree, after the lane's
 setup, in `srt` with the lane's sandbox (network and write lists, env, the
@@ -113,8 +137,8 @@ and any orphan (a process whose parent is the system's first process, as a
 daemon that forked twice is) started since whose working folder is in the
 worktree or the preview's temporary folder. A process with a living parent
 that the preview did not start is not touched, so a shell, an editor or a
-file watcher you start in the worktree while a browser task runs there is
-left alone. But a process you start there with `nohup` (or an editor that
+file watcher a person starts in the worktree while a browser task runs there is
+left alone. But a process started there with `nohup` (or an editor that
 detaches itself from the shell that started it) becomes an orphan once that
 shell ends, and is stopped at the end of the task. What can still escape on macOS: a process that forks twice,
 leaves the group, clears its environment and changes folder all between two
@@ -139,3 +163,110 @@ it**: `srt` runs a command there in a network namespace of its own
 server bound inside listens on the sandbox's own loopback, and the browser,
 which runs outside the sandbox, cannot reach it. The worker is told so. A
 design session starts its own preview, as before.
+
+## Merging, the merge check and conflicts
+
+`hansa merge ID` merges a task's branch into its lane's base branch. A failed
+check blocks it unless the coordinator says `--despite-check` (recorded), and
+so does a verification that does not hold.
+
+- **When it merges at once.** When the lane's base has not moved since the task
+  was made and the lane has no merge check of its own (below), or when the lane
+  has neither a check nor a `merge_check`, `hansa merge` merges at once. A lane
+  without a check has its tasks merged untested: give it one with `hansa lane
+  set L check "<command>"`.
+- **When the base has moved.** When the base has moved (another task was merged
+  meanwhile, say) and the lane has a check, the two together were never
+  checked, and two changes that each pass can fail together. Then `hansa merge`
+  does not merge at once: the task becomes `merging`, and its merge check waits
+  for the lane to be free. hansa merges the task onto the base as it is then, in
+  the lane's worktree, runs the lane's setup and its merge check there, and if
+  that passes moves the base to exactly that merge commit. The coordinator is
+  told when it ends: the task ends `merged`, or back in review with `hansa show
+  ID` saying why nothing was merged (the check's last lines, or a conflict). If
+  the base moves again while it is checked, it is checked once more on the new
+  tip; after a second move it stops and says so. `--despite-check` merges at
+  once without it (recorded).
+- **One at a time.** Merges into one base branch go one at a time, in the order
+  they were asked: a merge asked while a merge check runs or waits on the same
+  repository and base branch waits its turn behind it, as `merging`, and so
+  does one asked while a release runs in that repository. When its turn comes it
+  merges without a check if the base has still not moved, and with a merge
+  check as above if it has.
+- **Cancelling.** `hansa cancel ID` on a `merging` task stops its merge check
+  and puts the task back in review.
+- **`--recheck`.** `hansa merge ID --recheck` goes the same way whether or not
+  the base has moved: the task merged onto the base's tip, the lane's setup and
+  merge check run there when the lane is free, and exactly that merged if it
+  passes. Use it for a task whose check failed or could not run for the
+  machine's sake, once that is fixed. The event log records that the check was
+  run again, and by whom. Not with `--despite-check`.
+- **`merge_check` and `merge_timeout_min`.** A lane's merge check runs its check
+  unless the lane has a command of its own for it: `hansa lane set L
+  merge_check "<command>"`, for what is too slow to run after every task (the
+  whole build, packaging, the slow suites). Its time limit is the lane's
+  `merge_timeout_min` (`hansa lane set L merge_timeout_min N`; none takes it
+  out), else its `timeout_min`, whichever command it runs. A merge check of its
+  own runs exactly where the check would (the lane's worktree and sandbox, after
+  its setup, on the merged tree), but before every merge of a task that changed
+  something, whether or not the base has moved, since the task's own tree never
+  ran it; the check after each task still runs the check. A lane with only a
+  `merge_check` checks nothing after a task, and runs it before each merge.
+  `hansa show`, `hansa status` and what the coordinator is told name the
+  command that ran.
+- **Workers are told.** Workers and verifiers on a lane with a merge check of
+  its own are told that it runs before merging, not after their task.
+- **Trying it.** `hansa lane try L --merge-check` runs the lane's setup and the
+  merge check's command once where tasks run, under its time limit, with no
+  worker, and prints how each ended; `hansa lane try L --merge-check --log`
+  prints each step's whole output of the last merge-check try, keys removed.
+- **Conflicts.** A conflict lists each conflicting file and the lines where the
+  two sides meet. Settle it with `hansa retry ID --update "<how to settle
+  it>"`: the follow-up continues from the task's branch with the current base
+  merged in; where that conflicts, the worker finds the conflict markers in the
+  files it is told about and settles them by editing, and hansa's commit
+  completes the merge. Redo the whole change with `--fresh` only when the old
+  work is no use.
+
+## What work costs
+
+Cost figures are Claude Code's own token counts, priced with the principal's
+table of prices (on the page). With a subscription they show what the tokens
+are worth, not a bill. `hansa cost` gives them (`--days N` or `--since HH:MM`;
+`--by day`, `seat`, `lane`, `task`, `model` or `provider`; `--json`, with
+`--rows` for every row).
+
+To say what one job cost, note the time `hansa status` shows when it starts,
+and run `hansa cost --since HH:MM --by seat` when it is done.
+
+The coordinator's own session, with its helpers, is counted only when it runs
+with the workers' Claude login (the same config folder), because only then are
+its session records where hansa reads them. It has no lane or task, so in `--by
+lane` and `--by task` its usage is a row of its own, `(coordinator)`: in every
+view the rows add up to the total. `hansa cost --turns` shows the
+coordinator's own usage turn by turn (what started each turn, its steps, the
+conversation's length at its first step, its worth and the tools it called;
+then totals by what started them; no message text), which shows where its
+money goes. A coordinator run as root on a Linux server is not counted
+([On a Linux server](linux-server.md)).
+
+When `hansa status` says cost audit on, the principal wants the cost in every
+report: the coordinator ends each report with what that round of work cost (as
+above), and points out anything unusual, such as one task costing far more than
+the others, or a seat that grew. When it does not say so, the coordinator
+spends no turns on cost.
+
+## Task states
+
+`hansa explain states` prints these; they say the same.
+
+| State | What it means |
+|---|---|
+| `queued` | waiting for a free lane and a ready provider |
+| `running` | a worker is on it, or hansa is running the lane's check on its work |
+| `done` | the worker finished; waiting for the coordinator's review (`hansa show` / `hansa merge` / `hansa retry`) |
+| `merging` | `hansa merge` is checking it together with what the base gained since it was made: merged onto the base as it is now, with the lane's merge check (its check, unless it has a `merge_check` of its own) run there; it merges if that passes. Or it needs no check and waits its turn behind a merge check on the same base |
+| `failed` | the run ended with an error; `hansa show` says why |
+| `merged` | merged into the lane's base branch |
+| `cancelled` | stopped or closed on request |
+| `replaced` | a follow-up task took its place |

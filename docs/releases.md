@@ -14,22 +14,27 @@ release targets instead, with `hansa lane target L NAME "<command>"
 [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
 (else the lane's `timeout_min`) and optionally another target of the lane
 that must have sent out the same commit first; a lane has either the
-`release` command (its one unnamed target) or named targets. `hansa
+`release` command (its one unnamed target) or named targets: take `release`
+out (`hansa lane set L release none`) when the first named target is set.
+`hansa lane target L` lists them, each with the way it runs. `hansa
 release L [TARGET] [note]` (TARGET needed when there is more than one)
-records the request: the target, the commit, the command, the note, the
+records the request (a new request for the same target replaces one still
+waiting): the target, the commit, the command, the note, the
 commits that go out (on no remote-tracking branch of the repository and not
 in that target's last release; the whole history when it has no
 remote-tracking branch) and the files they change, a file the command names
 (such as `./deploy.sh`) marked. A word from the principal's list of words no
 release may send out, in the command line or in a line, a file name, a
 message or the author's or committer's name or email of any outgoing commit
-(all are checked; matched within one line, in text read as UTF-8), refuses
-it; each hit names its commit and where it is (`author`, `committer`, a
+(all are checked, and the page shows at most 200 of them and says how many
+were checked; the word scan and its limits are under [Forbidden words before a
+release](#forbidden-words-before-a-release)), refuses it; each hit names its commit and where it is (`author`, `committer`, a
 file). A command that holds one of those words
 is kept when it is set (`hansa lane set L release`, `hansa lane target`,
 `hansa lane add --like`), and hansa says the word and where at once, before
-any release is asked. A command that holds a known key is
-refused when it is set. A target that must follow another is asked only for
+any release is asked. A command that holds one of the desk's keys is
+refused when it is set, since a command is stored and shown as written: have
+it read the key from where the tool keeps it (its own login or config). A target that must follow another is asked only for
 a commit the other one already sent out, and looked at again before it
 starts. Otherwise the page shows it, with its target, with Release and
 Refuse; a target the principal ticks as released without asking (each one
@@ -60,7 +65,7 @@ recorded as the principal's answer given through the coordinator (channel
 `code`); three wrong codes void it, and it lapses when the release is
 answered, stopped or no longer what was asked, after 24 hours, or when a new
 alert for the release brings a new one. With no alert command there is no
-code: the page alone answers. Your alert command must not keep the alert's
+code: the page alone answers. The principal's alert command must not keep the alert's
 text anywhere the coordinator can read it (a file, a log, a chat history):
 the code in it approves a release. No lane may be named `yes` or `no`, as
 those words begin the answer. hansa serve runs the
@@ -83,7 +88,7 @@ refuses a fixed target whose command line itself names the base branch as
 what to send (`main`, `refs/heads/main`, `main~0`, `main^{commit}`,
 `main@{0}`, or the source of `main:prod`; `HEAD:main` is allowed), but a
 variable the command expands or a script it runs is not looked into. The commits going out
-are read and checked for forbidden words without holding the desk, each
+are read and scanned for forbidden words without holding the desk, each
 commit's own change once (a merge's: only what it adds beyond its parents,
 git's `--cc`), and recorded only if they are still what goes out; hansa
 serve checks again at the start only when the commit, the starting point,
@@ -91,9 +96,42 @@ the words or the command changed. The coordinator hears when the principal answe
 and when the release ends. `hansa release` lists them; `hansa explain lane L`
 shows each target's command and its last release.
 
+### A release gated on a full build on another desk
+
+A release that should go on only if a full build passes on another desk's
+machine (one whose sandbox allows what this one's refuses): a `--fixed`
+target that pushes `$HANSA_RELEASE_COMMIT` to the other desk's base branch and
+runs `hansa lane try L --merge-check --at "$HANSA_RELEASE_COMMIT"` there, and
+the public target set `--after` it. `--at COMMIT` answers for that commit
+only: it is refused with nothing run unless COMMIT is the base's tip there, a
+try at another commit (one already running, say) is waited for and never taken
+as the answer, and it exits 0 only when the try at COMMIT passed. So a try asked
+again after the base moved never passes on an older commit's verdict.
+
+### Stopping a release
+
+A release can be stopped: the coordinator with `hansa release --stop ID
+[reason]`, the principal with Stop on the page. One that has not started yet
+(waiting for the principal's answer, or approved and waiting its turn) is
+closed as stopped and never runs. A running one gets TERM to its command's
+whole process group, then KILL 30 seconds later to what still runs; it is
+recorded as stopped, with who stopped it and why, and its output so far is
+kept (a fixed target's checkout is removed as at any other end). A stopped
+release went out for no `--after`: a target that must follow it is not let
+through. A stopped install may leave the server half-switched, so a release
+command for which that matters should handle TERM: finish or undo the step it
+is in. A stop that comes after the command has already ended is not a stop:
+the release is recorded done or failed, as its exit says, with a note that the
+stop came after it ended. What a release's command starts is recorded while
+it runs, also what leaves its process group, and what of it still runs is
+stopped at any end (a stop, the time limit, a failure, done). The principal's
+alert command is told when the coordinator stops one (`release_stopped`); the
+coordinator hears when the principal does.
+
 ## Forbidden words before a release
 
-By the time a release finds a forbidden word, the word is on the base
+A release, and the steps before it, look for the words the principal keeps
+from going out (listed on the page): the word scan. By the time a release finds a forbidden word, the word is on the base
 branch: taking it out takes another task, and the history still holds it.
 So hansa looks for the same words, matched the same way (any case, within
 one line, in text read as UTF-8), earlier:
@@ -117,8 +155,12 @@ one line, in text read as UTF-8), earlier:
   the task back for review with the places in its result.
 
 With an empty list nothing is looked for and nothing changes. The release's
-own check stays as it was, the last net: a word set after a merge, or a
+own word scan stays as it was, the last net: a word set after a merge, or a
 commit that came to the base branch another way, is still found there.
+
+The word scan is a net, not a proof. A word is matched within one line only,
+so a phrase split over a line break is not found; and only in text hansa can
+read as UTF-8, so a UTF-16 file is not looked into.
 
 ## Files a release runs outside the sandbox
 
@@ -133,26 +175,6 @@ touching one of them until a verification of that change holds (`hansa
 verify ID`), naming the files; `--despite-check` does not let it through,
 nor does anything else. `hansa explain lane L` shows the list, and advises
 one for a lane with release targets and none.
-
-## Stopping a release
-
-A release can be stopped: the coordinator with `hansa release --stop ID
-[reason]`, the principal with Stop on the page. One that has not started yet
-(waiting for the principal's answer, or approved and waiting its turn) is
-closed as stopped and never runs. A running one gets TERM to its command's
-whole process group, then KILL 30 seconds later to what still runs; it is
-recorded as stopped, with who stopped it and why, and its output so far is
-kept (a fixed target's checkout is removed as at any other end). A stopped
-release went out for no `--after`: a target that must follow it is not let
-through. A stopped install may leave the server half-switched, so a release
-command for which that matters should handle TERM: finish or undo the step it
-is in. A stop that comes after the command has already ended is not a stop:
-the release is recorded done or failed, as its exit says, with a note that the
-stop came after it ended. What a release's command starts is recorded while
-it runs, also what leaves its process group, and what of it still runs is
-stopped at any end (a stop, the time limit, a failure, done). The principal's
-alert command is told when the coordinator stops one (`release_stopped`); the
-coordinator hears when the principal does.
 
 ## Alerts
 

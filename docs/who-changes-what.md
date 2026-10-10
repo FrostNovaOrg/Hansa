@@ -4,22 +4,36 @@ What the principal sets on the web page, and what the coordinator sets with `han
 design sessions may touch is in [Workers and the sandbox](sandbox.md); the coordinator's own interface is
 [hansa/card.md](../hansa/card.md).
 
-## The principal
+## The principal, the coordinator, and what runs outside the worker
+
+### The principal
 
 The principal, on the page: providers, models, endpoints, keys, effort
 defaults, the models of the coordinator and of design sessions, prices,
-whether the coordinator audits cost, the release targets that go out without
-asking (each ticked on its own), the words no release may send out, and the
-alert command ([Alerts](releases.md#alerts)). The page also shows what goes on, and asks the
-principal about each release ([Releases](releases.md)).
+whether the coordinator audits cost, the browser tool a task given `--browser`
+uses, the folders the coordinator may read outside the desk without asking
+(`hansa explain` lists them), the folders and files workers may not read, the
+release targets that go out without asking (each ticked on its own), the words
+no release may send out, and the alert command ([Alerts](releases.md#alerts)).
+The page also shows what goes on, and asks the principal about each release
+([Releases](releases.md)).
 
-## The coordinator
+What workers may not read, no worker, verifier, setup or check reads, and Read
+is denied there to the coordinator and to design sessions too. No lane's
+repository or write list may be such a folder, inside one or above one. What
+the page refuses on that list, and what a saved entry that can no longer be
+applied does, is in [Workers and the sandbox](sandbox.md#what-workers-verifiers-and-design-sessions-may-touch).
+
+These are the principal's alone. When the coordinator needs one changed (a
+folder it keeps needing to read, say), it asks with `hansa ask`; it never edits
+the desk's `settings.json` itself.
+
+### The coordinator
 
 The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
 provider order, allowed commands (for workers, verifiers and design sessions), network and write lists, environment,
 check, preview and setup commands, limits, and the merge check's own command and limit,
-`merge_check` and `merge_timeout_min`, for a heavier command run only before a merge: unset, the
-merge check runs the check under `timeout_min`) and how many tasks run at once (`hansa concurrency`:
+`merge_check` and `merge_timeout_min` ([Merging, the merge check and conflicts](tasks.md#merging-the-merge-check-and-conflicts))) and how many tasks run at once (`hansa concurrency`:
 side by side means lanes on one repository; when they each add to a CHANGELOG, `CHANGELOG.md merge=union`
 in the repository's `.gitattributes` keeps their merges from conflicting there);
 each lane's standing instructions (`hansa lane brief`, kept in
@@ -28,52 +42,46 @@ each lane's standing instructions (`hansa lane brief`, kept in
 targets (`hansa lane target L NAME "<command>"`) and asking for a release
 (`hansa release L [TARGET] "note"`), never pushing or deploying by itself:
 its settings deny pushing and publishing from its own shell, whatever its
-mode: git's (`git push`, `git send-email`, `git svn dcommit`), GitHub's
-(`gh release`, `gh pr merge`, `gh repo`), a package or image registry's
-(`npm publish`, `yarn npm publish`, `twine upload`, `cargo publish`,
-`docker push`), and Maven's and Gradle's (`mvn deploy`, Gradle's `publish`
-tasks, through a wrapper such as `./mvnw` too); the full list is in the card
-(`hansa/card.md`, How work moves). They are denied written plainly or with
-options before the subcommand (`git -C DIR push`), and after a plain `xargs`
-or a wrapper such as `env`, `nice` or `timeout`, which Claude Code looks
-past (`xargs git push` is caught); run through another shell
-(`bash -c "git push"`), a script, or an `xargs` with options of its own
-before the command (`xargs -n1 git push`), they are not caught, and in
-manual mode such a command asks the principal. `hansa release`
-runs the release command itself after the principal's yes.
+mode. `hansa release` runs the release command itself after the principal's yes.
 
-### The messages of hansa's commits
+The deny list:
 
-Each lane may also set the form of the messages hansa writes into its
-repository: `commit_message` for the commit of a task's work (and the merge
-of the base into a task's branch on `retry --update`), `merge_message` for a
-task's merge into the base, each one line with `{task}`, `{title}` and
-`{lane}` that holds `{task}` or `{title}`
-(`hansa lane set L merge_message "Merge: {title}"`). Unset, they are
-`t0001: <title>` and `Merge t0001: <title>`. A lane whose release goes to a
-public repository usually leaves `{task}` out; the release's word check reads
-every outgoing commit message all the same. With no `--title`, a task's
-title is the first line of its text cut at 80 characters, perhaps within a
-word; when a lane's form holds `{title}`, `hansa add` says so for a title it
-cut, with the title that will be used: give one with `--title`.
+- git's: `git push`, `git send-email`, `git svn dcommit`;
+- GitHub's: `gh release`, `gh pr merge`, `gh repo`;
+- a package or image registry's: `npm publish`, `pnpm publish`, `yarn publish`,
+  `yarn npm publish`, `twine upload`, `uv publish`, `poetry publish`,
+  `cargo publish`, `gem push`, `docker push`, `podman push`;
+- Maven's: the `deploy` goal and the deploy plugin's `deploy:` goals
+  (`deploy:deploy-file`), through `mvn` or a wrapper in any folder (`mvnw`,
+  `./mvnw`, `../mvnw`);
+- Gradle's: tasks whose name starts with `publish` (`publish`,
+  `publishToMavenLocal`, a project's own `:sub:publish`), through `gradle` or a
+  wrapper in any folder (`gradlew`, `./gradlew`, `../gradlew`).
 
-### The identity of hansa's commits
+Each is denied written plainly or with options, goals or subcommands before it
+(`git -C DIR push`, `git subtree push`, `mvn clean deploy`,
+`./gradlew :sub:publishToMavenLocal`).
 
-Every commit hansa makes for a lane (a task's commit, its merge into the
-base, the merge check's merge included, the merge of the base into a task's
-branch on `retry --update`, and a design session's commits) carries one
-identity as both author and committer: the lane's `identity` (`hansa lane set
-L identity "Name <email>"`, or `hansa lane add --identity`; copied by
-`--like`; none: unset), else the repository's own `user.name` and
-`user.email`, read from its local config alone (`git config --local`), else
-`hansa <hansa@localhost>`. An account's global or personal identity is never
-taken up by itself. A lane whose release goes to a public repository should
-have one set, on the lane or in the repository's config; `hansa explain lane
-L` shows the identity in use and where it comes from. Workers keep `hansa
-worker L` as theirs: they commit nothing (hansa does, from the index, with
-the lane's identity), so it only marks what a worker's git would record
-without a commit, and a commit a worker made against its rules stands out
-by it.
+The list stops the plain forms only. A Maven goal named in full
+(`org.apache.maven.plugins:maven-deploy-plugin:3.1.1:deploy-file`),
+`mvn release:perform` or `site:deploy`, a plugin's own publishing goal
+(`nexus-staging:deploy`), or Gradle's abbreviated task names (`./gradlew pTML`)
+are not caught: the principal's yes on a release is what stands between the
+coordinator and an outside server.
+
+Since the rules match words anywhere after the program, they also refuse, in
+the coordinator's own shell, a Gradle command with any word starting with
+`publish` (`--tests publishing.X`, `:publishing:build`, `-p publishing`) and
+Maven's `-pl deploy`: run such a build through the lane's check. In the same
+way a git command with `push` anywhere among its arguments is denied even when
+it only reads (`git log --grep push`, `git grep push`): the coordinator reads a
+repository through `hansa git`.
+
+Claude Code also matches these rules after a plain `xargs` and after wrappers
+such as `env`, `nice` or `timeout` (`xargs git push` is denied). Run through
+another shell (`bash -c "git push"`), a script, or an `xargs` given options of
+its own before the command (`xargs -n1 git push`), they are not caught; in
+manual mode such a command asks the principal.
 
 ### What runs outside the worker, and what stays closed to the coordinator
 
@@ -96,7 +104,51 @@ code changes go through workers, so each gets a branch, the lane's check and
 a merge. Its whole interface is `hansa/card.md`, copied into the desk as
 `CLAUDE.md`.
 
-### A Claude Code session's identity, and the page's token
+## Commit messages and identity
+
+### The messages of hansa's commits
+
+Each lane may also set the form of the messages hansa writes into its
+repository: `commit_message` for the commit of a task's work (and the merge
+of the base into a task's branch on `retry --update`), `merge_message` for a
+task's merge into the base, each one line with `{task}`, `{title}` and
+`{lane}` that holds `{task}` or `{title}`
+(`hansa lane set L merge_message "Merge: {title}"`). Unset, they are
+`t0001: <title>` and `Merge t0001: <title>`. A lane whose release goes to a
+public repository usually leaves `{task}` out; the release's word scan reads
+every outgoing commit message all the same. With no `--title`, a task's
+title is the first line of its text cut at 80 characters, perhaps within a
+word; when a lane's form holds `{title}`, `hansa add` says so for a title it
+cut, with the title that will be used: give one with `--title`.
+
+### The identity of hansa's commits
+
+Every commit hansa makes for a lane (a task's commit, its merge into the
+base, the merge check's merge included, the merge of the base into a task's
+branch on `retry --update`, a design session's commits, and the commit
+`hansa lane remove --keep` makes) carries one
+identity as both author and committer: the lane's `identity` (`hansa lane set
+L identity "Name <email>"`, or `hansa lane add --identity`; copied by
+`--like`; none: unset), else the repository's own `user.name` and
+`user.email`, read from its local config alone (`git config --local`), else
+`hansa <hansa@localhost>`. An account's global or personal identity is never
+taken up by itself. A lane whose release goes to a public repository should
+have one set, on the lane or in the repository's config; `hansa explain lane
+L` shows the identity in use and where it comes from. Workers keep `hansa
+worker L` as theirs: they commit nothing (hansa does, from the index, with
+the lane's identity), so it only marks what a worker's git would record
+without a commit, and a commit a worker made against its rules stands out
+by it.
+
+`hansa lane remove L --keep` puts what each of the lane's worktrees holds
+(changes not committed, or commits no branch keeps) on a new branch
+`hansa-kept/NAME-DATE` of its repository (NAME the worktree's folder: `L`, or
+`L-design` for its design worktree), in one commit, `Left in worktree NAME when
+lane L was removed`, with the identity the lane had before it was removed (else
+the repository's own, else `hansa <hansa@localhost>`), and then removes the
+worktree.
+
+## A Claude Code session's identity, and the page's token
 
 A process started from a Claude Code session (its Bash tool, a tmux it
 opened, the `!` prefix) inherits the session's identity and inbox:
@@ -122,12 +174,12 @@ like) is not a session's identity and stays.
 `hansa serve` started inside a Claude Code session runs without them, and says
 so: once as it starts, in `hansa status` and in `hansa explain server`, naming
 what it dropped. It is better started from a plain shell, a terminal or tmux
-of your own.
+of the principal's own; the coordinator tells the principal so.
 
 The page's address carries its token, which approves releases. `hansa web`
 prints it only outside a Claude Code session: in one (any of the variables
 above set, the `!` prefix's shell included) it refuses, prints nothing of the
-address, and says how to open the page from a terminal of your own, as the
+address, and says how the principal opens the page from a terminal of their own, as the
 README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
 before. `--file` (`hansa add`, `design`, `retry`, `lane brief`) refuses a file
 in the desk's `.hansa/` or `secrets/`, wherever a link leads, and a hard link

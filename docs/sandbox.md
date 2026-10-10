@@ -1,8 +1,9 @@
 # Workers and the sandbox
 
-What workers, verifiers and design sessions may touch, how hansa keeps git's folders and tries the
-sandbox before a run, what a lane's write list, env and allow list may hold, which paths hansa refuses,
-and what hansa stops when a run ends. The [README](../README.md#what-keeps-it-safe) has the short version.
+What workers, verifiers and design sessions may touch, how hansa keeps git's folders and probes the
+sandbox before a run, what a lane's write list, env, network list and allow list may hold, which paths
+hansa refuses, and what hansa stops when a run ends. The [README](../README.md#what-keeps-it-safe) has the
+short version.
 
 ## What workers, verifiers and design sessions may touch
 
@@ -62,11 +63,19 @@ sandbox's `allowUnsandboxedCommands` is off, so Claude Code ignores
 `dangerouslyDisableSandbox`. There are no design sessions on Linux: `hansa
 design` refuses there with one line, and one queued before does not start.
 
+A write-list entry that hansa would now refuse when a run starts (one saved before that refusal
+was there, or one whose link has since been pointed elsewhere) is left out of that run, and `hansa show`
+says so ([A lane's write list and env](#a-lanes-write-list-and-env)).
+
 Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
 and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
 verifier or a design session read the desk's card or `notes/`.
 
 ## Git's folders
+
+What each run may write in git's folders, and what hansa checks before it runs git in a worktree itself.
+
+### What each run may write there
 
 Claude Code opens a worktree's whole shared git folder for writing, and on
 Linux the sandbox (bubblewrap) keeps only paths that are there when a command
@@ -105,62 +114,7 @@ could make there reaches nothing outside the sandbox: git obeys a new
 `commondir` or a worktree's folder only through the checks below, and hansa
 commits nothing while a merge or the like it did not start is under way.
 
-## Trying the sandbox before a run
-
-Before it starts a worker, a verifier or a design session, hansa serve tries
-that run's sandbox: `srt` with the same filesystem and network settings
-Claude Code is given, on `/usr/bin/true`, then a write of what git needs
-open there: the worktree's own `index` (opened to append, nothing written)
-and a new file in its own git folder, and for a design session its branch's
-ref's `.lock` and a new file in `objects/`; and a write of what must be
-kept, to see that the deny patterns match at all: a new file at the top of
-the shared git folder (`.hansa-try-kept`), a name next to the worktree's
-own folder under `worktrees/`, and for a design session a name next to its
-branch's ref and a new file in `refs/heads/` (what such a write makes is
-removed again). On Linux, where srt drops every deny pattern and keeps only
-paths there when a command starts, it writes only the worktree's own
-`index` and git folder, and as what must be kept the shared `config` and
-other worktrees' `HEAD` (opened to append); new names in the shared git
-folder are left to hansa's checks before it runs git. It does so once for each set of
-settings while it runs (a lane's tasks do not each pay for it; a restart
-tries again). When srt refuses them, the run does not start: its task is held,
-not failed and without using a try, and `hansa status` shows the lane as
-unable to run, with srt's first line and the part of the settings it
-refuses (the exact deny-write paths, the deny-write patterns, the deny-read
-list, the write list or the network, each tried alone, or "the deny-write
-patterns keep what git needs open" or "the deny-write patterns do not
-keep" with the path; a sandbox that does not keep what it should runs no
-one); the principal's
-alert is told once for each lane and reason. Only what was refused is
-held: a design session's refusal holds the lane's design sessions, a
-worker's or a verifier's its workers and verifiers, and `hansa status` says
-which. Held tasks start by themselves once a try passes: after a fix,
-restart `hansa serve`, which as it starts tries the sandbox of each held
-lane again, clearing the hold when the try passes and keeping it with the
-new reason when it fails (a change of the settings tries again too). Without srt, or with an srt that cannot run at all, the
-run starts as before, in Claude Code's own sandbox, which is set to fail
-rather than run a command outside it (`failIfUnavailable`). Claude Code
-carries its own copy of the sandbox library, which may differ from the srt
-installed, so the try is a guard, not proof: hansa also reads each run's
-session record while it runs, and when a Bash result begins with
-`sandbox-exec: ` (macOS) or `bwrap: ` (Linux) before any Bash call of the
-run succeeded, it stops the run and holds its task the same way ("the
-sandbox could not start: ..."), not counting it as a try. The deny patterns
-write their character classes as ranges, `-` first (`[-0-9B-Zb-z._]` for
-all but `a`): macOS refuses a sandbox with two or more classes that list
-some sixty characters one by one, and a negated class cannot stand in,
-since srt escapes its `^`. macOS's sandbox matches paths without regard to
-case, so a letter left out of a class is left out in both cases, and it
-reads a `-` just before `]` as a range up to the end of the character set,
-so the `-` goes first. And it silently drops a class of more than 15
-elements (a character or a range): the profile still applies, but the
-class matches nothing. So a class that would hold more is split into
-several patterns of at most 15 each (`[-0-9A-KMNPQS-VX-Z._]*` and
-`[a-kmnpqs-vx-z]*` for all but `objects`, `refs`, `logs` and `worktrees` at
-the top of a design session's shared git folder). hansa's own names are
-small letters, digits, `.`, `_` and `-`.
-
-## Before hansa runs git in a worktree
+### Before hansa runs git in a worktree
 
 Before hansa runs git in a worktree, it checks the worktree's `.git` file;
 that the git folder it leads to still points back to the repository
@@ -214,66 +168,197 @@ inbox, and the folder once no other inbox is in it, when the session ends),
 from the temporary folder and `/tmp`: only empty ones, the account's own,
 left alone for an hour.
 
+## The sandbox probe before a run
+
+Before it starts a worker, a verifier or a design session, hansa serve probes
+that run's sandbox: `srt` with the same filesystem and network settings
+Claude Code is given, on `/usr/bin/true`, then a write of what git needs
+open there: the worktree's own `index` (opened to append, nothing written)
+and a new file in its own git folder, and for a design session its branch's
+ref's `.lock` and a new file in `objects/`; and a write of what must be
+kept, to see that the deny patterns match at all: a new file at the top of
+the shared git folder (`.hansa-try-kept`), a name next to the worktree's
+own folder under `worktrees/`, and for a design session a name next to its
+branch's ref and a new file in `refs/heads/` (what such a write makes is
+removed again). On Linux, where srt drops every deny pattern and keeps only
+paths there when a command starts, it writes only the worktree's own
+`index` and git folder, and as what must be kept the shared `config` and
+other worktrees' `HEAD` (opened to append); new names in the shared git
+folder are left to hansa's checks before it runs git. It probes once for each set of
+settings while it runs (a lane's tasks do not each pay for it; a restart
+probes again). When srt refuses them, the run does not start: its task is held,
+not failed and without using a try, and `hansa status` shows the lane as
+unable to run, with srt's first line and the part of the settings it
+refuses (the exact deny-write paths, the deny-write patterns, the deny-read
+list, the write list or the network, each tried alone, or "the deny-write
+patterns keep what git needs open" or "the deny-write patterns do not
+keep" with the path; a sandbox that does not keep what it should runs no
+one); the principal's
+alert is told once for each lane and reason. Only what was refused is
+held: a design session's refusal holds the lane's design sessions, a
+worker's or a verifier's its workers and verifiers, and `hansa status` says
+which. Held tasks start by themselves once a probe passes: after a fix,
+restart `hansa serve`, which as it starts probes the sandbox of each held
+lane again, clearing the hold when the probe passes and keeping it with the
+new reason when it fails (a change of the settings probes again too). Without srt, or with an srt that cannot run at all, the
+run starts as before, in Claude Code's own sandbox, which is set to fail
+rather than run a command outside it (`failIfUnavailable`). Claude Code
+carries its own copy of the sandbox library, which may differ from the srt
+installed, so the probe is a guard, not proof: hansa also reads each run's
+session record while it runs, and when a Bash result begins with
+`sandbox-exec: ` (macOS) or `bwrap: ` (Linux) before any Bash call of the
+run succeeded, it stops the run and holds its task the same way ("the
+sandbox could not start: ..."), not counting it as a try. The deny patterns
+write their character classes as ranges, `-` first (`[-0-9B-Zb-z._]` for
+all but `a`): macOS refuses a sandbox with two or more classes that list
+some sixty characters one by one, and a negated class cannot stand in,
+since srt escapes its `^`. macOS's sandbox matches paths without regard to
+case, so a letter left out of a class is left out in both cases, and it
+reads a `-` just before `]` as a range up to the end of the character set,
+so the `-` goes first. And it silently drops a class of more than 15
+elements (a character or a range): the profile still applies, but the
+class matches nothing. So a class that would hold more is split into
+several patterns of at most 15 each (`[-0-9A-KMNPQS-VX-Z._]*` and
+`[a-kmnpqs-vx-z]*` for all but `objects`, `refs`, `logs` and `worktrees` at
+the top of a design session's shared git folder). hansa's own names are
+small letters, digits, `.`, `_` and `-`.
+
 ## A lane's write list and env
 
-A write list holds a build or test tool's cache folders. The rule, in two
-lines: in the home folder of the account (whatever `HOME` says), only a
-plain folder (no name between the home folder and the entry starts with a
-dot, and not inside `~/Library` or `~/Applications`), such as
-`~/hansa-cache/<lane>/<tool>`; outside the home folder, anywhere but where
-programs are installed (the Homebrew prefix, `/opt/local`, `/opt/X11`,
-`/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, the
-system's own folders, and where `claude`, `git`, `srt`, `node`, `tmux`,
-hansa and its python really live) and the folders on the `PATH` hansa runs
-with, what is inside them and the folders above them. A lane writes only
-folders of its own: the user's caches (`~/.cache`, `~/Library/Caches`,
-`~/.m2/repository`, `~/.npm/_cacache` and the rest) cannot be listed, since
-they are shared with what runs outside the sandbox, and neither can the
-common tool homes with plain names (`~/go`, `~/miniconda3`, `~/anaconda3`,
-`~/miniforge3`, `~/mambaforge`, `~/miniconda`, `~/anaconda`,
-`~/micromamba`, `~/sdk`) or what is inside them. That list is not
-complete: hansa cannot see what your own shell, git or tools name in plain
-folders of the home folder (a conda install, a git hooks folder, a file
-your shell sources), so do not list such a folder. `hansa explain lane L`
-marks each entry a run would leave out, with why. A lane's env names may be
-in either case (`npm_config_cache`). The desk, the lane's
-repository, Claude Code's folders, credential files and other names for the
-whole disk are refused as before, and so is a name with `( ) [ ] { } * ?`,
-a backslash, a look-alike of one, or an invisible character. Point a tool at
-the lane's folder with the lane's env: pip `PIP_CACHE_DIR`, npm
-`npm_config_cache`, pnpm's store `npm_config_store_dir`, yarn
-`YARN_CACHE_FOLDER`, cargo `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`,
-gradle `GRADLE_USER_HOME`, maven `MAVEN_OPTS=-Dmaven.repo.local=...`, ccache
-`CCACHE_DIR`, uv `UV_CACHE_DIR`, poetry `POETRY_CACHE_DIR`, pipenv
-`PIPENV_CACHE_DIR`, bun `BUN_INSTALL_CACHE_DIR`, deno `DENO_DIR`, NuGet
-`NUGET_PACKAGES`, coursier `COURSIER_CACHE`. A lane's env reaches the lane's commands, in the sandbox
-(setup, check, preview, `hansa lane try` and the worker's Bash commands),
-not Claude Code and not hansa's own programs: srt, the scripts around a
-setup or check and Claude Code run with the server's environment, and the
-worker's commands get the lane's env from a file hansa writes
-(`CLAUDE_ENV_FILE`). As a second line, what any lane's env on the desk
-names is closed to workers: a write entry cannot be, be inside or be above
-a folder on a lane's `PATH` or a full path in another env value, this
-lane's or another's. A cache variable (those
-above and `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`) may point at
-the lane's own folder; put a tool's bin folder on the `PATH` inside the
-check command, not in the lane's env. A lane's env takes no name that tells
-a loader, git, a shell or Claude Code what to run (`LD_*`, `DYLD_*`,
-`GIT_*`, `CLAUDE_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`,
-`HOME`), no name sh, bash or zsh keeps for itself (read-only or special, such
-as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's `path` and
-`keymaps`, each one tried in sh, bash and zsh: setting one
-would stop every command of the lane's workers), no `PATH` entry that is empty
-or not a full path, and no place inside the desk. The file hansa writes it to
-for a run is readable by the desk's account alone (mode 0600). `hansa/card.md` says the same.
+A lane's write list (`hansa lane set L write PATH ...`, full paths such as
+`/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
+write besides the worktree and their temporary folder: a build or test tool's
+cache folders. A lane writes only folders of its own. The rule, in two lines:
+
+- in the home folder of the account (whatever `HOME` says), only a plain
+  folder: no name between the home folder and the entry starts with a dot,
+  and it is not inside `~/Library` or `~/Applications`. Such as
+  `~/hansa-cache/<lane>/<tool>` or `~/work/cache`;
+- outside the home folder, anywhere but where programs are installed and the
+  folders on the `PATH`: a tools folder such as `/srv/x/tools/xdg-cache/pnpm`,
+  another volume, `/tmp`.
+
+So none of the user's caches can be listed: not `~/.cache/pip`,
+`~/Library/Caches/pip`, `~/.m2/repository`, `~/.gradle/caches`,
+`~/.npm/_cacache`, `~/.cargo/registry` or any other hidden folder. They are
+shared with what runs outside the sandbox (apps' updaters, corepack's node,
+what brew installs from, the user's own builds), and shells, git and the
+tools hansa runs read hidden files when they start, so a worker that wrote
+there would change what runs outside the sandbox later. Give the lane a folder
+of its own, such as `~/hansa-cache/<lane>/<tool>`, list it, and point the tool
+there with the lane's env. The well-known tool homes with plain names are
+refused too, with what is inside them: `~/go` (Go's default GOPATH, whose
+`pkg/mod` the user's own builds share), `~/sdk` (the Go versions Go
+downloads), `~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `~/mambaforge`,
+`~/miniconda`, `~/anaconda`, `~/micromamba`. Those are the common ones, not a
+complete list: hansa cannot see what the account's own shell, git or tools name
+in plain folders of the home folder (a conda install, a git hooks folder, a
+file its shell sources), so do not list such a folder.
+
+Where programs are installed: the Homebrew prefix (`/opt/homebrew`,
+`/home/linuxbrew/.linuxbrew`, wherever `brew` is), `/opt/local`, `/opt/X11`,
+`/usr`, `/Applications`, `/Library`, `/nix`, `/snap`, `/var/lib`, and where
+`claude`, `git`, `srt`, `node`, `tmux`, hansa and its python really live: each
+one's install folder, what is inside it and the folders above it; for hansa,
+the whole folder that holds its package and `bin/hansa`. The folders on the
+`PATH` hansa runs with are refused with what is inside them and the folders
+above them (`~/bin/git` with `~/bin` on the `PATH`): hansa would run a program
+put there.
+
+The other refusals hold on top: the home folder or above it, the desk, the
+lane's repository, a provider's Claude Code folder and `~/.claude`, a login,
+key or history workers may not read (such as `~/.ssh` or
+`~/.cargo/credentials`), what the principal lists on the page as not for
+workers to read, a hidden folder at the top (`/.x`: such a folder can be
+another name for the whole disk, as `/.vol`, `/.nofollow` and `/.resolve` are
+on macOS), `/System`, `/dev`, `/proc`, `/sys` and `/etc`, and on macOS
+`/Volumes` (a folder on another volume, such as `/Volumes/Build/cache`, can be
+listed). So is a path with `( ) [ ] { } * ?` or a backslash in a name, a
+look-alike of one of them (a name that NFKC-normalizes to one), or an
+invisible character (a space other than the plain one too), which the sandbox
+may read as a pattern or a person as another name. Each refusal says what it
+would open. `hansa explain lane L` marks each entry a run would leave out,
+with why. The coordinator tells the principal what it added and why.
+
+Point a tool at the lane's folder with the lane's env (`hansa lane set L env
+NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
+`PIP_CACHE_DIR`, npm `npm_config_cache` (env names may be in either case),
+pnpm's store `npm_config_store_dir`, yarn `YARN_CACHE_FOLDER`, cargo
+`CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`, gradle `GRADLE_USER_HOME`, maven
+`MAVEN_OPTS=-Dmaven.repo.local=...`, ccache `CCACHE_DIR`, uv `UV_CACHE_DIR`,
+poetry `POETRY_CACHE_DIR`, pipenv `PIPENV_CACHE_DIR`, bun
+`BUN_INSTALL_CACHE_DIR`, deno `DENO_DIR`, NuGet `NUGET_PACKAGES`, coursier
+`COURSIER_CACHE`.
+
+A lane's env reaches the lane's commands, which run in the sandbox (setup,
+check, preview, `hansa lane try` and the worker's Bash commands), not Claude
+Code itself and not hansa's own programs: srt, the scripts around a setup or
+check and their git, and Claude Code (with its git, shell, helpers and MCP
+servers such as the browser) run with the environment of `hansa serve`, and
+the worker's commands get the lane's env from a file hansa writes
+(`CLAUDE_ENV_FILE`), readable by the desk's account alone (mode 0600). So a
+lane's `PATH` does not find srt or node for hansa, and a setting meant for
+Claude Code or the browser tool goes in the environment `hansa serve` is
+started with or in hansa's browser settings on the page, not in a lane's env.
+
+As a second line, what any lane's env on the desk names is closed to workers,
+as what hansa's own environment names is, so no worker writes where a lane's
+commands look: a write entry is refused when it is, is inside, or is above a
+folder on a lane's `PATH` or a full path in any other env value, this lane's
+or another's. A cache variable (those above, and `XDG_CACHE_HOME`,
+`XDG_DATA_HOME`, `XDG_STATE_HOME`) may point at the lane's own folder; put a
+tool's bin folder on the `PATH` inside the check or setup command
+(`PATH=$CARGO_HOME/bin:$PATH cargo test`), not in the lane's env. A lane's
+`PATH` holds only full paths, none empty, and no env value names a place
+inside the desk. The names that tell a loader, git, a shell or Claude Code
+what to run are refused (any starting with `LD_`, `DYLD_`, `GIT_` or
+`CLAUDE_`, and `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `SHELL`, `ZDOTDIR`, `HOME`):
+set such a thing inside the check or setup command, where it runs in the
+sandbox. So are the names sh, bash or zsh keep for themselves (read-only or
+special, such as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's
+`path`, `keymaps` and `dis_aliases`; each one tried in sh, bash and zsh):
+setting one would stop every command of the lane's workers. A saved env that
+holds a name refused now is not passed on whole: a run leaves that variable
+out, with a line in `hansa show`.
+
 The locale (`LANG`, `LC_ALL`) of a lane's setup, check, merge check, preview
 and workers is that of whoever started hansa: `hansa serve`'s environment
 (one started over ssh takes the client's), since nothing runs without it;
 `hansa explain lane L` says which locale they get and where from (when serve
-does not run, the locale of this shell, which a serve started here would give). A lane whose results must not depend on who started
-hansa sets its own (`hansa lane set L env ... LC_ALL=C.UTF-8`): tools such as
-`sort` and `comm` order and compare by the locale, and some `sort -u` keep
-only one of `acme-core` and `acmecore` under `en_US.UTF-8`.
+does not run, the locale of this shell, which a serve started here would
+give). A lane whose results must not depend on who started hansa sets its own
+(`hansa lane set L env ... LC_ALL=C.UTF-8`): tools such as `sort` and `comm`
+order and compare by the locale, and some `sort -u` keep only one of
+`acme-core` and `acmecore` under `en_US.UTF-8`.
+
+## A lane's network list
+
+A lane's network list (`hansa lane set L network HOST ...`, such as
+`registry.npmjs.org`, `*.pypi.org` or `localhost`; `hansa lane add
+--network`) is what its workers may reach during a task, and what its setup
+and check may reach; by default it is empty, and nothing is reached. A setup
+that installs dependencies needs its registry there, and a build that
+downloads needs the hosts it downloads from. Add a host only when the lane's
+work needs it, and the coordinator tells the principal what it added and why.
+Claude Code's web tools are given on the allow list instead (below).
+
+`localhost` on the list differs by system:
+
+- **On macOS** workers' own local servers (a test that starts an HTTP server,
+  say) need `localhost`, and it opens the machine's whole loopback: every
+  service listening there, local proxies among them, which reach the internet
+  whatever the list says. List it only on a Mac whose loopback holds nothing a
+  worker must not reach. A `hansa lane set` (or `hansa lane add`) that puts
+  `localhost` on the list prints that warning with what listens on the
+  loopback now, one line per server (and how many processes of other accounts
+  it could not look at, which a worker can reach too).
+- **On Linux** each sandbox has a loopback of its own: workers' own local
+  servers need nothing on the list, and `localhost` adds nothing for them. It
+  only lets a program told to use the sandbox's proxy for localhost reach the
+  machine's loopback through it, so leave it off.
+
+`hansa explain lane L` shows the list and says which of these holds on this
+machine.
 
 ## A lane's allow list: commands and web tools
 
@@ -287,7 +372,7 @@ site names only: an IP address in any form, `localhost` and the names meant for 
 suffix others share (`*.co.uk`, `*.github.io`), as a wildcard opens every name under it. So are names with no
 dot (`metadata`, which a resolver may complete) and the well-known names that come back as an address written
 in them or as this machine (`nip.io`, `sslip.io`, `lvh.me`, `localtest.me` and the like, with every name under
-them). Any listed name can still be pointed at any address, this machine included: list only sites you know;
+them). Any listed name can still be pointed at any address, this machine included: list only sites known to be safe;
 the principal sees every change. Each rule is one value, checked as Claude Code splits the list (on commas and
 spaces outside parentheses, where every `)` closes them): one it would split into several, such as
 `Bash(x),WebFetch` or `Bash(a(b),WebFetch,c)`, is refused. MCP tools are refused on the list (a task gets a
@@ -297,8 +382,8 @@ page warns of it, names the coordinator's command that removes it, and saves the
 
 Inside the sandbox a worker or verifier needs no rule to run a command, but Claude Code still refuses a shell
 `-c` it cannot check, such as `bash -c "..."` with a line that runs `rm` taken from a build script. Workers and
-verifiers are told to write such a probe to a script file in their temporary folder and run it with `sh`
-(`sh <their temporary folder>/probe.sh`), which runs in a lane with no allowed commands as in any other.
+verifiers are told to write such a line to a script file in their temporary folder and run it with `sh`
+(`sh <their temporary folder>/probe.sh`, in the words they are given), which runs in a lane with no allowed commands as in any other.
 
 ## Paths hansa refuses
 

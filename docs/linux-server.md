@@ -1,7 +1,7 @@
 # On a Linux server
 
 The [README](../README.md#quick-start) covers the usual setup, where the desk belongs to the user who runs
-hansa. Here: a Linux server where you work as root, and what a lane's commands meet in Linux's sandbox.
+hansa. Here: a Linux server where the principal works as root, and what a lane's commands meet in Linux's sandbox.
 
 ## The coordinator as root, the desk as an ordinary account
 
@@ -29,6 +29,15 @@ the account. Its own usage then is not in `hansa cost`,
 because Claude Code keeps root's records where the account cannot read them. A
 design session runs under the account's tmux; root joins it with the command the
 page gives.
+
+`hansa` commands run as the account by themselves, but the coordinator stays
+root: it changes the desk only through `hansa`, never with its own tools. Git
+refuses to work for root in a repository another account owns, so the
+coordinator reads the lanes' repositories with `hansa git LANE ...` (which runs
+git as the account) and with the Read tool, one simple command at a time, and
+never tells git to trust them (`safe.directory`): that would have root run what
+the account's repository settings name. In `manual` mode any command other than
+`hansa` waits for the principal's approval.
 
 ## What a lane's commands meet in Linux's sandbox
 
