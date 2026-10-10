@@ -3695,9 +3695,12 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
     cancelled while hansa prepared it."""
-    meta = desk.transition(tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname,
-                           started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False,
-                           cancel=False, held=None, sandbox_failed=None)
+    with desk.lock():  # an unassigned task cannot start on a lane marked as a merge lane meanwhile
+        if desk.settings()["lanes"].get(lane_name, {}).get("merge_lane"):
+            return None
+        meta = desk.transition(tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname,
+                               started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False,
+                               cancel=False, held=None, sandbox_failed=None)
     if not meta:
         return None
     no_read(desk)  # before anything is prepared: an entry that cannot be applied fails the run (not_started)
@@ -4445,6 +4448,9 @@ def finish_check(desk: Desk, tid: str) -> dict:
 # merge_check_result saying why nothing was merged. One runs at a time per repository and base branch, in
 # the order the merges were asked (merge_check.queued); others wait for it (merge_check_ahead). A merge that
 # needs no check, asked while one runs or waits there, joins the same line (merge_check {plain: True}, plain_merge).
+# A configured merge_lane on that repository and base takes the checks instead. It is selected at start and
+# recorded as merge_check.lane: only that lane is held, and its commands and sandbox run the check, while the
+# task lane still supplies the merge message and commit identity.
 MERGE_FILES = ("merge-check.log", "merge-setup.log", "merge-check.err")
 MERGE_MOVES = 2  # the base moved this often while its merge was being checked: hansa stops trying
 
@@ -4491,21 +4497,24 @@ def bash_limits(lane: dict) -> dict:
             "BASH_MAX_TIMEOUT_MS": str(60000 * bash_minutes(lane))}
 
 
-def own_merge_check(lane: dict) -> bool:
+def own_merge_check(lane: dict, task_lane: dict | None = None) -> bool:
     """Whether the lane's merge check runs a command other than its check after each task, which the task's
     own tree has therefore never passed."""
+    if task_lane is not None:
+        return bool(merge_command(lane)) and merge_command(lane) != task_lane.get("check")
     return bool(lane.get("merge_check")) and lane["merge_check"] != lane.get("check")
 
 
-def merge_needs_check(lane: dict, m: dict, repo, tip: str) -> str:
+def merge_needs_check(lane: dict, m: dict, repo, tip: str, check_lane: dict | None = None) -> str:
     """Why merging this task needs a merge check first: "moved" when the base has commits its branch does not
     (the two together were never checked), "own" when the lane's merge check runs its own command, which ran on
     neither; '' when it needs none (no change, or no command to run)."""
-    if not merge_command(lane) or not m.get("commits"):
+    command_lane = lane if check_lane is None else check_lane
+    if not merge_command(command_lane) or not m.get("commits"):
         return ""
     if base_moved(repo, tip, m["head"]):
         return "moved"
-    return "own" if own_merge_check(lane) else ""
+    return "own" if own_merge_check(command_lane, lane if check_lane is not None else None) else ""
 
 
 def lane_occupied(m: dict) -> bool:
@@ -4514,12 +4523,32 @@ def lane_occupied(m: dict) -> bool:
         (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running"))
 
 
+def occupied_lane(m: dict):
+    """The lane a task holds; a running merge check holds its recorded lane, even if unmarked meanwhile."""
+    return ((m.get("merge_check") or {}).get("lane") or m.get("lane")) if m["state"] == "merging" else m.get("lane")
+
+
 def merge_target(s: dict, lane_name) -> tuple | None:
     """The repository and base branch a lane's merges move; None for a lane not in settings."""
     lane = s["lanes"].get(lane_name)
     if not lane:
         return None
     return str(Path(lane["repo"]).expanduser().resolve()), lane.get("base") or "main"
+
+
+def merge_lane(s: dict, lane_name):
+    """The configured merge lane for a task lane's repository and base, else the task lane itself."""
+    at = merge_target(s, lane_name)
+    return next((n for n, ln in s["lanes"].items() if ln.get("merge_lane") and at is not None
+                 and merge_target(s, n) == at), lane_name)
+
+
+def merge_check_lane(s: dict, m: dict):
+    """Where a merge check runs now, or would start now if queued. Plain merges keep their task lane."""
+    mc = m.get("merge_check") or {}
+    if mc.get("phase") in ("starting", "running"):
+        return occupied_lane(m)
+    return m.get("lane") if mc.get("plain") else merge_lane(s, m.get("lane"))
 
 
 def merge_order(m: dict) -> tuple:
@@ -4676,10 +4705,18 @@ def rethink_text(desk: Desk, m: dict) -> str:
     return RETHINK.format(n=n) if n >= 2 else ""
 
 
+def merge_result_lane(m: dict, lane_name: str | None) -> dict:
+    """Record the execution lane only when it differs from the task's own lane."""
+    return {"lane": lane_name} if lane_name and lane_name != m.get("lane") else {}
+
+
 def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
     """Nothing was merged: the task goes back to waiting for review, with the result saying why. A merge that
     needed no check and waited its turn (plain) says so in its result (waited): no check ran for it."""
     plain = ((desk.meta(tid).get("merge_check") or {}).get("plain"))
+    check_lane = (desk.meta(tid).get("merge_check") or {}).get("lane")
+    if result:
+        result = {**result, **merge_result_lane(desk.meta(tid), check_lane)}
     if plain and result:
         result = {**result, "waited": True}
     m = desk.change(tid, lambda x: None if x["state"] != "merging" else
@@ -4705,10 +4742,13 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             return None
         repo, name = lane["repo"], lane.get("base") or "main"
         tip = git("rev-parse", name, cwd=repo)
-        unchecked = bool(merge_needs_check(lane, m, repo, tip))
+        s = desk.settings()
+        check_name = merge_lane(s, m["lane"])
+        check_lane = lane if check_name == m["lane"] else s["lanes"][check_name]
+        unchecked = bool(merge_needs_check(lane, m, repo, tip, check_lane))
         if unchecked and not mc.get("despite"):
             desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": 0})
-            desk.event("merge_check_queued", task=tid, onto=tip, waited=True, command=merge_command(lane))
+            desk.event("merge_check_queued", task=tid, onto=tip, waited=True, command=merge_command(check_lane))
             return "check"
         why = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
         current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
@@ -4771,6 +4811,14 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         mc = m.get("merge_check") or {}
         if m["state"] != "merging" or mc.get("phase") != "queued":
             return None
+        s = desk.settings()
+        if merge_lane(s, m["lane"]) != lane_name:  # settings changed since this round chose a free lane
+            return None
+        task_lane = lane if lane_name == m["lane"] else s["lanes"][m["lane"]]
+        if lane_name != m["lane"]:
+            lane = s["lanes"][lane_name]
+        mc = {**mc, "lane": lane_name}
+        desk.update(tid, merge_check=mc)
         repo, name = Path(lane["repo"]), lane.get("base") or "main"
         wt = desk.worktrees_dir / lane_name
         tip = git("rev-parse", name, cwd=repo)
@@ -4781,8 +4829,8 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         ready_worktree(desk, repo, wt, tid, tip)
         try:
             wgit(desk, wt, "checkout", "-q", "--detach", tip)
-            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", merge_message(lane, lane_name, tid, m["title"]), m["head"],
-                 env=identity_env(lane))
+            wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m", merge_message(task_lane, m["lane"], tid, m["title"]), m["head"],
+                 env=identity_env(task_lane))
         except GitFileChanged as e:
             raise RuntimeError(git_file_changed(desk, tid, e)) from None
         except RuntimeError as e:
@@ -4795,11 +4843,12 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         commit = wgit(desk, wt, "rev-parse", "HEAD")
-        said = message_fallback(lane, lane_name, "merge_message")  # the message this merge commit was given
+        said = message_fallback(task_lane, m["lane"], "merge_message")  # the message this merge commit was given
         command = merge_command(lane)
         if not command:  # the check and merge check were taken away meanwhile: nothing to run
             land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
-                                   "at": now(), "seconds": 0, "tail": [], "message_note": said})
+                                   "at": now(), "seconds": 0, "tail": [], "message_note": said,
+                                   **merge_result_lane(m, lane_name)})
             return None
         pname = m.get("provider", "")
         p = desk.settings()["providers"].get(pname) or {}
@@ -4814,7 +4863,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         env = {**base_env(), "HANSA_TASK": tid, "HANSA_RUN": run_mark(desk, tid), "TERM": "dumb", "TMPDIR": tmp,
                "CLAUDE_CODE_TMPDIR": tmp}
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
-              "own": own_merge_check(lane), "message_note": said,
+              "own": own_merge_check(lane, task_lane), "message_note": said,
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
         desk.update(tid, merge_check=mc)
         with open(raw / "merge-check.log", "wb") as out:
@@ -4855,6 +4904,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         except GitFileChanged as e:
             note = git_file_changed(desk, tid, e)
     result = {"ok": code == 0 and not note, "exit": code, "note": note, "command": mc.get("command", ""),
+              **merge_result_lane(m, mc.get("lane")),
               **({"own": True} if mc.get("own") else {}),
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
@@ -4959,7 +5009,7 @@ def tried_lanes(desk: Desk) -> set:
 
 def lane_holder(desk: Desk, lane_name: str):
     """The task holding the lane's worktree now, if any."""
-    return next((m for m in desk.tasks() if m.get("lane") == lane_name and lane_occupied(m)), None)
+    return next((m for m in desk.tasks() if occupied_lane(m) == lane_name and lane_occupied(m)), None)
 
 
 def end_try(desk: Desk, lane_name: str, result: dict) -> dict:
@@ -5414,7 +5464,7 @@ class Dispatcher:
             mc = m.get("merge_check") or {}
             if m["state"] != "merging" or mc.get("phase") != "running":
                 continue
-            limit = 60 * merge_minutes(s["lanes"].get(m.get("lane"), {}))
+            limit = 60 * merge_minutes(s["lanes"].get(occupied_lane(m), {}))
             if not mc.get("cancel") and time.time() - (mc.get("started") or time.time()) > limit:
                 desk.update(m["id"], merge_check={**mc, "timed_out": True})
                 stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
@@ -5422,7 +5472,7 @@ class Dispatcher:
             return
         from .release import holds_repo, releases
         tasks = self.tasks()
-        busy = {m.get("lane") for m in tasks if lane_occupied(m)} | tried_lanes(desk)
+        busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried_lanes(desk)
         free = s["concurrency"] - sum(map(lane_occupied, tasks))
         # one merge check at a time per repository and base branch, in the order the merges were asked: one
         # that ran beside another would be checked on a base that the other's merge then moves
@@ -5450,6 +5500,7 @@ class Dispatcher:
                                                     "note": desk.redact(f"the merge could not be made: {e}")[:600]})
                     continue
                 m = desk.meta(m["id"])  # a merge check now, first in line
+            ln = merge_check_lane(s, m)
             if ln in busy or free <= 0:
                 held.add(at)  # first in line: the ones after it wait for it
                 continue
@@ -5607,6 +5658,7 @@ class Dispatcher:
         designing = {m["lane"] for m in self.tasks() if m["state"] == "running" and m.get("kind") == "design"}
         for m in self.tasks():  # a design session has its own worktree and waits on the principal
             if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
+                    and not s["lanes"][m["lane"]].get("merge_lane") \
                     and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s, "design"):
                 try:
                     start_design(desk, m["id"], m["lane"])
@@ -5618,14 +5670,14 @@ class Dispatcher:
                     designing.add(m["lane"])
         running = [m for m in self.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
-        busy = {m["lane"] for m in running} | tried_lanes(desk)
+        busy = {occupied_lane(m) for m in running} | tried_lanes(desk)
         for m in self.tasks():
             if free <= 0:
                 break
             if m["state"] != "queued" or m.get("kind") == "design":
                 continue
             for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
-                if ln in busy or ln not in s["lanes"] or self.sandbox_waits(ln, s):
+                if ln in busy or ln not in s["lanes"] or s["lanes"][ln].get("merge_lane") or self.sandbox_waits(ln, s):
                     continue
                 pname = next((p for p in s["lanes"][ln]["providers"]
                               if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
@@ -5925,14 +5977,17 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
         return "dispatch is paused"
     if lk["disk"]:
         return lk["disk"]
-    lanes = [m["lane"]] if m.get("lane") else sorted(s["lanes"])
+    lanes = [m["lane"]] if m.get("lane") else sorted(n for n, ln in s["lanes"].items() if not ln.get("merge_lane"))
     if not lanes:
-        return "no lanes in settings"
+        return "no lanes that take work in settings" if s["lanes"] else "no lanes in settings"
     why = []
     held = lk["held"]
     for ln in lanes:
         if ln not in s["lanes"]:
             why.append(f"lane {ln} is not in settings")
+            continue
+        if s["lanes"][ln].get("merge_lane"):
+            why.append(f"lane {ln} is a merge lane and takes no work")
             continue
         if "work" in held.get(ln, {}):
             why.append(f"HELD: lane {ln} cannot run, {sandbox_held_text(held[ln]['work'])}")

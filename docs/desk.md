@@ -150,6 +150,10 @@ them out again, with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`
 unless `--to` names another); `hansa notes` lists the files with their sizes and
 headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 
+## Merge checks
+
+For long merge checks and busy task lanes, add a merge lane with `hansa lane add m --like a`, give it its own caches through `write` and `env`, then set `hansa lane set m merge_lane true` (unset or false: ordinary). One per repository and base, it takes no work and uses its own worktree, sandbox, env, setup, merge command and limit, keeping the task lane free and its merge message and identity. The lane is chosen when the check starts; unmarking or removing it while queued restores the task lane. Merge checks still run in order, one at a time per repository and base, taking a concurrency slot before new work. With every slot busy, a merge check waits for the next task to end anywhere, and that task's lane waits about one merge check. Raising concurrency by one removes the wait if the machine can run a merge check beside the lanes' work.
+
 ## Free space
 
 Desks run builds and tests many times a day, and a full disk breaks everything on the machine, the desk's own
