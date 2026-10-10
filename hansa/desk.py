@@ -311,10 +311,11 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def validate(s: dict, root=None, page: bool = False) -> list:
+def validate(s: dict, root=None, page: bool = False, before: dict | None = None) -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
-    rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings)."""
+    rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings).
+    before: saved settings, to name the existing merge lane when refusing a second one."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
@@ -415,7 +416,12 @@ def validate(s: dict, root=None, page: bool = False) -> list:
         elif ln.get("merge_lane") and isinstance(ln.get("repo"), str):
             target = (resolved(ln["repo"]) or ln["repo"], ln.get("base") or "main")
             if target in merge_lanes:
-                p.append(f"{at}: lane {merge_lanes[target]} is already the merge lane for this repository and "
+                refused, other = name, merge_lanes[target]
+                was = ((before or {}).get("lanes") or {}).get(name) or {}
+                if (was.get("merge_lane") and isinstance(was.get("repo"), str)
+                        and (resolved(was["repo"]) or was["repo"], was.get("base") or "main") == target):
+                    refused, other = other, name
+                p.append(f"lane {refused}: lane {other} is already the merge lane for this repository and "
                          f"base {target[1]}; at most one merge lane serves each repository and base")
             else:
                 merge_lanes[target] = name
@@ -2152,7 +2158,7 @@ class Desk:
                        "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
             # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
             page = by == "page" and new.get("lanes") == old.get("lanes")
-            problems = (validate(new, self.root, page=page) + self.keys_in_release(old, new)
+            problems = (validate(new, self.root, page=page, before=old) + self.keys_in_release(old, new)
                         + self.keys_in_alert(old, new) + answer_names(old, new))
             lanes = new.get("lanes")
             for name, ln in (lanes.items() if isinstance(lanes, dict) else []):

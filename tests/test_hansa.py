@@ -2410,14 +2410,25 @@ class DeskTest(unittest.TestCase):
 
     def test_merge_lane_settings_and_refusals(self):
         self.merge_lane_for_checks()
+        self.hansa("lane", "add", "b", "--like", "a")
+        for order in (("a", "b", "m"), ("m", "b", "a")):
+            s = self.desk.settings()
+            s["lanes"] = {n: s["lanes"][n] for n in order}
+            self.assertEqual(self.desk.save_settings(s), [])
+            before = self.desk.settings()
+            for args, refused in ((["lane", "set", "b", "merge_lane", "true"], "b"),
+                                  (["lane", "add", "n", "--like", "m"], "n")):
+                with self.subTest(order=order, args=args), self.assertRaises(SystemExit) as e:
+                    self.hansa(*args)
+                self.assertEqual(str(e.exception), "hansa: nothing was changed:\n"
+                                 f"  lane {refused}: lane m is already the merge lane for this repository and "
+                                 "base main; at most one merge lane serves each repository and base")
+                self.assertEqual(self.desk.settings(), before)
         before = self.desk.settings()
-        for args, why in ((["lane", "set", "a", "merge_lane", "true"], "already the merge lane"),
-                          (["lane", "add", "n", "--like", "m"], "already the merge lane"),
-                          (["lane", "set", "m", "merge_lane", "yes"], "takes true or false")):
-            with self.subTest(args=args), self.assertRaises(SystemExit) as e:
-                self.hansa(*args)
-            self.assertIn(why, str(e.exception))
-            self.assertEqual(self.desk.settings(), before)
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "set", "m", "merge_lane", "yes")
+        self.assertIn("takes true or false", str(e.exception))
+        self.assertEqual(self.desk.settings(), before)
         s = self.desk.settings()
         s["lanes"]["m"]["merge_lane"] = "false"
         self.assertIn("lane m: merge_lane must be true or false", self.desk.save_settings(s))
@@ -2438,6 +2449,26 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as helped:
             main(["help", "lane", "set"])
         self.assertIn("merge_lane takes true or false", " ".join(helped.getvalue().split()))
+
+    def test_merge_lane_explain_names_its_checks_and_served_lanes(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.git_out("branch", "other")
+        self.hansa("lane", "add", "c", "--like", "a", "--base", "other")
+        self.merge_lane_for_checks("echo merge", merge_timeout_min=7)
+        self.hansa("lane", "set", "m", "setup", "echo setup")
+        self.hansa("lane", "set", "m", "check", "echo check")
+        for command, args in (("echo merge", ()), ("echo check", ("lane", "set", "m", "merge_check", "none"))):
+            if args:
+                self.hansa(*args)
+            explained = self.hansa("explain", "lane", "m")
+            self.assertIn("  work: none; a merge lane takes no work\n", explained)
+            self.assertIn(f"  merge checks for lanes a, b: {command}; in this worktree and sandbox, after its setup, "
+                          "stopped at 7 minutes; needed when the base moved or its command differs from the task "
+                          "lane's check (or with --recheck)\n", explained)
+            self.assertIn("  setup before each merge check: echo setup\n", explained)
+            self.assertNotIn("check after each task:", explained)
+            self.assertNotIn("setup before each task:", explained)
+            self.assertNotIn("before it merges any task", explained)
 
     def test_merge_lane_refuses_tasks_verifications_designs_and_retries(self):
         _, tid = self.merge_lane_task()
@@ -2488,6 +2519,7 @@ class DeskTest(unittest.TestCase):
         out = self.hansa("merge", tid)
         self.assertIn("in lane m's worktree", out)
         self.assertIn("lane m has a merge check of its own", out)
+        self.assertIn("exactly that if it passes. The merge check is queued: `hansa serve` is not running.", out)
         self.assertNotIn("lane a's worktree", out)
         self.assertNotIn("lane", self.desk.meta(tid)["merge_check"])  # selected only on starting
         m = self.settle_merge(d, tid)
@@ -2666,11 +2698,34 @@ class DeskTest(unittest.TestCase):
         self.hansa("merge", t1)
         self.hansa("lane", "set", "m", "merge_lane", "false")
         self.assertEqual(views.status(self.desk)["merging"][0]["lane"], "a")
-        self.assertEqual(self.settle_merge(d, t1)["merge_check_result"]["lane"], "a")
+        self.assertNotIn("lane", self.settle_merge(d, t1)["merge_check_result"])
+        self.assertEqual(self.events("merge_check_started")[-1]["lane"], "a")
         self.hansa("lane", "set", "m", "merge_lane", "true")
         self.hansa("merge", t2)
         self.hansa("lane", "remove", "m")  # no worktree yet: queued merge does not hold it
-        self.assertEqual(self.settle_merge(d, t2)["merge_check_result"]["lane"], "b")
+        self.assertNotIn("lane", self.settle_merge(d, t2)["merge_check_result"])
+        self.assertEqual(self.events("merge_check_started")[-1]["lane"], "b")
+
+    def test_merge_lane_busy_check_holds_it_for_another_base(self):
+        d, t1, t2 = self.two_lanes(check="true")
+        self.git_out("branch", "other")
+        gate = self.tmp / "merge-go"
+        self.addCleanup(gate.touch)
+        self.merge_lane_for_checks(f"while ! test -f {shlex.quote(str(gate))}; do sleep 0.05; done")
+        self.hansa("merge", t1)
+        d.tick()
+        self.assertEqual(self.desk.meta(t1)["merge_check"]["phase"], "running")
+        self.hansa("merge", t2)
+        self.hansa("lane", "set", "m", "base", "other")
+        self.hansa("lane", "set", "b", "base", "other")
+        d.tick()  # merge_checks must see that m is held, even though these bases may run together
+        self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "queued")
+        self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])
+        gate.touch()
+        self.assertEqual(self.settle_merge(d, t1)["state"], "merged")
+        self.git_out("checkout", "-q", "other")
+        self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
+        self.assertEqual([(e["task"], e["lane"]) for e in self.events("merge_check_started")], [(t1, "m"), (t2, "m")])
 
     def test_merge_lane_gets_the_next_free_slot_before_queued_work(self):
         d, tid, _ = self.two_lanes(check="true")
@@ -2719,6 +2774,7 @@ class DeskTest(unittest.TestCase):
                 reaper = threading.Thread(target=proc.wait)
                 reaper.start()
                 self.addCleanup(reaper.join)
+                self.addCleanup(gate.touch)  # release the check before joining, even when an assertion fails
                 mc = self.desk.meta(tid)["merge_check"]
                 self.desk.update(tid, merge_check={**mc, "phase": phase,
                                                   **({"pid": None, "pid_start": ""} if phase == "starting" else {})})
@@ -2748,7 +2804,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(run.lane_holder(self.desk, "m")["id"], tid)
         self.hansa("lane", "set", "m", "merge_lane", "false")
         m = self.settle_merge(Dispatcher(self.desk), tid)
-        self.assertEqual((m["state"], m["merge_check_result"]["lane"]), ("merged", "a"))
+        self.assertEqual(m["state"], "merged")
+        self.assertNotIn("lane", m["merge_check_result"])
         self.assertEqual([e["lane"] for e in self.events("merge_check_started")], ["a"])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
@@ -2788,7 +2845,8 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(run, "start_merge_check", unmark):
             d.tick()
         self.assertEqual((self.desk.meta(tid)["merge_check"]["phase"], self.events("merge_check_started")), ("queued", []))
-        self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["lane"], "a")
+        self.assertNotIn("lane", self.settle_merge(d, tid)["merge_check_result"])
+        self.assertEqual(self.events("merge_check_started")[-1]["lane"], "a")
         self.hansa("lane", "add", "0", "--like", "a")
         work = self.desk.new_task("Unassigned work")
         original_worker = run.start
@@ -3320,6 +3378,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", "main").split()[1:], [tip, m["head"]])
         self.assertTrue((self.repo / "hello.txt").exists())
         self.assertTrue(self.events("task_merged")[-1]["recheck"])
+        self.assertNotIn("lane", m["merge_check_result"])
 
     def test_recheck_that_fails_merges_nothing(self):
         tid, tip, m = self.recheck_after_a_failed_check("echo still broken; exit 2")
@@ -3327,6 +3386,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.git_out("rev-parse", "main"), tip)
         self.assertFalse((self.repo / "hello.txt").exists())
         self.assertIn("still broken", views.show_text(self.desk, tid))
+        self.assertNotIn("lane", m["merge_check_result"])
 
     def merge_check_lane(self, **fields):
         """Lane a with these fields set (None takes one out), and one finished task on it."""

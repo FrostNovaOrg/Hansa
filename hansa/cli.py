@@ -342,7 +342,7 @@ def _runs_when(desk: Desk, tid: str, base: str) -> str:
     lane = merge_check_lane(desk.settings(), m)
     if lane != m["lane"]:
         return (f"One merge check runs at a time on {base}, so it waits for {ahead}." if ahead else
-                views.merge_check_text(desk, m) + ".")
+                views.merge_check_text(desk, m).replace("merge check queued", "The merge check is queued", 1) + ".")
     return (f"One merge check runs at a time on {base}, so it waits for {ahead}, then runs when lane {lane} is "
             f"free." if ahead else f"It runs when lane {lane} is free.")
 

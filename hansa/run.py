@@ -4714,7 +4714,7 @@ def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
     needed no check and waited its turn (plain) says so in its result (waited): no check ran for it."""
     plain = ((desk.meta(tid).get("merge_check") or {}).get("plain"))
     check_lane = (desk.meta(tid).get("merge_check") or {}).get("lane")
-    if result and check_lane:
+    if result and check_lane and check_lane != desk.meta(tid).get("lane"):
         result = {**result, "lane": check_lane}
     if plain and result:
         result = {**result, "waited": True}
@@ -4902,7 +4902,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         except GitFileChanged as e:
             note = git_file_changed(desk, tid, e)
     result = {"ok": code == 0 and not note, "exit": code, "note": note, "command": mc.get("command", ""),
-              **({"lane": mc["lane"]} if mc.get("lane") else {}),
+              **({"lane": mc["lane"]} if mc.get("lane") and mc["lane"] != m.get("lane") else {}),
               **({"own": True} if mc.get("own") else {}),
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),

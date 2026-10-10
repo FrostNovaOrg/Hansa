@@ -1274,6 +1274,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         check_name = merge_lane(s, name)
         check_lane = s["lanes"][check_name]
         separate = check_name != name
+        served = ([n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
+                  if ln.get("merge_lane") else [])
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
@@ -1289,6 +1291,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
             f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
             " (check included); set high, so reaching it means something went wrong",
+            "  work: none; a merge lane takes no work" if ln.get("merge_lane") else
             "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends,"
                                             " in the lane's sandbox;"
                                             " hansa merge refuses a failed check"
@@ -1299,7 +1302,11 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                                                " check that failed or could not run for the machine's sake") + ")"
                                             if ln.get("check") else "none" if separate or ln.get("merge_check")
                                             else "none, so its tasks are merged untested"),
-            *([f"  merge check before merging: {merge_command(check_lane) or 'none'}; in lane {check_name}'s"
+            *([f"  merge checks for lanes {', '.join(served) or '(none yet)'}: {merge_command(ln) or 'none'};"
+               f" in this worktree and sandbox, after its setup, stopped at {merge_minutes(ln)} minutes; needed"
+               " when the base moved or its command differs from the task lane's check (or with --recheck)"]
+              if ln.get("merge_lane") else
+              [f"  merge check before merging: {merge_command(check_lane) or 'none'}; in lane {check_name}'s"
                f" worktree and sandbox, after its setup, stopped at {merge_minutes(check_lane)} minutes; needed"
                " when the base moved or its command differs from this lane's check (or with --recheck)"] if separate else
               [f"  merge check before merging: {ln['merge_check']} (hansa merge runs it in place of the check, on"
@@ -1309,6 +1316,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                f" · stopped at {merge_minutes(ln)} minutes"] if own_merge_check(ln) else
               [f"  merge check before merging: the check, stopped at {merge_minutes(ln)} minutes"]
               if ln.get("check") and ln.get("merge_timeout_min") else []),
+            "  setup before each merge check: " + (ln.get("setup") or "none") if ln.get("merge_lane") else
             "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts,"
                                              " in the lane's sandbox, so one that downloads needs its registry on"
                                              " the network list;"
