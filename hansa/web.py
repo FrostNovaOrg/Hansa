@@ -25,7 +25,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import alert, cost, disk, release, views
-from .desk import Desk, deny_split, lane_warnings, public_settings, read_json, read_split
+from .desk import Desk, deny_split, event_record, lane_warnings, public_settings, read_json, read_split
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
@@ -62,7 +62,7 @@ def _last_lines(path, n: int, block: int = 65536) -> list:
                 break
     if at:  # cut where a character may go on: the rest of it, in the line that is left out
         data = data[next((i for i in range(min(4, len(data))) if not 0x80 <= data[i] < 0xC0), 0):]
-    return data.decode("utf-8").splitlines()[1 if at else 0:][-n:]
+    return data.decode("utf-8", errors="surrogateescape").splitlines()[1 if at else 0:][-n:]
 
 
 def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
@@ -71,12 +71,12 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
     if not desk.events_path.exists():
         return []
     kinds = {k for k in kind.split(",") if k}
-    lines = desk.events_path.read_text(encoding="utf-8").splitlines() if kinds else _last_lines(desk.events_path, n)
+    lines = desk.events_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines() \
+        if kinds else _last_lines(desk.events_path, n)
     out = []
     for line in reversed(lines if kinds else lines[-n:]):
-        try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
+        e = event_record(line)
+        if e is None:
             continue
         if not kinds or (isinstance(e, dict) and e.get("event") in kinds):
             out.append(e)

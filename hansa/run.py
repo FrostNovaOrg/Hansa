@@ -33,7 +33,7 @@ from pathlib import Path
 from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
-                   read_json, resolved, task_message, update_message, write_json, write_problems)
+                   WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 
 # Only the wording providers use for "out of quota", so a task that is itself
@@ -113,7 +113,7 @@ shift 3; exec "$@"
 # The lane's check, in srt; its exit code goes to a file, so a restarted server can still read it.
 # Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
 # sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings> <its own temporary folder>
-CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; echo $? > "$2"; } | cat; rm -rf "$3" "$6"'
+CHECK_SCRIPT = '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; ' + WRITE_FILE + ' "$2" "$?"; } | cat; rm -rf "$3" "$6"'
 # `hansa lane try`: the lane's setup, then its check, each in srt as for a task; the first that fails ends it.
 # Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
 # and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
@@ -124,7 +124,7 @@ run() {
   rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- /bin/sh -c "$2" </dev/null 2>&1 3>&-
     echo $? >&3; } | cat >"$d/$1.log"; } 3>&1 )
   rm -rf "$4" "$5"
-  echo "$rc $(( $(date +%s) - t0 ))" >"$d/$1.exit"
+  """ + WRITE_FILE + """ "$d/$1.exit" "$rc $(( $(date +%s) - t0 ))"
   [ "$rc" = 0 ]
 }
 shift 2
@@ -682,7 +682,7 @@ def _srt_writes(path: str, settings: dict, tmp: str, cwd, paths, kept=()) -> tup
     """srt with these settings writing `paths` and `kept` (git_open_try): (the first of `paths` refused, or "",
     the first of `kept` written, or "", srt's first line when it failed otherwise)."""
     f = Path(tmp) / GIT_OPEN_TRY
-    f.write_text(git_open_try(paths, kept))
+    write_text(f, git_open_try(paths, kept))
     ran, said, out = _srt_true(path, settings, tmp, cwd, ["/bin/sh", str(f)])
     lines = out.splitlines()
     refused = [x.removeprefix("refused: ") for x in lines if x.startswith("refused: ")]
@@ -2054,15 +2054,15 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
     keep = desk.raw_dir(tid) / f"worktree-git-{int(time.time() * 1000)}"
     keep.mkdir(parents=True, exist_ok=True)
     if isinstance(e, GitFolderChanged):  # a commondir or gitdir: what was found is kept, git's line put back
-        (keep / "what-was-found.txt").write_text(f"{e.path}: {e.found}\nexpected: {e.expected}\n", encoding="utf-8")
+        write_text(keep / "what-was-found.txt", f"{e.path}: {e.found}\nexpected: {e.expected}\n")
         text = _plain_text(e.path)[0]
         target = e.path.parent / text if text and e.path.name == "commondir" else None
         for name in ("config", "hooks") if target else ():  # the settings and hooks hansa's git would have run
             try:
                 if (target / name).is_dir():
-                    shutil.copytree(target / name, keep / name, symlinks=True)
+                    shutil.copytree(target / name, keep / name, symlinks=True, copy_function=copy_file)
                 elif (target / name).is_file():
-                    shutil.copy2(target / name, keep / name)
+                    copy_file(target / name, keep / name)
             except OSError:
                 pass
         fixable = e.path.parent.is_dir() and (
@@ -2078,16 +2078,16 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
         return (f"{e}. What was found is kept in .hansa/runs/{tid}/{keep.name}; " +
                 ("the right file is back, so the lane's next task runs normally" if fixable else
                  "it is left as it was found, and hansa runs no git there until it is put right"))
-    (keep / "what-was-found.txt").write_text(f"{dot}: {e.found}\nexpected: {e.expected}\n", encoding="utf-8")
+    write_text(keep / "what-was-found.txt", f"{dot}: {e.found}\nexpected: {e.expected}\n")
     if e.found.startswith("it now points to "):  # the settings and hooks hansa's git would have run
         target = Path(e.found[len("it now points to "):])
         target = target if target.is_absolute() else e.wt / target
         for name in ("config", "hooks"):
             try:
                 if (target / name).is_dir():
-                    shutil.copytree(target / name, keep / name, symlinks=True)
+                    shutil.copytree(target / name, keep / name, symlinks=True, copy_function=copy_file)
                 elif (target / name).is_file():
-                    shutil.copy2(target / name, keep / name)
+                    copy_file(target / name, keep / name)
             except OSError:
                 pass
     if os.path.lexists(dot):
@@ -2399,10 +2399,7 @@ def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
     if git_config:
         env = {**env, **git_config_env(env, git_config)}
     f = desk.raw_dir(tid) / "lane-env.sh"
-    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # only the desk's account reads it
-    os.fchmod(fd, 0o600)  # one written before was made with the umask's mode
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        out.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + sandbox_prelude())
+    write_text(f, "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + sandbox_prelude(), mode=0o600)
     return {"CLAUDE_ENV_FILE": str(f)}
 
 
@@ -2832,7 +2829,7 @@ def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
                     src.read_text(encoding="utf-8", errors="replace")
                 # errors="replace": a byte read_bounded kept that is not UTF-8 is written as one "?", not three bytes
                 data = desk.redact(text).encode("utf-8", errors="replace")
-                (d / name).write_bytes(cut_redacted(data, most) if most else data)
+                write_bytes(d / name, cut_redacted(data, most) if most else data)
                 if src.parent == raw:
                     src.unlink()
         try:
@@ -3650,9 +3647,8 @@ def browser_for(desk: Desk, tid: str, command: str):
     d = desk.tasks_dir / tid / "browser"
     d.mkdir(parents=True, exist_ok=True)
     cfg = desk.tasks_dir / tid / "browser-mcp.json"
-    cfg.write_text(json.dumps({"mcpServers": {"browser": {
-        "command": sys.executable, "args": [str(Path(__file__).with_name("relay.py")), str(d), command]}}}),
-        encoding="utf-8")
+    write_text(cfg, json.dumps({"mcpServers": {"browser": {
+        "command": sys.executable, "args": [str(Path(__file__).with_name("relay.py")), str(d), command]}}}))
     return cfg, ["mcp__browser", rule("Read", d)]
 
 
@@ -3667,7 +3663,7 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
         if len(text) <= COMMAND_SHOWN or not tmp:
             return f"`{text}`"
         f = Path(tmp) / f"lane-{name}-command.txt"
-        f.write_text(text + "\n", encoding="utf-8")
+        write_text(f, text + "\n")
         return (f"`{text[:200]} ...` (the command is {len(text)} characters long; it is whole in "
                 f"{f}, which you may read)")
     out = []
@@ -3766,7 +3762,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
     # no key in it: keys are in env only. Without the preview around it: a resume starts its own (resume)
-    (raw / RESUME_ARGV).write_text(json.dumps(argv), encoding="utf-8")
+    write_text(raw / RESUME_ARGV, json.dumps(argv))
     if meta.get("browser") and s.get("browser") and lane.get("preview"):  # started after the setup, and any merge
         argv = with_preview(desk, tid, argv, lane, pname, p, wt)
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
@@ -4185,7 +4181,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     denied = run.get("permission_denials") or []
     reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
                           meta.get("session_id", "")) if p and denied else {}
-    (d / "result.md").write_text(report + ("\n" if report else ""), encoding="utf-8")
+    write_text(d / "result.md", report + ("\n" if report else ""))
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
@@ -5048,7 +5044,7 @@ def keep_try_log(desk: Desk, lane_name: str, t: dict, whole: list):
         data = desk.redact("".join(out)).encode("utf-8", errors="replace")
         try:
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_bytes(cut_redacted(data, TRY_KEEP * len(whole) + 4096))
+            write_bytes(f, cut_redacted(data, TRY_KEEP * len(whole) + 4096))
         except OSError:
             return None
     return f

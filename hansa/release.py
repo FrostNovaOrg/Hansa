@@ -56,7 +56,7 @@ import uuid
 from pathlib import Path
 
 from . import without_session
-from .desk import Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json
+from .desk import WRITE_FILE, Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json, write_text
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
@@ -68,7 +68,7 @@ SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the ti
 TAIL = 15
 STOP_GRACE = 30  # seconds between the TERM a stopped release's command gets and the KILL to what still runs
 # $0 is the launch word, which finds the run again after hansa serve restarts; the exit code goes in a file
-SCRIPT = '/bin/sh -c "$1"; echo $? > "$2"'
+SCRIPT = '/bin/sh -c "$1"; ' + WRITE_FILE + ' "$2" "$?"'
 # a hunk of a patch, or of a merge's combined diff (one more @ and one more -range per parent)
 HUNK = re.compile(r"^(@@+) ((?:-\d+(?:,\d+)? )+\+\d+(?:,\d+)?) @@")
 RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
@@ -616,11 +616,7 @@ def _code_key(desk: Desk) -> bytes:
     f = code_key_file(desk)
     if not f.is_file():
         desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
-        tmp = f.with_name(f.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(secrets.token_hex(32))
-        os.replace(tmp, f)
+        write_text(f, secrets.token_hex(32), mode=0o600)
     return f.read_text().strip().encode()
 
 
@@ -1024,7 +1020,7 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
         log = d / f"{rid}.log"
         text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
         if log.exists():
-            log.write_text(text, encoding="utf-8")
+            write_text(log, text)
     limit, whose = r.get("limit_min"), r.get("limit_of") or "the lane's"
     problem = (f"stopped at {whose} time limit ({limit} min)" if r.get("timed_out") else
                r.get("lost") or ("" if code is not None else "it was interrupted before it could end (no exit code)"))

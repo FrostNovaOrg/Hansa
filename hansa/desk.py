@@ -31,6 +31,7 @@ import secrets as _secrets
 import shlex
 import shutil
 import site
+import stat
 import string
 import subprocess
 import sys
@@ -294,10 +295,92 @@ def json_text(data) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
+def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
+    """Replace a file whole; preserve its mode and clean up even when writing or closing fails.
+
+    New files use the caller's mode (otherwise 0666 under the umask). An explicit mode is for keys and
+    other private files that hansa already made 0600. The temporary file is on the same filesystem.
+    """
+    if mode is None:
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            pass
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{_secrets.token_hex(4)}.tmp")
+    made = False
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if mode is None else mode)
+        made = True
+        with os.fdopen(fd, "wb") as fh:
+            if mode is not None:
+                os.fchmod(fh.fileno(), mode)  # the umask must not narrow an existing file's permissions
+            fh.write(data)
+        os.replace(tmp, path)
+    finally:
+        if made:
+            tmp.unlink(missing_ok=True)
+
+
+def write_text(path: Path, text: str, mode: int | None = None) -> None:
+    write_bytes(path, text.encode("utf-8"), mode)
+
+
 def write_json(path: Path, data) -> None:
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")  # writers never share one
-    tmp.write_text(json_text(data), encoding="utf-8")
-    os.replace(tmp, path)
+    write_text(path, json_text(data))
+
+
+# The command wrappers use the same writer for their completion files. Run this module as a script so
+# it works outside the desk and without a PYTHONPATH; neither the path nor the value holds a key.
+WRITE_FILE = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))}"
+
+
+def copy_file(src, dst):
+    """copy2 for kept evidence, with a whole destination and no leftover temporary on failure."""
+    path = Path(dst)
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{_secrets.token_hex(4)}.tmp")
+    made = False
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        made = True
+        os.close(fd)
+        shutil.copy2(src, tmp)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if made:
+            tmp.unlink(missing_ok=True)
+    return dst
+
+
+def append_event(path: Path, line: str) -> None:
+    """Append one event under a log lock. Never truncate: a failed append may leave a partial line."""
+    data = (line + "\n").encode("utf-8")
+    with open(path, "a+b", buffering=0) as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        if fh.seek(0, os.SEEK_END):
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) != b"\n":
+                data = b"\n" + data
+        # FileIO can return a short write without raising. Hold the lock across the entire line.
+        while data:
+            written = fh.write(data)
+            if not written:
+                raise OSError("event append made no progress")
+            data = data[written:]
+
+
+def event_record(line) -> dict | None:
+    """Skip damaged JSON, incomplete UTF-8 and non-record lines in every event-log reader."""
+    try:
+        record = json.loads(line.encode("utf-8") if isinstance(line, str) else line)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def read_json(path: Path, default=None):
@@ -2208,11 +2291,7 @@ class Desk:
         if problem:
             raise ValueError(problem)
         with self.lock():  # a provider check compares and records under the same lock
-            tmp = f.with_name(f.name + ".tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(value.strip() + "\n")
-            os.replace(tmp, f)
+            write_text(f, value.strip() + "\n", mode=0o600)
             self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
             self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
@@ -2237,7 +2316,7 @@ class Desk:
                 text = text.replace(key, f"[key of {provider}]")
                 self.writes += f.name == "meta.json"
                 write_json(f, json.loads(text)) if f.name in ("meta.json", "asks.json") \
-                    else f.write_text(text, encoding="utf-8")
+                    else write_text(f, text)
 
     def raw_dir(self, tid: str) -> Path:
         """Where a task's processes write before hansa removes keys from what they wrote: under
@@ -2272,16 +2351,14 @@ class Desk:
         def clean(v):
             return self.redact(v) if isinstance(v, str) else [clean(x) for x in v] if isinstance(v, list) else v
         line = json.dumps({"ts": now(), "event": kind, **{k: clean(v) for k, v in fields.items()}}, ensure_ascii=False)
-        with open(self.events_path, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        append_event(self.events_path, line)
         if kind in ALERTED:  # what waits for the principal, for the principal's own alert command (hansa/alert.py)
             from .alert import from_event
             try:
                 from_event(self, kind, fields)
             except Exception as e:  # noqa: BLE001 - an alert never keeps an event from being recorded
-                with open(self.events_path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"ts": now(), "event": "alert_error", "error": self.redact(str(e))[:300]},
-                                        ensure_ascii=False) + "\n")
+                append_event(self.events_path, json.dumps(
+                    {"ts": now(), "event": "alert_error", "error": self.redact(str(e))[:300]}, ensure_ascii=False))
 
     @contextlib.contextmanager
     def lock(self):
@@ -2311,7 +2388,7 @@ class Desk:
             return None
 
     def pause(self, reason: str, by: str = "") -> None:
-        self.paused_path.write_text(reason.strip() + "\n", encoding="utf-8")
+        write_text(self.paused_path, reason.strip() + "\n")
         self.event("paused", reason=reason, by=by)
 
     def resume(self, by: str = "") -> None:
@@ -2330,7 +2407,7 @@ class Desk:
             tid = f"t{max(ids, default=0) + 1:04d}"
             d = self.tasks_dir / tid
             d.mkdir()
-            (d / "task.md").write_text(text + "\n", encoding="utf-8")
+            write_text(d / "task.md", text + "\n")
             title = self.redact(opts.pop("title", "")) or text.splitlines()[0][:80]
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}
@@ -2454,9 +2531,7 @@ class Desk:
         f = self.state_dir / "web-token"
         if not f.is_file():
             self.state_dir.mkdir(exist_ok=True)
-            fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(_secrets.token_urlsafe(18))
+            write_text(f, _secrets.token_urlsafe(18), mode=0o600)
         return f.read_text().strip()
 
 
@@ -2481,3 +2556,7 @@ def public_settings(desk: Desk) -> dict:
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}
+
+
+if __name__ == "__main__":  # completion files written by the shell wrappers
+    write_text(Path(sys.argv[1]), sys.argv[2] + "\n")

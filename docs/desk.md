@@ -40,6 +40,78 @@ tmux capture without colors that grey guess looked typed. With an older
 Claude Code, where a grey line still shows there, the principal should not press
 Enter on what looks like an empty box: it may send the guess as if they wrote it.
 
+### Whole files and event lines
+
+Hansa writes a replacement beside its destination and renames it only after the write and close succeed.
+An `OSError` during writing, closing or replacement leaves the previous file intact (or no file when it was
+new), and removes the temporary file. Replacements keep the destination's permission bits, including `0600`;
+new files keep their previous defaults under the umask, and keys, tokens and the lane environment stay `0600`.
+Publishing a run's output removes its raw source only after the whole copy has been installed.
+
+Event appends hold a lock on `events.jsonl` across checking its last byte and writing the next event. If the
+previous append left a line without a newline, the next append first supplies one, in the same write as the
+new event. Hansa never truncates the log to undo a failed append. A damaged line stays there and readers skip
+it; a complete event missing only its newline remains readable. This also applies to the fallback
+`alert_error` append. The follower (`notify.read_log`), the page's latest and filtered events (`web._events`),
+and lane history (`views.lane_origin`) all skip invalid JSON, invalid UTF-8 and lines that are not objects.
+Successful writes keep the same contents and number of payload writes; no extra event or record is written
+each round. This concerns file writes, rather than what a command or server round does after an I/O error.
+
+The write inventory below groups callers that use the same writer. The failure column describes the tests
+in `tests.test_hansa.FailedWriteTest`: replacement rows check old bytes, no leftover temporary, and a file
+starting at `0600`. New-only rows check that the destination stays absent and a retry works.
+
+| Desk file and writer | Write fails part way |
+|---|---|
+| JSON records through `desk.write_json`: settings, task records, requests, provider state, heartbeat and runtime records (disk, sandbox, server, followers, alert and release state) | Whole replacement; JSON row in `test_partial_replacement_matrix` |
+| `secrets/<provider>.key`, `Desk.write_key` | Whole replacement at `0600`; private-files matrix |
+| `PAUSED`, `Desk.pause` | Whole replacement; replacement matrix |
+| `tasks/<id>/task.md`, `Desk.new_task` | Whole creation; failed-creation matrix |
+| Published `run.json`, `run.err`, `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err`, `preview.log`, `preview-before-resume.log`, `run.publish` | One replacement row per name; raw source is also checked intact |
+| Published task text/results/logs and lanes' `try.log`, `merge-check-try.log`, `Desk.scrub` | Whole replacement; private-files matrix covers each text name; JSON scrubs use `write_json` |
+| Initial `lanes/<lane>/brief.md`, `CLAUDE.md`, `notes/PROJECT.md`, `cli.init_desk` | Whole writes; other-sites matrix, three rows |
+| Follow-up `tasks/<id>/note.md`, `cli._retry` | Whole write; other-sites matrix |
+| `.hansa/web-port` and `web-host`, `cli.cmd_serve` | Whole writes; other-sites matrix, two rows |
+| Refreshed card, helpers and their timestamped `.hansa/` backups, `cli._bring` | Whole writes; other-sites matrix covers both destination and backup expressions |
+| Copied, new and edited lane briefs, and `brief-before-*.md`, `cli.cmd_lane` | Whole writes; other-sites matrix, four rows |
+| `.hansa/runs/<id>/lane-env.sh`, `run.env_file` | Whole replacement at `0600`; private-files matrix |
+| Task `browser-mcp.json`, `run.browser_for` | Whole replacement; other-sites matrix |
+| `.hansa/runs/<id>/worker-argv.json`, `run.start` | Whole replacement with the existing JSON format; other-sites matrix |
+| Task `result.md`, `run.finish` | Whole replacement; other-sites matrix |
+| Lane `try.log` and `merge-check-try.log`, `run.keep_try_log` | Whole replacements; private-files matrix also checks the writer's failure return |
+| Design startup `run.err`, `session.main` | Whole replacement; other-sites matrix |
+| `.hansa/web-token`, `Desk.web_token` | Whole creation at `0600`; failed-creation matrix checks retry |
+| `secrets/release-code.hmac`, `release._code_key` | Whole creation at `0600`; failed-creation matrix checks retry |
+| Finished `.hansa/releases/<id>.log`, `release.finish` | Whole replacement after redaction; other-sites matrix |
+| Raw preview state, `preview.main.save` | Whole replacement with the existing JSON format; other-sites matrix |
+| Git evidence `what-was-found.txt`, `run.git_file_changed` (two branches) | Whole writes; other-sites matrix, two rows |
+| Git evidence `config` and files under `hooks/`, `desk.copy_file` used directly and by `copytree` | Whole copies, including copied metadata before replacement; private-files matrix covers both paths |
+| Check and merge-check `.exit`, `run.CHECK_SCRIPT` | Whole writes through the shared writer; shell-completion matrix |
+| Try `<step>.exit`, `run.TRY_SCRIPT` | Whole write, with the same exit code and elapsed seconds; shell-completion matrix |
+| Release `<id>.exit`, `release.SCRIPT` | Whole write; shell-completion matrix |
+| Notes source and archive destination, `notes._write` | Already whole replacements with cleanup and fsync; private-files matrix covers both paths |
+| Ended tasks' trimmed logs, `disk._trim_one` | Whole replacement, now preserving permissions too; private-files matrix checks the failure return |
+| Command text and git-open probe script in a run's temporary folder, `run.around_note` and `run._srt_writes` | Whole writes; other-sites matrix covers both; these inputs normally live outside the desk |
+| `events.jsonl`, primary and `alert_error` appends | Append-only; failed-append tests keep the damaged prefix, then retain the next event; the two-process test retains every good event |
+
+For the larger command functions, the other-sites matrix executes their actual write expressions with
+representative inputs, so it exercises each destination without starting a server, worker, release or git
+operation. Additional tests cover close, chmod and rename errors, successful contents and permission bits
+under a restrictive umask, one payload write per replacement or append, and successful short event writes.
+
+The following writes intentionally remain in place:
+
+| Place | Why it can stay |
+|---|---|
+| Worker/design stdout and stderr in raw `run.json` and `run.err`; setup, check, merge-check and try logs; the release's running log (`run` wrappers, `release._launch`) | These are live process output streams. Their published or finished copies use whole replacement. |
+| Raw preview output, `preview.Kept` | This is a live process log, with its capped tail rewritten while output arrives; it is published whole after the preview ends. |
+| Follower `.log`, `notify.spawn`, and the optional `HANSA_NOTIFY_CAPTURE` file, `notify.post` | Appended process output; capture is a test facility, not the desk event log. |
+| `.hansa/lock`, `alert.lock` and follower `.lock` files | Empty lock files have no payload to be part-written. Their inode must remain stable for holders and waiters. |
+| `.hansa/serve.lock`, `cli.hold_server_lock` | Its PID text is attached to the inode that the server locks. Replacing it would let another server lock a different inode and start. It remains a lock file, not a replaceable record. |
+| Empty lane brief creation on a page save, `web._save_settings` (`touch`); setup `.done` marker, `SETUP_SCRIPT` | Neither writes a payload; an existing empty file cannot become half-written. |
+| Sandbox commands' scratch Maven settings under their own TMPDIR, `JAVA_PRELUDE` | Private, disposable command input, never a published desk record; its command's temporary directory is removed when the command ends. On Linux that TMPDIR is under `.hansa/tmp/`. |
+| Git's temporary config/excludes in the Linux prelude, missing empty git-deny placeholders, git-open probes, and worktree git-file repairs | Git and sandbox scratch, including the worktree's git state, are outside this change. These do not replace the desk's settings, task records or published output. |
+
 ### Where a desk's files grow
 
 | What | Where | How big |

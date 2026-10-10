@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 
 from . import account
-from .desk import Desk, now, read_json, write_json
+from .desk import Desk, now, read_json, write_bytes, write_json
 
 GB = 10 ** 9
 DEFAULT_FLOOR = 10  # GB
@@ -400,12 +400,9 @@ def _trim_one(f: Path, at: float) -> int | None:
         tail = tail[1:]
     head = (f"[hansa trimmed this log on {time.strftime('%Y-%m-%d %H:%M', time.localtime(at))}: it was {size:,} "
             f"bytes; its last {len(tail):,} bytes follow]\n").encode()
-    tmp = f.with_name(f"{f.name}.{os.getpid()}.trim")
     try:
-        tmp.write_bytes(head + tail)
-        os.replace(tmp, f)
+        write_bytes(f, head + tail)
     except OSError:
-        tmp.unlink(missing_ok=True)
         return None
     return size
 

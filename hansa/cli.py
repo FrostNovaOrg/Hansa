@@ -20,7 +20,7 @@ from . import account, alert, build, cost, installed_text, notes, notify, releas
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, answer_name)
+                   PROJECT_INTRO, answer_name, write_text)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, git, identity_env, keys_in_change, lane_holder,
                   lane_identity,
@@ -138,11 +138,11 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
     if repo:
         s["lanes"][lane] = default_lane(repo, base)
         (desk.lanes_dir / lane).mkdir(exist_ok=True)
-        (desk.lanes_dir / lane / "brief.md").write_text("", encoding="utf-8")
+        write_text(desk.lanes_dir / lane / "brief.md", "")
     write_json(desk.settings_path, s)
-    (desk.root / "CLAUDE.md").write_text(CARD.read_text(encoding="utf-8"), encoding="utf-8")
+    write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
     if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
-        desk.project_path.write_text(PROJECT_INTRO, encoding="utf-8")
+        write_text(desk.project_path, PROJECT_INTRO)
     (desk.root / ".claude").mkdir(exist_ok=True)
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
@@ -824,7 +824,7 @@ def _retry(desk: Desk, a) -> None:
         opts.update(start_from=m["head"], base=m["base"])
         text += f"\nYou start from the previous attempt's last commit ({m['head'][:10]})."
     tid = desk.new_task(text, **opts)
-    (desk.tasks_dir / tid / NOTE_FILE).write_text(desk.redact(note) + "\n", encoding="utf-8")  # later rounds quote it
+    write_text(desk.tasks_dir / tid / NOTE_FILE, desk.redact(note) + "\n")  # later rounds quote it
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
@@ -1294,8 +1294,8 @@ def cmd_serve(a):
     def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stopped)
-    (desk.state_dir / "web-port").write_text(str(port), encoding="utf-8")  # what hansa web opens
-    (desk.state_dir / "web-host").write_text(a.host, encoding="utf-8")  # with it, where hansa status says the page is
+    write_text(desk.state_dir / "web-port", str(port))  # what hansa web opens
+    write_text(desk.state_dir / "web-host", a.host)  # with it, where hansa status says the page is
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
@@ -1600,9 +1600,9 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
         return
     if dst.is_file():
         desk.state_dir.mkdir(exist_ok=True)
-        (desk.state_dir / f"{keep_as or dst.name}.{int(time.time())}").write_text(dst.read_text(encoding="utf-8"), encoding="utf-8")
+        write_text(desk.state_dir / f"{keep_as or dst.name}.{int(time.time())}", dst.read_text(encoding="utf-8"))
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(new, encoding="utf-8")
+    write_text(dst, new)
     desk.event(event, file=dst.name)
 
 
@@ -1821,10 +1821,10 @@ def cmd_lane(a):
                 old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
                 if old.strip() and old != text:  # left by an earlier lane of this name: set aside, not lost
                     aside = brief.with_name(f"brief-before-{time.strftime('%Y%m%d-%H%M%S')}.md")
-                    aside.write_text(old, encoding="utf-8")
-                brief.write_text(text, encoding="utf-8")
+                    write_text(aside, old)
+                write_text(brief, text)
             elif not brief.exists():
-                brief.write_text("", encoding="utf-8")
+                write_text(brief, "")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
                   f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
                   + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check", "release_files",
@@ -1886,7 +1886,7 @@ def cmd_lane(a):
                 return
             text = _text(a)
             brief.parent.mkdir(parents=True, exist_ok=True)
-            brief.write_text(text, encoding="utf-8")
+            write_text(brief, text)
             desk.event("lane_brief_changed", lane=a.name, new=text)
             print(f"lane {a.name}: standing instructions replaced ({len(text)} characters); "
                   f"every worker in the lane gets them from its next task on")

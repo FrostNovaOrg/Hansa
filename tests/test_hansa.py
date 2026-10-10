@@ -1,5 +1,7 @@
 """Tests for hansa with a stand-in for claude, so no model is called."""
 import contextlib
+import ast
+import errno
 import fcntl
 import functools
 import inspect
@@ -17,6 +19,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import types
@@ -626,6 +629,452 @@ def as_home(home, **env):
     with unittest.mock.patch.dict(os.environ, {"HOME": str(home), "HANSA_TESTS_HOME": str(home), "PYTHONPATH": path,
                                                **env}), unittest.mock.patch("pwd.getpwuid", getpwuid):
         yield
+
+
+@contextlib.contextmanager
+def partial_write(path, after=None):
+    """Really write a prefix, then raise ENOSPC, through either a Path or a file descriptor."""
+    path = Path(path)
+    opened, hit = {}, []
+    real_open, real_io_open, real_os_open, real_fdopen = open, io.open, os.open, os.fdopen
+
+    class File:
+        def __init__(self, f):
+            self.f = f
+
+        def __getattr__(self, name):
+            return getattr(self.f, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self.f.__exit__(*exc)
+
+        def write(self, data):
+            self.f.write(data[:max(1, len(data) // 2)])
+            self.f.flush()
+            hit.append(True)
+            if after:
+                after()
+            raise OSError(errno.ENOSPC, "injected full disk")
+
+    def wrap(f, name, mode):
+        p = Path(name) if isinstance(name, (str, bytes, os.PathLike)) else opened.get(name)
+        # Both the old writers' temporary names and the whole-file writer's names.
+        target = p is not None and p.parent == path.parent and (
+            p.name == path.name or p.name.startswith(path.name + ".") or p.name.startswith("." + path.name + "."))
+        return File(f) if target and any(c in mode for c in "wax+") else f
+
+    def opening(original, name, mode="r", *a, **kw):
+        return wrap(original(name, mode, *a, **kw), name, mode)
+
+    def os_open(name, *a, **kw):
+        fd = real_os_open(name, *a, **kw)
+        opened[fd] = Path(name)
+        return fd
+
+    with unittest.mock.patch("builtins.open", lambda *a, **kw: opening(real_open, *a, **kw)), \
+            unittest.mock.patch("io.open", lambda *a, **kw: opening(real_io_open, *a, **kw)), \
+            unittest.mock.patch("os.open", os_open), \
+            unittest.mock.patch("os.fdopen", lambda *a, **kw: opening(real_fdopen, *a, **kw)), \
+            unittest.mock.patch("shutil._HAS_FCOPYFILE", False, create=True), \
+            unittest.mock.patch("shutil._USE_CP_SENDFILE", False, create=True):
+        yield hit
+
+
+class FailedWriteTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.desk = Desk(self.root)
+        for d in (self.desk.tasks_dir, self.desk.state_dir, self.desk.lanes_dir, self.desk.secrets_dir,
+                  self.desk.notes_dir):
+            d.mkdir()
+        with self.desk.lock():
+            pass
+
+    def assert_failed_replacement(self, path, write, old=b"old contents\n"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(old)
+        path.chmod(0o600)
+        before = set(path.parent.iterdir())
+        with partial_write(path) as hit, self.assertRaises(OSError):
+            write()
+        self.assertTrue(hit, "the write fault must reach this writer")
+        self.assertEqual(path.read_bytes(), old)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(set(path.parent.iterdir()), before, "a temporary file was left behind")
+
+    def test_partial_replacement_matrix(self):
+        from hansa import run
+        task = self.desk.tasks_dir / "t0001"
+        task.mkdir()
+        raw = self.desk.raw_dir("t0001")
+        # Table: each row is a writer; the column is an ENOSPC after a real prefix write.
+        rows = [("JSON record", self.desk.settings_path, lambda: write_json(self.desk.settings_path, {"new": 1})),
+                ("PAUSED", self.desk.paused_path, lambda: self.desk.pause("new reason"))]
+        for name in ("run.json", "run.err", "setup.log", "check.log", "merge-check.log", "merge-setup.log",
+                     "merge-check.err", "preview.log", "preview-before-resume.log"):
+            src, dst = raw / name, task / name
+            src.write_bytes(b"new process output\n")
+            rows.append(("publish " + name, dst, lambda n=name: run.publish(self.desk, "t0001", n)))
+        for label, path, write in rows:
+            with self.subTest(writer=label):
+                self.assert_failed_replacement(path, write)
+                if label.startswith("publish "):
+                    self.assertEqual((raw / path.name).read_bytes(), b"new process output\n")
+
+    def test_other_replacement_sites_matrix(self):
+        """Fault each actual write expression, without launching serve, workers, releases or git.
+
+        Extracting the call from its function keeps this table on the production write path; copying the
+        expression into the test would still pass if a caller reverted to an in-place write.
+        """
+        from hansa import preview, release, run, session
+        task, raw = self.desk.tasks_dir / "t0001", self.desk.raw_dir("t0001")
+        task.mkdir()
+        brief = self.desk.lanes_dir / "a" / "brief.md"
+        common = {"desk": self.desk, "tid": "t0001", "lane": "a", "a": types.SimpleNamespace(name="a", host="localhost"),
+                  "port": 8765, "d": task, "raw": raw, "argv": ["worker", "--prompt", "text"],
+                  "brief": brief, "aside": brief.with_name("brief-before.md"), "text": "new text\n", "old": "old text\n",
+                  "note": "follow-up note", "report": "a report", "new": "new card\n", "dst": self.root / "CLAUDE.md",
+                  "keep_as": "card", "cfg": task / "browser-mcp.json", "command": "browser command",
+                  "keep": raw / "evidence", "dot": task / "example.git",
+                  "e": types.SimpleNamespace(path=task / "example.git", found="changed", expected="original"),
+                  "state": str(raw / "preview.json"), "rec": {"pgid": 123, "ready": False}, "seen_procs": {123: "start"},
+                  "log": self.desk.state_dir / "releases" / "1.log", "f": self.root / "command-input.txt",
+                  "paths": ["/example"], "kept": ["/private"]}
+        # Each call below is a row; ENOSPC part way is the column. All rows start at 0600.
+        scopes = [(cli, cli.init_desk, 3), (cli, cli._retry, 1), (cli, cli.cmd_serve, 2),
+                  (cli, cli._bring, 2), (cli, cli.cmd_lane, 4), (run, run.git_file_changed, 2),
+                  (run, run.browser_for, 1), (run, run.start, 1), (run, run.finish, 1),
+                  (run, run.around_note, 1), (run, run._srt_writes, 1),
+                  (session, session.main, 1), (release, release.finish, 1), (preview, preview.main, 1)]
+        with unittest.mock.patch("time.time", return_value=1700000000):
+            for module, function, count in scopes:
+                tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+                calls = sorted((c for c in ast.walk(tree) if isinstance(c, ast.Call) and (
+                    isinstance(c.func, ast.Name) and c.func.id in ("write_text", "write_bytes") or
+                    isinstance(c.func, ast.Attribute) and c.func.attr in ("write_text", "write_bytes"))),
+                    key=lambda c: c.lineno)
+                if function is run.git_file_changed:  # the worktree's git repairs belong to a separate task
+                    calls = [c for c in calls if "what-was-found.txt" in ast.get_source_segment(
+                        textwrap.dedent(inspect.getsource(function)), c)]
+                self.assertEqual(len(calls), count, function.__name__)
+                for i, call in enumerate(calls):
+                    target = call.args[0] if isinstance(call.func, ast.Name) else call.func.value
+                    path = eval(compile(ast.Expression(target), "<write target>", "eval"), module.__dict__, common)
+                    expression = compile(ast.Expression(call), "<production write>", "eval")
+                    with self.subTest(writer=function.__name__, site=i + 1, file=str(path.relative_to(self.root))):
+                        self.assert_failed_replacement(path, lambda: eval(expression, module.__dict__, common))
+
+    def test_private_files_and_scrubbing_matrix(self):
+        from hansa import disk, notes, run
+        from hansa.desk import copy_file
+        self.assert_failed_replacement(self.desk.key_file("api"), lambda: self.desk.write_key("api", "new-key-123456"))
+        task = self.desk.tasks_dir / "t0001"
+        task.mkdir()
+        for name in self.desk.PUBLISHED:
+            if name == "meta.json":  # JSON uses the already-covered record writer
+                continue
+            with self.subTest(writer="scrub", file=name):
+                self.assert_failed_replacement(task / name, lambda: self.desk.scrub("old-key-123456", "api"),
+                                               b"old-key-123456 in a saved output\n")
+                (task / name).unlink()  # only this row contains the newly saved key
+        for name in ("try.log", "merge-check-try.log"):
+            path = self.desk.lanes_dir / "a" / name
+            with self.subTest(writer="scrub", file=name):
+                self.assert_failed_replacement(path, lambda: self.desk.scrub("old-key-123456", "api"),
+                                               b"old-key-123456 in a saved try\n")
+                path.unlink()
+        env = self.desk.raw_dir("t0001") / "lane-env.sh"
+        self.assert_failed_replacement(env, lambda: run.env_file(self.desk, "t0001", {"env": {"DEMO": "value"}}))
+        source = self.root / "source.txt"
+        source.write_bytes(b"kept evidence\n")
+        for name in ("config", "hooks/example"):
+            with self.subTest(writer="copy evidence", file=name):
+                self.assert_failed_replacement(self.desk.raw_dir("t0001") / "evidence" / name,
+                                               lambda: copy_file(source, self.desk.raw_dir("t0001") / "evidence" / name))
+        for name in ("plan.md", "archive/plan.md"):
+            path = self.desk.notes_dir / name
+            with self.subTest(writer="notes", file=name):
+                self.assert_failed_replacement(path, lambda: notes._write(path, b"new notes\n", 0o600))
+        path = task / "check.log"
+        old = b"a full old log\n" * disk.TRIM_KEEP
+        self.assert_failed_replacement(path, lambda: self._must_fail(disk._trim_one(path, time.time())), old)
+        for merge in (False, True):
+            path = run.try_log(self.desk, "a", merge)
+            whole = [("setup", {"exit": 0, "command": "true", "seconds": 1}, "new try output\n")]
+            with self.subTest(writer="keep_try_log", merge=merge):
+                self.assert_failed_replacement(path, lambda: self._must_fail(
+                    run.keep_try_log(self.desk, "a", {"merge": merge}, whole)))
+
+    @staticmethod
+    def _must_fail(result):
+        # These two public writers deliberately return None for an I/O failure.
+        if result is not None:
+            raise AssertionError("the writer should have reported failure")
+        raise OSError(errno.ENOSPC, "failure reported as None")
+
+    def test_failed_creation_leaves_no_file_or_temporary_and_retry_works(self):
+        from hansa import release
+        rows = [("web token", self.desk.state_dir / "web-token", self.desk.web_token),
+                ("release HMAC key", release.code_key_file(self.desk), lambda: release._code_key(self.desk)),
+                ("new task text", self.desk.tasks_dir / "t0001" / "task.md", lambda: self.desk.new_task("new task text"))]
+        for label, path, write in rows:
+            with self.subTest(writer=label):
+                before = set(path.parent.iterdir()) if path.parent.exists() else set()
+                with partial_write(path) as hit, self.assertRaises(OSError):
+                    write()
+                self.assertTrue(hit)
+                self.assertFalse(path.exists())
+                self.assertEqual(set(path.parent.iterdir()), before)
+                if label != "new task text":
+                    write()
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    self.assertTrue(path.read_bytes())
+
+    def test_whole_writer_cleans_up_on_close_and_replace_failures(self):
+        from hansa.desk import write_text
+        path = self.root / "record.txt"
+        original = os.fdopen
+
+        class CloseFails:
+            def __init__(self, *a, **kw):
+                self.f = original(*a, **kw)
+
+            def __enter__(self):
+                return self.f
+
+            def __exit__(self, *exc):
+                self.f.close()
+                raise OSError(errno.ENOSPC, "injected close failure")
+
+        for label, patch in (("close", unittest.mock.patch("os.fdopen", CloseFails)),
+                             ("replace", unittest.mock.patch("os.replace", side_effect=OSError(errno.ENOSPC, "full"))),
+                             ("chmod", unittest.mock.patch("os.fchmod", side_effect=OSError(errno.ENOSPC, "full")))):
+            with self.subTest(stage=label):
+                path.write_bytes(b"old record\n")
+                path.chmod(0o600)
+                before = set(self.root.iterdir())
+                with patch, self.assertRaises(OSError):
+                    write_text(path, "new record\n")
+                self.assertEqual(path.read_bytes(), b"old record\n")
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(set(self.root.iterdir()), before)
+
+    def test_success_keeps_bytes_permissions_and_one_payload_write(self):
+        from hansa.desk import write_bytes, write_text
+        real_fdopen, real_open = os.fdopen, open
+        writes = []
+
+        def counting(original, *a, **kw):
+            f = original(*a, **kw)
+            proxy = unittest.mock.MagicMock(wraps=f)
+            proxy.__enter__.return_value = proxy
+            proxy.__exit__.side_effect = f.__exit__
+            writes.append(proxy.write)
+            return proxy
+
+        rows = [("bytes", lambda p: write_bytes(p, b"new bytes\n"), b"new bytes\n"),
+                ("text", lambda p: write_text(p, "new text 中文\n"), "new text 中文\n".encode()),
+                ("JSON", lambda p: write_json(p, {"name": "中文"}), '{\n  "name": "中文"\n}\n'.encode())]
+        old_umask = os.umask(0o077)
+        try:
+            for label, write, expected in rows:
+                for mode in (0o600, 0o640, 0o751):
+                    with self.subTest(writer=label, mode=oct(mode)):
+                        path = self.root / (label + ".txt")
+                        path.write_bytes(b"old\n")
+                        path.chmod(mode)
+                        before = set(self.root.iterdir())
+                        with unittest.mock.patch("os.fdopen", lambda *a, **kw: counting(real_fdopen, *a, **kw)):
+                            write(path)
+                        self.assertEqual(path.read_bytes(), expected)
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                        self.assertEqual(set(self.root.iterdir()), before)
+                        self.assertEqual(writes[-1].call_count, 1)
+            path = self.root / "new.txt"
+            write_text(path, "new\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)  # 0666 under this umask
+        finally:
+            os.umask(old_umask)
+        self.desk.events_path.write_bytes(b'{"event":"old"}\n')
+        self.desk.events_path.chmod(0o600)
+        for tail in (b"", b"broken", b'{"event":"whole but no newline"}'):
+            with self.subTest(tail=tail):
+                self.desk.events_path.write_bytes(b'{"event":"old"}\n' + tail)
+                before = self.desk.events_path.read_bytes()
+                with unittest.mock.patch("builtins.open", lambda *a, **kw: counting(real_open, *a, **kw)):
+                    self.desk.event("good")
+                self.assertEqual(writes[-1].call_count, 1)
+                self.assertTrue(self.desk.events_path.read_bytes().startswith(before))
+                self.assertEqual(stat.S_IMODE(self.desk.events_path.stat().st_mode), 0o600)
+                events, _ = notify.read_log(self.desk, 0)
+                self.assertEqual(events[-1]["event"], "good")
+                self.assertEqual([e["event"] for e in events[:-1]],
+                                 ["old", "whole but no newline"] if tail.startswith(b'{') else ["old"])
+
+    def test_shell_completion_writers_matrix(self):
+        from hansa import release, run
+        from hansa.desk import WRITE_FILE
+        srt = self.root / "srt"
+        srt.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
+        srt.chmod(0o755)
+        fault = self.root / "fault.py"
+        fault.write_text("import sys\nfrom pathlib import Path\n"
+                         f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})\n"
+                         "from hansa.desk import write_text\nfrom tests.test_hansa import partial_write\n"
+                         "with partial_write(Path(sys.argv[1])):\n"
+                         "    write_text(Path(sys.argv[1]), sys.argv[2] + '\\n')\n")
+        fault_command = f"{shlex.quote(sys.executable)} {shlex.quote(str(fault))}"
+        for label, source in (("check", run.CHECK_SCRIPT), ("try", run.TRY_SCRIPT), ("release", release.SCRIPT)):
+            for failing in (True, False):
+                with self.subTest(writer=label, partial=failing):
+                    folder = self.root / (label + str(failing))
+                    folder.mkdir()
+                    path = folder / ("setup.exit" if label == "try" else "exit")
+                    path.write_bytes(b"old exit record\n")
+                    path.chmod(0o600)
+                    script = self.root / "command.sh"
+                    script.write_text(source.replace(WRITE_FILE, fault_command) if failing else source)
+                    if label == "release":
+                        args = ["exit 127", str(path)]
+                    else:
+                        tmp, own = self.root / "command-tmp", self.root / "command-own"
+                        tmp.mkdir()
+                        own.mkdir()
+                        if label == "check":
+                            args = ["exit 127", str(path), str(tmp), str(srt), "unused", str(own)]
+                        else:
+                            (folder / "setup.log").write_bytes(b"")  # a live log, not a replacement row
+                            args = [str(folder), str(srt), "setup", "exit 127", "unused", str(tmp), str(own)]
+                    before = set(folder.iterdir())
+                    # Run the actual wrapper in the foreground, from outside the checkout.
+                    result = subprocess.run(["/bin/sh", str(script), *args], cwd=self.root,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                    self.assertEqual(set(folder.iterdir()), before, "a temporary completion file was left")
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    if failing:
+                        self.assertIn("injected full disk", result.stderr)
+                        self.assertEqual(path.read_bytes(), b"old exit record\n")
+                    elif label == "try":
+                        self.assertRegex(path.read_text(), r"^127 [0-9]+\n$")
+                    else:
+                        self.assertEqual(path.read_bytes(), b"127\n")
+
+    def test_short_event_writes_are_completed(self):
+        real_open = open
+
+        def short(*a, **kw):
+            f = real_open(*a, **kw)
+            proxy = unittest.mock.MagicMock(wraps=f)
+            proxy.__enter__.return_value = proxy
+            proxy.__exit__.side_effect = f.__exit__
+            proxy.write.side_effect = lambda data: f.write(data[:3])
+            return proxy
+
+        with unittest.mock.patch("builtins.open", short):
+            self.desk.event("good", text="中文")
+        events, pos = notify.read_log(self.desk, 0)
+        self.assertEqual([(e["event"], e["text"]) for e in events], [("good", "中文")])
+        self.assertEqual(pos, self.desk.events_path.stat().st_size)
+
+    def test_partial_event_then_good_event(self):
+        self.desk.event("old")
+        before = self.desk.events_path.read_bytes()
+        with partial_write(self.desk.events_path) as hit, self.assertRaises(OSError):
+            self.desk.event("broken", text="a long event that runs out of space")
+        self.assertTrue(hit)
+        damaged = self.desk.events_path.read_bytes()
+        self.desk.event("good")
+        events, pos = notify.read_log(self.desk, 0)
+        self.assertEqual([e["event"] for e in events], ["old", "good"])
+        self.assertTrue(self.desk.events_path.read_bytes().startswith(damaged))  # never rolled back
+        self.assertTrue(damaged.startswith(before))
+        self.assertEqual(pos, self.desk.events_path.stat().st_size)
+
+    def test_partial_alert_error_append_then_good_event(self):
+        with contextlib.ExitStack() as stack:
+            def alert_fails(*a):
+                stack.enter_context(partial_write(self.desk.events_path))
+                raise RuntimeError("alert failed")
+            with unittest.mock.patch("hansa.alert.from_event", alert_fails), self.assertRaises(OSError):
+                self.desk.event("ask", id=1)
+        damaged = self.desk.events_path.read_bytes()
+        self.desk.event("good")
+        events, _ = notify.read_log(self.desk, 0)
+        self.assertEqual([e["event"] for e in events], ["ask", "good"])
+        self.assertTrue(self.desk.events_path.read_bytes().startswith(damaged))
+
+    def test_every_event_reader_skips_unreadable_lines(self):
+        from hansa import web
+        for damaged in (b'{"lane":"a","event":', b'{"lane":"a","event":"lane_set","field":"\xff"}',
+                        b'{"lane":"a","event":"lane_set","field":"\xe4\xb8', b'["a"]', b'null', b'"a"'):
+            with self.subTest(line=damaged):
+                self.desk.events_path.write_bytes(b'{"event":"lane_added","lane":"a"}\n' + damaged + b'\n' +
+                                                 b'{"event":"lane_set","lane":"a","field":"check"}\n')
+                events, pos = notify.read_log(self.desk, 0)
+                self.assertEqual([e["event"] for e in events], ["lane_added", "lane_set"])
+                self.assertEqual(pos, notify.log_end(self.desk))
+                for kind in ("", "lane_added,lane_set"):
+                    self.assertEqual([e["event"] for e in web._events(self.desk, kind=kind)], ["lane_set", "lane_added"])
+                self.assertEqual(views.lane_origin(self.desk, "a"),
+                                 "made with hansa lane add; last changed with hansa lane set a check")
+
+    def test_two_processes_appending_while_one_fails(self):
+        self.desk.event("old")
+        before = self.desk.events_path.read_bytes()
+        fail = textwrap.dedent("""\
+            import sys
+            from hansa.desk import Desk
+            from tests.test_hansa import partial_write
+            desk = Desk(sys.argv[1])
+            def hold():
+                print('partial written', flush=True)
+                sys.stdin.readline()
+            try:
+                with partial_write(desk.events_path, hold):
+                    desk.event('broken', text='a long event that runs out of space')
+            except OSError:
+                pass
+        """)
+        good = textwrap.dedent("""\
+            import sys
+            from hansa.desk import Desk
+            desk = Desk(sys.argv[1])
+            print('ready to append', flush=True)
+            for i in range(40):
+                desk.event('good', i=i)
+        """)
+        procs = []
+        try:
+            first = subprocess.Popen([sys.executable, "-c", fail, str(self.root)], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            procs.append(first)
+            self.assertEqual(first.stdout.readline().strip(), "partial written")
+            damaged = self.desk.events_path.read_bytes()
+            second = subprocess.Popen([sys.executable, "-c", good, str(self.root)], stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True)
+            procs.append(second)
+            self.assertEqual(second.stdout.readline().strip(), "ready to append")
+            _, err = first.communicate("release\n", timeout=10)
+            self.assertEqual(first.returncode, 0, err)
+            _, err = second.communicate(timeout=10)
+            self.assertEqual(second.returncode, 0, err)
+            events, pos = notify.read_log(self.desk, 0)
+            self.assertEqual([e["event"] for e in events], ["old"] + ["good"] * 40)
+            self.assertEqual([e["i"] for e in events[1:]], list(range(40)))
+            self.assertTrue(self.desk.events_path.read_bytes().startswith(damaged))
+            self.assertTrue(damaged.startswith(before))
+            self.assertEqual(pos, self.desk.events_path.stat().st_size)
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.terminate()
+                p.communicate(timeout=10)
 
 
 class DeskTest(unittest.TestCase):
