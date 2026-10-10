@@ -230,6 +230,29 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   completes the merge. Redo the whole change with `--fresh` only when the old
   work is no use.
 
+## Sending a task back
+
+`hansa retry ID "<what to change>"` sends a task back: a follow-up takes its
+place, and is the one to review and merge. The follow-up's worker gets the
+original task, one line per earlier round (its id, how it ended, the start of
+its note), this round's note, the previous report and the latest
+verification's report, with its verdict. Earlier notes are not carried, so
+what still holds of them is said again in the new note. Each round's note is
+kept on its own beside its task, as `note.md` in the task's folder (keys
+removed, as from what else hansa writes there).
+
+`hansa show` of a follow-up says which round it is, the earlier rounds' ids,
+oldest first, and how many of them a verification found do not hold. When a
+verification of a follow-up finds that it does not hold, and that is the second
+such verdict in its rounds or more, `hansa show` and what the coordinator is
+told add: "This task has not held N times. Before sending it back again,
+rethink it: make it smaller, ask for less, or start again from the base."
+
+The worker is told that hansa runs the lane's check after it ends, with the
+command, so it runs only the tests related to its change. A verification is
+told the command of the task's last check and how it ended, and that the whole
+check need not be run again unless it needs to.
+
 ## What work costs
 
 Cost figures are Claude Code's own token counts, priced with the principal's
