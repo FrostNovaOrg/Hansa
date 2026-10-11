@@ -1238,10 +1238,14 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
     """'' while a release target on the principal's list of releases without asking is what it was when the page
     saved the list; otherwise what is no longer so (zh: in Chinese, for the page)."""
     lane, target = listed_key(entry)
-    # a target no lane has now is said as such first, whenever and however its entry was saved
+    # a lane or target gone now is said as such first, whenever and however its entry was saved
     ln = s.get("lanes", {}).get(lane)
     if not ln:
         return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
+    if target == "":
+        return (f"这是工作线 {lane} 未命名发布的旧勾选：现在不涵盖任何目标；若要无需询问就发布，请重新勾选 default" if zh else
+                f"an old tick for lane {lane}'s unnamed release: it covers no target now; "
+                "tick default again if it should go out without asking")
     if target not in lane_targets(ln):
         if zh:
             return f"工作线 {lane} 现在没有发布目标 {target or 'default'}"

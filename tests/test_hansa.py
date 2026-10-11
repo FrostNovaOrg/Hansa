@@ -19988,7 +19988,8 @@ class DeskTest(unittest.TestCase):
         s["releases_without_asking"] = ["a"]  # as a page saved it before hansa recorded what it listed
         self.desk.settings_path.write_text(json.dumps(s))
         [u] = public_settings(self.desk)["release_unmatched"]
-        self.assertEqual(u["why"], "lane a has no release target default now")
+        self.assertEqual(u["why"], "an old tick for lane a's unnamed release: it covers no target now; "
+                         "tick default again if it should go out without asking")
         # a save of something else keeps it as it was, as it keeps a recorded entry that no longer matches
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])), {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["releases_without_asking"], ["a"])
@@ -20102,15 +20103,40 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         shown = public_settings(self.desk)
         self.assertEqual(shown["problems"], [])
         self.assertEqual([(u["lane"], u["target"], u["gone"], u["was"], u["why"]) for u in shown["release_unmatched"]],
-                         [("a", "", True, "", "lane a has no release target default now"),
-                          ("b", "", True, "make deploy", "lane b has no release target default now"),
-                          ("c", "", True, "", "lane c has no release target default now")])
+                         [(lane, "", True, was, f"an old tick for lane {lane}'s unnamed release: it covers no target now; "
+                           "tick default again if it should go out without asking")
+                          for lane, was in (("a", ""), ("b", "make deploy"), ("c", ""))])
         # they can be taken off the list: a save without them keeps only what is ticked
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "github"}])),
                          {"ok": True, "problems": []})
         self.assertEqual([(x["lane"], x["target"]) for x in self.desk.settings()["releases_without_asking"]],
                          [("a", "github")])
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
+
+    def test_the_list_explains_an_old_unnamed_tick_in_both_languages_with_default_present(self):
+        self.with_targets(default="true", prod="false")
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["releases_without_asking"] = [{"lane": "a", "repo": str(self.repo.resolve()), "base": "main",
+                                                 "command": "true", **target}]
+                self.desk.settings_path.write_text(json.dumps(s))
+                [u] = public_settings(self.desk)["release_unmatched"]
+                self.assertEqual((u["lane"], u["target"], u["gone"], u["was"]), ("a", "", True, "true"))
+                self.assertEqual(u["why"], "an old tick for lane a's unnamed release: it covers no target now; "
+                                 "tick default again if it should go out without asking")
+                self.assertEqual(u["why_zh"], "这是工作线 a 未命名发布的旧勾选：现在不涵盖任何目标；若要无需询问就发布，请重新勾选 default")
+
+    def test_the_list_keeps_the_reason_for_a_missing_named_target_in_both_languages(self):
+        self.with_targets(default="true", prod="false")
+        s = self.desk.settings()
+        s["releases_without_asking"] = [{"lane": "a", "target": "test", "repo": str(self.repo.resolve()),
+                                         "base": "main", "command": "true"}]
+        self.desk.settings_path.write_text(json.dumps(s))
+        [u] = public_settings(self.desk)["release_unmatched"]
+        self.assertEqual((u["lane"], u["target"], u["gone"], u["was"]), ("a", "test", True, "true"))
+        self.assertEqual(u["why"], "lane a has no release target test now")
+        self.assertEqual(u["why_zh"], "工作线 a 现在没有发布目标 test")
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_the_settings_page_renders_a_desk_with_long_commands_and_old_entries(self):

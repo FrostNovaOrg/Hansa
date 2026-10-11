@@ -16,6 +16,8 @@ release targets, with `hansa lane target L NAME "<command>"
 that must have sent out the same commit first. An older unnamed release
 moves to `default` if absent, taking only its tick for the same command.
 Other unnamed ticks match nothing, even if `default` has the same command.
+The page says these old ticks cover no target now and asks the principal to
+tick `default` again if it should go out without asking.
 `lane set L release CMD` (or `none`) forwards to `lane target L default` until
 the next version; it refuses a default target with its own options.
 `hansa lane target L` lists them, each with the way it runs. `hansa
