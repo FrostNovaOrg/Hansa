@@ -3640,6 +3640,7 @@ def not_started(desk: Desk, tid: str, e: Exception) -> None:
                                          "machine_problem": machine})
     remove_sandbox_tmp(desk, tid)
     desk.event("task_not_started", task=tid, error=why)
+    desk.failed_starts.pop(("task", tid, desk.meta(tid).get("launch")), None)
 
 
 def browser_for(desk: Desk, tid: str, command: str):
@@ -3788,8 +3789,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(command, cwd=str(wt), env=env, stdin=stdin, stdout=out,
                                     stderr=err, start_new_session=True)
-        desk.update(tid, phase="", model_asked=model, effort_used=effort, effort_from=effort_from, pid=proc.pid,
-                    pid_start=proc_start(proc.pid))
+        with recording_start(desk, ("task", tid, sid), proc.pid, proc):
+            desk.update(tid, phase="", model_asked=model, effort_used=effort, effort_from=effort_from, pid=proc.pid,
+                        pid_start=proc_start(proc.pid))
     desk.event("task_started", task=tid, lane=lane_name, provider=pname, model=model)
     return proc
 
@@ -3868,7 +3870,8 @@ def resume(desk: Desk, tid: str):
             stdin.seek(0)
             proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
                                     start_new_session=True)
-        desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
+        with recording_start(desk, None, proc.pid, proc):
+            desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
     desk.event("task_resumed", task=tid, lane=lane_name, provider=pname, left=[desk.redact(x) for x in left])
     return proc
 
@@ -4002,7 +4005,8 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         said = " ".join((r.stdout + r.stderr).split())[:300] or "nothing"
         raise RuntimeError(f"tmux did not open the design session; it printed: {said}")
     pid = int(r.stdout.strip())
-    meta = desk.update(tid, phase="", pid=pid, pid_start=proc_start(pid))
+    with recording_start(desk, ("task", tid, meta.get("launch")), pid, cleanup=lambda: end_design(desk, meta)):
+        meta = desk.update(tid, phase="", pid=pid, pid_start=proc_start(pid))
     ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
                        f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit (if it "
                        f"then asks about background work, press Enter: the first choice stops it). The first "
@@ -4406,9 +4410,20 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
             proc = subprocess.Popen(["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "check.exit"), tmp,
                                      srt, settings, own], cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                     start_new_session=True)
-        desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
+        with recording_start(desk, ("check", tid, token), proc.pid, proc):
+            desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
     desk.event("check_started", task=tid, lane=lane_name)
     return proc
+
+
+def check_not_started(desk: Desk, tid: str, e: Exception) -> None:
+    why = desk.redact(f"the lane's check could not run: {e}")[:600]
+    remove_sandbox_tmp(desk, tid)
+    publish(desk, tid, "check.log")
+    desk.change(tid, lambda x: {"state": "failed", "phase": "", "pid": None, "pid_start": "", "error": why})
+    desk.event("task_checked", task=tid, ok=False, exit=None, note=why)
+    sweep(desk, tid)
+    desk.failed_starts.pop(("check", tid, desk.meta(tid).get("launch")), None)
 
 
 def finish_check(desk: Desk, tid: str) -> dict:
@@ -4872,9 +4887,18 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         with open(raw / "merge-check.log", "wb") as out:
             proc = subprocess.Popen(argv, cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
-        desk.update(tid, merge_check={**mc, "phase": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+        with recording_start(desk, ("merge", tid, token), proc.pid, proc):
+            desk.update(tid, merge_check={**mc, "phase": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
     desk.event("merge_check_started", task=tid, lane=lane_name, onto=tip, command=command)
     return proc
+
+
+def merge_not_started(desk: Desk, tid: str, e: Exception) -> None:
+    key = ("merge", tid, (desk.meta(tid).get("merge_check") or {}).get("launch"))
+    remove_sandbox_tmp(desk, tid)
+    end_merge_check(desk, tid, {"ok": False, "at": now(),
+                              "note": desk.redact(f"the merge check could not run: {e}")[:600]})
+    desk.failed_starts.pop(key, None)
 
 
 def finish_merge_check(desk: Desk, tid: str) -> dict | None:
@@ -5088,9 +5112,18 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
             proc = subprocess.Popen(["/bin/sh", "-c", TRY_SCRIPT, token, str(d), srt, *args], cwd=str(wt), env=env,
                                     stdin=subprocess.DEVNULL, stdout=err, stderr=subprocess.STDOUT,
                                     start_new_session=True)
-        write_try(desk, lane_name, {**t, "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+        with recording_start(desk, ("try", lane_name, token), proc.pid, proc):
+            write_try(desk, lane_name, {**t, "pid": proc.pid, "pid_start": proc_start(proc.pid)})
     desk.event("lane_try_started", lane=lane_name, onto=tip)
     return proc
+
+
+def try_not_started(desk: Desk, lane_name: str, e: Exception) -> None:
+    t = read_try(desk, lane_name)
+    for x in t.get("tmp", []):
+        shutil.rmtree(x, ignore_errors=True)
+    end_try(desk, lane_name, {"ok": False, "steps": {}, "note": desk.redact(f"the try could not run: {e}")[:600]})
+    desk.failed_starts.pop(("try", lane_name, t.get("launch")), None)
 
 
 def finish_try(desk: Desk, lane_name: str) -> dict:
@@ -5259,6 +5292,38 @@ def stop(pid, start: str = "", proc=None) -> None:
         proc.poll()
 
 
+@contextlib.contextmanager
+def recording_start(desk: Desk, key, pid, proc=None, cleanup=None):
+    """A launched process may run only if its pid can be recorded. Keep a failed start for later
+    when even that record cannot be written; the key includes its launch, so a later run is left alone."""
+    try:
+        yield
+    except Exception as e:
+        if key is not None:
+            desk.failed_starts[key] = e
+        try:
+            stop(pid, proc=proc)
+            if proc is None:
+                try:
+                    os.waitpid(pid, os.WNOHANG)  # stop already waited; normally another server's child
+                except ChildProcessError:
+                    pass
+        finally:
+            if cleanup is not None:
+                cleanup()
+        raise
+
+
+def retry_start_failure(desk: Desk, key, record) -> bool:
+    """Retry only the failed-start record, never its stopped process."""
+    error = desk.failed_starts.get(key)
+    if error is None:
+        return False
+    record(error)
+    desk.failed_starts.pop(key, None)
+    return True
+
+
 SERVE_ERRORS = contextvars.ContextVar("serve_errors", default=None)
 
 
@@ -5397,6 +5462,9 @@ class Dispatcher:
         """A task an earlier server claimed but did not record as started: a worker it did start
         is taken over; otherwise the task goes back to the queue, or ends there if cancelled. While
         hansa cannot look for that worker, the task stays as it is, and fails after LOOK_LIMIT."""
+        key = ("task", m["id"], m.get("launch"))
+        if retry_start_failure(self.desk, key, lambda e: not_started(self.desk, m["id"], e)):
+            return
         found, since = self.look(m["id"], m.get("launch", ""), m.get("started"), m.get("lookup_failing_since"),
                                   "worker") \
             if m.get("kind") != "design" else (None, None)
@@ -5409,7 +5477,11 @@ class Dispatcher:
                 remove_sandbox_tmp(self.desk, m["id"])
             return
         if found:
-            self.desk.update(m["id"], phase="", pid=found, pid_start=proc_start(found), lookup_failing_since=None)
+            try:
+                with recording_start(self.desk, key, found):
+                    self.desk.update(m["id"], phase="", pid=found, pid_start=proc_start(found), lookup_failing_since=None)
+            except Exception as e:
+                not_started(self.desk, m["id"], e)
             return
         if m.get("tmux"):  # a design session it may have opened, which nobody was asked to join yet
             try:
@@ -5429,6 +5501,9 @@ class Dispatcher:
         """Run the lane's check on a task whose worker is done: or take over the one an earlier
         server started, or finish the one it left finished."""
         desk, tid = self.desk, m["id"]
+        key = ("check", tid, m.get("launch"))
+        if retry_start_failure(desk, key, lambda e: check_not_started(desk, tid, e)):
+            return
         found, since = self.look(tid, m.get("launch", ""), m.get("check_started"), m.get("lookup_failing_since"),
                                 "check")
         if since:  # not run a second time beside one that may still run: looked for again next tick
@@ -5440,7 +5515,11 @@ class Dispatcher:
         if m.get("lookup_failing_since"):
             desk.update(tid, lookup_failing_since=None)
         if found:
-            desk.update(tid, pid=found, pid_start=proc_start(found))
+            try:
+                with recording_start(desk, key, found):
+                    desk.update(tid, pid=found, pid_start=proc_start(found))
+            except Exception as e:
+                check_not_started(desk, tid, e)
             return
         if (desk.state_dir / "runs" / tid / "check.exit").exists():
             finish_check(desk, tid)
@@ -5461,12 +5540,7 @@ class Dispatcher:
             sweep(desk, tid)
             return
         except Exception as e:  # noqa: BLE001 - say: the check cannot run, so the task fails
-            why = desk.redact(f"the lane's check could not run: {e}")[:600]
-            remove_sandbox_tmp(desk, tid)
-            publish(desk, tid, "check.log")
-            desk.change(tid, lambda x: {"state": "failed", "phase": "", "pid": None, "pid_start": "", "error": why})
-            desk.event("task_checked", task=tid, ok=False, exit=None, note=why)
-            sweep(desk, tid)
+            check_not_started(desk, tid, e)
             return
         if proc:
             self.procs[tid] = proc
@@ -5496,6 +5570,9 @@ class Dispatcher:
                 mc = m.get("merge_check") or {}
                 if m["state"] != "merging" or m["id"] in self.merge_procs or mc.get("phase") not in ("starting", "running"):
                     continue
+                key = ("merge", m["id"], mc.get("launch"))
+                if retry_start_failure(desk, key, lambda e: merge_not_started(desk, m["id"], e)):
+                    continue
                 found, since = self.look(m["id"], mc.get("launch", ""), mc.get("started"),
                                          mc.get("lookup_failing_since"), "merge check")
                 if since and mc.get("phase") == "starting":  # not started a second time: looked for again next tick
@@ -5508,8 +5585,12 @@ class Dispatcher:
                                     else None)
                     continue
                 if found and mc.get("phase") == "starting":  # an earlier server stopped right after starting it
-                    desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found),
-                                                      "lookup_failing_since": None})
+                    try:
+                        with recording_start(desk, key, found):
+                            desk.update(m["id"], merge_check={**mc, "phase": "running", "pid": found, "pid_start": proc_start(found),
+                                                              "lookup_failing_since": None})
+                    except Exception as e:
+                        merge_not_started(desk, m["id"], e)
                 elif not found and not alive(mc.get("pid"), mc.get("pid_start", "")):
                     if mc.get("phase") == "starting":  # it never started: once more from the start
                         desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued",
@@ -5582,9 +5663,7 @@ class Dispatcher:
                                                     "note": desk.redact(f"could not run: {e}")[:600]})
                     continue
                 except Exception as e:  # noqa: BLE001 - say: nothing is merged, and the task says why
-                    remove_sandbox_tmp(desk, m["id"])
-                    end_merge_check(desk, m["id"], {"ok": False, "at": now(),
-                                                    "note": desk.redact(f"the merge check could not run: {e}")[:600]})
+                    merge_not_started(desk, m["id"], e)
                     continue
                 if proc:
                     self.merge_procs[m["id"]] = proc
@@ -5614,6 +5693,8 @@ class Dispatcher:
         for ln in sorted(f.stem for f in d.glob("*.json")) if d.is_dir() else []:
             with serve_step():
                 t = read_try(desk, ln)
+                if retry_start_failure(desk, ("try", ln, t.get("launch")), lambda e: try_not_started(desk, ln, e)):
+                    continue
                 if t.get("phase") == "running" and ln not in self.try_procs:
                     if not alive(t.get("pid"), t.get("pid_start", "")):  # started by an earlier server
                         save_stopped(self.pending_stops, ("try", ln), t, lambda fields: write_try(desk, ln, {**t, **fields}))
@@ -5640,9 +5721,7 @@ class Dispatcher:
                 try:
                     proc = start_try(desk, ln, s["lanes"][ln])
                 except Exception as e:  # noqa: BLE001 - srt missing, say: the try says why it did not run
-                    for x in read_try(desk, ln).get("tmp", []):
-                        shutil.rmtree(x, ignore_errors=True)
-                    end_try(desk, ln, {"ok": False, "steps": {}, "note": desk.redact(f"the try could not run: {e}")[:600]})
+                    try_not_started(desk, ln, e)
                     continue
                 if proc:
                     self.try_procs[ln] = proc
