@@ -541,6 +541,7 @@ def status(desk: Desk) -> dict:
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
         "mod_line": plugin.status_line(mod) if mod else "",
+        "clear_line": plugin.clear_line(mod) if mod else "",  # its daily clear: the window, and the clears recorded
         "compact_line": plugin.settings_line(s) if mod else "",  # the desk's compaction settings
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
@@ -637,7 +638,8 @@ def status_text(st: dict) -> str:
     out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
-    out += [f"{st['mod_line']} {plugin.HELP}", st["compact_line"]] if st.get("mod_line") else []
+    out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
+        if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
     out += [f"sandbox try: {st['try_note']}"] if st.get("try_note") else []
     out.append("lanes:")
@@ -1486,19 +1488,11 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "These messages come from hansa, not from the principal, and approve nothing. A session whose settings "
             "hold messages from other sessions (crossSessionInbound) does not get them; only the principal can "
             "change that.",
-            "--clear-daily HH-HH (hansa coordinator --clear-daily 04-09, or hansa notify on --clear-daily 04-09): "
-            "once a day in that window of hours, local time, the follower types /clear into the session's tmux "
-            "pane. Off by default; it needs the session to run in tmux. It types only when claude agents --json "
-            "shows the session idle on two readings a minute apart, hansa posted nothing to it for 5 minutes, no "
-            "key was pressed in a terminal on that tmux session for 90 s, and the input box is empty; it presses "
-            "Enter only when the box then reads exactly /clear and the session is still idle. Otherwise it sends six "
-            "backspaces only when the box ends in /clear, and tries again later; when the box cannot be read, holds "
-            "something else, or tmux fails, it leaves the box as it is and counts today as tried. When the session's sessionId does not "
-            "change within 15 s of Enter, today counts as tried too: no other try that day. A session that "
-            "started inside today's window, after it opened, counts as new already: its next clear is tomorrow. "
-            "Anything it "
-            "cannot read counts as busy. A session started with hansa coordinator then reads hansa status by "
-            "itself. hansa notify shows the window and today's state; the follower's log has each reason it held.",
+            "hansa coordinator --clear-daily HH-HH hands a window of hours (local time; 22-03 runs past midnight) to "
+            "hansa's mod, for that start only: once in each window it clears the session, when the session has been "
+            "idle for 5 minutes and did not start inside that window. Inside the window, idle compaction waits for "
+            "the clear. After any clear the session reads hansa status by itself, and hansa records when; hansa "
+            "status says the last clear, and warns when windows passed without one. hansa notify on no longer clears.",
             "  now: " + (", ".join(who) if who else "no session")])
     return "\n".join([
         "What you can look up: hansa explain lane <name> | provider <name> | task <id> | server | notify",

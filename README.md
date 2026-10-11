@@ -93,8 +93,7 @@ belong to, or are readable by, an ordinary account, and the steps below change a
   `npm install -g @anthropic-ai/sandbox-runtime`; srt is a node script, so node must be on the `PATH` of
   `hansa serve`. Without it, a lane's setup fails each task before its worker starts, and its check reads
   "could not run" without judging the task; `hansa status` says so.
-- **tmux** for design sessions; and to run the coordinator in, if it should clear its session once a day
-  (`hansa coordinator --clear-daily HH-HH`).
+- **tmux** for design sessions.
 
 ### 2. Get hansa
 

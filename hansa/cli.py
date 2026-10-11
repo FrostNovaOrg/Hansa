@@ -1209,15 +1209,15 @@ def cmd_release(a):
 
 def cmd_notify(a):
     desk = Desk.find(a.desk)
-    if a.clear_daily and a.action != "on":
-        raise SystemExit("hansa: --clear-daily goes with hansa notify on (or hansa coordinator)")
-    print(notify.turn_on(desk, a.clear_daily or "") if a.action == "on" else notify.turn_off(desk)
+    if a.clear_daily is not None and a.action != "on":
+        raise SystemExit("hansa: --clear-daily goes with hansa coordinator (hansa notify on still takes it)")
+    print(notify.turn_on(desk, a.clear_daily is not None) if a.action == "on" else notify.turn_off(desk)
           if a.action == "off" else notify.list_text(desk))
 
 
 def cmd_notify_follow(a):
     raise SystemExit(notify.follow(Desk.find(a.desk), a.key, {"pid": a.pid, "start": a.start}, a.socket, a.nonce,
-                                   a.name, a.clear_daily))
+                                   a.name))
 
 
 def cmd_notify_feed(a):
@@ -1461,14 +1461,17 @@ def cmd_coordinator(a):
     if mod["on"]:  # for this start only: hansa names the mod in no settings file
         argv += ["--plugin-dir", mod["copy"]]
         env["HANSA_MOD_SETTINGS"] = str(desk.settings_path)
-    for line in [plugin.left_text(mod)] + plugin.start_lines(mod):
+        if clear:  # the mod clears the session in this window; without the mod nothing does
+            env["HANSA_MOD_CLEAR_DAILY"] = clear
+    for line in [plugin.left_text(mod)] + plugin.start_lines(mod, clear):
         if line:
             print(f"hansa: {line}", file=sys.stderr)
-    # after a /clear (hansa's daily one, or anyone's) the fresh context starts from the desk's state; the hook is
-    # hansa's own code, never the desk's files
+    # after a /clear (the mod's daily one, or anyone's) the fresh context starts from the desk's state, and the desk's
+    # owner records the clear (plugin.record_clear); root on the account's desk records none. The hook is hansa's own
+    # code, never the desk's files
     hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
-        f"{shlex.quote(str(desk.root))} status")}]}]}
+        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}]}
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)
@@ -1476,10 +1479,10 @@ def cmd_coordinator(a):
         argv += ["--setting-sources", "user", "--settings", json.dumps({"permissions": rules, "hooks": hooks, **QUIET})]
     else:
         argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks, **QUIET})]
-    argv += _notified(desk, rest, clear)
+    argv += _notified(desk, rest)
     # what hansa did at this start, kept in the desk by its owner (root's, by the account's hansa) for status and the
-    # page, with the --autocompact options of the whole command line, the caller's too, as given
-    rec = plugin.start_record(mod, argv + rest, plan.get("started"))
+    # page, with the --autocompact options of the whole command line, the caller's too, as given, and the window
+    rec = plugin.start_record(mod, argv + rest, plan.get("started"), clear)
     unrecorded = _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
     if unrecorded:
         print(f"hansa: {unrecorded}", file=sys.stderr)
@@ -1576,13 +1579,13 @@ def _clear_daily(rest: list) -> tuple:
         i += 1
     if clear:
         try:
-            notify.parse_window(clear)
+            plugin.parse_window(clear)
         except ValueError as e:
             raise SystemExit(f"hansa: {e}")
     return clear, out
 
 
-def _notified(desk: Desk, rest: list, clear: str = "") -> list:
+def _notified(desk: Desk, rest: list) -> list:
     """Start the follower that posts to the session this process becomes (its pid stays when it execs Claude
     Code), at an inbox path it knows: claude's options for that path. Nothing when it cannot; the session can
     try again with hansa notify on."""
@@ -1591,11 +1594,8 @@ def _notified(desk: Desk, rest: list, clear: str = "") -> list:
                   or x.startswith("--messaging-socket-path=")), "")
     try:
         sock = given or notify.socket_path(os.getpid())
-        if clear:  # the follower finds the same; said here, before the session takes the screen
-            print(f"hansa: {notify.clear_said(os.getpid(), clear)}", file=sys.stderr)
         # no name of hansa's own: the session is named by its pid until Claude Code gives it one (notify.who)
-        notify.start(desk, {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}, sock, wait=False,
-                     clear=clear)
+        notify.start(desk, {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}, sock, wait=False)
     except (OSError, RuntimeError) as e:
         print(f"hansa: this session will not hear from hansa by itself ({e}); run hansa wait in the background, "
               f"or hansa notify on from the session", file=sys.stderr)
@@ -1654,6 +1654,16 @@ def _record_roots_mod(theirs: str, desk: Desk, rec: dict) -> str:
     except (Exception, SystemExit) as e:  # noqa: BLE001 - SystemExit: no runuser
         said = f"{type(e).__name__}: {e}"
     return plugin.unrecorded_text("the desk", said) if said else ""
+
+
+def cmd_coordinator_cleared(a):
+    """The coordinator's SessionStart hook for /clear, as the desk's owner: record the clear, then print hansa status
+    into the fresh context, and one line more only when the record could not be written."""
+    desk = Desk.find(a.desk)
+    unrecorded = plugin.record_clear(desk)
+    print(views.status_text(views.status(desk)))
+    if unrecorded:
+        print(f"hansa: {unrecorded}")
 
 
 def cmd_coordinator_desk(a):
@@ -2777,8 +2787,8 @@ def main(argv=None):
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
             "Code session this is run from")
     p.add_argument("action", nargs="?", choices=["on", "off"])
-    p.add_argument("--clear-daily", metavar="HH-HH", help="with on: clear the session once a day in this window of "
-                   "hours, local time (such as 04-09), when it is idle and nobody is typing; it needs tmux")
+    p.add_argument("--clear-daily", metavar="HH-HH", help="taken and left: the daily clear comes with hansa "
+                   "coordinator --clear-daily HH-HH")
     p.epilog = see_more("inbox")
     p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
             "background when hansa does not notify the session (hansa notify)")
@@ -3039,23 +3049,25 @@ def main(argv=None):
                       "prints the address and returns")
     p.add_argument("--port", type=int, help="default: the port this desk's hansa serve serves the page on")
     p = add("coordinator", cmd_coordinator, "start the coordinator session in this desk; anything after the word "
-            "coordinator is passed to claude as is, except --clear-daily HH-HH: clear the session once a day in that "
-            "window of hours, local time, when it is idle and nobody is typing (it needs tmux)")
+            "coordinator is passed to claude as is, except --clear-daily HH-HH: hansa's mod clears the session once "
+            "a day in that window of hours, local time, once it has been idle for 5 minutes")
     p.usage = "hansa coordinator [--clear-daily HH-HH] [claude's own options and words ...]"
     p.description = ("Start the coordinator session in this desk: claude, in the desk, with the card and the desk's "
                      "settings. hansa's own option is --clear-daily; every other word after coordinator goes to "
                      "claude as is (claude --help lists them). It also gives claude hansa's mod (--plugin-dir), which "
                      "compacts the session when it is idle, and --autocompact, at the principal's thresholds. "
                      "-h or --help after coordinator prints this help and starts nothing.")
-    p.add_argument("--clear-daily", metavar="HH-HH", help="clear the session once a day in this window of hours, "
-                   "local time (such as 04-09; 22-03 runs past midnight), when it is idle and nobody is typing; it "
-                   "needs tmux")
+    p.add_argument("--clear-daily", metavar="HH-HH", help="hansa's mod clears the session once a day in this window of "
+                   "hours, local time (such as 04-09; 22-03 runs past midnight), once it has been idle for 5 minutes; "
+                   "for this start only")
     p.epilog = see_more("linux-root", "inbox")
     p = add("help", cmd_help, "list the commands and the topics; with a command, that command's help; with a topic, "
             "that topic; card: the whole agent card")
     p.add_argument("words", nargs="*", metavar="COMMAND | TOPIC | card | topics", help="a command, such as verify: "
                    "its help, as hansa verify --help prints it (lane add: that subcommand's); a topic, such as "
                    "browser: its section of docs/; card: the whole card; topics: the topics, one line each")
+    p = sub.add_parser("coordinator-cleared")  # hidden: the coordinator's hook after a /clear, as the desk's owner
+    p.set_defaults(fn=cmd_coordinator_cleared)
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--mod", default="")  # only this: record root's start of the mod (plugin.start_record), as JSON
@@ -3067,7 +3079,7 @@ def main(argv=None):
     p.add_argument("--pid", type=int, required=True)
     p.add_argument("--start", default="")
     p.add_argument("--name", default="")
-    p.add_argument("--clear-daily", default="")
+    p.add_argument("--clear-daily", default="")  # taken and left: an older follower restarting on this code gives it
     p = sub.add_parser("notify-feed")  # hidden: a follower's request to the desk, as the desk's owner
     p.set_defaults(fn=cmd_notify_feed)
 

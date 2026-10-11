@@ -117,29 +117,24 @@ A coordinator's session can run for days. Each time its context fills, Claude
 Code compacts it into a summary; the next compaction summarizes that summary
 again together with everything since. The summary keeps growing, the session
 starts each stretch heavier, compaction comes sooner, and early detail drifts.
-`--clear-daily HH-HH` (`hansa coordinator --clear-daily 04-09`, or `hansa notify
-on --clear-daily 04-09`) clears the session once a day while it is idle, so it
-starts again from the desk's state, not from a summary of summaries. A session
-started with `hansa coordinator` is shown `hansa status` after the clear.
-Automatic compaction keeps a full session going; it does not do what the daily
-clear does.
+`hansa coordinator --clear-daily HH-HH` (such as `04-09`) clears the session
+once a day while it is idle, so it starts again from the desk's state, not from
+a summary of summaries. Automatic compaction keeps a full session going; it does
+not do what the daily clear does.
 
-It is off by default and needs the session to run in tmux. Once a day, in that
-window of hours (local time; `22-03` runs past midnight), the follower types
-`/clear` into the session's tmux pane, only when `claude agents --json` shows
-the session idle on two readings a minute apart, hansa posted nothing to it for
-5 minutes, no key was pressed in a terminal on that tmux session for 90
-seconds, and the input box is empty; it presses Enter only when the box then
-reads exactly `/clear` and the session is still idle. Otherwise it takes the
-`/clear` back only when the box ends in it, and tries again later; when the box
-cannot be read, holds something else, or tmux fails, it leaves the box as it is
-and counts the day as tried, and so it does when the session's id does not
-change within 15 seconds of Enter. Anything it cannot read counts as busy. A
-session that started inside the day's window, after it opened, counts as
-cleared already: its next clear is the next day. `hansa notify` shows each
-session's window and the day's state (cleared at a time, held and why, the
-window passed without a clear, or off and why); the follower's log has each
-reason it held.
+It is off by default. hansa hands the window (local time; `22-03` runs past
+midnight) to its mod, for that start only, and the mod clears the session as
+`/clear` does, once in each window, when the session has been idle for 5
+minutes: no turn (hansa's posts and anyone's messages start one) and no
+background work waiting. It skips the window the session started in. Inside the window
+idle compaction waits for the clear. Without the mod there is no daily clear,
+and the start says why; `hansa notify on --clear-daily` is still taken but
+clears nothing.
+
+After any clear, the session is shown `hansa status`, and hansa records when.
+`hansa status` and the page show the window and the last clear, and warn once
+two windows have ended since without one; the session started as root on an
+account's desk records no clear, so there the last clear is not known.
 
 So the coordinator keeps what must survive in the desk (tasks, requests, and
 its notes under `notes/`), not only in the conversation. It keeps the notes file
