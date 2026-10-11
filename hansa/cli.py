@@ -16,11 +16,11 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, alert, build, cost, installed_text, notes, notify, release, session_vars, views, without_session
-from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, views, without_session
+from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, no_read_unusable, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, answer_name, write_text)
+                   PROJECT_INTRO, answer_name, compact_settings, write_text)
 from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
@@ -1451,6 +1451,19 @@ def cmd_coordinator(a):
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
+    # when the session compacts while working: the account's plan may be the account's to write, so only a number in
+    # range counts. The mod reads the other three in the desk's settings file at each decision
+    given = plan.get("compact") if isinstance(plan.get("compact"), dict) else {}
+    working_at = compact_settings({"coordinator_compact": given})["working_at"]
+    # preparing the mod never stops the start: a step that fails leaves it off
+    mod = plugin.plan(desk, claude)
+    argv += ["--autocompact", str(working_at)] if mod["autocompact"] else []
+    if mod["on"]:  # for this start only: hansa names the mod in no settings file
+        argv += ["--plugin-dir", mod["copy"]]
+        env["HANSA_MOD_SETTINGS"] = str(desk.settings_path)
+    for line in [plugin.left_text(mod)] + plugin.start_lines(mod):
+        if line:
+            print(f"hansa: {line}", file=sys.stderr)
     # after a /clear (hansa's daily one, or anyone's) the fresh context starts from the desk's state; the hook is
     # hansa's own code, never the desk's files
     hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
@@ -1464,6 +1477,12 @@ def cmd_coordinator(a):
     else:
         argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks, **QUIET})]
     argv += _notified(desk, rest, clear)
+    # what hansa did at this start, kept in the desk by its owner (root's, by the account's hansa) for status and the
+    # page, with the --autocompact options of the whole command line, the caller's too, as given
+    rec = plugin.start_record(mod, argv + rest, plan.get("started"))
+    unrecorded = _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
+    if unrecorded:
+        print(f"hansa: {unrecorded}", file=sys.stderr)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + rest, env)
 
@@ -1607,7 +1626,9 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
             old.rename(desk.state_dir / f"{name}.{int(time.time())}")
             desk.event("helper_retired", file=name)
     desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
-    write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": now()})
+    plugin.forget(desk)  # the earlier start's record of the mod, before this start prepares it
+    started = now()  # and when: this start's record of the mod is tied to it (plugin.status)
+    write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": started})
     kept, unkept, stops = no_read_parts(s, desk.root)
     if stops:  # Read would be open there to the session: it does not start
         raise SystemExit(f"hansa: {stop_text(stops)}")
@@ -1618,11 +1639,33 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
         desk.event("coordinator_read_skipped", why=line)
     return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
             "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p),
-            "read": read, "read_refused": refused, "no_read": kept, "no_read_refused": unkept}
+            "read": read, "read_refused": refused, "no_read": kept, "no_read_refused": unkept,
+            "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started}
+
+
+def _record_roots_mod(theirs: str, desk: Desk, rec: dict) -> str:
+    """Root's start of the coordinator, recorded in the desk by the account's hansa; '' when it was, else what the
+    start says. Never raises."""
+    try:
+        r = account.run(theirs, ["coordinator-desk", "--by", str(account.uid()), "--mod", json.dumps(rec)], desk.root,
+                        capture_output=True, text=True)
+        said = json.loads(r.stdout).get("mod_unrecorded") if not r.returncode else (
+            r.stderr.strip() or f"exit {r.returncode}")
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - SystemExit: no runuser
+        said = f"{type(e).__name__}: {e}"
+    return plugin.unrecorded_text("the desk", said) if said else ""
 
 
 def cmd_coordinator_desk(a):
-    print(json.dumps(coordinator_desk(Desk.find(a.desk), a.by)))
+    desk = Desk.find(a.desk)
+    if not a.mod:
+        print(json.dumps(coordinator_desk(desk, a.by)))
+        return
+    try:  # root's start, recorded by the account
+        plugin.record_start(desk, json.loads(a.mod), root=True)
+        print(json.dumps({}))
+    except Exception as e:  # noqa: BLE001 - root starts all the same
+        print(json.dumps({"mod_unrecorded": f"{type(e).__name__}: {e}"}))
 
 
 def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> None:
@@ -2424,7 +2467,8 @@ def cmd_hide(a):
     if not a.paths:
         raise SystemExit("hansa: hansa hide PATH [PATH ...]: name at least one full path to keep workers from reading "
                          "(such as /opt/myproject/keys); nothing was changed")
-    added, there, refused = Desk.find(a.desk).hide(a.paths)
+    desk = Desk.find(a.desk)
+    added, there, refused = desk.hide(a.paths)
     for x in added:
         print(f"added to what workers may not read: {x}")
     for x, same in there:
@@ -2436,6 +2480,8 @@ def cmd_hide(a):
         print("Runs that start from now on are kept from it; a run already going keeps the sandbox it started with. "
               "Your own Read is denied there from your next start. Only the principal removes an entry, on the web "
               "page (Settings).")
+    for x in no_read_unusable(desk.settings(), desk.root):  # already on the list: the principal's to settle
+        print(x)
     if refused:
         raise SystemExit(1)
 
@@ -2977,7 +3023,7 @@ def main(argv=None):
     p = add("hide", cmd_hide, "add folders or files to what workers may not read; only the principal removes one, on "
             "the web page")
     p.description = ("Add each full path to what workers may not read (the principal's list on the web page, Settings), "
-                     "checked as the page checks it: an entry the page would refuse is refused, with the page's "
+                     "each checked as the page checks an entry: one the page would refuse is refused, with the page's "
                      "reason, and one already there, however it is spelled, is not added again. Each addition is "
                      "recorded as the coordinator's, with when, and shown so on the page and in hansa explain lane L. "
                      "Runs that start from now on are kept from it, and Read is denied there to the coordinator from "
@@ -3033,8 +3079,9 @@ def main(argv=None):
     p.usage = "hansa coordinator [--clear-daily HH-HH] [claude's own options and words ...]"
     p.description = ("Start the coordinator session in this desk: claude, in the desk, with the card and the desk's "
                      "settings. hansa's own option is --clear-daily; every other word after coordinator goes to "
-                     "claude as is (claude --help lists them). -h or --help after coordinator prints this help and "
-                     "starts nothing.")
+                     "claude as is (claude --help lists them). It also gives claude hansa's mod (--plugin-dir), which "
+                     "compacts the session when it is idle, and --autocompact, at the principal's thresholds. "
+                     "-h or --help after coordinator prints this help and starts nothing.")
     p.add_argument("--clear-daily", metavar="HH-HH", help="clear the session once a day in this window of hours, "
                    "local time (such as 04-09; 22-03 runs past midnight), when it is idle and nobody is typing; it "
                    "needs tmux")
@@ -3046,6 +3093,7 @@ def main(argv=None):
                    "browser: its section of docs/; card: the whole card; topics: the topics, one line each")
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
+    p.add_argument("--mod", default="")  # only this: record root's start of the mod (plugin.start_record), as JSON
     p.add_argument("--by", type=int, required=True)
     p = sub.add_parser("notify-follow")  # hidden: a follower (hansa/notify.py), started detached
     p.set_defaults(fn=cmd_notify_follow)

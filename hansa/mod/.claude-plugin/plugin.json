@@ -1,0 +1,8 @@
+{
+  "name": "hansa-coordinator",
+  "version": "1.0.0",
+  "description": "hansa's mod for the coordinator's session: it compacts the context once the session is idle at hansa's thresholds",
+  "author": {
+    "name": "hansa"
+  }
+}

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .worktrees/
 hansa/BUILD
+# what Claude Code writes into a plugin's folder when it loads it
+hansa/mod/.claude-plugin/types/
+hansa/mod/tsconfig.json

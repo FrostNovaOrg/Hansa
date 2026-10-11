@@ -9,7 +9,8 @@ design sessions may touch is in [Workers and the sandbox](sandbox.md); the coord
 ### The principal
 
 The principal, on the page: providers, models, endpoints, keys, effort
-defaults, the models of the coordinator and of design sessions, prices,
+defaults, the models of the coordinator and of design sessions, when the
+coordinator's session compacts ([Compaction](desk.md#compaction)), prices,
 whether the coordinator audits cost, the browser tool a task given `--browser`
 uses, the folders the coordinator may read outside the desk without asking
 (`hansa explain` lists them), the folders and files workers may not read (the
@@ -27,9 +28,9 @@ applied does, is in [Workers and the sandbox](sandbox.md#what-workers-verifiers-
 
 These are the principal's alone, but for one thing: the coordinator may add to
 what workers may not read with `hansa hide PATH [PATH ...]`, since an entry
-only takes something away from workers. Each path is checked as the page checks
-it when it saves: an entry the page would refuse is refused, with the page's
-reason, and one already on the list, however it is spelled, is not added again.
+only takes something away from workers. Each path is checked on its own as the
+page checks an entry: one the page would refuse is refused, with its reason,
+and one already on the list, however it is spelled, is not added again.
 hansa records each addition as the coordinator's, with when, writes an event
 (`no_read_added`) for it, and shows it beside the entry on the page and in
 `hansa explain lane L`; an entry the principal saves on the page is the

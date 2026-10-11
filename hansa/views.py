@@ -9,8 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, release
-from .desk import (DENY_AT, HOME_SECRETS, hidden_note, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release
+from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
@@ -539,6 +539,9 @@ def status(desk: Desk) -> dict:
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
+        "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
+        "mod_line": plugin.status_line(mod) if mod else "",
+        "compact_line": plugin.settings_line(s) if mod else "",  # the desk's compaction settings
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
@@ -634,6 +637,7 @@ def status_text(st: dict) -> str:
     out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
+    out += [f"{st['mod_line']} {plugin.HELP}", st["compact_line"]] if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
     out += [f"sandbox try: {st['try_note']}"] if st.get("try_note") else []
     out.append("lanes:")
@@ -1530,7 +1534,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
-    kept, left, stops = no_read_parts(s, desk.root)
+    kept = no_read_parts(s, desk.root)[0]
     mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
            if sys.platform == "darwin" else "")
     built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
@@ -1547,8 +1551,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
             " add to it with hansa hide, and only the principal removes an entry; Read is denied there to you, workers,"
             " verifiers and design sessions as well; no lane's repository or write list may be one, inside one or"
             " above one): " + (", ".join(x + hidden_note(s, x) for x in kept) or "none"),
-            *(f"      not applied, and no run starts: {x.removeprefix(DENY_AT)}" for x in stops),
-            *(f"      not applied: {x.removeprefix(DENY_AT)}" for x in left)]
+            *("      " + x for x in no_read_unusable(s, desk.root))]
 
 
 def read_lines(desk: Desk, s: dict) -> list:

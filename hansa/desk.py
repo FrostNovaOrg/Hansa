@@ -83,7 +83,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert", "coordinator_compact")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -236,6 +236,13 @@ def home_secrets() -> tuple:
 
 
 REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
+# When the coordinator's session compacts (hansa/plugin.py): idle_at and long_idle_at, in tokens, by the coordinator's
+# mod once a turn has ended and the session has been idle for a minute or for long_idle_min minutes (the mod reads
+# them here, in the desk's settings file, and keeps the same defaults and ranges: hansa/mod/hooks/register.js);
+# working_at, the window hansa gives Claude Code's own auto-compact (--autocompact), which takes 100k to 1M
+COMPACT_DEFAULTS = {"idle_at": 400_000, "long_idle_at": 200_000, "long_idle_min": 50, "working_at": 550_000}
+COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "long_idle_at": (100_000, 1_000_000), "long_idle_min": (1, 240),
+                "working_at": (100_000, 1_000_000)}
 
 
 def default_settings() -> dict:
@@ -247,6 +254,8 @@ def default_settings() -> dict:
         "disk_floor": 10,
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
+        # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
+        "coordinator_compact": dict(COMPACT_DEFAULTS),
         # Design sessions, which the principal works in directly (`hansa design`). Blank provider
         # or model: the coordinator's.
         "design": {"provider": "", "model": "", "effort": ""},
@@ -284,6 +293,13 @@ def default_settings() -> dict:
             "claude-opus-5": {"in": 5, "out": 25},
         },
     }
+
+
+def compact_settings(s: dict) -> dict:
+    """When the coordinator's session compacts, {idle_at, long_idle_at, long_idle_min, working_at}: the settings',
+    each one missing or out of range taken as its default."""
+    cc = s.get("coordinator_compact") if isinstance(s.get("coordinator_compact"), dict) else {}
+    return {k: cc[k] if _is_int(cc.get(k), *COMPACT_MOST[k]) else v for k, v in COMPACT_DEFAULTS.items()}
 
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
@@ -446,7 +462,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
         return ["settings must be an object"]
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
-             "release_forbidden", "alert"}
+             "release_forbidden", "alert", "coordinator_compact"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     by = s.get(HIDDEN_BY, {})
     if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
@@ -479,6 +495,12 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
         p.append("the alert command must be one shell command line (up to 1000 characters)")
+    cc = s.get("coordinator_compact", {})
+    if not isinstance(cc, dict) or set(cc) - set(COMPACT_DEFAULTS) or not all(
+            _is_int(v, *COMPACT_MOST[k]) for k, v in cc.items()):
+        p.append("coordinator_compact: compact when idle at, compact after a long idle at and compact while working "
+                 "at must be whole numbers of tokens from 100,000 to 1,000,000, and a long idle is a whole number of "
+                 "minutes from 1 to 240")
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -1828,6 +1850,11 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
         fenced.append((DATA, _above, f"it is {DATA}, the volume macOS keeps everything on, or a folder above it"))
     if root:
         fenced.append((str(root), _above, f"it is {root}, the desk, or a folder above it"))
+    # Setups and checks run our relay inside srt, before the lane's env.
+    # These are hard refusals even when also on the PATH or above a lane's repository.
+    code = os.path.dirname(os.path.abspath(__file__))
+    for p in (code, os.path.join(code, "srt_output.py")):
+        fenced.append((p, _above, f"it hides {p}, hansa's output relay: setups and checks need to read it"))
     settled = set()  # the reasons for which an entry is left out of runs rather than stopping them
     for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
@@ -1908,6 +1935,17 @@ def hidden_note(s: dict, entry: str) -> str:
         return ""
     at = time.strftime("%Y-%m-%d %H:%M", time.localtime(v["at"])) if isinstance(v.get("at"), (int, float)) else "?"
     return f" (added by the {v.get('by') or 'coordinator'} with hansa hide, {at})"
+
+
+def no_read_unusable(s: dict, root=None) -> list:
+    """The entries of what workers may not read that are not applied, a line each in hansa explain's words, with
+    who added it beside one the coordinator added."""
+    def noted(line):
+        x = line.removeprefix(DENY_AT)
+        e = max((e for e in hidden_by(s) if x.startswith(e + ": ")), key=len, default=None)
+        return e + hidden_note(s, e) + x[len(e):] if e else x
+    _, left, stops = no_read_parts(s, root)
+    return [f"not applied, and no run starts: {noted(x)}" for x in stops] + [f"not applied: {noted(x)}" for x in left]
 
 
 def kept_from_workers(s: dict, root=None) -> tuple:
@@ -2245,6 +2283,7 @@ class Desk:
         self.notes_dir = self.root / "notes"
         self.project_path = self.root / PROJECT_FILE
         self.state_dir = self.root / ".hansa"
+        self.mod_dir = self.state_dir / "coordinator-mod"  # the coordinator's mod's files here (hansa/plugin.py)
         self.events_path = self.root / "events.jsonl"
         self.asks_path = self.root / "asks.json"
         self.paused_path = self.root / "PAUSED"
@@ -2308,6 +2347,10 @@ class Desk:
                 if gone:  # the coordinator adds to it (hansa hide); taking an entry out gives workers it back
                     return [f"only the principal removes an entry of what workers may not read, on the web page "
                             f"(Settings): {', '.join(map(str, gone))}; ask with hansa ask"]
+                # who added each entry is hansa's record: only hansa hide writes it, whatever a caller passes
+                new = {k: v for k, v in new.items() if k != HIDDEN_BY}
+                if HIDDEN_BY in old:
+                    new[HIDDEN_BY] = old[HIDDEN_BY]
             else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
                 lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
                 new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes,
@@ -2339,9 +2382,11 @@ class Desk:
         return []
 
     def hide(self, paths: list, by: str = "coordinator") -> tuple:
-        """hansa hide: add each path to what workers may not read, each checked as the page checks a save of it
-        (web._save_settings: deny_split, and read_split for what it would close of the coordinator's folders), and
-        recorded as added by `by`. ([entries added], [(path, the entry it already is)], [(path, [why, ...])])."""
+        """hansa hide: add each path to what workers may not read, each on its own checked as the page checks an
+        entry (web._save_settings: deny_split, read_split for the coordinator's folders it would close, the limit,
+        and validate for the lanes'), and recorded as added by `by`. What is wrong with the settings already saved
+        neither stops an addition nor is changed by it. ([entries added], [(path, the entry it already is)],
+        [(path, [why, ...])])."""
         added, there, refused = [], [], []
         with self.lock():
             s = self.settings()
@@ -2350,10 +2395,11 @@ class Desk:
                 return [], [], [(x, [DENY_LIST_WHY]) for x in paths]
             listed, hidden = list(listed), hidden_by(s)
 
-            def closed(entries):  # what the page refuses: the coordinator's folders the list would close
+            def problems(entries):  # what the page refuses of a list: of the settings, and the coordinator's folders
                 denied = deny_split(entries, self.root, s.get("lanes"))[0]
-                return [g for g in read_split(s.get("coordinator_read", []), self.root, s.get("providers"),
-                                              denied=denied)[1] if "what workers may not read" in g]
+                return validate({**s, "workers_may_not_read": entries}, self.root) + [
+                    g for g in read_split(s.get("coordinator_read", []), self.root, s.get("providers"),
+                                          denied=denied)[1] if "what workers may not read" in g]
             for x in paths:
                 kept, bad = deny_split([x], self.root, s.get("lanes"))
                 same = next((e for e in listed if isinstance(e, str) and e.startswith("/") and kept
@@ -2364,19 +2410,20 @@ class Desk:
                     there.append((x, same))
                 elif len(listed) >= MAX_DENY:
                     refused.append((x, [DENY_LIST_WHY]))
-                else:
-                    before = closed(listed)
-                    more = [g for g in closed(listed + kept) if g not in before]
+                else:  # only what this path brings: a problem already there is not its
+                    before = set(problems(listed))
+                    more = [g for g in problems(listed + kept) if g not in before]
                     if more:
                         refused.append((x, more))
                     else:
                         listed.append(kept[0])
                         hidden[kept[0]] = {"by": by, "at": now()}
                         added.append(kept[0])
-            if added:
-                problems = self.save_settings({**s, "workers_may_not_read": listed, HIDDEN_BY: hidden}, by=by)
-                if problems:
-                    return [], there, refused + [(x, problems) for x in added]
+            if added:  # not save_settings: it would judge the whole settings, and it keeps the record as it was
+                write_json(self.settings_path, {**s, "workers_may_not_read": listed, HIDDEN_BY: hidden})
+        if added:
+            self.event("settings_saved", by=by, changed=["workers_may_not_read", HIDDEN_BY])
+            self.ready_news()
         for x in added:
             self.event("no_read_added", path=x, by=by)
         return added, there, refused
