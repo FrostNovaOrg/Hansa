@@ -6,9 +6,6 @@
 
 Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
 A write that fails leaves the previous file, with its permissions, and no temporary file.
-The full-disk tests disable `shutil`'s fast-copy paths while injecting a partial write,
-so copied evidence reaches the same failing `write` on macOS and Linux. The helper
-restores the flags afterwards, including removing flags absent from that Python.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the
@@ -178,11 +175,10 @@ session or release. What already runs goes on, a running task's check and a resu
 It starts again by itself once every volume has the floor and 1 GB more free, so that it does not stop and start
 at every round around the line. A release asked meanwhile waits, approved, and goes once there is space.
 
-If a write fails anyway (a full disk, for example), `hansa serve` continues through the rest of the round in
-the usual order, including the other runs in that step. It still stops cancelled runs and those over their
-time limits. Its error event is best effort: when that cannot be written either, it prints the error to
-standard error and keeps serving. Free space so that it can record the ends it kept for a later round; see
-[Time limits](tasks.md#time-limits-and-work-left-running-in-the-background) for what survives a restart.
+If a write fails anyway (a full disk, for example), `hansa serve` goes on, and still stops runs that are
+cancelled or over their time limit. Free space: once writes work again, it records the ends it kept, a run
+stopped at its limit as timed out. After a restart, a check's end is found without running the check again;
+a worker's exit code that could not be recorded stays unknown, as before.
 
 The floor holds for each volume by its own size. A volume smaller than four times the floor has a quarter of its
 size as its floor: on a Linux server that mounts `/tmp` as a tmpfs (systemd's default size is half the memory), an

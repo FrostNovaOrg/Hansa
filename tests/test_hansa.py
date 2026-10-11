@@ -3187,6 +3187,10 @@ class DeskTest(unittest.TestCase):
                 if phase == "merge check":
                     self.assertEqual(m["merge_check_result"]["exit"], 9)
                     self.assertNotIn("ceiling", m["merge_check_result"]["note"])
+                if phase == "check":
+                    check = m.get("check") or {}
+                    self.assertEqual((m["state"], check.get("exit"), check.get("ok"), check.get("note")),
+                                     ("done", 0, True, ""), m)
                 if "check" not in phase:
                     self.assertEqual(m["exit"], 0)
 
@@ -3478,8 +3482,14 @@ class DeskTest(unittest.TestCase):
                     self.failed_round(d)
                     self.assertIsNotNone(proc.poll(), "full disk prevented a time-limit stop")
                     self.failed_round(d)
-                d.tick()
-                d.tick()
+                ending, finish_merge = [], run.finish_merge_check
+
+                def merge_end(desk, tid):  # the merge check's record as its end is recorded; it is cleared after
+                    ending.append((desk.meta(tid).get("merge_check") or {}).get("timed_out"))
+                    return finish_merge(desk, tid)
+                with unittest.mock.patch.object(run, "finish_merge_check", side_effect=merge_end):
+                    d.tick()
+                    d.tick()
                 if kind == "try":
                     result = run.read_try(self.desk, key)
                     self.assertTrue(result["timed_out"])
@@ -3491,6 +3501,7 @@ class DeskTest(unittest.TestCase):
                     self.assertIn("time limit", result["problem"])
                     self.assertIsNone(result["exit"])
                 elif kind == "merge check":
+                    self.assertEqual(ending, [True])  # marked once writes worked again, before its end was recorded
                     result = self.desk.meta(key)["merge_check_result"]
                     self.assertIn("ceiling", result["note"])
                     self.assertIsNone(result["exit"])
@@ -3503,8 +3514,53 @@ class DeskTest(unittest.TestCase):
                     else:
                         self.assertEqual(m["exit"], proc.returncode)
 
+    def test_a_release_timeout_mark_that_cannot_be_written_holds_back_nothing_else_in_its_round(self):
+        from hansa import release, run
+        out = self.tmp / "released.txt"
+        self.with_release(f"touch {out}")
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+        # One release at a time per repository: the overdue ones run in repositories of their own, so the approved
+        # one waits for neither. The round takes them in the order they were asked: #2's mark fails first.
+        d, procs = Dispatcher(self.desk), {}
+        for rid in (2, 3):
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            self.addCleanup(lambda p=proc: p.poll() is None and (p.kill(), p.wait()))
+            (self.tmp / f"repo-{rid}").mkdir()
+            release._write(self.desk, release.releases(self.desk) + [{
+                "id": rid, "state": "running", "lane": "a", "repo": str(self.tmp / f"repo-{rid}"), "pid": proc.pid,
+                "pid_start": run.proc_start(proc.pid), "launch": f"fixture-{proc.pid}", "started": time.time() - 30000}])
+            procs[rid] = d.release_procs[rid] = proc
+        left = release.checkout_dir(self.desk, 9)  # one a server that stopped left
+        left.mkdir(parents=True)
+        write = release.write_json
+
+        def full(path, data, *args, **kwargs):
+            if isinstance(data, list) and any(x.get("id") == 2 and x.get("timed_out") for x in data):
+                raise OSError(errno.ENOSPC, "disk full")
+            return write(path, data, *args, **kwargs)
+        with unittest.mock.patch.object(release, "write_json", side_effect=full):
+            self.failed_round(d)
+        self.assertIsNotNone(procs[2].poll(), "a failed timeout mark prevented its stop")
+        self.assertFalse(release.get(self.desk, 2).get("timed_out"))
+        self.assertIsNotNone(procs[3].poll(), "a failed timeout mark skipped the other releases' time limits")
+        self.assertTrue(release.get(self.desk, 3)["timed_out"])
+        self.assertFalse(left.exists(), "a failed timeout mark skipped the checkout sweep")
+        self.assertIn(1, d.release_procs, "a failed timeout mark skipped the approved starts")
+        self.assertEqual([e["id"] for e in self.events("release_started")], [1])
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["exit"]), ("done", 0), r)
+        self.assertTrue(out.exists())
+        for rid in (2, 3):
+            r = release.get(self.desk, rid)
+            self.assertEqual((r["state"], r["timed_out"], r["problem"]),
+                             ("failed", True, "stopped at the lane's time limit (240 min)"), r)
+
     def test_a_full_disk_still_stops_every_cancelled_kind_and_records_it_later(self):
         from hansa import release
+        # A try has no cancel: serve stops one only at its time limit, kept and recorded later as in
+        # test_a_full_disk_still_stops_every_kind_at_its_limit_and_records_it_later.
         for kind in ("worker", "verification", "check", "merge check", "release"):
             with self.subTest(kind=kind):
                 d = Dispatcher(self.desk)
@@ -3515,6 +3571,7 @@ class DeskTest(unittest.TestCase):
                     key, proc = self.serve_other_run(d, kind, cancelled=True, overdue=False)
                 with self.serve_full_disk():
                     self.failed_round(d)
+                    sent = time.time()  # the TERM went in that round; its mark is kept in memory
                     proc.wait(timeout=10)
                     self.failed_round(d)
                 d.tick()
@@ -3523,6 +3580,7 @@ class DeskTest(unittest.TestCase):
                     result = release.get(self.desk, key)
                     self.assertEqual(result["state"], "stopped")
                     self.assertTrue(result.get("termed"))
+                    self.assertLessEqual(result["termed"], round(sent, 3), "the kept TERM mark was lost, and a later one saved")
                 else:
                     m = self.desk.meta(key)
                     self.assertEqual(m["state"], "done" if kind == "merge check" else "cancelled")
@@ -3605,6 +3663,14 @@ class DeskTest(unittest.TestCase):
                     self.failed_round(d)
                     self.assertIsNotNone(proc.poll())
                 d.tick()
+                if kind == "try":
+                    t = run.read_try(self.desk, key)
+                    self.assertEqual((t["phase"], t["timed_out"], t["note"], t["steps"]["check"]["exit"]),
+                                     ("done", True, "stopped at the lane's time ceiling", None), t)
+                else:
+                    r = release.get(self.desk, key)
+                    self.assertEqual((r["state"], r["timed_out"], r["problem"], r["exit"]),
+                                     ("failed", True, "stopped at the lane's time limit (240 min)", None), r)
 
     def test_a_key_saved_later_is_removed_from_what_was_already_published(self):
         later = "sk-saved-later-0654"
