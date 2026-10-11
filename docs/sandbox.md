@@ -25,8 +25,9 @@ the folders and files the principal lists on the page (Settings, "workers may
 not read": this machine's own folders of keys, and `~/.m2/settings.xml` or
 `~/.gradle/gradle.properties` when they hold deploy credentials the project's
 builds do not need: hansa leaves them readable, as they also hold the mirrors
-and proxies a build may need; who else may not read them is under
-[The principal](who-changes-what.md#the-principal). An entry that would stop
+and proxies a build may need; the coordinator may add to the list with `hansa
+hide`, and only the principal removes an entry; who else may not read them is
+under [The principal](who-changes-what.md#the-principal). An entry that would stop
 every worker is refused on saving, each with its reason: the home folder,
 the desk, a lane's repository, a folder on the `PATH`, the system's programs
 and libraries (`/usr/lib`, `/etc` and the like), hansa's own folder and its

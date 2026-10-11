@@ -91,7 +91,7 @@ EXPLAIN_RETIRED = {"states": "hansa help states"}
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "design")),
                   ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "cost")),
-                  ("lanes and releases", ("lane", "release", "concurrency", "disk-floor", "pause", "resume")),
+                  ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "pause", "resume")),
                   ("the desk", ("init", "serve", "web", "coordinator", "check", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
@@ -2473,6 +2473,29 @@ def cmd_concurrency(a):
     print(f"concurrency: {old} -> {a.n}")
 
 
+def cmd_hide(a):
+    if not a.paths:
+        raise SystemExit("hansa: hansa hide PATH [PATH ...]: name at least one full path to keep workers from reading "
+                         "(such as /opt/myproject/keys); nothing was changed")
+    desk = Desk.find(a.desk)
+    added, there, refused, warnings = desk.hide(a.paths)
+    for x in added:
+        print(f"added to what workers may not read: {x}")
+    for x, same in there:
+        print(f"already there: {x}" + (f" (as {same})" if same != x else ""))
+    for x, why in refused:
+        print(f"refused: {x if x.isprintable() else json.dumps(x)}")
+        print("".join(f"  {w}\n" for w in why), end="")
+    if added:
+        print("Runs that start from now on are kept from it; a run already going keeps the sandbox it started with. "
+              "Your own Read is denied there from your next start. Only the principal removes an entry, on the web "
+              "page (Settings).")
+    for x in warnings:  # as the page shows them on saving: the lanes' to fix, not the list's
+        print(f"warning: {x}")
+    if refused:
+        raise SystemExit(1)
+
+
 def cmd_disk_floor(a):
     from . import disk
     desk = Desk.find(a.desk)
@@ -3007,6 +3030,18 @@ def main(argv=None):
     p.add_argument("--to", metavar="OTHER", help="with archive: the file under notes/ the section goes to "
                    "(default: archive/FILE)")
     p.epilog = see_more("desk-files")
+    p = add("hide", cmd_hide, "add folders or files to what workers may not read; only the principal removes one, on "
+            "the web page")
+    p.description = ("Add each full path to what workers may not read (the principal's list on the web page, Settings), "
+                     "each judged as a page save adding it: any problem, even an old one, refuses it, with the page's "
+                     "reason, and one already there, however it is spelled, is not added again. Each addition is "
+                     "recorded as the coordinator's, with when, and shown so on the page and in hansa explain lane L. "
+                     "Runs that start from now on are kept from it, and Read is denied there to the coordinator from "
+                     "its next start; a run already going keeps the sandbox it started with. There is no command to "
+                     "remove an entry: removing one gives workers something back, so only the principal removes "
+                     "entries, on the web page.")
+    p.add_argument("paths", nargs="*", metavar="PATH")
+    p.epilog = see_more("who-changes-what", "workers-sandbox")
     p = add("concurrency", cmd_concurrency, "show, or set, how many tasks run at once")
     p.add_argument("n", nargs="?", type=int)
     p = add("disk-floor", cmd_disk_floor, "show, or set, the free space (GB) under which hansa serve starts nothing "

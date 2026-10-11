@@ -13500,7 +13500,7 @@ class DeskTest(unittest.TestCase):
         told = self.hansa("explain", "lane", "a")
         self.assertIn(f"folders and files the principal keeps from workers", told)
         self.assertIn(f"{keys}, {token}", told)
-        self.assertIn("you cannot set", told)
+        self.assertIn("you add to it with hansa hide, and only the principal removes an entry", told)
         # no write list, no folder the coordinator reads and no lane's repository is one, inside one or above one
         for x in (keys, keys / "sub", keys.parent, token):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
@@ -13754,6 +13754,316 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(public_settings(self.desk)["deny_skipped"], [])
             for x in ("NO_READ_STOP = r.no_read_stop", "section(T.noReadStop", "st.no_read_stop"):
                 self.assertIn(x, (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
+
+    # -- hansa hide: the coordinator adds to what workers may not read; only the principal removes ----------------
+    def hide(self, *paths) -> tuple:
+        """hansa hide PATH ...: (what it printed, its exit code: 0, or what it exited with)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                main(["--desk", str(self.desk.root), "hide", *paths])
+                code = 0
+            except SystemExit as e:
+                code = e.code
+        return out.getvalue(), code
+
+    def test_hansa_hide_adds_an_entry_a_run_started_after_cannot_read(self):
+        seen = self.tmp / "argv.jsonl"
+        keys = (self.tmp / "keys").resolve()
+        keys.mkdir()
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        told, code = self.hide(str(keys))
+        self.assertEqual(code, 0, told)
+        self.assertIn(f"added to what workers may not read: {keys}\n", told)
+        for x in ("Runs that start from now on are kept from it", "a run already going keeps the sandbox it started with",
+                  "Your own Read is denied there from your next start", "Only the principal removes an entry"):
+            self.assertIn(x, told)
+        s = self.desk.settings()
+        self.assertEqual(s["workers_may_not_read"], [str(keys)])
+        self.assertEqual(s["workers_may_not_read_added"][str(keys)]["by"], "coordinator")
+        self.assertAlmostEqual(s["workers_may_not_read_added"][str(keys)]["at"], time.time(), delta=60)
+        [e] = self.events("no_read_added")
+        self.assertEqual((e["path"], e["by"]), (str(keys), "coordinator"))
+        # a run that starts afterwards: its sandbox refuses it, and so does its Read tool
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertIn(str(keys), self.sandbox_of(argv)["filesystem"]["denyRead"])
+        self.assertIn(f"Read(//{str(keys).lstrip('/')}/**)", self.denied_by(argv))
+        # and the coordinator's next start
+        r = self.echo_coordinator()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"Read(//{str(keys).lstrip('/')}/**)", r.stdout.split("--disallowedTools")[1])
+        # hansa explain and the page say who added it, and when; an entry the principal saved is the principal's
+        mine = str(self.tmp.resolve() / "mine")
+        self.assertTrue(self.page_save(lambda s: s["workers_may_not_read"].append(mine))["ok"])
+        explained = self.hansa("explain", "lane", "a")
+        day = time.strftime("%Y-%m-%d")
+        self.assertIn(f"{keys} (added by the coordinator with hansa hide, {day} ", explained)
+        self.assertIn(f", {mine}\n", explained)  # no note beside the principal's
+        self.assertIn("you add to it with hansa hide, and only the principal removes an entry", explained)
+        shown = public_settings(self.desk)["settings"]
+        self.assertEqual(list(shown["workers_may_not_read_added"]), [str(keys)])
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertEqual(ui.count("workersMayNotReadAdded:"), 2)  # said in both languages
+        # the coordinator cannot take it out, by hansa hide or by another of its commands; its changes keep it
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [mine]
+        said = self.desk.save_settings(s, by="coordinator")
+        self.assertTrue(any("only the principal removes an entry" in x and str(keys) in x for x in said), said)
+        self.hansa("lane", "set", "a", "check", "true")
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(keys), mine])
+        help_ = io.StringIO()
+        with contextlib.redirect_stdout(help_), self.assertRaises(SystemExit):
+            main(["hide", "--help"])
+        self.assertIn("only the principal removes entries, on the web page", " ".join(help_.getvalue().split()))
+        self.assertIn("hide", self.hansa("help"))
+        # the principal removes it on the page, and hansa's record of it goes with it
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[mine]))["ok"])
+        self.assertNotIn("workers_may_not_read_added", self.desk.settings())
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_shows_beside_the_list_the_entries_the_coordinator_added(self):
+        from hansa import web
+        keys, mine = str(self.tmp.resolve() / "keys"), str(self.tmp.resolve() / "mine")
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[mine]))["ok"])
+        self.assertEqual(self.hide(keys)[1], 0)
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS.replace("console.log(JSON.stringify(nulls));",
+                           "console.log(JSON.stringify({nulls, text: ids['#tab-settings'].textContent}));"))
+        given = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk), "/api/events": []}
+        r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rendered = json.loads(r.stdout)
+        self.assertEqual(rendered["nulls"], [])
+        self.assertIn("Of these, the coordinator added (hansa hide;", rendered["text"])
+        self.assertIn(f"{keys} · added by the coordinator ", rendered["text"])
+        self.assertNotIn(f"{mine} · added by the coordinator", rendered["text"])
+
+    def test_hansa_hide_refuses_each_entry_the_page_refuses_with_the_pages_reason(self):
+        from hansa.desk import account_home
+        home, tmp = Path(account_home()), self.tmp.resolve()
+        tools, systmp, shared = tmp / "tools", tmp / "systmp", tmp / "shared"
+        for d in (tools / "bin", systmp, shared / "keys"):
+            d.mkdir(parents=True)
+        link = self.tmp / "link-to-repo"
+        link.symlink_to(self.repo)
+        wts = self.desk.root / "worktrees"
+        # what the coordinator is let read: an entry inside it would close it
+        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(shared)]))["ok"])
+        # one table for the page and the command: each kind of entry the page refuses, and a word of its reason
+        refused = {"relative/path": "must be a full path", "/": "the whole machine",
+                   str(home): "the home folder", str(home.parent): "the home folder",
+                   str(self.desk.root): "the desk, or a folder above it", str(tmp): "the desk, or a folder above it",
+                   str(self.repo.resolve()): "lane a's repository", str(link): "lane a's repository",
+                   str(tools / "bin"): "a folder on the PATH", str(tools): "a folder on the PATH",
+                   "/usr/lib": "programs and libraries", "/etc": "programs and libraries",
+                   str(home / ".config"): "settings and caches in the home folder",
+                   str(home / ".cache"): "settings and caches in the home folder",
+                   str(systmp): "the temporary folder", "/var/tmp": "the temporary folder",
+                   str(wts): "the desk's worktrees folder", str(wts / "a"): "a lane's worktree",
+                   "/dev": "devices", "/dev/null": "devices", "/opt/homebrew/Cellar": "Homebrew's programs",
+                   f"{tmp}/a\nb": "control character", f"{tmp}/a​b": "invisible or direction-changing",
+                   f"{tmp}/star*": "read as a pattern", f"{tmp}/(x)": "read as a pattern",
+                   str(shared / "keys"): "which is on the list of what workers may not read"}
+        with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)), \
+                unittest.mock.patch.dict(os.environ, {"PATH": f"{tools / 'bin'}{os.pathsep}/usr/bin:/bin"}):
+            for path, why in refused.items():
+                page = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                self.assertFalse(page["ok"], path)
+                self.assertIn(why, "".join(page["problems"]), path)
+                told, code = self.hide(path)
+                self.assertEqual(code, 1, (path, told))
+                said = path if path.isprintable() else json.dumps(path)  # a line break, say, is shown, not made
+                self.assertEqual(told, f"refused: {said}\n" + "".join(f"  {x}\n" for x in page["problems"]), path)
+            self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+            self.assertEqual(self.events("no_read_added"), [])
+            # a full list: the page's reason too
+            s = self.desk.settings()
+            s["workers_may_not_read"] = [f"{tmp}/k{i}" for i in range(50)]
+            write_json(self.desk.settings_path, s)
+            page = self.page_save(lambda s: s["workers_may_not_read"].append(f"{tmp}/one-more"))
+            self.assertFalse(page["ok"])
+            told, code = self.hide(f"{tmp}/one-more")
+            self.assertEqual((told, code), (f"refused: {tmp}/one-more\n" + "".join(f"  {x}\n" for x in page["problems"]), 1))
+            # one place left: the first is added, the next refused
+            s["workers_may_not_read"] = s["workers_may_not_read"][:49]
+            write_json(self.desk.settings_path, s)
+            told, code = self.hide(f"{tmp}/last", f"{tmp}/one-more")
+            self.assertEqual(code, 1)
+            self.assertIn(f"added to what workers may not read: {tmp}/last\n", told)
+            self.assertIn(f"refused: {tmp}/one-more\n" + "".join(f"  {x}\n" for x in page["problems"]), told)
+            self.assertEqual(len(self.desk.settings()["workers_may_not_read"]), 50)
+            # what is refused leaves the others to be added, each said
+            s["workers_may_not_read"] = []
+            write_json(self.desk.settings_path, s)
+            told, code = self.hide("/", f"{tmp}/fine")
+            self.assertEqual(code, 1)
+            self.assertIn(f"added to what workers may not read: {tmp}/fine\n", told)
+            self.assertIn("refused: /\n  workers cannot be kept from reading /: it is the whole machine", told)
+            self.assertEqual(self.desk.settings()["workers_may_not_read"], [f"{tmp}/fine"])
+
+    def test_hansa_hide_adds_one_path_once_however_it_is_spelled(self):
+        keys = (self.tmp / "keys").resolve()
+        keys.mkdir()
+        link = self.tmp.resolve() / "keys-link"
+        link.symlink_to(keys)
+        told, code = self.hide(str(keys), str(keys) + "/", f"{keys}/./", str(link))
+        self.assertEqual(code, 0, told)
+        self.assertEqual(told.count("added to what workers may not read"), 1, told)
+        self.assertIn(f"already there: {keys}/ (as {keys})\n", told)
+        self.assertIn(f"already there: {link} (as {keys})\n", told)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(keys)])
+        told, code = self.hide(str(keys))  # again: nothing changes, nothing is recorded
+        self.assertEqual((told, code), (f"already there: {keys}\n", 0))
+        self.assertEqual(len(self.events("no_read_added")), 1)
+        # one the principal saved is there too
+        mine = (self.tmp / "mine").resolve()
+        self.assertTrue(self.page_save(lambda s: s["workers_may_not_read"].append(str(mine) + "/"))["ok"])
+        self.assertEqual(self.hide(str(mine)), (f"already there: {mine} (as {mine}/)\n", 0))
+        self.assertNotIn(str(mine), self.desk.settings()["workers_may_not_read_added"])
+
+    def test_a_page_loaded_before_hansa_hide_does_not_drop_the_entry_on_saving(self):
+        keys = str(self.tmp.resolve() / "keys")
+        loaded = json.loads(json.dumps(public_settings(self.desk)))  # the principal's page, open
+        self.assertEqual(self.hide(keys)[1], 0)
+        loaded["settings"]["cool_minutes"] = 31  # the principal changes something else, and saves
+        told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+        self.assertFalse(told["ok"], told)
+        self.assertIn("press Reload", told["problems"][0])
+        s = self.desk.settings()
+        self.assertEqual((s["workers_may_not_read"], s["cool_minutes"]), ([keys], 30))
+        # reloaded, the page saves and keeps it, with who added it
+        self.assertEqual(self.page_save(lambda s: s.update(cool_minutes=31)), {"ok": True, "problems": []})
+        s = self.desk.settings()
+        self.assertEqual((s["workers_may_not_read"], s["cool_minutes"]), ([keys], 31))
+        self.assertEqual(s["workers_may_not_read_added"][keys]["by"], "coordinator")
+        # the page cannot write who added an entry: hansa keeps its own record
+        told = self.page_save(lambda s: s.update(workers_may_not_read=[keys, keys + "2"], workers_may_not_read_added={
+            keys: {"by": "page", "at": 0}, keys + "2": {"by": "coordinator", "at": 0}}))
+        self.assertTrue(told["ok"], told)
+        self.assertEqual(list(self.desk.settings()["workers_may_not_read_added"]), [keys])
+        self.assertEqual(self.desk.settings()["workers_may_not_read_added"][keys]["by"], "coordinator")
+
+    def test_hansa_hide_adds_the_paths_that_pass_when_another_is_refused(self):
+        keys, cache = str(self.tmp.resolve() / "keys"), str(self.tmp.resolve() / "cache")
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [cache]
+        self.assertEqual(self.desk.save_settings(s), [])
+        page = self.page_save(lambda s: s.update(workers_may_not_read=[cache]))
+        self.assertFalse(page["ok"])
+        told, code = self.hide(keys, cache)
+        self.assertEqual(code, 1, told)
+        self.assertIn(f"added to what workers may not read: {keys}\n", told)
+        self.assertIn(f"refused: {cache}\n" + "".join(f"  {x}\n" for x in page["problems"]), told)
+        self.assertIn("lane a: write cannot include", told)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [keys])
+        self.assertEqual([e["path"] for e in self.events("no_read_added")], [keys])
+
+    def test_hansa_hide_judges_each_path_as_a_page_save_would_problems_already_saved_too(self):
+        target = (self.tmp / "target").resolve()
+        target.mkdir()
+        link = self.tmp.resolve() / "link"
+        link.symlink_to(target)
+        keys, more = str(self.tmp.resolve() / "keys"), str(self.tmp.resolve() / "more")
+        # a lane saved before its rule was refused: the page saves, and warns of it; so does the command
+        s = self.desk.settings()
+        s["lanes"]["a"]["allow"] = ["WebFetch"]
+        write_json(self.desk.settings_path, s)
+        page = self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))
+        self.assertTrue(page["ok"], page)
+        told, code = self.hide(keys)
+        self.assertEqual(code, 0, told)
+        self.assertIn(f"added to what workers may not read: {keys}\n", told)
+        self.assertTrue(told.endswith("".join(f"warning: {x}\n" for x in page["lane_warnings"])), told)
+        # an entry that went bad later: the page refuses a save then, and so the command refuses the path, in its words
+        link.unlink()
+        link.symlink_to("/usr/lib")
+        page = self.page_save(lambda s: s["workers_may_not_read"].append(more))
+        self.assertFalse(page["ok"], page)
+        told, code = self.hide(more)
+        self.assertEqual((told, code), (f"refused: {more}\n" + "".join(f"  {x}\n" for x in page["problems"]), 1))
+        self.assertIn(f"{link}: it is /usr/lib", told)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(link), keys])
+
+    def test_hansa_hide_refuses_a_path_an_old_problem_hides_a_new_one_of(self):
+        # a listed link pointed into lane a's write folder after both were saved: SHARED/new is a problem of its own,
+        # though the page names the old one first
+        shared, target = (self.tmp / "SHARED").resolve(), (self.tmp / "target").resolve()
+        target.mkdir()
+        (shared / "old").mkdir(parents=True)
+        link = self.tmp.resolve() / "link"
+        link.symlink_to(target)
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [str(shared)]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))["ok"])
+        link.unlink()
+        link.symlink_to(shared / "old")
+        new = str(shared / "new")
+        page = self.page_save(lambda s: s["workers_may_not_read"].append(new))
+        self.assertFalse(page["ok"], page)
+        told, code = self.hide(new)
+        self.assertEqual((told, code), (f"refused: {new}\n" + "".join(f"  {x}\n" for x in page["problems"]), 1))
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(link)])
+        self.assertEqual(self.events("no_read_added"), [])
+
+    def test_hansa_hide_writes_only_the_list_and_who_added_it(self):
+        keys = str(self.tmp.resolve() / "keys")
+        s = json.loads(self.desk.settings_path.read_text())
+        s.pop("coordinator_compact", None)  # absent, and a blank check: each stays as saved
+        s.pop("cool_minutes", None)
+        s["lanes"]["a"]["merge_check"] = "   "
+        write_json(self.desk.settings_path, s)
+        self.assertEqual(self.hide(keys)[1], 0)
+        after = json.loads(self.desk.settings_path.read_text())
+        self.assertEqual((after.pop("workers_may_not_read"), list(after.pop("workers_may_not_read_added"))), ([keys], [keys]))
+        s.pop("workers_may_not_read", None)
+        self.assertEqual(after, s)
+
+    def test_only_hansa_hide_writes_who_added_an_entry(self):
+        keys, other = str(self.tmp.resolve() / "keys"), str(self.tmp.resolve() / "other")
+        self.assertEqual(self.hide(keys)[1], 0)
+        record = self.desk.settings()["workers_may_not_read_added"]
+        for by in ("coordinator", ""):
+            s = self.desk.settings()  # dropped by a save that is not the page's: kept
+            s.pop("workers_may_not_read_added")
+            self.assertEqual(self.desk.save_settings(s, by=by), [])
+            self.assertEqual(self.desk.settings()["workers_may_not_read_added"], record)
+            s = self.desk.settings()  # changed, or forged for an entry it adds: not written
+            s["workers_may_not_read"] = [keys, other]
+            s["workers_may_not_read_added"] = {keys: {"by": "principal", "at": 0}, other: {"by": "coordinator", "at": 0}}
+            self.assertEqual(self.desk.save_settings(s, by=by), [])
+            self.assertEqual(self.desk.settings()["workers_may_not_read_added"], record)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [keys, other])
+
+    def test_hansa_explain_says_who_added_an_entry_that_went_bad(self):
+        target = (self.tmp / "target").resolve()
+        target.mkdir()
+        link = self.tmp.resolve() / "link"
+        link.symlink_to(target)
+        self.assertEqual(self.hide(str(link))[1], 0)
+        link.unlink()
+        link.symlink_to("/usr/lib")
+        day = time.strftime("%Y-%m-%d")
+        self.assertIn(f"not applied, and no run starts: {link} (added by the coordinator with hansa hide, {day} ",
+                      self.hansa("explain", "lane", "a"))
+
+    def test_hansa_hide_with_no_path_or_a_relative_one_changes_nothing(self):
+        told, code = self.hide()
+        self.assertEqual(told, "")
+        self.assertIn("name at least one full path", str(code))
+        told, code = self.hide("keys/secret")
+        self.assertEqual(code, 1)
+        self.assertIn("refused: keys/secret\n  workers cannot be kept from reading keys/secret: it must be a full path "
+                      "starting with /", told)
+        self.assertNotIn("Runs that start from now on", told)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [])
+        self.assertNotIn("workers_may_not_read_added", self.desk.settings())
+        self.assertEqual(self.events("no_read_added"), [])
 
     def test_status_and_the_page_look_at_what_workers_may_not_read_once_a_minute_and_runs_every_time(self):
         from hansa import desk as hdesk, run
@@ -17164,6 +17474,24 @@ class DeskTest(unittest.TestCase):
         problems = self.desk.save_settings(second["settings"], rev=second["rev"])
         self.assertTrue(problems and "changed since" in problems[0], problems)
         self.assertEqual((self.desk.settings()["concurrency"], self.desk.settings().get("cool_minutes", 30)), (3, 30))
+
+    def test_a_stale_page_is_refused_before_any_other_check(self):
+        target = (self.tmp / "target").resolve()
+        target.mkdir()
+        link = self.tmp.resolve() / "link"
+        link.symlink_to(target)
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))["ok"])
+        loaded = json.loads(json.dumps(public_settings(self.desk)))  # the principal's page, open
+        link.unlink()
+        link.symlink_to("/usr/lib")  # an entry gone bad, which a fresh page's save is refused for
+        s = self.desk.settings()
+        s["concurrency"] = 3  # and the settings changed since the page loaded them
+        self.assertEqual(self.desk.save_settings(s), [])
+        loaded["settings"]["workers_may_not_read"].append(str(self.tmp.resolve() / "keys"))
+        told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+        self.assertEqual(told, {"ok": False, "problems": [
+            "the settings changed since this page loaded them (another tab or a command); press Reload, then make the "
+            "change again"]})
 
     def test_a_check_that_ran_on_a_replaced_key_is_not_recorded(self):
         import hansa.run as run

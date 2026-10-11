@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release
-from .desk import (DENY_AT, HOME_SECRETS, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
@@ -1528,7 +1528,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
-    kept, left, stops = no_read_parts(s, desk.root)
+    kept = no_read_parts(s, desk.root)[0]
     mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
            if sys.platform == "darwin" else "")
     built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
@@ -1541,11 +1541,11 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
             f"    every provider's Claude Code folder, whichever provider the run uses: {', '.join(homes)}; and ~/.claude",
             "    logins, keys, tokens, browsing data, messages and histories under the home folder (built in): "
             + built_in,
-            "    folders and files the principal keeps from workers (set on the web page, Settings; you cannot set"
-            " it: hansa ask; Read is denied there to you, workers, verifiers and design sessions as well; no"
-            " lane's repository or write list may be one, inside one or above one): " + (", ".join(kept) or "none"),
-            *(f"      not applied, and no run starts: {x.removeprefix(DENY_AT)}" for x in stops),
-            *(f"      not applied: {x.removeprefix(DENY_AT)}" for x in left)]
+            "    folders and files the principal keeps from workers (the principal's, on the web page, Settings; you"
+            " add to it with hansa hide, and only the principal removes an entry; Read is denied there to you, workers,"
+            " verifiers and design sessions as well; no lane's repository or write list may be one, inside one or"
+            " above one): " + (", ".join(x + hidden_note(s, x) for x in kept) or "none"),
+            *("      " + x for x in no_read_unusable(s, desk.root))]
 
 
 def read_lines(desk: Desk, s: dict) -> list:
