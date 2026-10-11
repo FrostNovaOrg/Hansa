@@ -582,10 +582,7 @@ here; work that needs code changed or a browser goes to a worker.
   script). The server tries it when it starts and before each
   setup or check; `hansa status` reports what the server saw. When it cannot run,
   a task's setup fails it before its worker starts, and its check reads "could
-  not run" without judging the task; you may install srt. If the start check
-  fails, hansa tries plain `true` without its output relay: the message says
-  when srt itself could not start, or points to "workers may not read" hiding
-  hansa's Python or folder when only the relay could not run.
+  not run" without judging the task; you may install srt.
 - A lane's network list (`hansa lane set L network HOST ...`, such as
   `registry.npmjs.org`, `*.pypi.org` or `localhost`) is what its workers may
   reach during a task, and what its setup and check may reach. Add a host only
