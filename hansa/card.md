@@ -83,6 +83,7 @@ Details are under `hansa help <topic>`; `hansa help topics` lists them (and the 
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. `--at COMMIT`: only at that commit, refused with nothing run unless it is the base's tip; a try at another commit is waited for, never taken as the answer; exit 0 only when the try at COMMIT passed. `--log`: print each step's whole output of the last try (with `--merge-check`: of the last merge-check try), keys removed, kept in `lanes/L/` until the next one. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
+| `hansa hide PATH [PATH ...]` | add full paths to what workers may not read, checked as the page checks them (an entry the page refuses is refused, with its reason; one already there, however spelled, is not added again); recorded as yours, with when, on the page and in `hansa explain lane L`. Runs that start from now on are kept from it, a run already going keeps its sandbox, and your own Read is denied there from your next start. You only add: the principal removes entries, on the page |
 | `hansa concurrency [N]` | show, or set, how many tasks run at once, over all lanes; a lane runs one at a time (see What you change) |
 | `hansa disk-floor [GB]` | show, or set, the free space under which `hansa serve` starts nothing new (default 10 GB, a quarter of a volume's size on one smaller than four times it; 0 turns it off; see What you change) |
 | `hansa cost [--days N \| --since HH:MM] [--by day\|seat\|lane\|task\|model\|provider]` | tokens and what they are worth at the principal's prices; with `--json`, `--rows` adds every row |
@@ -144,8 +145,9 @@ Anthropic's own tool settings in `.config/anthropic`, cloud tools' and
 registries' credentials, proxy clients' settings, password stores and the like;
 on macOS the keychains, cookies, mail and apps' data of that kind under
 `~/Library` too), or
-what the principal lists on the web page as not for workers to read
-(`hansa explain lane L` lists the principal's entries and counts the built-in
+what the principal lists on the web page as not for workers to read (you add
+to it with `hansa hide`; `hansa explain lane L` lists its entries, says which
+you added, and counts the built-in
 ones; `--all` names those too); it reaches
 no network but the lane's network list, and leaves git history to hansa (no
 commit, merge, reset, branch and the like). The lane's setup runs before the
@@ -709,7 +711,8 @@ here; work that needs code changed or a browser goes to a worker.
 - The principal's, on the web page: providers, models, endpoints, keys, effort
   defaults, the models of the coordinator and of design sessions, prices and the
   cost audit, the folders you read without asking, and the folders and files
-  workers may not read (no worker, verifier, setup or check reads them, and
+  workers may not read (you may add to it with `hansa hide`; only the principal
+  removes an entry; no worker, verifier, setup or check reads them, and
   Read is denied there to you and to design sessions too; no lane's repository
   or write list may be one, inside one or above one; and none may be or be above
   what every worker needs: the home folder, the desk, a lane's repository or
@@ -725,7 +728,8 @@ here; work that needs code changed or a browser goes to a worker.
   folder on the `PATH` is left out of runs instead, and that folder is open to
   them: settle it with the principal); which lanes' releases go
   out without the principal's yes, and the words no release may send out.
-  Ask with `hansa ask`; do not edit `settings.json`. Keys live in
+  Ask with `hansa ask` (to remove an entry of what workers may not read too);
+  do not edit `settings.json`. Keys live in
   `secrets/`, which you cannot read, by design.
 
 ## Facts you can rely on

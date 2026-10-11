@@ -12,7 +12,8 @@ The principal, on the page: providers, models, endpoints, keys, effort
 defaults, the models of the coordinator and of design sessions, prices,
 whether the coordinator audits cost, the browser tool a task given `--browser`
 uses, the folders the coordinator may read outside the desk without asking
-(`hansa explain` lists them), the folders and files workers may not read, the
+(`hansa explain` lists them), the folders and files workers may not read (the
+coordinator may add to them, below), the
 release targets that go out without asking (each ticked on its own), the words
 no release may send out, and the alert command ([Alerts](releases.md#alerts)).
 The page also shows what goes on, and asks the principal about each release
@@ -24,9 +25,25 @@ repository or write list may be such a folder, inside one or above one. What
 the page refuses on that list, and what a saved entry that can no longer be
 applied does, is in [Workers and the sandbox](sandbox.md#what-workers-verifiers-and-design-sessions-may-touch).
 
-These are the principal's alone. When the coordinator needs one changed (a
-folder it keeps needing to read, say), it asks with `hansa ask`; it never edits
-the desk's `settings.json` itself.
+These are the principal's alone, but for one thing: the coordinator may add to
+what workers may not read with `hansa hide PATH [PATH ...]`, since an entry
+only takes something away from workers. Each path is checked as the page checks
+it when it saves: an entry the page would refuse is refused, with the page's
+reason, and one already on the list, however it is spelled, is not added again.
+hansa records each addition as the coordinator's, with when, writes an event
+(`no_read_added`) for it, and shows it beside the entry on the page and in
+`hansa explain lane L`; an entry the principal saves on the page is the
+principal's. Runs that start afterwards are kept from it, a run already going
+keeps the sandbox it started with, and the coordinator's own Read is denied there
+from its next start. Only the principal removes an entry, on the page: removing
+one gives workers something back (keys, logins), so there is no command for it,
+and no command of the coordinator's may take one out. A page loaded before an
+addition does not drop it on saving: as for any change made since it loaded,
+the save is refused, says what the coordinator added, and asks for Reload.
+
+When the coordinator needs anything else here changed (a folder it keeps
+needing to read, say), it asks with `hansa ask`; it never edits the desk's
+`settings.json` itself.
 
 ### The coordinator
 

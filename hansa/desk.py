@@ -84,6 +84,9 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
+# The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
+# An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
+HIDDEN_BY = "workers_may_not_read_added"
 # The events that may call for an alert to the principal (alert.from_event)
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
            "ask", "sandbox_held", "disk_low")
@@ -442,9 +445,14 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
     if not isinstance(s, dict):
         return ["settings must be an object"]
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden",
-             "alert"}
+             "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
+             "release_forbidden", "alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
+    by = s.get(HIDDEN_BY, {})
+    if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
+                                           and isinstance(v.get("at"), (int, float)) for v in by.values()):
+        p.append(f"{HIDDEN_BY} must map each entry the coordinator added to what workers may not read to who added "
+                 "it and when")
     # which of them may be read is looked at when the page saves a changed list, and when the coordinator
     # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
     # said on the page, and does not keep other settings or the coordinator's lane changes from saving
@@ -1887,6 +1895,21 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
     return good, p, stops
 
 
+def hidden_by(s: dict) -> dict:
+    """Who added each entry of what workers may not read that the coordinator added (HIDDEN_BY): {entry: {by, at}}."""
+    by = s.get(HIDDEN_BY)
+    return {x: v for x, v in by.items() if isinstance(v, dict)} if isinstance(by, dict) else {}
+
+
+def hidden_note(s: dict, entry: str) -> str:
+    """Beside an entry of what workers may not read, in hansa explain: who added it, when the coordinator did."""
+    v = hidden_by(s).get(entry)
+    if not v:
+        return ""
+    at = time.strftime("%Y-%m-%d %H:%M", time.localtime(v["at"])) if isinstance(v.get("at"), (int, float)) else "?"
+    return f" (added by the {v.get('by') or 'coordinator'} with hansa hide, {at})"
+
+
 def kept_from_workers(s: dict, root=None) -> tuple:
     """deny_split for a desk's settings: (what the principal keeps workers from reading, a line for each entry
     of the list that is not applied)."""
@@ -2266,19 +2289,36 @@ class Desk:
         """rev: the settings_rev() the change was made on; a save over newer settings is refused."""
         with self.lock():
             if rev is not None and rev != self.settings_rev():
+                old = self.settings()
+                listed = new.get("workers_may_not_read") if isinstance(new, dict) else None
+                hidden = [x for x in hidden_by(old) if isinstance(listed, list) and x not in listed]
                 return ["the settings changed since this page loaded them (another tab or a command); "
-                        "press Reload, then make the change again"]
+                        "press Reload, then make the change again"
+                        + (f"; meanwhile the coordinator added to what workers may not read (hansa hide): "
+                           f"{', '.join(hidden)}, which this page does not show yet" if hidden else "")]
             old = self.settings()
             if by != "page":  # the principal's alone: a command that changes them changes nothing
                 theirs = [k for k in PRINCIPAL_ONLY if new.get(k, []) != old.get(k, [])]
                 if theirs:
                     return [f"{k} is the principal's, set only on the web page (Settings); ask with hansa ask"
                             for k in theirs]
+                listed = new.get("workers_may_not_read", [])
+                was = old.get("workers_may_not_read") if isinstance(old.get("workers_may_not_read"), list) else []
+                gone = [x for x in was if not isinstance(listed, list) or x not in listed]
+                if gone:  # the coordinator adds to it (hansa hide); taking an entry out gives workers it back
+                    return [f"only the principal removes an entry of what workers may not read, on the web page "
+                            f"(Settings): {', '.join(map(str, gone))}; ask with hansa ask"]
             else:  # each lane the page lists, recorded as it is now: it goes out without asking only while it still is
                 lanes = new.get("lanes") if isinstance(new.get("lanes"), dict) else {}
                 new = {**new, "releases_without_asking": record_listed(new.get("releases_without_asking", []), lanes,
                                                                        old.get("releases_without_asking")),
                        "alert": stamp_alert(new.get("alert", old.get("alert")), old.get("alert"))}
+                # who added each entry is hansa's record, not the page's: kept for the entries the page still lists
+                listed = new.get("workers_may_not_read") if isinstance(new.get("workers_may_not_read"), list) else []
+                hidden = {x: v for x, v in hidden_by(old).items() if x in listed}
+                new = {k: v for k, v in new.items() if k != HIDDEN_BY}
+                if hidden:
+                    new[HIDDEN_BY] = hidden
             # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
             page = by == "page" and new.get("lanes") == old.get("lanes")
             problems = (validate(new, self.root, page=page, before=old) + self.keys_in_release(old, new)
@@ -2297,6 +2337,49 @@ class Desk:
         self.event("settings_saved", by=by, changed=changed)
         self.ready_news()
         return []
+
+    def hide(self, paths: list, by: str = "coordinator") -> tuple:
+        """hansa hide: add each path to what workers may not read, each checked as the page checks a save of it
+        (web._save_settings: deny_split, and read_split for what it would close of the coordinator's folders), and
+        recorded as added by `by`. ([entries added], [(path, the entry it already is)], [(path, [why, ...])])."""
+        added, there, refused = [], [], []
+        with self.lock():
+            s = self.settings()
+            listed = s.get("workers_may_not_read")
+            if not isinstance(listed, list):
+                return [], [], [(x, [DENY_LIST_WHY]) for x in paths]
+            listed, hidden = list(listed), hidden_by(s)
+
+            def closed(entries):  # what the page refuses: the coordinator's folders the list would close
+                denied = deny_split(entries, self.root, s.get("lanes"))[0]
+                return [g for g in read_split(s.get("coordinator_read", []), self.root, s.get("providers"),
+                                              denied=denied)[1] if "what workers may not read" in g]
+            for x in paths:
+                kept, bad = deny_split([x], self.root, s.get("lanes"))
+                same = next((e for e in listed if isinstance(e, str) and e.startswith("/") and kept
+                             and _seen(stored(e)) == _seen(kept[0])), None)
+                if bad:
+                    refused.append((x, bad))
+                elif same is not None:  # however it is spelled
+                    there.append((x, same))
+                elif len(listed) >= MAX_DENY:
+                    refused.append((x, [DENY_LIST_WHY]))
+                else:
+                    before = closed(listed)
+                    more = [g for g in closed(listed + kept) if g not in before]
+                    if more:
+                        refused.append((x, more))
+                    else:
+                        listed.append(kept[0])
+                        hidden[kept[0]] = {"by": by, "at": now()}
+                        added.append(kept[0])
+            if added:
+                problems = self.save_settings({**s, "workers_may_not_read": listed, HIDDEN_BY: hidden}, by=by)
+                if problems:
+                    return [], there, refused + [(x, problems) for x in added]
+        for x in added:
+            self.event("no_read_added", path=x, by=by)
+        return added, there, refused
 
     def keys_in_release(self, old: dict, new: dict) -> list:
         """A new or changed release command that holds a key the desk knows: refused, as the command is stored and
