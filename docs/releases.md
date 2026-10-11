@@ -74,7 +74,8 @@ what the principal saw (else the request is void and the coordinator asks
 again): in the lane's repository at that commit, as the desk's account,
 outside the sandbox (it needs the account's logins and network), with
 hansa's own environment (not the lane's env), the target's time limit as its
-limit, its output kept without keys in `.hansa/releases/`. One release at a
+limit, its output kept without keys in `.hansa/releases/` (the daily trim keeps
+the last 256 KB once it ended over 30 days ago). One release at a
 time per repository. A release that runs in the repository holds it: none
 starts while a merge or merge check runs there, nor a merge while it runs. A
 target set `--fixed` runs instead in a detached checkout of the release's
