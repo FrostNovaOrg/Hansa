@@ -9735,8 +9735,9 @@ class DeskTest(unittest.TestCase):
         real_run, fed = subprocess.run, []
 
         def gone_first(cmd, **kw):  # the account cannot read the file: only root's copy of the text counts
-            brief.unlink()
-            fed.append(kw.get("input"))
+            if cmd[0] == account.runuser_bin():  # the shared patch also catches build()'s uncached git lookup
+                brief.unlink()
+                fed.append(kw.get("input"))
             return real_run(cmd, **kw)
         with unittest.mock.patch.object(account.subprocess, "run", side_effect=gone_first), \
                 contextlib.redirect_stdout(io.StringIO()):
