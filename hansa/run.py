@@ -5300,11 +5300,9 @@ def recording_start(desk: Desk, key, pid, proc=None, cleanup=None):
             desk.failed_starts[key] = e
         try:
             stop(pid, proc=proc)
-            if proc is not None:
-                proc.wait()
-            else:
+            if proc is None:
                 try:
-                    os.waitpid(pid, 0)  # a recovered process is normally another server's child
+                    os.waitpid(pid, os.WNOHANG)  # stop already waited; normally another server's child
                 except ChildProcessError:
                     pass
         finally:

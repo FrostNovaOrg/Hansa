@@ -2738,34 +2738,86 @@ class DeskTest(unittest.TestCase):
     # | design in tmux          | stopped session/group; failed; no second start |
     # | resumed worker/verify   | stopped group; original run ends; no new resume|
     # Tries do not recover a found pid; design recovery kills the recorded session already.
+    # Restart before the failure can be saved (new launches and failed recovery writes):
+    # | kind                | unrecorded start after restart                     |
+    # | worker/verification | queued, then dispatched; old group gone first      |
+    # | lane check          | check runs again; old group gone first             |
+    # | merge check         | check runs again; old group gone first             |
+    # | try                 | done/ok=False; no second start                     |
+    # | release shared/fixed| failed/lost; no second start                       |
+    # | design in tmux      | queued, then reopened; old session/group gone      |
+    # There is no durable failed-start marker: a fresh Desk uses ordinary recovery.
 
     def start_record_group(self, token, marker, popen):
-        """A real leader and child, ready before the pid write; TERM reaps the child too."""
-        code = ("import pathlib, signal, subprocess, sys, time\n"
-                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-                "def ended(*args):\n"
-                "    child.wait()\n"
-                "    sys.exit(0)\n"
-                "signal.signal(signal.SIGTERM, ended)\n"
-                "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
-                "time.sleep(60)\n")
+        """A real leader and independent child: neither ends by itself or waits for the other."""
+        child = ("import os, pathlib, sys, time\n"
+                 "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                 "while True: time.sleep(3600)\n")
+        code = ("import subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[1]])\n"
+                "while True: time.sleep(3600)\n")
         proc = popen([sys.executable, "-c", code, str(marker), token], start_new_session=True)
 
         def cleanup():
+            # Independent of the cleanup under test, including a missing stop or leader-only stop.
             from hansa import run
-            run.stop(proc.pid, proc=proc)
+            if run.group_running(proc.pid):
+                os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=10)
+            end = time.time() + 3
+            while run.group_running(proc.pid) and time.time() < end:
+                time.sleep(0.01)
+            self.assertFalse(run.group_running(proc.pid), "fixture cleanup left its child running")
         self.addCleanup(cleanup)
         end = time.time() + 10
         while not marker.exists() and time.time() < end:
             time.sleep(0.01)
         self.assertTrue(marker.exists(), "process fixture did not start its child")
+        proc.child_pid = int(marker.read_text())
         return proc
 
-    def unrecordable_start(self, kind, recovering, persistent):
+    def assert_start_record_group_stopped(self, proc):
+        from hansa import run
+        self.assertIsNotNone(proc.poll(), "pid record failed but its process is still running")
+        self.assertFalse(run.group_running(proc.pid), "pid record failed but its group is still running")
+        self.assertTrue(not run.alive(proc.child_pid) or run._state(proc.child_pid) == "Z",
+                        "the process's child is still running")
+
+    def test_a_failed_pid_record_does_not_add_an_unbounded_wait_after_stop(self):
+        from hansa import run
+        for recovered in (False, True):
+            with self.subTest(recovered=recovered):
+                proc = self.start_record_group("bounded-start-record", self.tmp / f"bounded-{recovered}.pid",
+                                               subprocess.Popen)
+                waitpid, wait = os.waitpid, proc.wait
+
+                def reap(pid, options):
+                    self.assertNotEqual(options, 0, "unbounded wait after stopping a recovered group")
+                    return waitpid(pid, options)
+
+                def bounded_wait(timeout=None):
+                    self.assertIsNotNone(timeout, "unbounded wait after stopping a child group")
+                    return wait(timeout=timeout)
+
+                def overdue(*args):
+                    self.fail("stopping the fixture's group did not finish within three seconds")
+                handler = signal.signal(signal.SIGALRM, overdue)
+                signal.setitimer(signal.ITIMER_REAL, 3)
+                try:
+                    with unittest.mock.patch.object(os, "waitpid", side_effect=reap), \
+                            unittest.mock.patch.object(proc, "wait", side_effect=bounded_wait):
+                        with self.assertRaisesRegex(OSError, "start record disk full"):
+                            with run.recording_start(self.desk, None, proc.pid, None if recovered else proc):
+                                raise OSError(errno.ENOSPC, "start record disk full")
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    signal.signal(signal.SIGALRM, handler)
+                self.assert_start_record_group_stopped(proc)
+
+    def unrecordable_start(self, kind, recovering, persistent, restart=False):
         from hansa import release, run
         # Each table cell has its own repository and desk, including when a base failure leaves a claim.
-        folder = self.tmp / f"start-{kind.replace(' ', '-')}-{recovering}-{persistent}"
+        folder = self.tmp / f"start-{kind.replace(' ', '-')}-{recovering}-{persistent}-{restart}"
         folder.mkdir()
         repo = folder / "repo"
         sh("git", "clone", "-q", str(self.repo), str(repo), cwd=folder)
@@ -2808,13 +2860,15 @@ class DeskTest(unittest.TestCase):
         def launch(argv, **kwargs):
             if not kwargs.get("start_new_session"):
                 return popen(argv, **kwargs)
+            for previous in procs:
+                self.assert_start_record_group_stopped(previous)
             launches.append(argv)
             if tid:
                 m = self.desk.meta(tid)
                 word = (m.get("merge_check") or {}).get("launch") if kind == "merge check" else m.get("launch")
             else:
                 word = release.get(self.desk, rid).get("launch") if rid else run.read_try(self.desk, "a").get("launch")
-            p = self.start_record_group(word, marker, popen)
+            p = self.start_record_group(word, folder / f"child-{len(procs)}.pid", popen)
             procs.append(p)
             return p
         full = []
@@ -2859,14 +2913,50 @@ class DeskTest(unittest.TestCase):
                                        release.get(self.desk, rid) if rid else run.read_try(self.desk, "a")))
                 self.assertEqual(len(procs), 1)
                 proc = procs[0]
-                self.assertIsNotNone(proc.poll(), "pid record failed but its process is still running")
-                self.assertFalse(run.group_running(proc.pid), "pid record failed but its group is still running")
-                self.assertFalse(run.alive(int(marker.read_text())), "the process's child was not reaped")
+                self.assert_start_record_group_stopped(proc)
                 if persistent:
                     tick()  # another full-disk round cannot start it again either
+                if restart:
+                    self.desk = Desk(self.desk.root)  # serve restarted while the failure was still only in memory
+                    d = Dispatcher(self.desk)
+                    self.assertEqual(self.desk.failed_starts, {})
+                    tick()  # writes still fail after the restart; no replacement can launch yet
+                    self.assertEqual(len(procs), 1)
+                    self.assert_start_record_group_stopped(proc)
+            if restart and kind in ("worker", "verification"):
+                self.desk.pause("observe ordinary recovery before dispatch")
+                d.tick()
+                m = self.desk.meta(tid)
+                self.assertEqual((m["state"], m["phase"], m.get("pid")), ("queued", "", None), m)
+                self.assertEqual(len(launches), 0 if recovering else 1)
+                self.assert_start_record_group_stopped(proc)
+                self.desk.resume()
             for _ in range(3):
-                d.tick()  # writes work again: record the failure, and leave it ended
-            self.assertEqual(len(launches), 0 if recovering else 1, "process started again by itself")
+                d.tick()  # space returned: retry the failure record, or ordinary recovery after restart
+            reruns = restart and kind in ("worker", "verification", "check", "merge check")
+            self.assertEqual(len(launches), (0 if recovering else 1) + int(reruns), "unexpected second start")
+        if restart:
+            self.assert_start_record_group_stopped(proc)
+            if rid:
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["state"], "failed", r)
+                self.assertEqual(r["problem"], r["lost"])
+                self.assertIn("hansa serve stopped as it started the release", r["lost"])
+            elif kind == "try":
+                t = run.read_try(self.desk, "a")
+                self.assertEqual((t["phase"], t["ok"]), ("done", False), t)
+                self.assertEqual((t["steps"]["check"]["ran"], t["steps"]["check"]["exit"]), (False, None))
+                self.assertEqual(t["note"], "")
+            else:
+                m = self.desk.meta(tid)
+                record = m["merge_check"] if kind == "merge check" else m
+                self.assertEqual(m["state"], "merging" if kind == "merge check" else "running", m)
+                self.assertEqual(record["pid"], procs[-1].pid)
+                self.assertEqual(record["phase"], "running" if kind == "merge check" else
+                                 "checking" if kind == "check" else "")
+                self.assertIsNone(procs[-1].poll())
+                self.assertTrue(run.group_running(procs[-1].pid))
+            return
         if rid:
             r = release.get(self.desk, rid)
             self.assertEqual(r["state"], "failed", r)
@@ -2897,13 +2987,23 @@ class DeskTest(unittest.TestCase):
                 with self.subTest(kind=kind, persistent=persistent):
                     self.unrecordable_start(kind, True, persistent)
 
+    def test_restart_before_a_failed_start_record_is_saved_uses_ordinary_recovery(self):
+        for kind in ("worker", "verification", "check", "merge check", "try", "release", "release fixed"):
+            with self.subTest(kind=kind):
+                self.unrecordable_start(kind, False, True, restart=True)
+
+    def test_restart_before_a_failed_recovery_record_is_saved_uses_ordinary_recovery(self):
+        for kind in ("worker", "verification", "check", "merge check", "release", "release fixed"):
+            with self.subTest(kind=kind):
+                self.unrecordable_start(kind, True, True, restart=True)
+
     @design_as_on_mac
     def test_a_failed_design_start_record_stops_its_tmux_session_and_group(self):
         from hansa import run
-        for persistent in (False, True):
-            with self.subTest(persistent=persistent):
+        for persistent, restart in ((False, False), (True, False), (True, True)):
+            with self.subTest(persistent=persistent, restart=restart):
                 tid = self.desk.new_task("A design start-record fixture", kind="design", lane="a")
-                marker, procs, commands, full = self.tmp / f"design-child-{persistent}.pid", [], [], []
+                procs, commands, full = [], [], []
                 popen, execute, write = subprocess.Popen, subprocess.run, write_json
 
                 def tmux(argv, **kwargs):
@@ -2911,10 +3011,13 @@ class DeskTest(unittest.TestCase):
                         return execute(argv, **kwargs)
                     commands.append(argv)
                     if "new-session" in argv:
+                        for previous in procs:
+                            self.assert_start_record_group_stopped(previous)
+                        marker = self.tmp / f"design-{tid}-child-{len(procs)}.pid"
                         procs.append(self.start_record_group(tid, marker, popen))
-                        return subprocess.CompletedProcess(argv, 0, str(procs[0].pid) + "\n", "")
+                        return subprocess.CompletedProcess(argv, 0, str(procs[-1].pid) + "\n", "")
                     if "kill-session" in argv:
-                        run.stop(procs[0].pid, proc=procs[0])
+                        run.stop(procs[-1].pid, proc=procs[-1])
                         return subprocess.CompletedProcess(argv, 0, "", "")
                     self.fail(f"unexpected tmux command: {argv}")
 
@@ -2936,14 +3039,25 @@ class DeskTest(unittest.TestCase):
                                 self.assertTrue(persistent)
                         self.assertTrue(full)
                         self.assertEqual(sum("kill-session" in c for c in commands), 1)
-                        self.assertIsNotNone(procs[0].poll())
-                        self.assertFalse(run.group_running(procs[0].pid))
-                        self.assertFalse(run.alive(int(marker.read_text())))
+                        self.assert_start_record_group_stopped(procs[0])
+                        if restart:
+                            self.desk = Desk(self.desk.root)
                     d = Dispatcher(self.desk)
+                    if restart:
+                        self.desk.pause("observe design recovery before dispatch")
+                        d.tick()
+                        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                        self.assert_start_record_group_stopped(procs[0])
+                        self.desk.resume()
                     for _ in range(3):
                         d.tick()
-                    self.assertEqual(sum("new-session" in c for c in commands), 1)
+                    self.assertEqual(sum("new-session" in c for c in commands), 2 if restart else 1)
                 m = self.desk.meta(tid)
+                if restart:
+                    self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", procs[-1].pid), m)
+                    self.assertIsNone(procs[-1].poll())
+                    self.assertEqual(len(self.desk.asks()), 1)
+                    continue
                 self.assertEqual((m["state"], m["phase"], m.get("pid")), ("failed", "", None), m)
                 self.assertIn("could not start: [Errno 28] design start record disk full", m["error"])
                 self.assertEqual(self.desk.asks(), [])
@@ -2976,9 +3090,7 @@ class DeskTest(unittest.TestCase):
                     with unittest.mock.patch("hansa.desk.write_json", side_effect=save):
                         Dispatcher(self.desk).ended(tid, first.returncode)
                     self.assertEqual(len(procs), 1)
-                    self.assertIsNotNone(procs[0].poll())
-                    self.assertFalse(run.group_running(procs[0].pid))
-                    self.assertFalse(run.alive(int(marker.read_text())))
+                    self.assert_start_record_group_stopped(procs[0])
                     d = Dispatcher(self.desk)
                     for _ in range(3):
                         d.tick()
