@@ -407,7 +407,8 @@ def _trim_one(f: Path, at: float, keep_head: bool = False) -> int | None:
     if keep_head:
         nl = start.rfind(b"\n", TRIM_HEAD - 1024, TRIM_HEAD)
         end = nl + 1 if nl >= 0 else TRIM_HEAD
-        while start[end] & 0xC0 == 0x80:
+        floor = end - 3  # UTF-8 has at most three continuation bytes.
+        while end > floor and start[end] & 0xC0 == 0x80:
             end -= 1
         head = start[:end]
         head += (b"" if head.endswith(b"\n") else b"\n") + (

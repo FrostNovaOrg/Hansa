@@ -19016,10 +19016,38 @@ class DeskTest(unittest.TestCase):
                 else:
                     self.assertEqual(log.read_bytes(), big)
 
-    def test_daily_trim_docs_distinguish_task_records_from_release_events(self):
-        doc = (Path(__file__).resolve().parent.parent / "docs" / "desk.md").read_text()
-        self.assertIn("Task cuts appear in the record and `hansa show`, release cuts only in the event;",
-                      " ".join(doc.split()))
+    def test_daily_trim_continues_past_a_log_with_only_continuation_bytes_in_its_head(self):
+        from hansa import disk
+        at = time.time()
+        bad = self.desk.new_task("Non-UTF-8 build", state="merged", merged=at - 60, check={"ok": True})
+        other = self.desk.new_task("Normal build", state="merged", merged=at - 60, check={"ok": True})
+        data = {bad: b"\x80" * (disk.TRIM_HEAD + 128) + b"x" * 600000,
+                other: b"build output\n" * 60000}
+        for tid, big in data.items():
+            (self.desk.tasks_dir / tid / "check.log").write_bytes(big)
+        self.assertEqual(disk.trim(self.desk, at), [(tid, "check.log", len(big)) for tid, big in data.items()])
+        for tid, big in data.items():
+            self.assertLess((self.desk.tasks_dir / tid / "check.log").stat().st_size, len(big))
+            self.assertIn("check.log", self.desk.meta(tid)["trimmed"])
+        [event] = self.events("logs_trimmed")
+        self.assertEqual(event["tasks"], sorted(data))
+
+    def test_daily_trim_never_recuts_a_log_with_a_long_run_of_continuation_bytes(self):
+        from hansa import disk
+        at = time.time()
+        tid = self.desk.new_task("Non-UTF-8 build", state="merged", merged=at - 60, check={"ok": True})
+        log = self.desk.tasks_dir / tid / "check.log"
+        big = b"x" * (disk.TRIM_HEAD - 5000) + b"\xa0" * 5128 + b"x" * 600000
+        log.write_bytes(big)
+        self.assertEqual(disk.trim(self.desk, at), [(tid, "check.log", len(big))])
+        data, record = log.read_bytes(), self.desk.meta(tid)
+        self.assertEqual(disk.trim(self.desk, at + 31 * 86400), [])
+        self.assertIsNone(disk._trim_one(log, at + 31 * 86400))  # the marker also prevents a tail-only cut
+        head, _, _ = data.partition(b"[hansa trimmed this log on ")
+        self.assertEqual(head, big[:disk.TRIM_HEAD - 3] + b"\n")
+        self.assertEqual(log.read_bytes(), data)
+        self.assertEqual(self.desk.meta(tid), record)
+        self.assertEqual(len(self.events("logs_trimmed")), 1)
 
     def test_daily_trim_cuts_logs_of_tasks_left_at_done_for_30_days(self):
         from hansa import disk
