@@ -1,4 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
+import { register } from '../hooks/register.js'
 
 const SETTINGS = '/desk/settings.json'
 const MIN = 60_000
@@ -184,6 +185,31 @@ for (const [rule, value, after] of [['the long idle', 300_000, 50 * MIN], ['the 
   })
 }
 
+// Every way back to idle decides afresh and cancels the wait first, so only the wait itself shows that a new turn
+// cancelled it at once: the mod's handlers, given a $ whose waits say when they are cancelled
+test('a new turn cancels the wait at once, as it starts', async () => {
+  const handlers: Record<string, Function> = {}
+  register((name: string, fn: Function) => {
+    handlers[name] = fn
+    return { catch: () => undefined }
+  })
+  const waits = { set: 0, cancelled: 0 }
+  const $ = {
+    clock: { now: async () => 1_000, after: () => ((waits.set += 1), { cancel: () => { waits.cancelled += 1 } }) },
+    env: { get: async () => SETTINGS },
+    fs: { read: async () => desk({}) },
+    session: { usage: async () => ({ context: { tokens: 450_000 } }), compact: async () => ({}) },
+    ui: { log: async () => undefined },
+  }
+  const next = async (e: unknown) => e
+  await handlers['turn.start']($, { text: 'work', turnId: 't1' }, next)
+  await handlers['classic.Stop']($, stopped(), next)
+  await handlers['turn.complete']($, done('t1'), next)
+  expect(waits).toEqual({ set: 1, cancelled: 0 }) // waiting for the minute
+  await handlers['turn.start']($, { text: 'hansa posted', turnId: 't2' }, next)
+  expect(waits).toEqual({ set: 1, cancelled: 1 })
+})
+
 // -- thresholds: read at each decision -----------------------------------------------------------------------------
 
 test('a threshold changed during a wait is the one used when the wait ends', async ($, on) => {
@@ -326,6 +352,17 @@ test('not while a turn runs: a subagent ending inside it counts for nothing', as
   await $.turn.complete(done('sub2', { agentId: 'agent-2' }))
   await clock.advance(60 * MIN)
   expect(calls.compact).toBe(0)
+})
+
+test('a subagent ending while the main conversation waits counts for nothing, even with work of its own', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls } = setup(on, tokens)
+  await turn($, 't1')
+  await clock.advance(30_000) // idle, waiting for the minute
+  await $.classic.Stop(stopped({ agent_id: 'agent-1',
+    background_tasks: [{ id: 'b1', type: 'local_bash', status: 'running', description: 'x' }] }))
+  await clock.advance(31_000)
+  expect(calls.compact).toBe(1)
 })
 
 test('an interrupted or failed turn: no compact', async ($, on) => {

@@ -12,22 +12,21 @@ when the session starts). All are the principal's, on the page (desk.COMPACT_DEF
 It needs Claude Code NEEDS or later (mods, and --autocompact, on any endpoint). On an older one the session starts
 without the mod and without --autocompact, and the start says so. --autocompact is given whenever Claude Code is new
 enough, whether or not the mod loads. Preparing the mod (the version probe, the copy, the start's record) never stops
-the session: a step that fails leaves the mod off, and the start says what failed. hansa says only what it knows at
-the start: whether the session was started with the mod, and why not (status). It reads none of the mod's files, and
-the mod writes none.
+the session: a step that fails leaves the mod off, and the start says what failed. hansa reads none of the mod's
+files, and the mod writes none.
 
 Where things are kept:
     plugin-XXXXXX/   the copy --plugin-dir loads (home), made new at each start in a folder hansa creates, readable and
                      writable only by whoever runs the session; the earlier copies are removed. home is the desk's
                      .hansa/coordinator-mod/, except for root on an account's desk (see account.py): root writes
                      nothing in the desk, so its copy is under root's home, in a folder of root's own
-    start.json       in the desk's .hansa/coordinator-mod/, written by the desk's owner: this start, as passed to
-                     Claude Code (the mod loaded or not and why, and the window: the last --autocompact of its command
-                     line, the caller's options included). Removed before the mod is prepared, and tied to this start
-                     (coordinator.json's at): an earlier start's is never shown
+    start.json       in the desk's .hansa/coordinator-mod/, written by the desk's owner: what hansa did at this start
+                     (whether it loaded the mod, and why not) and the --autocompact options of the command line, as
+                     given. Removed before the mod is prepared, and tied to this start (coordinator.json's at): an
+                     earlier start's is never shown
 
-What status and the page say of a running session comes from that record, and the thresholds from the desk's settings
-file, read as the mod reads it (thresholds).
+Of a running session, status and the page say only what that record holds, and nothing of what Claude Code or the mod
+make of it; the thresholds, as the desk's settings.
 """
 from __future__ import annotations
 
@@ -36,6 +35,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 from . import account
-from .desk import COMPACT_DEFAULTS, COMPACT_MOST, Desk, now, write_json
+from .desk import Desk, compact_settings, now, write_json
 
 MOD = Path(__file__).with_name("mod")
 NEEDS = (2, 1, 290)  # Claude Code's version the mod and --autocompact need, on a compatible endpoint too
@@ -133,9 +133,9 @@ def _needed() -> str:
 def version_problem(v: str) -> str:
     """Why this Claude Code cannot run the mod or take --autocompact; '' when it can."""
     if not v:
-        return f"hansa could not tell which Claude Code this is (claude --version), and the mod needs {_needed()}"
+        return "hansa could not tell which Claude Code this is from claude --version"
     if tuple(int(x) for x in v.split(".")) < NEEDS:
-        return f"Claude Code {v} is older than {_needed()}, which the mod needs"
+        return f"Claude Code {v} is older than {_needed()}"
     return ""
 
 
@@ -175,27 +175,27 @@ def _number(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
-def given(cmd: list, option: str) -> list:
-    """The values of option in a command line, in order, in either spelling (--option N, --option=N); none after a
-    bare --, where the options end."""
-    out = []
-    for i, x in enumerate(cmd[1:], 1):
-        if x == "--":
-            break
-        if x == option:
-            out.append(cmd[i + 1] if i + 1 < len(cmd) else "")
-        elif x.startswith(option + "="):
-            out.append(x[len(option) + 1:])
+def options(cmd: list, option: str) -> list:
+    """The words of a command line that give option, as they are there: each word that is option with the word after
+    it, and each that starts with option=. hansa reads nothing into them."""
+    out, i = [], 0
+    while i < len(cmd):
+        if cmd[i] == option:
+            out += cmd[i:i + 2]
+            i += 2
+            continue
+        if cmd[i].startswith(option + "="):
+            out.append(cmd[i])
+        i += 1
     return out
 
 
 def start_record(p: dict, cmd: list, start) -> dict:
-    """What the desk keeps of this start: what Claude Code is started with, cmd its whole command line. The window is
-    the last --autocompact there, whoever put it there: Claude Code takes the last. start: coordinator.json's at, which
-    coordinator_desk wrote for this start."""
-    windows = given(cmd, "--autocompact")
-    return {"start": start, "plugin": p["on"] and p.get("copy") in given(cmd, "--plugin-dir"),
-            "autocompact": windows[-1] if windows else None, "why": p.get("why", ""), "version": p.get("version", "")}
+    """What the desk keeps of this start: whether hansa loaded the mod, and why not; and the --autocompact options of
+    cmd, the whole command line Claude Code is started with. start: coordinator.json's at, which coordinator_desk
+    wrote for this start."""
+    return {"start": start, "loaded": p["on"], "why": p.get("why", ""),
+            "autocompact_options": options(cmd, "--autocompact"), "version": p.get("version", "")}
 
 
 def forget(desk: Desk) -> None:
@@ -207,14 +207,19 @@ def forget(desk: Desk) -> None:
         pass
 
 
+def _words(x) -> bool:
+    return isinstance(x, list) and all(isinstance(w, str) for w in x)
+
+
 def record_start(desk: Desk, rec: dict, root: bool = False) -> None:
     """Keep this start in the desk, as the desk's owner, with only what a record holds (rec may be root's, given to
-    the account's hansa). root: root's session on the account's desk."""
-    ac, why, v = rec.get("autocompact"), rec.get("why"), rec.get("version")
+    the account's hansa); a field that is not of its kind is kept as not known (None). root: root's session on the
+    account's desk."""
+    why, v, opts = rec.get("why"), rec.get("version"), rec.get("autocompact_options")
     clean = {"start": rec.get("start") if _number(rec.get("start")) else None, "at": now(),
-             "plugin": rec.get("plugin") is True,
-             "autocompact": "".join(c for c in ac if c.isprintable())[:40] if isinstance(ac, str) else None,
+             "loaded": rec.get("loaded") if isinstance(rec.get("loaded"), bool) else None,
              "why": " ".join(why.split())[:300] if isinstance(why, str) else "",
+             "autocompact_options": opts if _words(opts) else None,
              "version": v if isinstance(v, str) and re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", v) else "",
              "root": root}
     desk.mod_dir.mkdir(parents=True, exist_ok=True)
@@ -237,22 +242,12 @@ def record(desk: Desk, rec: dict) -> str:
         return unrecorded_text(desk.mod_dir / "start.json", e)
 
 
-def window_text(w) -> str:
-    """The window Claude Code was given (the last --autocompact, as given), in words."""
-    if w is None:
-        return "its own window"
-    if isinstance(w, int) or re.fullmatch(r"\d{1,12}", w):
-        return f"{int(w):,} tokens"
-    return f"{w} (as given to --autocompact)"
-
-
-def start_text(p: dict, window) -> str:
-    """What the start says of the mod when it is off, in one line; '' when it is on. window: the record's."""
-    if p["on"]:
-        return ""
-    return (f"the coordinator's mod is off{'' if p['autocompact'] else ', and so is --autocompact'}: {p['why']}"
-            + ("" if p["autocompact"] or p.get("failed") else " (claude update)") + ". The session does not compact "
-            f"when idle; Claude Code compacts at {window_text(window)}. " + HELP)
+def start_lines(p: dict) -> list:
+    """What the start says hansa did not do, and why: a line each for the mod and --autocompact."""
+    old = not p["autocompact"] and not p.get("failed")  # a Claude Code to update
+    return ([f"hansa did not load the coordinator's mod, because {p['why']}{' (claude update)' if old else ''}. {HELP}"]
+            if not p["on"] else []) + ([f"hansa did not pass --autocompact, because {p['why']}."]
+                                       if not p["autocompact"] else [])
 
 
 def left_text(p: dict) -> str:
@@ -262,39 +257,16 @@ def left_text(p: dict) -> str:
 
 
 # -- what hansa says of it -----------------------------------------------------------------------------------------
-def _whole(x) -> bool:
-    """A whole number as the mod's Number.isInteger takes one: 400000, and 400000.0 or 4e5 too."""
-    return _number(x) and x == int(x)
-
-
-def thresholds(path) -> dict | None:
-    """The three the mod reads at each decision, read as it reads them (hooks/register.js: thresholds): one absent or
-    out of range is its default; None when the file cannot be read or parsed, and then it compacts nothing while
-    idle."""
-    def no(x):
-        raise ValueError(x)  # NaN, Infinity: not JSON to the mod
-    try:
-        x = json.loads(Path(path).read_bytes().decode("utf-8"), parse_constant=no)
-    except (OSError, ValueError, RecursionError):
-        return None
-    if not isinstance(x, dict):
-        return None
-    cc = x.get("coordinator_compact") if isinstance(x.get("coordinator_compact"), dict) else {}
-    return {k: int(cc[k]) if _whole(cc.get(k)) and COMPACT_MOST[k][0] <= cc[k] <= COMPACT_MOST[k][1] else v
-            for k, v in COMPACT_DEFAULTS.items() if k != "working_at"}
-
-
-def values_text(v: dict) -> str:
-    """The thresholds in their words: compact when idle at 400,000 tokens, ..."""
-    window = f"{WORDS['working_at'][0]} {window_text(v['working_at'])}"
-    if v["idle_at"] is None:
-        return "it cannot read the desk's settings file now, so it does not compact when idle; " + window
-    return ", ".join([*(f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS if k != "working_at"), window])
+def _quoted(words: list) -> str:
+    """Words as a shell would take them, on one line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in shlex.join(words))
 
 
 def status(desk: Desk) -> dict | None:
-    """The coordinator's mod as hansa status and the page show it: what hansa knew when the session started
-    ({known: False} when that start left no record of its own). None before a coordinator was started."""
+    """The coordinator's session as hansa status and the page show it: when it started; whether hansa loaded the mod
+    at that start (loaded), and why not; and the --autocompact options of its command line, quoted ('' when none).
+    None for what that start's record does not tell (none, an earlier start's, or one that does not hold it); None in
+    all before a coordinator was started."""
     who = _read(desk.state_dir / "coordinator.json")
     start = who.get("at") if isinstance(who, dict) else None
     if not _number(start):
@@ -304,28 +276,30 @@ def status(desk: Desk) -> dict | None:
     except (OverflowError, OSError, ValueError):
         return None
     r = _read(desk.mod_dir / "start.json")
-    if not isinstance(r, dict) or r.get("start") != start:  # none, or an earlier start's that was left there
-        return {"known": False, "started": started}
-    ac = r.get("autocompact") if isinstance(r.get("autocompact"), str) else None
-    # the first three: what the mod reads at its next decision, from the file it reads (None: it cannot read it); the
-    # fourth: the window Claude Code was given, a number of tokens when it was one
-    read = thresholds(desk.settings_path) or {k: None for k in WORDS if k != "working_at"}
-    values = {**read, "working_at": int(ac) if ac and re.fullmatch(r"\d{1,12}", ac) else ac}
-    return {"known": True, "on": r.get("plugin") is True, "root": r.get("root") is True,
-            "started": started, "why": " ".join(str(r.get("why") or "").split())[:300], "autocompact": ac,
-            "values": values}
+    r = r if isinstance(r, dict) and r.get("start") == start else {}
+    loaded = r.get("loaded") if isinstance(r.get("loaded"), bool) else None
+    why = r.get("why") if loaded is False and isinstance(r.get("why"), str) else ""
+    opts = r.get("autocompact_options")
+    return {"started": started, "loaded": loaded, "why": " ".join(why.split())[:300] or None,
+            "autocompact": _quoted(opts) if _words(opts) else None}
 
 
 def status_line(st: dict) -> str:
-    """hansa status's line on the coordinator's mod: the session was started with it, or without it and why, or
-    hansa does not know."""
-    head = f"coordinator's mod: the session started {st['started']} was started "
-    if not st["known"]:
-        return (f"coordinator's mod: hansa does not know how the session started {st['started']} was started (that "
-                f"start left no record). {HELP}")
-    if not st["on"]:
-        return (head + f"without it: {st['why']}"
-                + (f"; Claude Code compacts at {window_text(st['autocompact'])}" if st["autocompact"] is not None
-                   else "")
-                + f". {HELP}")
-    return head + "with it; " + values_text(st["values"])
+    """The line on the coordinator's session, in hansa status and on the page: what hansa did at its start, and
+    nothing else."""
+    if st["loaded"] is None:
+        mod = "whether hansa loaded the coordinator's mod: not known"
+    elif st["loaded"]:
+        mod = "hansa loaded the coordinator's mod"
+    else:
+        mod = f"hansa did not load the coordinator's mod, because {st['why'] or 'of what is not known'}"
+    opts = "not known" if st["autocompact"] is None else st["autocompact"] or "none"
+    return f"coordinator's session started {st['started']}: {mod}; --autocompact options of its command line: {opts}."
+
+
+def settings_line(s: dict) -> str:
+    """hansa status's line on the desk's compaction settings, in their words."""
+    v = compact_settings(s)
+    said = [f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS]
+    return ("coordinator's compaction, the desk's settings: " + ", ".join(said[:3]) + " (the mod reads these); "
+            + said[3] + " (hansa passes it as --autocompact at a start)")

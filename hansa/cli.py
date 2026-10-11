@@ -1461,8 +1461,9 @@ def cmd_coordinator(a):
     if mod["on"]:  # for this start only: hansa names the mod in no settings file
         argv += ["--plugin-dir", mod["copy"]]
         env["HANSA_MOD_SETTINGS"] = str(desk.settings_path)
-    if plugin.left_text(mod):
-        print(f"hansa: {plugin.left_text(mod)}", file=sys.stderr)
+    for line in [plugin.left_text(mod)] + plugin.start_lines(mod):
+        if line:
+            print(f"hansa: {line}", file=sys.stderr)
     # after a /clear (hansa's daily one, or anyone's) the fresh context starts from the desk's state; the hook is
     # hansa's own code, never the desk's files
     hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
@@ -1476,11 +1477,9 @@ def cmd_coordinator(a):
     else:
         argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks, **QUIET})]
     argv += _notified(desk, rest, clear)
-    # what Claude Code is started with, kept in the desk by its owner (root's, by the account's hansa) for status and
-    # the page: from the whole command line, the caller's options too (the window is the last --autocompact)
+    # what hansa did at this start, kept in the desk by its owner (root's, by the account's hansa) for status and the
+    # page, with the --autocompact options of the whole command line, the caller's too, as given
     rec = plugin.start_record(mod, argv + rest, plan.get("started"))
-    if not mod["on"]:
-        print(f"hansa: {plugin.start_text(mod, rec['autocompact'])}", file=sys.stderr)
     unrecorded = _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
     if unrecorded:
         print(f"hansa: {unrecorded}", file=sys.stderr)

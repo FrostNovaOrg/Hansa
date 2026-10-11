@@ -539,8 +539,9 @@ def status(desk: Desk) -> dict:
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
         "heard": notify.hears(desk),  # whether the session asking is one of them
-        "mod": (mod := plugin.status(desk)),  # the coordinator's mod: on or off at the session's start, and why
+        "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
         "mod_line": plugin.status_line(mod) if mod else "",
+        "compact_line": plugin.settings_line(s) if mod else "",  # the desk's compaction settings
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
@@ -636,7 +637,7 @@ def status_text(st: dict) -> str:
     out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
-    out += [st["mod_line"]] if st.get("mod_line") else []
+    out += [f"{st['mod_line']} {plugin.HELP}", st["compact_line"]] if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
     out += [f"sandbox try: {st['try_note']}"] if st.get("try_note") else []
     out.append("lanes:")

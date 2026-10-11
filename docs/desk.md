@@ -167,7 +167,7 @@ Tokens take 100,000 to 1,000,000, minutes 1 to 240. A new turn cancels a wait; a
 refused) the mod asks again only after a new turn. It reads the first three in the desk's settings file at each
 decision (a turn or a wait ends): a missing value is its default, a file it cannot read or parse means no idle
 compact. The fourth applies from the next start. The mod needs Claude Code 2.1.290 or later; `--autocompact` is given
-whenever Claude Code is new enough, whether or not the mod loads. When the mod is off, the start, `hansa status` and
+whenever Claude Code is new enough, whether or not the mod loads. When hansa skips it, the start, `hansa status` and
 the page say why. A session whose settings turn hooks off runs without the mod's rules, and hansa cannot see that;
 Claude Code's own auto-compact still applies to it.
 
