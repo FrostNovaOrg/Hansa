@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import hansa  # noqa: E402
-from hansa import account, cli, cost, notify, views  # noqa: E402
+from hansa import account, cli, cost, notify, plugin, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
@@ -9687,6 +9687,463 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "coordinator", "--clear-daily", "9am"])
         self.assertIn("such as 04-09", str(e.exception.code))
 
+    # -- the coordinator's mod (hansa/plugin.py, hansa/mod/) ------------------------------------------------------
+
+    def versioned_claude(self, version="2.1.296"):
+        """A stand-in claude that answers --version as Claude Code does ('': it says no version)."""
+        f = self.tmp / f"claude-{version or 'unknown'}"
+        f.write_text("#!/bin/sh\n" + (f'[ "$1" = "--version" ] && echo "{version} (Claude Code)" && exit 0\n'
+                                      if version else "") + "exit 0\n")
+        f.chmod(0o755)
+        return f
+
+    def start_with_mod(self, *extra, version="2.1.296", env=None):
+        """Start the coordinator in this process, catching the claude it would become: (argv, env, what it said)."""
+        started, said = {}, io.StringIO()
+        with unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv, env=e)), \
+                unittest.mock.patch.dict(os.environ, {"HANSA_CLAUDE": str(self.versioned_claude(version)),
+                                                      "CLAUDE_CONFIG_DIR": str(self.tmp / "own-claude"), **(env or {})}), \
+                unittest.mock.patch("os.chdir"), unittest.mock.patch("hansa.notify.start", lambda *x, **k: None), \
+                contextlib.redirect_stderr(said):
+            main(["--desk", str(self.desk.root), "coordinator", *extra])
+        self.mod_said = said.getvalue()  # as printed, line by line
+        return started["argv"], started["env"], " ".join(said.getvalue().split())
+
+    def mod_copy(self):
+        """The copy of the mod the last start made in the desk: the only one there."""
+        [copy] = self.desk.mod_dir.glob("plugin*")
+        return copy
+
+    def mod_record(self):
+        return json.loads((self.desk.mod_dir / "start.json").read_text())
+
+    MOD_WORDS = ("coordinator's compaction, the desk's settings: compact when idle at 400,000 tokens, compact after a "
+                 "long idle at 200,000 tokens, a long idle is 50 minutes (the mod reads these); compact while working at "
+                 "550,000 tokens (hansa passes it as --autocompact at a start)")
+    MOD_UNKNOWN = ("whether hansa loaded the coordinator's mod: not known; --autocompact options of its command line: not "
+                   "known")
+    MOD_LOADED = "hansa loaded the coordinator's mod; --autocompact options of its command line: --autocompact 550000."
+
+    def mod_line(self):
+        return plugin.status_line(plugin.status(self.desk))
+
+    def test_the_coordinator_loads_hansas_mod_for_that_start_only(self):
+        argv, env, said = self.start_with_mod("--permission-mode", "dontAsk")
+        copy = self.mod_copy()
+        self.assertEqual(argv[argv.index("--plugin-dir") + 1], str(copy))
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
+        self.assertLess(argv.index("--autocompact"), argv.index("dontAsk"))  # the principal's own options come last
+        self.assertNotIn("did not", said)
+        code = Path(__file__).resolve().parent.parent / "hansa" / "mod"
+        for rel in (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.js"):
+            self.assertEqual((copy / rel).read_bytes(), (code / rel).read_bytes())
+        self.assertFalse((copy / "tests").exists())  # the mod's own tests stay in hansa/mod
+        # a folder hansa made for this start, readable and writable only by whoever runs the session
+        for f in (copy, *copy.rglob("*")):
+            self.assertEqual(stat.S_IMODE(os.stat(f).st_mode), 0o700 if f.is_dir() else 0o600, f)
+            self.assertEqual(os.stat(f).st_uid, os.getuid())
+        # what the mod is given in the session's environment: the desk's own settings file, the one the page saves,
+        # and nothing else of hansa's; no plugin folders in the environment (a claude the session starts would
+        # inherit them), nothing in a settings file, no second copy of the thresholds
+        self.assertEqual(env["HANSA_MOD_SETTINGS"], str(self.desk.settings_path))
+        self.assertEqual([k for k in env if k.startswith("HANSA_MOD")], ["HANSA_MOD_SETTINGS"])
+        self.assertEqual(sorted(p.name for p in self.desk.mod_dir.iterdir()), sorted([copy.name, "start.json"]))
+        self.assertNotIn("CLAUDE_CODE_PLUGIN_DIRS", env)
+        self.assertFalse({"enabledPlugins", "env", "autoCompactWindow"} & set(json.loads(argv[argv.index("--settings") + 1])))
+        self.assertFalse({"enabledPlugins", "env", "autoCompactWindow"}
+                         & set(json.loads((self.desk.root / ".claude" / "settings.json").read_text())))
+        self.assertFalse((self.tmp / "own-claude" / "settings.json").exists())
+        # the start's record: what hansa did, and the command line's --autocompact options, tied to this start
+        rec = self.mod_record()
+        self.assertEqual({k: rec[k] for k in ("loaded", "autocompact_options", "why", "version", "root")},
+                         {"loaded": True, "autocompact_options": ["--autocompact", "550000"], "why": "",
+                          "version": "2.1.296", "root": False})
+        self.assertEqual(rec["start"], json.loads((self.desk.state_dir / "coordinator.json").read_text())["at"])
+        # each start: a new copy in a new folder; the earlier copy is removed, what Claude Code wrote there with it
+        (copy / ".claude-plugin" / "types").mkdir()
+        (copy / ".claude-plugin" / "types" / "index.d.ts").write_text("// types\n")
+        self.start_with_mod()
+        self.assertNotEqual(self.mod_copy(), copy)
+        self.assertFalse(copy.exists())
+        # the page's save: the first three in the file the mod reads at each decision, with nothing else written;
+        # while working, from the next start
+        changed = {"idle_at": 300000, "long_idle_at": 150000, "long_idle_min": 30, "working_at": 700000}
+        before = sorted(self.desk.mod_dir.iterdir())
+        self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact=changed)), {"ok": True, "problems": []})
+        self.assertEqual(json.loads(Path(env["HANSA_MOD_SETTINGS"]).read_text())["coordinator_compact"], changed)
+        self.assertEqual(sorted(self.desk.mod_dir.iterdir()), before)
+        # status: what hansa did at the start, and the desk's settings as they are now
+        self.assertIn(self.MOD_LOADED, self.mod_line())
+        self.assertIn("compact when idle at 300,000 tokens, compact after a long idle at 150,000 tokens, a long idle is 30 "
+                      "minutes (the mod reads these); compact while working at 700,000 tokens",
+                      views.status(self.desk)["compact_line"])
+        argv, _, _ = self.start_with_mod()
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "700000")
+
+    def test_the_start_records_what_was_passed_even_when_the_page_saves_meanwhile(self):
+        # the page saves while the start asks Claude Code its version: the start passes and records the window it
+        # read first, and the page's save stands, whole, in the file the mod reads
+        changed = {"idle_at": 300000, "long_idle_at": 150000, "long_idle_min": 30, "working_at": 700000}
+        probe = plugin.version
+
+        def saving(claude):
+            self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact=changed)), {"ok": True, "problems": []})
+            return probe(claude)
+        with unittest.mock.patch.object(plugin, "version", saving):
+            argv, env, _ = self.start_with_mod()
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
+        self.assertEqual(self.mod_record()["autocompact_options"], ["--autocompact", "550000"])
+        self.assertEqual(json.loads(Path(env["HANSA_MOD_SETTINGS"]).read_text())["coordinator_compact"], changed)
+        self.assertIn(self.MOD_LOADED, self.mod_line())
+
+    def test_status_quotes_the_autocompact_options_of_the_command_line_as_given(self):
+        # every --autocompact the command line Claude Code is started with has, hansa's first and the caller's after it,
+        # quoted as given: hansa reads nothing into them (no unit, no window). What Claude Code receives is left as it is
+        for extra, quoted in (
+                ((), "--autocompact 550000"),
+                (("--autocompact", "700"), "--autocompact 550000 --autocompact 700"),
+                (("--autocompact=700000",), "--autocompact 550000 --autocompact=700000"),
+                (("--autocompact", "600000", "--autocompact=650000"),
+                 "--autocompact 550000 --autocompact 600000 --autocompact=650000"),
+                (("--autocompact", "auto"), "--autocompact 550000 --autocompact auto"),
+                (("--autocompact", "5 5"), "--autocompact 550000 --autocompact '5 5'"),
+                (("--", "--autocompact=100000"), "--autocompact 550000 --autocompact=100000")):
+            argv, _, said = self.start_with_mod(*extra)
+            self.assertEqual(argv[len(argv) - len(extra):], list(extra), extra)
+            self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")  # hansa's own, before the caller's
+            self.assertEqual(self.mod_record()["autocompact_options"], shlex.split(quoted))
+            line = self.mod_line()
+            self.assertTrue(line.endswith(f"hansa loaded the coordinator's mod; --autocompact options of its command line: "
+                                          f"{quoted}."), line)
+            self.assertNotIn("token", line)
+        # hansa did not pass one: the start says so, and why; status quotes the caller's, or says there is none
+        argv, _, said = self.start_with_mod("--autocompact", "700000", version="2.1.200")
+        self.assertEqual(argv.count("--autocompact"), 1)
+        self.assertEqual([x for x in self.mod_said.splitlines() if "did not" in x],
+                         ["hansa: hansa did not load the coordinator's mod, because Claude Code 2.1.200 is older than "
+                          "2.1.290 (claude update). More: hansa help inbox",
+                          "hansa: hansa did not pass --autocompact, because Claude Code 2.1.200 is older than 2.1.290."])
+        self.assertIn("hansa did not load the coordinator's mod, because Claude Code 2.1.200 is older than 2.1.290; "
+                      "--autocompact options of its command line: --autocompact 700000.", self.mod_line())
+        self.start_with_mod(version="2.1.200")
+        self.assertTrue(self.mod_line().endswith("--autocompact options of its command line: none."))
+        self.assertNotIn("window", self.mod_line())
+        with unittest.mock.patch.object(plugin, "home", side_effect=KeyError("no home")):
+            argv, _, said = self.start_with_mod("--autocompact=700000")
+        self.assertEqual([x for x in self.mod_said.splitlines() if "did not" in x],
+                         ["hansa: hansa did not load the coordinator's mod, because finding the folder for the mod's copy "
+                          "(the home folder) failed (KeyError: 'no home'). More: hansa help inbox"])
+        self.assertTrue(self.mod_line().endswith(
+            "--autocompact options of its command line: --autocompact 550000 --autocompact=700000."))
+
+    def test_workers_do_not_load_the_coordinators_mod(self):
+        self.start_with_mod()  # its copy and record are in the desk now
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+        worker, verifier = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
+        self.assertIn("checking another worker's finished task", verifier[verifier.index("--append-system-prompt") + 1])
+        from hansa import run
+        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
+                         model_asked="sonnet")
+        design, design_env, _ = run.design_command(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        for argv in (worker, verifier, design):
+            self.assertIn("-p" if argv is not design else "--session-id", argv)
+            self.assertFalse({"--plugin-dir", "--autocompact"} & set(argv))
+            self.assertFalse([x for x in argv if "coordinator-mod" in x])
+        self.assertFalse({"HANSA_MOD_SETTINGS", "CLAUDE_CODE_PLUGIN_DIRS"} & set(design_env))
+
+    def test_an_install_puts_the_mod_in_place_and_the_coordinator_started_from_it_copies_it_into_the_desk(self):
+        code = Path(__file__).resolve().parent.parent
+        top = self.tmp.resolve() / "inst"  # an install: bin/hansa, and of the package only the files hansa ships
+        for f in (code / "hansa").rglob("*"):
+            if f.is_file() and hansa.shipped(f.relative_to(code / "hansa")):
+                (top / "hansa" / f.relative_to(code / "hansa")).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, top / "hansa" / f.relative_to(code / "hansa"))
+        shutil.copytree(code / "bin", top / "bin")
+        mod = top / "hansa" / "mod"
+        for rel in (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.js", "tests/register.test.ts"):
+            self.assertTrue((mod / rel).is_file(), rel)
+        with (mod / "hooks" / "register.js").open("a") as f:
+            f.write("// as installed\n")  # so the copy shows which mod it was made from
+        show = self.tmp / "argv-claude"  # Claude Code 2.1.296; the session: its options, one per line
+        show.write_text('#!/bin/sh\n[ "$1" = "--version" ] && echo "2.1.296 (Claude Code)" && exit 0\n'
+                        'for x in "$@"; do echo "$x"; done\nsleep 1\n')
+        show.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "PYTHONPATH")}
+        r = subprocess.run([str(top / "bin" / "hansa"), "--desk", str(self.desk.root), "coordinator"], cwd=self.tmp,
+                           env={**env, "HANSA_CLAUDE": str(show), "CLAUDE_CONFIG_DIR": str(self.tmp / "own-claude")},
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("did not", " ".join(r.stderr.split()))
+        argv = r.stdout.splitlines()
+        copy = self.mod_copy()
+        self.assertEqual(argv[argv.index("--plugin-dir") + 1], str(copy))
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
+        for rel in (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.js"):
+            self.assertEqual((copy / rel).read_bytes(), (mod / rel).read_bytes(), rel)
+        self.assertTrue((copy / "hooks" / "register.js").read_text().endswith("// as installed\n"))
+        self.assertFalse((copy / "tests").exists())
+        self.soon(lambda: notify.records(self.desk) and all(x.get("ended") for x in notify.records(self.desk)))
+
+    def test_an_older_claude_code_starts_without_the_mod_or_autocompact_and_says_so(self):
+        for version, says in (("2.1.289", "Claude Code 2.1.289 is older than 2.1.290"),
+                              ("", "hansa could not tell which Claude Code this is from claude --version")):
+            argv, env, said = self.start_with_mod(version=version)
+            self.assertFalse({"--plugin-dir", "--autocompact"} & set(argv))
+            self.assertNotIn("HANSA_MOD_SETTINGS", env)
+            self.assertIn(f"hansa did not load the coordinator's mod, because {says} (claude update). More: hansa help "
+                          "inbox", said)
+            self.assertIn(f"hansa did not pass --autocompact, because {says}.", said)
+            rec = self.mod_record()
+            self.assertEqual((rec["loaded"], rec["autocompact_options"]), (False, []))
+            self.assertIn(f"hansa did not load the coordinator's mod, because {says}; --autocompact options of its "
+                          "command line: none", self.mod_line())
+        self.assertFalse(list(self.desk.mod_dir.glob("plugin*")))
+        argv, _, said = self.start_with_mod(version="2.1.290")
+        self.assertIn("--plugin-dir", argv)
+        self.assertIn("--autocompact", argv)
+        self.assertNotIn("did not", said)
+        # the version probe waits 10 seconds at most
+        with unittest.mock.patch.object(plugin.subprocess, "run",
+                                        side_effect=subprocess.TimeoutExpired("claude", 10)) as ran:
+            self.assertEqual(plugin.version("claude"), "")
+        self.assertEqual(ran.call_args.kwargs["timeout"], 10)
+
+    def test_hansa_does_not_foretell_whether_hooks_run(self):
+        # settings that turn hooks off, in each place this test owns (the user's, the desk's, the command line), and
+        # claude's own options and variable that do: hansa reads none of them, passes the mod all the same, and
+        # says nothing of them at the start
+        own = self.tmp / "own-claude"
+        own.mkdir()
+        (own / "settings.json").write_text(json.dumps({"disableAllHooks": True}))
+        (self.desk.root / ".claude" / "settings.local.json").write_text(json.dumps({"disableAllHooks": True}))
+        for extra in ((), ("--settings", '{"disableAllHooks":true}'), ("--setting-sources", "project,local"),
+                      ("--bare",), ("--safe-mode",)):
+            argv, env, said = self.start_with_mod(*extra)
+            self.assertIn("--plugin-dir", argv)
+            self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
+            self.assertNotIn("did not", said)
+            self.assertNotIn("disableAllHooks", said)
+        _, env, _ = self.start_with_mod(env={"CLAUDE_CODE_SIMPLE": "1"})
+        self.assertEqual(env["CLAUDE_CODE_SIMPLE"], "1")
+        # hansa sets no CLAUDE_CODE_PLUGIN_DIRS; one the caller's own environment holds is left as it is
+        self.assertNotIn("CLAUDE_CODE_PLUGIN_DIRS", env)
+        _, env, _ = self.start_with_mod(env={"CLAUDE_CODE_PLUGIN_DIRS": "/theirs/plugins"})
+        self.assertEqual(env["CLAUDE_CODE_PLUGIN_DIRS"], "/theirs/plugins")
+        # the docs say what such a session does, and when --autocompact is given
+        docs = " ".join(self.hansa("help", "inbox").split())
+        self.assertIn("A session whose settings turn hooks off runs without the mod's rules, and hansa cannot see "
+                      "that; Claude Code's own auto-compact still applies to it.", docs)
+        self.assertIn("`--autocompact` is given whenever Claude Code is new enough, whether or not the mod loads.", docs)
+
+    def test_preparing_the_mod_never_stops_the_coordinator(self):
+        # each step that fails leaves the mod off: the session starts as without hansa's mod, with --autocompact once
+        # Claude Code is known to be new enough, and the start says in one line what failed; status says it too
+        def broken(step, says, autocompact=True, failed=True, **kw):
+            argv, env, said = self.start_with_mod(**kw)
+            self.assertNotIn("--plugin-dir", argv, step)
+            self.assertEqual("--autocompact" in argv, autocompact, step)
+            self.assertIn("--model", argv)  # the rest of the start as ever
+            self.assertNotIn("HANSA_MOD_SETTINGS", env, step)
+            lines = [x for x in self.mod_said.splitlines() if "did not" in x]
+            self.assertEqual(len(lines), 1 if autocompact else 2, step)
+            self.assertTrue(lines[0].startswith(f"hansa: hansa did not load the coordinator's mod, because {says}"), lines)
+            if not autocompact:
+                self.assertTrue(lines[1].startswith(f"hansa: hansa did not pass --autocompact, because {says}"), lines)
+            if failed:  # not a Claude Code to update
+                self.assertNotIn("claude update", lines[0])
+            self.assertIn(f"hansa did not load the coordinator's mod, because {says}", self.mod_line(), step)
+        with unittest.mock.patch.object(plugin, "version", side_effect=RuntimeError("it hung up")):
+            broken("the version probe", "asking Claude Code its version (claude --version) failed (RuntimeError: "
+                   "it hung up)", autocompact=False)
+        odd = self.tmp / "claude-odd"  # its --version prints what is not UTF-8: no version to be had
+        odd.write_bytes(b"#!/bin/sh\nprintf '\\377\\376 2.1.296'\n")
+        odd.chmod(0o755)
+        broken("a version that is not UTF-8", "hansa could not tell which Claude Code this is", autocompact=False,
+               failed=False, env={"HANSA_CLAUDE": str(odd)})
+        with unittest.mock.patch.object(plugin, "home", side_effect=KeyError("getpwuid(): uid not found")):
+            broken("the home folder", "finding the folder for the mod's copy (the home folder) failed (KeyError")
+        shutil.rmtree(self.desk.mod_dir)  # (the starts above recorded themselves there)
+        self.desk.mod_dir.write_text("")  # a file where the mod's folder goes: and so no record either
+        argv, _, said = self.start_with_mod()
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertIn(f"hansa did not load the coordinator's mod, because making the mod's folder {self.desk.mod_dir} "
+                      "failed (FileExistsError", said)
+        self.assertIn(f"hansa could not record this start in {self.desk.mod_dir / 'start.json'}", said)
+        self.assertIn(self.MOD_UNKNOWN, self.mod_line())
+        self.desk.mod_dir.unlink()
+        self.desk.mod_dir.mkdir()
+        self.start_with_mod()
+        self.desk.mod_dir.chmod(0o500)  # a folder hansa cannot write in: no copy, no record
+        self.addCleanup(self.desk.mod_dir.chmod, 0o700)
+        argv, _, said = self.start_with_mod()
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertIn(f"hansa did not load the coordinator's mod, because copying the mod into {self.desk.mod_dir} failed "
+                      "(PermissionError", said)
+        self.assertIn(self.MOD_UNKNOWN, self.mod_line())  # never the earlier start's
+        self.desk.mod_dir.chmod(0o700)
+        # the record alone cannot be written: the mod loads all the same; the start says it in one line, and status
+        # that it does not know
+        (self.desk.mod_dir / "start.json").unlink()
+        (self.desk.mod_dir / "start.json").mkdir()
+        argv, _, said = self.start_with_mod()
+        self.assertIn("--plugin-dir", argv)
+        self.assertNotIn("did not", said)
+        lines = [x for x in self.mod_said.splitlines() if "could not record" in x]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(f"hansa: hansa could not record this start in {self.desk.mod_dir / 'start.json'} ("))
+        self.assertTrue(lines[0].endswith("hansa status and the page say they do not know how this session was started"))
+        self.assertIn(self.MOD_UNKNOWN, self.mod_line())
+        (self.desk.mod_dir / "start.json").rmdir()
+        argv, _, said = self.start_with_mod()
+        self.assertIn("--plugin-dir", argv)
+        self.assertNotIn("did not", said)
+        self.assertIn(self.MOD_LOADED, self.mod_line())
+        # the earlier start's record is removed before the mod is prepared: a start that records nothing leaves none
+        with unittest.mock.patch.object(plugin, "record_start", side_effect=OSError("disk full")):
+            self.start_with_mod()
+        self.assertFalse((self.desk.mod_dir / "start.json").exists())
+
+    def test_an_earlier_copy_that_cannot_be_removed_is_said_in_one_line_at_the_start(self):
+        self.start_with_mod()
+        old = self.mod_copy()
+        (old / "hooks").chmod(0o500)  # its files cannot be taken out of it
+        self.addCleanup(lambda: (old / "hooks").exists() and (old / "hooks").chmod(0o700))
+        argv, _, said = self.start_with_mod()
+        self.assertIn("--plugin-dir", argv)  # the new copy loads all the same
+        self.assertNotEqual(argv[argv.index("--plugin-dir") + 1], str(old))
+        lines = [x for x in self.mod_said.splitlines() if "earlier copy" in x]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(f"hansa: hansa could not remove an earlier copy of the coordinator's mod: "
+                                            f"{old} ("), lines[0])
+        (old / "hooks").chmod(0o700)
+        self.start_with_mod()
+        self.assertNotIn("earlier copy", self.mod_said)
+        self.assertFalse(old.exists())
+
+    def test_the_mods_copy_is_made_new_at_each_start_and_never_in_a_folder_another_account_could_change(self):
+        self.desk.mod_dir.mkdir(parents=True)
+        self.desk.mod_dir.chmod(0o777)
+        self.addCleanup(self.desk.mod_dir.chmod, 0o700)
+        argv, _, said = self.start_with_mod()
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")  # Claude Code is new enough
+        self.assertIn("hansa did not load the coordinator's mod, because its copy would be in a folder another account "
+                      f"could change: others may write in {self.desk.mod_dir}. More: hansa help inbox", said)
+        self.assertIn(f"others may write in {self.desk.mod_dir}; --autocompact options of its command line: --autocompact "
+                      "550000.", self.mod_line())
+        self.desk.mod_dir.chmod(0o700)
+        theirs = lambda p: 4242 if Path(p) == self.desk.mod_dir else os.getuid()  # noqa: E731
+        with unittest.mock.patch.object(account, "owner", theirs):
+            argv, _, said = self.start_with_mod()
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertIn(f"{self.desk.mod_dir} belongs to {account.name_of(4242)}", said)
+        # earlier copies others could change (the folder, a file in it), and one by an older hansa: none is reused,
+        # each is removed, and the new one is hansa's own code, closed to others
+        code = Path(__file__).resolve().parent.parent / "hansa" / "mod" / "hooks" / "register.js"
+        for old in ("plugin", "plugin-abc123"):
+            (self.desk.mod_dir / old / "hooks").mkdir(parents=True)
+            (self.desk.mod_dir / old / "hooks" / "register.js").write_text("// someone else's\n")
+            (self.desk.mod_dir / old / "hooks" / "register.js").chmod(0o666)
+            (self.desk.mod_dir / old).chmod(0o777)
+        argv, _, said = self.start_with_mod()
+        self.assertNotIn("did not", said)
+        copy = Path(argv[argv.index("--plugin-dir") + 1])
+        self.assertEqual([p.name for p in self.desk.mod_dir.glob("plugin*")], [copy.name])
+        self.assertEqual((copy / "hooks" / "register.js").read_bytes(), code.read_bytes())
+        self.assertEqual(stat.S_IMODE(os.stat(copy / "hooks" / "register.js").st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(copy).st_mode), 0o700)
+
+    def test_hansa_status_says_only_what_hansa_did_at_the_coordinators_start(self):
+        self.assertIsNone(plugin.status(self.desk))  # no coordinator started yet
+        self.assertNotIn("coordinator's session started", views.status_text(views.status(self.desk)))
+        self.assertNotIn("compaction", views.status_text(views.status(self.desk)))
+        self.start_with_mod()
+        started = time.strftime("%m-%d %H:%M", time.localtime(self.mod_record()["at"]))
+        lines = views.status_text(views.status(self.desk)).splitlines()
+        self.assertIn(f"coordinator's session started {started}: {self.MOD_LOADED} More: hansa help inbox", lines)
+        self.assertIn(self.MOD_WORDS, lines)  # the desk's settings, which the mod reads
+        self.start_with_mod(version="2.1.200")
+        self.assertIn(f"coordinator's session started {started}: hansa did not load the coordinator's mod, because "
+                      "Claude Code 2.1.200 is older than 2.1.290; --autocompact options of its command line: none. More: "
+                      "hansa help inbox", views.status_text(views.status(self.desk)))
+        # hansa reads none of the mod's files: what the mod could leave beside its copy changes nothing said
+        self.start_with_mod()
+        before = views.status(self.desk)["mod_line"]
+        for name in ("heartbeat.json", "alerted.json", "settings.json"):
+            (self.desk.mod_dir / name).write_text(json.dumps({"at": time.time(), "launch": "x", "idle_at": 100000}))
+        self.assertEqual(views.status(self.desk)["mod_line"], before)
+        # a record that is not this start's, cannot be read, or does not hold a fact (an older hansa's): not known
+        rec = self.mod_record()
+        for bad in (b"\xff", b'{"start": Infinity}', b'{"start": "x"}', b"[]",
+                    json.dumps({**rec, "start": rec["start"] - 60}).encode(),  # an earlier start's, left there
+                    json.dumps({"start": rec["start"], "plugin": True, "autocompact": 550000, "why": ""}).encode(),
+                    json.dumps({"start": rec["start"], "plugin": True, "autocompact": "550000", "why": ""}).encode(),
+                    json.dumps({**rec, "loaded": "yes", "autocompact_options": [550000]}).encode()):
+            (self.desk.mod_dir / "start.json").write_bytes(bad)
+            st = views.status(self.desk)
+            self.assertEqual(f"coordinator's session started {started}: {self.MOD_UNKNOWN}.", st["mod_line"], bad)
+            self.assertIn(f"{st['mod_line']} More: hansa help inbox", views.status_text(st).splitlines())
+        (self.desk.mod_dir / "start.json").write_text(json.dumps({**rec, "autocompact_options": None}))
+        self.assertIn("hansa loaded the coordinator's mod; --autocompact options of its command line: not known.",
+                      views.status(self.desk)["mod_line"])
+        (self.desk.mod_dir / "start.json").write_text(json.dumps({**rec, "loaded": False, "why": None}))
+        self.assertIn("hansa did not load the coordinator's mod, because of what is not known; --autocompact options of its "
+                      "command line: --autocompact 550000", views.status(self.desk)["mod_line"])
+        (self.desk.mod_dir / "start.json").unlink()
+        self.assertIn(self.MOD_UNKNOWN, views.status(self.desk)["mod_line"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_says_only_what_hansa_did_at_the_coordinators_start(self):
+        from hansa import web
+        harness = self.tmp / "page.js"
+        script = self.PAGE_HARNESS.replace("console.log(JSON.stringify(nulls));",
+                                           "console.log(JSON.stringify({nulls, text: ids['#state'].textContent, "
+                                           "warn: ids['#state'].className, settings: ids['#tab-settings'].textContent}));")
+        for version, says, zh, warn in (
+                ("2.1.296", self.MOD_LOADED, "hansa 加载了协调席的 mod；命令行里的 --autocompact 选项：--autocompact 550000",
+                 "muted"),
+                ("2.1.200", "hansa did not load the coordinator's mod, because Claude Code 2.1.200 is older than 2.1.290; "
+                 "--autocompact options of its command line: none",
+                 "hansa 没有加载协调席的 mod，因为：Claude Code 2.1.200 is older than 2.1.290；命令行里的 --autocompact 选项：无",
+                 "warn"),
+                ("caller", "--autocompact options of its command line: --autocompact 550000 --autocompact=700000.",
+                 "命令行里的 --autocompact 选项：--autocompact 550000 --autocompact=700000", "muted"),
+                ("unrecorded", self.MOD_UNKNOWN, "hansa 是否加载了协调席的 mod：不知道；命令行里的 --autocompact 选项：不知道",
+                 "warn")):
+            if version == "unrecorded":
+                (self.desk.mod_dir / "start.json").unlink()
+            elif version == "caller":
+                self.start_with_mod("--autocompact=700000")
+            else:
+                self.start_with_mod(version=version)
+            st = views.status(self.desk)
+            st.update(paused="", server_up=True, server=None, srt_missing="", disk=None, no_read_stop="",
+                      no_read_left_out=[])  # nothing else on the status line asks for attention
+            given = {"/api/settings": public_settings(self.desk), "/api/status": st, "/api/events": []}
+            for lang, words in (("en", says), ("zh-CN", zh)):
+                harness.write_text(script.replace('navigator: {language: "en"}', f'navigator: {{language: "{lang}"}}'))
+                r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                page = json.loads(r.stdout)
+                self.assertEqual(page["nulls"], [])
+                self.assertIn(words, page["text"])
+                self.assertNotIn("hansa help", page["text"])  # for the coordinator, not on the page
+                self.assertEqual(page["warn"], warn, (version, lang))
+                if lang == "en":  # the settings name the thresholds in the words status uses
+                    for w in ("Compact when idle at (tokens)", "Compact after a long idle at (tokens)",
+                              "A long idle is (minutes)", "Compact while working at (tokens)"):
+                        self.assertIn(w, page["settings"])
+
     # -- a Linux server: the desk belongs to an account, the coordinator is root ---------------------
     # Tests cannot run as root, so the lookups that decide it are replaced: hansa "runs as root" on
     # "Linux", and the desk's owner is the test's own user, which stands for the account.
@@ -9804,7 +10261,7 @@ class DeskTest(unittest.TestCase):
                 main(["--desk", str(self.desk.root), "status"])
         self.assertIn("needs runuser", str(e.exception.code))
 
-    def coordinator_as_root(self, env):
+    def coordinator_as_root(self, env, *extra):
         """Start the coordinator in this process as "root", catching the claude it would become."""
         started = {}
         with unittest.mock.patch.object(account.os, "execve", side_effect=AssertionError("it switched")), \
@@ -9812,7 +10269,7 @@ class DeskTest(unittest.TestCase):
                 unittest.mock.patch("os.chown", side_effect=AssertionError("root changed an owner")), \
                 unittest.mock.patch.dict(os.environ, env), unittest.mock.patch("os.chdir"), \
                 unittest.mock.patch("hansa.notify.start", lambda *x, **k: started.update(follower=x)):
-            main(["--desk", str(self.desk.root), "coordinator"])
+            main(["--desk", str(self.desk.root), "coordinator", *extra])
         return started
 
     def test_roots_follower_reads_the_desk_through_the_account_and_keeps_its_own_files_at_home(self):
@@ -9846,7 +10303,8 @@ class DeskTest(unittest.TestCase):
             started = self.coordinator_as_root({"CLAUDE_CONFIG_DIR": str(self.tmp / "root-claude")})
         self.assertEqual(started["env"]["CLAUDE_CONFIG_DIR"], str(self.tmp / "root-claude"))  # root's, not the account's
         args = json.loads(log.read_text().splitlines()[-1])
-        self.assertEqual(args[:2] + args[-3:], ["-u", account.name_of(os.getuid()), "coordinator-desk", "--by", "0"])
+        at = args.index("coordinator-desk")
+        self.assertEqual(args[:2] + args[at:at + 3], ["-u", account.name_of(os.getuid()), "coordinator-desk", "--by", "0"])
         # the account's hansa did the desk's part: the card, the helpers, the permissions, the record, the events
         self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (Path(__file__).resolve().parent.parent / "hansa" /
                                                                        "card.md").read_text())
@@ -9886,6 +10344,108 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(started["env"]["CLAUDE_CONFIG_DIR"], str(self.tmp / "root-claude"))
         self.assertEqual((started["env"]["ANTHROPIC_BASE_URL"], started["env"]["ANTHROPIC_AUTH_TOKEN"]),
                          ("https://x.invalid", "sk-mimo-12345678"))  # the provider's endpoint and key, as before
+
+    def test_roots_copy_of_the_mod_is_its_own_and_no_step_of_preparing_it_stops_roots_start(self):
+        self.as_root()
+        log, _ = self.stand_in_runuser()
+        root_home = self.tmp / "root-home"
+        root_home.mkdir()
+        desk_side = (str(self.desk.root), str(self.repo.resolve()))  # the account's; everything else stands for root's
+
+        def start(version="2.1.296", *extra):
+            said = io.StringIO()
+            with contextlib.redirect_stderr(said):
+                started = self.coordinator_as_root({"HANSA_CLAUDE": str(self.versioned_claude(version)),
+                                                    "CLAUDE_CONFIG_DIR": str(self.tmp / "root-claude")}, *extra)
+            return started["argv"], started["env"], " ".join(said.getvalue().split())
+        with unittest.mock.patch.object(account, "owner", lambda p: os.getuid() if str(p).startswith(desk_side) else 0), \
+                unittest.mock.patch.dict(os.environ, {"HOME": str(root_home)}):
+            argv, env, said = start()
+            mine = root_home / ".hansa" / "coordinator-mod"
+            copy = Path(argv[argv.index("--plugin-dir") + 1])
+            self.assertEqual(copy.parent.parent, mine)  # root's own folder for this desk
+            self.assertTrue((copy / "hooks" / "register.js").is_file())
+            self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
+            # the thresholds: the desk's own settings file, as for the account's session; no copy of them anywhere
+            self.assertEqual(env["HANSA_MOD_SETTINGS"], str(self.desk.settings_path))
+            self.assertEqual([p.name for p in copy.parent.iterdir()], [copy.name])
+            self.assertFalse(list(self.desk.mod_dir.glob("plugin*")))  # root wrote nothing in the desk
+            self.assertIn("--mod", json.loads(log.read_text().splitlines()[-1]))  # the account recorded root's start
+            rec = self.mod_record()
+            self.assertEqual((rec["loaded"], rec["autocompact_options"], rec["root"]),
+                             (True, ["--autocompact", "550000"], True))
+            self.assertEqual(rec["start"], json.loads((self.desk.state_dir / "coordinator.json").read_text())["at"])
+            # a change on the page reaches root's session as any other: at its next decision, from that file
+            self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact={"idle_at": 300000})),
+                             {"ok": True, "problems": []})
+            self.assertEqual(json.loads(Path(env["HANSA_MOD_SETTINGS"]).read_text())["coordinator_compact"],
+                             {"idle_at": 300000})
+            self.assertIn(self.MOD_LOADED, self.mod_line())
+            self.assertIn("compact when idle at 300,000 tokens", views.status(self.desk)["compact_line"])
+            # root's own --autocompact, after hansa's: the record and status quote them all, as given
+            start("2.1.296", "--autocompact", "600000", "--autocompact=700000")
+            self.assertEqual(self.mod_record()["autocompact_options"],
+                             ["--autocompact", "550000", "--autocompact", "600000", "--autocompact=700000"])
+            self.assertIn("--autocompact options of its command line: --autocompact 550000 --autocompact 600000 "
+                          "--autocompact=700000.", self.mod_line())
+            # a folder of root's that the account could change: no mod; --autocompact, as Claude Code is new enough
+            sub = copy.parent
+            sub.chmod(0o777)
+            self.addCleanup(sub.chmod, 0o700)
+            argv, env, said = start()
+            self.assertNotIn("--plugin-dir", argv)
+            self.assertNotIn("HANSA_MOD_SETTINGS", env)
+            self.assertIn("--autocompact", argv)
+            self.assertIn("hansa did not load the coordinator's mod, because its copy would be in a folder another account "
+                          "could change", self.mod_line())
+            sub.chmod(0o700)
+            # the account's hansa cannot record root's start in the desk, or cannot be run for it at all: root starts
+            # with the mod all the same, says so in one line, and status says hansa does not know
+            (self.desk.mod_dir / "start.json").unlink()
+            (self.desk.mod_dir / "start.json").mkdir()
+            argv, _, said = start()
+            self.assertIn("--plugin-dir", argv)
+            self.assertIn("hansa could not record this start in the desk (IsADirectoryError", said)
+            self.assertIn(self.MOD_UNKNOWN, self.mod_line())
+            (self.desk.mod_dir / "start.json").rmdir()
+            start()
+            self.assertIn(self.MOD_LOADED, self.mod_line())
+            run = account.run
+
+            def no_record(theirs, args, *a, **k):
+                if "--mod" in args:
+                    raise OSError("runuser went away")
+                return run(theirs, args, *a, **k)
+            for broken in (no_record, lambda theirs, args, *a, **k: run(theirs, args + (["--nope"] if "--mod" in args
+                                                                                       else []), *a, **k)):
+                with unittest.mock.patch.object(account, "run", broken):
+                    argv, _, said = start()
+                self.assertIn("--model", argv)
+                self.assertIn("--plugin-dir", argv)
+                self.assertIn("hansa could not record this start in the desk (", said)
+                self.assertIn(self.MOD_UNKNOWN, self.mod_line())  # not the earlier one
+            # root's own folder cannot be had: root starts without the mod, and the desk records why
+            with unittest.mock.patch.object(plugin, "home", side_effect=KeyError("no home")):
+                argv, _, said = start()
+            self.assertEqual(("--plugin-dir" in argv, "--autocompact" in argv), (False, True))
+            self.assertIn("hansa did not load the coordinator's mod, because finding the folder for the mod's copy (the home "
+                          "folder) failed", self.mod_line())
+            # an older Claude Code: root starts without the mod, and the desk records why
+            argv, _, said = start("2.1.100")
+            self.assertFalse({"--plugin-dir", "--autocompact"} & set(argv))
+            self.assertIn("hansa did not load the coordinator's mod, because Claude Code 2.1.100 is older than 2.1.290; "
+                          "--autocompact options of its command line: none", self.mod_line())
+            # what root gives the account to record is checked: only a record's fields, each of its kind (as the
+            # account's hansa runs it)
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.cmd_coordinator_desk(types.SimpleNamespace(desk=str(self.desk.root), by=0, mod=json.dumps(
+                    {"start": "x", "loaded": "yes", "autocompact_options": 5, "why": "a\nb" * 400, "version": "../x",
+                     "extra": "y"})))
+            rec = self.mod_record()
+            self.assertEqual({k: rec[k] for k in ("start", "loaded", "autocompact_options", "version", "root")},
+                             {"start": None, "loaded": None, "autocompact_options": None, "version": "", "root": True})
+            self.assertEqual(len(rec["why"]), 300)
+            self.assertNotIn("extra", rec)
 
     def test_root_takes_only_the_providers_variables_and_a_sound_model_and_effort_from_the_accounts_plan(self):
         self.as_root()
@@ -16196,6 +16756,14 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(hansa, "__file__", str(pkg / "__init__.py")):
             hansa.installed.cache_clear()
             self.assertEqual(hansa.installed(), 2_000_000)  # a checkout: when its files last changed, not a commit time
+            for name, at in (("mod/hooks/register.js", 2_500_000),  # the coordinator's mod is hansa's code too
+                             ("mod/tsconfig.json", 9_000_000), ("mod/.claude-plugin/types/index.d.ts", 9_000_000),
+                             ("mod/hooks/.DS_Store", 9_000_000)):  # not what Claude Code writes as it loads it
+                (pkg / name).parent.mkdir(parents=True, exist_ok=True)
+                (pkg / name).write_text("x")
+                os.utime(pkg / name, (at, at))
+            hansa.installed.cache_clear()
+            self.assertEqual(hansa.installed(), 2_500_000)
             (pkg / "BUILD").write_text("abc1234 2026-09-01\n")
             os.utime(pkg / "BUILD", (3_000_000, 3_000_000))
             hansa.installed.cache_clear()
@@ -18255,6 +18823,46 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), [])
 
+    def test_the_principal_sets_when_the_coordinators_session_compacts_and_the_coordinator_cannot(self):
+        from hansa.desk import compact_settings
+        defaults = {"idle_at": 400000, "long_idle_at": 200000, "long_idle_min": 50, "working_at": 550000}
+        self.assertEqual(self.desk.settings()["coordinator_compact"], defaults)
+        s = self.desk.settings()
+        for bad in ({"idle_at": 99_999}, {"working_at": 1_000_001}, {"idle_at": "400000"}, {"idle_at": True},
+                    {"working_at": 550000.5}, {"when_idle": 400000}, [400000], {"long_idle_at": 99_999},
+                    {"long_idle_at": 1_000_001}, {"long_idle_min": 0}, {"long_idle_min": 241}, {"long_idle_min": 50.5},
+                    {"long_idle_min": 200000}):
+            s["coordinator_compact"] = bad
+            self.assertTrue(any(x.startswith("coordinator_compact: ") for x in validate(s)), bad)
+        edges = {"idle_at": 100000, "long_idle_at": 1_000_000, "long_idle_min": 240, "working_at": 1_000_000}
+        self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact=edges)), {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["coordinator_compact"], edges)
+        self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact={**edges, "long_idle_min": 1})),
+                         {"ok": True, "problems": []})
+        self.assertFalse(self.page_save(lambda s: s.update(coordinator_compact={"idle_at": 50_000}))["ok"])
+        s = self.desk.settings()
+        s["coordinator_compact"] = {"idle_at": 100000, "working_at": 100000}
+        said = self.desk.save_settings(s, by="coordinator")
+        self.assertEqual(said, ["coordinator_compact is the principal's, set only on the web page (Settings); ask with "
+                                "hansa ask"])
+        self.assertEqual(self.desk.settings()["coordinator_compact"], {**edges, "long_idle_min": 1})
+        # a figure left blank on the page is its default
+        self.assertEqual(compact_settings({"coordinator_compact": {"idle_at": 300000}}), {**defaults, "idle_at": 300000})
+        # the mod reads the same three from the same file, with the same defaults and ranges
+        from hansa.desk import COMPACT_MOST
+        mod = (Path(__file__).resolve().parent.parent / "hansa" / "mod" / "hooks" / "register.js").read_text()
+        for k in ("idle_at", "long_idle_at", "long_idle_min"):
+            self.assertIn(f"  {k}: [{defaults[k]:_}, {COMPACT_MOST[k][0]:_}, {COMPACT_MOST[k][1]:_}],", mod)
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for x in ('bind(S.coordinator_compact, "idle_at", "number")', 'bind(S.coordinator_compact, "long_idle_at", "number")',
+                  'bind(S.coordinator_compact, "long_idle_min", "number")',
+                  'bind(S.coordinator_compact, "working_at", "number")', "suit a model with a 1M-token window",
+                  "A fourth figure above the model's window is taken as that window",
+                  "never comes: Claude Code compacts on its own first", "The token figures take 100,000 to 1,000,000; a "
+                  "long idle, 1 to 240 minutes", "A change to the first three applies from the session's next decision",
+                  "a change to the fourth from the session's next start", "The coordinator cannot change them"):
+            self.assertIn(x, ui)
+
     def test_the_coordinator_cannot_change_the_principals_release_settings(self):
         s = self.desk.settings()
         self.assertEqual((s["releases_without_asking"], s["release_forbidden"]), ([], []))
@@ -19839,6 +20447,15 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.assertTrue(hansa.shipped(Path(f).relative_to("hansa")), f)
         for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py",
                   "._cli.py", "._card.md", "agents/._worker.md"):  # macOS's AppleDouble files, left by a copy
+            self.assertFalse(hansa.shipped(Path(f)), f)
+        for f in ("mod/.claude-plugin/plugin.json", "mod/hooks/hooks.json", "mod/hooks/register.js",
+                  "mod/tests/register.test.ts"):  # the coordinator's mod: what its session loads, and its tests
+            self.assertTrue(hansa.shipped(Path(f)), f)
+        for f in ("mod/.DS_Store", "mod/hooks/.DS_Store", "mod/hooks/register.js~", "mod/hooks/._register.js",
+                  "mod/.claude-plugin/._plugin.json", "mod/tests/._register.test.ts", "mod/__pycache__/x.pyc",
+                  "mod/x.py", "mod/hooks/x/y.js", "mod/register.js", "x/mod/hooks/register.js",
+                  "mod/tsconfig.json", "mod/.claude-plugin/types/index.d.ts",  # what Claude Code writes as it loads it
+                  "mod/.claude/.cc-writes/x"):
             self.assertFalse(hansa.shipped(Path(f)), f)
 
     def test_the_coordinators_notes_rule_is_given_for_each_spelling_of_the_desk(self):

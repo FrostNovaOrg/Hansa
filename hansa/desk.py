@@ -83,7 +83,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert")
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert", "coordinator_compact")
 # The events that may call for an alert to the principal (alert.from_event)
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
            "ask", "sandbox_held", "disk_low")
@@ -233,6 +233,13 @@ def home_secrets() -> tuple:
 
 
 REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
+# When the coordinator's session compacts (hansa/plugin.py): idle_at and long_idle_at, in tokens, by the coordinator's
+# mod once a turn has ended and the session has been idle for a minute or for long_idle_min minutes (the mod reads
+# them here, in the desk's settings file, and keeps the same defaults and ranges: hansa/mod/hooks/register.js);
+# working_at, the window hansa gives Claude Code's own auto-compact (--autocompact), which takes 100k to 1M
+COMPACT_DEFAULTS = {"idle_at": 400_000, "long_idle_at": 200_000, "long_idle_min": 50, "working_at": 550_000}
+COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "long_idle_at": (100_000, 1_000_000), "long_idle_min": (1, 240),
+                "working_at": (100_000, 1_000_000)}
 
 
 def default_settings() -> dict:
@@ -244,6 +251,8 @@ def default_settings() -> dict:
         "disk_floor": 10,
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
+        # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
+        "coordinator_compact": dict(COMPACT_DEFAULTS),
         # Design sessions, which the principal works in directly (`hansa design`). Blank provider
         # or model: the coordinator's.
         "design": {"provider": "", "model": "", "effort": ""},
@@ -281,6 +290,13 @@ def default_settings() -> dict:
             "claude-opus-5": {"in": 5, "out": 25},
         },
     }
+
+
+def compact_settings(s: dict) -> dict:
+    """When the coordinator's session compacts, {idle_at, long_idle_at, long_idle_min, working_at}: the settings',
+    each one missing or out of range taken as its default."""
+    cc = s.get("coordinator_compact") if isinstance(s.get("coordinator_compact"), dict) else {}
+    return {k: cc[k] if _is_int(cc.get(k), *COMPACT_MOST[k]) else v for k, v in COMPACT_DEFAULTS.items()}
 
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
@@ -443,7 +459,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
         return ["settings must be an object"]
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", "releases_without_asking", "release_forbidden",
-             "alert"}
+             "alert", "coordinator_compact"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     # which of them may be read is looked at when the page saves a changed list, and when the coordinator
     # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
@@ -471,6 +487,12 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
         p.append("the alert command must be one shell command line (up to 1000 characters)")
+    cc = s.get("coordinator_compact", {})
+    if not isinstance(cc, dict) or set(cc) - set(COMPACT_DEFAULTS) or not all(
+            _is_int(v, *COMPACT_MOST[k]) for k, v in cc.items()):
+        p.append("coordinator_compact: compact when idle at, compact after a long idle at and compact while working "
+                 "at must be whole numbers of tokens from 100,000 to 1,000,000, and a long idle is a whole number of "
+                 "minutes from 1 to 240")
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
@@ -2222,6 +2244,7 @@ class Desk:
         self.notes_dir = self.root / "notes"
         self.project_path = self.root / PROJECT_FILE
         self.state_dir = self.root / ".hansa"
+        self.mod_dir = self.state_dir / "coordinator-mod"  # the coordinator's mod's files here (hansa/plugin.py)
         self.events_path = self.root / "events.jsonl"
         self.asks_path = self.root / "asks.json"
         self.paused_path = self.root / "PAUSED"

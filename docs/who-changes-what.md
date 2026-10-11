@@ -9,7 +9,8 @@ design sessions may touch is in [Workers and the sandbox](sandbox.md); the coord
 ### The principal
 
 The principal, on the page: providers, models, endpoints, keys, effort
-defaults, the models of the coordinator and of design sessions, prices,
+defaults, the models of the coordinator and of design sessions, when the
+coordinator's session compacts ([Compaction](desk.md#compaction)), prices,
 whether the coordinator audits cost, the browser tool a task given `--browser`
 uses, the folders the coordinator may read outside the desk without asking
 (`hansa explain` lists them), the folders and files workers may not read, the
