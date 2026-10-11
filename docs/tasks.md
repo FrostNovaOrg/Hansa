@@ -95,6 +95,8 @@ how it ended, the file in the task's folder with its whole output (`check.log`, 
 lines. Its first line says which of the two follow and how to print each whole: `hansa show ID --check-log` and
 `hansa show ID --merge-check-log` print one output whole, keys removed, under a line that names it, its length
 and its file.
+For setups and checks, a command killed by a signal exits with 128 plus the signal number on both Linux
+and macOS, so a killed check fails.
 
 ## Effort
 

@@ -1842,6 +1842,11 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
         fenced.append((DATA, _above, f"it is {DATA}, the volume macOS keeps everything on, or a folder above it"))
     if root:
         fenced.append((str(root), _above, f"it is {root}, the desk, or a folder above it"))
+    # Setups and checks run our relay inside srt, before the lane's env.
+    # These are hard refusals even when also on the PATH or above a lane's repository.
+    code = os.path.dirname(os.path.abspath(__file__))
+    for p in (code, os.path.join(code, "srt_output.py")):
+        fenced.append((p, _above, f"it hides {p}, hansa's output relay: setups and checks need to read it"))
     settled = set()  # the reasons for which an entry is left out of runs rather than stopping them
     for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):

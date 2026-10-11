@@ -142,7 +142,7 @@ def main() -> int:
     env.update(HANSA_TASK=tid, HANSA_RUN=os.environ.get("HANSA_RUN", ""), TERM="dumb", TMPDIR=tmp, CLAUDE_CODE_TMPDIR=tmp)
     kept = Kept(log, run.PREVIEW_KEEP // 2)
     try:
-        proc = subprocess.Popen([srt, "--settings", settings, "--", "/bin/sh", "-c", command], env=env,
+        proc = subprocess.Popen([srt, "--settings", settings, "--", *run.protected(["/bin/sh", "-c", command])], env=env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 start_new_session=True)
     except OSError as e:
