@@ -81,6 +81,11 @@ const T = ZH ? {
   compactNote:"一轮以回答结束、会话空闲后，协调席的 mod 压缩它：空闲一分钟后，若上下文达到第一个数（这时整个上下文还在提示缓存里）；长时间空闲（第三个数）后，若达到第二个数：赶在提示缓存（一小时）失效之前压缩，下一轮就从短的上下文开始，不必不走缓存地读一个长的。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第四个数时压缩（hansa coordinator 用 --autocompact 传给它）。token 数都在 100,000 到 1,000,000 之间，长时间空闲在 1 到 240 分钟之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或不小于第四个数），那个压缩就不会发生：Claude Code 自己先压缩了。第四个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。前三个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第四个数从会话下次启动起生效。协调席不能改它们。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modStarted:t => `协调席会话 ${t} 启动：`, modOn:"hansa 加载了协调席的 mod", modOff:why => `hansa 没有加载协调席的 mod，因为：${why}`,
   modUnknown:"hansa 是否加载了协调席的 mod：不知道", modOptions:"命令行里的 --autocompact 选项：", notKnown:"不知道",
+  clearUnknown:"每日清空：不知道", clearNone:"没有每日清空，因为协调席启动时没带 --clear-daily",
+  clearNoMod:(w, why) => `没有每日清空 ${w}，因为 hansa 没有加载协调席的 mod（${why}）`,
+  clearRoot:w => `每日清空 ${w}：上次清空不知道（root 在这个工作台上的会话，hansa 不记录它的清空）`,
+  clearLastUnknown:w => `每日清空 ${w}：上次清空不知道`, clearLast:(w, t) => `每日清空 ${w}：上次清空在 ${t}`,
+  clearNever:(w, t) => `每日清空 ${w}：自 ${t} 启动以来没有清空过`, clearMissed:n => `；此后已有 ${n} 个时段过去而没有清空`,
   auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"这条线的执行层、核验和设计会话不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
@@ -294,6 +299,15 @@ function modLine(m, line) {
   return " · " + T.modStarted(m.started) + (m.loaded === null ? T.modUnknown : m.loaded ? T.modOn : T.modOff(m.why || T.notKnown))
     + "；" + T.modOptions + (m.autocompact === null ? T.notKnown : m.autocompact || T.none);
 }
+// Its daily clear: the window hansa handed over at the start, and the clears hansa's hook recorded (hansa/plugin.py)
+function clearLine(m, line) {
+  if (!m || !m.clear) return "";
+  if (!ZH) return " · " + line;
+  const c = m.clear, w = c.window;
+  return " · " + (w === null || (w && m.loaded === null) ? T.clearUnknown : !w ? T.clearNone
+    : !m.loaded ? T.clearNoMod(w, m.why || T.notKnown) : c.root ? T.clearRoot(w) : !c.known ? T.clearLastUnknown(w)
+    : (c.last ? T.clearLast(w, c.last) : T.clearNever(w, m.started)) + (c.warn ? T.clearMissed(c.missed) : ""));
+}
 async function loadStatus() {
   const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);
   const designs = (st.design || []).map(designBlock);
@@ -305,9 +319,9 @@ async function loadStatus() {
     + (st.disk && st.disk.unknown || []).map(x => " · " + x).join("")
     + (st.no_read_stop ? " · " + T.noReadStop + ": " + st.no_read_stop : "")
     + (st.no_read_left_out || []).map(x => " · " + T.workersMayNotReadSkipped + ": " + x).join("")
-    + modLine(st.mod, st.mod_line);
+    + modLine(st.mod, st.mod_line) + clearLine(st.mod, st.clear_line);
   $("#state").className = (st.paused || !st.server_up || (st.server && st.server.state === "stuck") || st.srt_missing
-    || (st.mod && st.mod.loaded !== true)
+    || (st.mod && st.mod.loaded !== true) || (st.mod && st.mod.clear && st.mod.clear.warn)
     || (st.disk && (st.disk.low_text || (st.disk.unknown || []).length))
     || st.no_read_stop || (st.no_read_left_out || []).length) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});

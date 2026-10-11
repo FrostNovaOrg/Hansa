@@ -8769,480 +8769,6 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(later[0].startswith(f"[hansa, upgraded] desk {self.desk.root}\n"), later[0])
         self.assertEqual(sum("t0001" in x for x in self.posts(sock)), 1)  # nothing said twice, no catch-up
 
-    # the daily clear: a stand-in tmux answers capture-pane from a file and records send-keys; a stand-in claude
-    # answers agents --json from a file
-    RULE = "\x1b[38;5;244m" + "─" * 60 + "\x1b[39m"
-    BOX_EMPTY = "\x1b[39m❯\xa0"
-    BOX_TYPED = "\x1b[39m❯\xa0\x1b[38;5;153m/clear\x1b[39m"
-    # the bottom lines of a session started with --name cleartest: the rule above the box carries its name
-    NAMED_RULE = "\x1b[38;5;244m" + "─" * 100 + " \x1b[38;5;246mcleartest\x1b[38;5;244m ─\x1b[39m"
-    PLAIN_RULE = "\x1b[38;5;244m" + "─" * 113 + "\x1b[39m"
-    FOOTER = "  \x1b[38;5;211m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle) · ← for agents\x1b[39m"
-
-    def test_box_text_reads_the_box_under_a_rule_with_the_sessions_name_or_none(self):
-        def capture(*box):
-            return "\n".join(["\x1b[39m⏺ Done.", "", *box, self.FOOTER, "", ""])
-        for name, box, want in (
-                ("empty", self.BOX_EMPTY, ""),
-                ("a dimmed placeholder", '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m', ""),
-                ("typed words", "\x1b[39m❯\xa0half-typed words", "half-typed words")):
-            with self.subTest(name):
-                self.assertEqual(notify.box_text(capture(self.NAMED_RULE, box, self.PLAIN_RULE)).strip(" "), want)
-                self.assertEqual(notify.box_text(capture(self.PLAIN_RULE, box, self.PLAIN_RULE)).strip(" "), want)
-        self.assertEqual(notify.ESC.sub("", self.NAMED_RULE).split("─ ")[-1], "cleartest ─")
-        question = ["\x1b[38;5;153m Which colour?\x1b[39m",
-                    "\x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m1.\x1b[39m \x1b[38;5;153mRed\x1b[39m",
-                    "  \x1b[38;5;246m2.\x1b[39m Blue", "", "\x1b[2mEnter to select · Esc to cancel\x1b[0m"]
-        self.assertIsNone(notify.box_text("\n".join(["\x1b[39m⏺ Done.", "", self.PLAIN_RULE, *question, ""])))
-        self.assertIsNone(notify.box_text(capture(self.NAMED_RULE, *question, self.PLAIN_RULE)))
-        for line in ("──", "── cleartest ─", "──────x", "─────── cleartest", "❯\xa0"):
-            self.assertFalse(notify._rule(line), line)
-
-    def test_box_text_needs_a_rule_above_the_box_and_the_prompt_with_a_no_break_space(self):
-        def capture(*box):
-            return "\n".join(["\x1b[39m⏺ Done.", "", *box, self.FOOTER, "", ""])
-        self.assertEqual(notify.box_text(capture(self.PLAIN_RULE, self.BOX_EMPTY, self.PLAIN_RULE)), "")
-        earlier = "\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231mUse the scout on lane a\x1b[0m"  # a message sent
-        for name, box in (("an earlier message", [self.PLAIN_RULE, earlier, self.PLAIN_RULE]),
-                          ("an ordinary space", [self.PLAIN_RULE, "\x1b[39m❯ ", self.PLAIN_RULE]),
-                          ("words after an ordinary space", [self.PLAIN_RULE, "\x1b[39m❯ half-typed", self.PLAIN_RULE]),
-                          ("no rule above", [self.BOX_EMPTY, self.PLAIN_RULE]),
-                          ("a line above", ["\x1b[39m  some output", self.BOX_EMPTY, self.PLAIN_RULE])):
-            with self.subTest(name):
-                self.assertIsNone(notify.box_text(capture(*box)))
-
-    def pane(self, *box) -> str:
-        """A capture of the session's pane: the conversation, then the input box (these lines), and the footer."""
-        return "\n".join(["\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231mUse the scout on lane a\x1b[0m",
-                          "\x1b[39m⏺ Done: the scout reported.", "", *box, self.FOOTER, "", ""])
-
-    def clearing(self, *, typed=None, keys_ago=None, quiet="0"):
-        """A session in a stand-in tmux pane, and hansa notify on --clear-daily from it: (what it said, the
-        stand-ins' folder, the follower's log). After Enter the pane shows an empty box again.
-        quiet: HANSA_CLEAR_QUIET, or None for its default. The rest of the daily clear's cases run in this process
-        (clearing_here)."""
-        d = self.tmp / f"clear-{uuid.uuid4().hex[:6]}"
-        (d / "bin").mkdir(parents=True)
-        (d / "bin" / "tmux").write_text(
-            "#!/usr/bin/env python3\nimport json, os, sys, time\n"
-            f"D = {str(d)!r}\n"
-            "a = sys.argv[1:]\nf = lambda n: os.path.join(D, n)\n"
-            "open(f('calls.jsonl'), 'a').write(json.dumps(a) + '\\n')\n"
-            "sys.stdout.reconfigure(encoding='utf-8')\n"
-            "if a[0] == 'display-message':\n"
-            "    print(a[-1].replace('#{pane_pid}', open(f('pane_pid')).read()).replace('#{session_id}', '$3'))\n"
-            "elif a[0] == 'list-clients':\n"
-            "    print('\\n'.join(str(int(time.time()) - int(x)) for x in open(f('keys')).read().split()))\n"
-            "elif a[0] == 'capture-pane':\n"
-            "    sys.stdout.write(open(f('pane.txt'), encoding='utf-8').read())\n"
-            "elif a[0] == 'send-keys':\n"
-            "    if '-l' in a and os.path.exists(f('pane-typed.txt')):\n"
-            "        os.replace(f('pane-typed.txt'), f('pane.txt'))\n"
-            "    if a[-1] == 'Enter' and os.path.exists(f('agents-after.json')):\n"
-            "        os.replace(f('agents-after.json'), f('agents.json'))\n"
-            "    if a[-1] == 'Enter' and os.path.exists(f('pane-after.txt')):\n"
-            "        os.replace(f('pane-after.txt'), f('pane.txt'))\n")
-        (d / "bin" / "claude").write_text(
-            "#!/usr/bin/env python3\nimport os, sys\n"
-            f"D = {str(d)!r}\n"
-            "if sys.argv[1:3] == ['agents', '--json']:\n"
-            "    sys.stdout.write(open(os.path.join(D, 'agents.json')).read())\n")
-        for x in ("tmux", "claude"):
-            (d / "bin" / x).chmod(0o755)
-        p, sock = self.session()
-        row = {"pid": p.pid, "name": "ntA", "status": "idle", "sessionId": "s-before"}
-        (d / "agents.json").write_text(json.dumps([row]))
-        (d / "agents-after.json").write_text(json.dumps([{**row, "sessionId": "s-after"}]))
-        (d / "pane_pid").write_text(str(p.pid))
-        empty = self.pane(self.NAMED_RULE, self.BOX_EMPTY, self.PLAIN_RULE)
-        (d / "pane.txt").write_text(empty, encoding="utf-8")
-        (d / "pane-after.txt").write_text(empty, encoding="utf-8")
-        if typed:  # the box line after /clear is typed
-            (d / "pane-typed.txt").write_text(self.pane(self.NAMED_RULE, typed, self.PLAIN_RULE), encoding="utf-8")
-        (d / "keys").write_text("" if keys_ago is None else str(keys_ago))
-        env = {"PATH": f"{d / 'bin'}{os.pathsep}{os.environ['PATH']}", "HANSA_CLAUDE": str(d / "bin" / "claude"),
-               "TMUX_PANE": "%7", "TMUX": f"{d}/tmux-socket,1,0", "HANSA_CLEAR_EVERY": "0.3",
-               "HANSA_CLEAR_STARTED": "1",  # a session of long ago: today's clear is due
-               **({"HANSA_CLEAR_QUIET": quiet} if quiet is not None else {})}
-        with unittest.mock.patch.dict(os.environ, env), self.in_session(p, sock):
-            if quiet is None:
-                os.environ.pop("HANSA_CLEAR_QUIET", None)
-            said = self.hansa_out("notify", "on", "--clear-daily", "00-24")
-        key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
-        return said, d, notify.private_dir(self.desk) / f"{key}.log"
-
-    def keys_sent(self, d) -> list:
-        f = d / "calls.jsonl"
-        return [json.loads(x)[3:] for x in f.read_text().splitlines() if json.loads(x)[0] == "send-keys"] \
-            if f.exists() else []
-
-    def held(self, log, why, times=3):
-        """Wait until the follower's log holds the clear back for this reason a few times."""
-        self.soon(lambda: log.exists() and log.read_text().count(f"daily clear held: {why}") >= times)
-
-    def clearing_here(self, *, status="idle", waiting=None, listed=True, fails=False, box=None, typed=None,
-                      keys_ago=None, window="00-24", pane_pid=None, send_fails="", busy_typed=False, keys_said=None):
-        """A DailyClear in this process for a session in a stand-in tmux pane, as clearing's follower makes it: the
-        stand-ins (s) answer tmux and claude agents --json as clearing's do, s.t is its clock (each sleep moves it
-        on), s.said what it said. After Enter the pane shows an empty box again. send_fails: the key whose
-        send-keys fails. busy_typed: the session goes busy when /clear is typed. keys_said: what list-clients
-        prints ('fails': it fails)."""
-        pid = os.getpid()
-        row = {"pid": pid, "name": "ntA", "status": status, "sessionId": "s-before",
-               **({"waitingFor": waiting} if waiting else {})}
-        empty = self.pane(self.NAMED_RULE, self.BOX_EMPTY, self.PLAIN_RULE)
-        s = types.SimpleNamespace(
-            t=[time.time()], said=[], calls=[], rows=[row] if listed else [],
-            rows_typed=[{**row, "status": "busy"}] if busy_typed else None,
-            rows_after=[{**row, "sessionId": "s-after"}], pane=self.pane(*box) if box else empty, pane_after=empty,
-            pane_typed=None if not typed else self.pane(*typed) if isinstance(typed, list) else
-            self.pane(self.NAMED_RULE, typed, self.PLAIN_RULE))
-
-        def tmux(*a):
-            s.calls.append(list(a))
-            if a[0] == "display-message":
-                return a[-1].replace("#{pane_pid}", str(pane_pid or pid)).replace("#{session_id}", "$3") + "\n"
-            if a[0] == "list-clients":
-                if keys_said == "fails":
-                    raise RuntimeError("tmux list-clients ended with 1: no current client")
-                if keys_said is not None:
-                    return keys_said
-                return "" if keys_ago is None else f"{int(s.t[0]) - keys_ago}\n"
-            if a[0] == "capture-pane":
-                return s.pane
-            if a[0] == "send-keys":
-                if send_fails and a[-1] == send_fails:
-                    raise RuntimeError("tmux send-keys ended with 1: no server running on the socket")
-                if "-l" in a:
-                    s.pane, s.pane_typed = s.pane_typed or s.pane, None
-                    s.rows, s.rows_typed = s.rows_typed or s.rows, None
-                if a[-1] == "Enter":
-                    s.pane, s.rows = s.pane_after, s.rows_after
-            return ""
-
-        def session_row(p):
-            if fails:
-                raise RuntimeError("claude agents --json ended with 1: agents: something broke")
-            return next((x for x in s.rows if x["pid"] == p), None)
-
-        def sleep(x):
-            s.t[0] += x
-        say = unittest.mock.patch.object(notify, "_say", side_effect=s.said.append)
-        say.start()
-        self.addCleanup(say.stop)
-        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%7"}), \
-                unittest.mock.patch.object(notify, "started_at", return_value=1.0):  # a session of long ago
-            c = notify.DailyClear(window, pid, tmux=tmux, session_row=session_row, clock=lambda: s.t[0], sleep=sleep,
-                                  every=60, quiet=0)
-        s.tmux = tmux
-        return c, s
-
-    def ticks(self, c, s, n):
-        """n of the follower's rounds, a minute apart."""
-        for _ in range(n):
-            c.tick(0, False)
-            s.t[0] += c.every
-
-    def sent_here(self, s) -> list:
-        return [x[3:] for x in s.calls if x[0] == "send-keys"]
-
-    def held_here(self, s, why) -> int:
-        return "\n".join(s.said).count(f"daily clear held: {why}")
-
-    def test_daily_clear_types_clear_then_enter_when_the_session_is_idle_and_nobody_types(self):
-        said, d, log = self.clearing(typed=self.BOX_TYPED, keys_ago=200)
-        self.assertIn("hansa types /clear into tmux pane %7", said)
-        self.assertIn("cannot add a hook to a session that is already running", said)
-        self.soon(lambda: "cleared the session (sessionId s-before -> s-after)" in log.read_text())
-        self.assertIn("daily clear held: idle on one reading", log.read_text())  # two readings, then it typed
-        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["Enter"]])
-        self.soon(lambda: re.search(r"daily clear 00-24: cleared at \d\d:\d\d", self.hansa_out("notify")))
-        checks = len((d / "calls.jsonl").read_text().splitlines())
-        time.sleep(2.5)  # the box is empty and the session idle again, and still: once a day
-        self.assertIn(self.BOX_EMPTY, (d / "pane.txt").read_text(encoding="utf-8"))
-        self.assertEqual(self.keys_sent(d), [["-l", "/clear"], ["Enter"]])
-        self.assertEqual(len((d / "calls.jsonl").read_text().splitlines()), checks)  # not even looked at
-
-    def test_daily_clear_waits_five_minutes_after_hansa_posted_to_the_session(self):
-        _, d, log = self.clearing(typed=self.BOX_TYPED, keys_ago=30, quiet=None)  # HANSA_CLEAR_QUIET's default
-        self.held(log, "a key was pressed", 1)
-        self.desk.event("server_stopped")
-        self.soon(lambda: "posted: " in log.read_text())
-        (d / "keys").write_text("")  # nobody types now; all else holds but the post
-        self.held(log, "hansa posted to the session ", 3)
-        self.assertRegex(log.read_text(), r"daily clear held: hansa posted to the session \d+ s ago\n")
-        self.assertEqual(self.keys_sent(d), [])
-
-    def test_daily_clear_leaves_it_for_the_day_when_tmux_fails_or_the_box_holds_something_else(self):
-        for name, kw, what in (("tmux fails", {"typed": self.BOX_TYPED, "send_fails": "Enter"},
-                                r"tmux failed \(tmux send-keys ended with 1: no server running on the socket\)"),
-                               ("something else", {"typed": "\x1b[39m❯\xa0/clea"}, r"the box read '/clea'")):
-            with self.subTest(name):
-                c, s = self.clearing_here(**kw)
-                self.ticks(c, s, 2)
-                self.assertIn("/clear may be left in the box", s.said[-1])
-                self.assertRegex(notify.clear_text(c.rec, s.t[0]), rf"daily clear 00-24: /clear typed at \d\d:\d\d, "
-                                                                   rf"but then {what}: /clear may be left in the box")
-                s.pane = s.pane_after
-                self.ticks(c, s, 3)  # the box is empty again, and still no second try that day
-                self.assertEqual(self.sent_here(s), [["-l", "/clear"], *([["Enter"]] if "send_fails" in kw else [])])
-
-    def test_daily_clear_types_nothing_unless_claude_agents_shows_the_session_idle(self):
-        for kw, why in (({"status": "busy"}, "the session is 'busy', not idle"),
-                        ({"status": "shell"}, "the session is 'shell', not idle"),
-                        ({"status": "waiting", "waiting": "input needed"}, "the session is 'waiting', not idle"),
-                        ({"status": "idle", "waiting": "input needed"}, "the session waits: input needed"),
-                        ({"listed": False}, "claude agents --json lists no session with pid"),
-                        ({"fails": True}, "claude agents --json ended with 1: agents: something broke")):
-            with self.subTest(**kw):
-                c, s = self.clearing_here(typed=self.BOX_TYPED, **kw)
-                self.ticks(c, s, 3)
-                self.assertEqual(self.held_here(s, why), 3)
-                self.assertEqual(self.sent_here(s), [])
-
-    def test_daily_clear_types_only_into_an_empty_input_box(self):
-        c, s = self.clearing_here(box=[self.RULE, '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m', self.RULE],
-                                  typed=self.BOX_TYPED)  # a dimmed placeholder: empty
-        self.ticks(c, s, 2)
-        self.assertIn("cleared the session", s.said[-1])
-        self.assertEqual(self.sent_here(s), [["-l", "/clear"], ["Enter"]])
-        dialog = ["\x1b[38;5;244m Do you want to make this edit?\x1b[39m",
-                  "\x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m1.\x1b[39m \x1b[38;5;153mYes\x1b[39m",
-                  "  \x1b[38;5;246m2.\x1b[39m No"]
-        for name, box, why in (
-                ("typed text", [self.RULE, "\x1b[39m❯\xa0half-typed words", self.RULE], "there are words in the input box"),
-                ("a dialog", [self.RULE, *dialog], "no input box alone at the bottom of the pane"),
-                ("a box of lines", [self.RULE, "\x1b[39m❯\xa0first line", "  second line", self.RULE],
-                 "no input box alone at the bottom of the pane")):
-            with self.subTest(name):
-                c, s = self.clearing_here(box=box, typed=self.BOX_TYPED)
-                self.ticks(c, s, 4)
-                self.assertEqual(self.held_here(s, why), 3)  # after the first idle reading
-                self.assertEqual(self.sent_here(s), [])
-
-    def test_daily_clear_waits_while_someone_pressed_a_key_lately(self):
-        c, s = self.clearing_here(typed=self.BOX_TYPED, keys_ago=30)
-        self.ticks(c, s, 4)
-        self.assertEqual(self.held_here(s, "a key was pressed in a terminal on the session's tmux session 30 s ago"), 3)
-        self.assertEqual(self.sent_here(s), [])
-
-    def test_daily_clear_counts_a_key_press_time_tmux_cannot_give_as_busy(self):
-        for said, why in (("now", "could not read when a key was last pressed (invalid literal"),
-                          ("fails", "could not read when a key was last pressed (tmux list-clients ended with 1: "
-                                    "no current client)")):
-            with self.subTest(said):
-                c, s = self.clearing_here(typed=self.BOX_TYPED, keys_said=said)
-                self.ticks(c, s, 4)
-                self.assertEqual(self.held_here(s, why), 3)
-                self.assertEqual(self.sent_here(s), [])
-
-    def test_daily_clear_takes_its_clear_back_when_the_session_went_busy_as_it_typed(self):
-        c, s = self.clearing_here(typed=self.BOX_TYPED, busy_typed=True)
-        self.ticks(c, s, 2)
-        self.assertEqual(s.said[-1], "daily clear held: after /clear was typed the box read '/clear' and the "
-                                     "session was not idle: the session is 'busy', not idle; no Enter; the /clear "
-                                     "was taken back")
-        self.ticks(c, s, 2)
-        self.assertEqual(self.held_here(s, "the session is 'busy', not idle"), 2)
-        self.assertEqual(self.sent_here(s), [["-l", "/clear"], ["BSpace"] * 6])
-
-    def test_daily_clear_says_what_it_knows_when_typing_or_taking_back_clear_fails(self):
-        failed = r"tmux failed \(tmux send-keys ended with 1: no server running on the socket\)"
-        for name, kw, logged, shown in (
-                ("typing", {"typed": self.BOX_TYPED, "send_fails": "/clear"},
-                 rf"daily clear: hansa tried to type /clear, but then {failed}; no Enter, nothing taken back, and no "
-                 r"other try today: /clear may be left in the box",
-                 rf"daily clear 00-24: hansa tried to type /clear at \d\d:\d\d, but then {failed}: /clear may be "
-                 r"left in the box"),
-                ("taking it back", {"typed": "\x1b[39m❯\xa0half-typed words/clear", "send_fails": "BSpace"},
-                 rf"daily clear: typed /clear, but then {failed}; no Enter, it is not known how many of the six "
-                 r"backspaces taking it back went through, and no other try today: /clear may be left in the box",
-                 rf"daily clear 00-24: /clear typed at \d\d:\d\d, but then {failed}; it is not known how many of "
-                 r"the six backspaces taking it back went through: /clear may be left in the box")):
-            with self.subTest(name):
-                c, s = self.clearing_here(**kw)
-                self.ticks(c, s, 2)
-                self.assertRegex(s.said[-1], logged)
-                self.assertRegex(notify.clear_text(c.rec, s.t[0]), shown)
-                self.assertNotIn("the /clear was taken back", "\n".join(s.said))
-                self.ticks(c, s, 3)  # no other try that day
-                self.assertEqual(self.sent_here(s), [["-l", "/clear"], *([["BSpace"] * 6] if name != "typing" else [])])
-
-    def daily(self, every="60"):
-        """A DailyClear for window 00-24 in this process, on pane %7 of pid 1; what it says is left out."""
-        say = unittest.mock.patch.object(notify, "_say")
-        say.start()
-        self.addCleanup(say.stop)
-        with unittest.mock.patch.dict(os.environ, {"HANSA_CLEAR_EVERY": every}):
-            return notify.DailyClear("00-24", 1, {"window": "00-24", "pane": "%7", "off": None})
-
-    def test_daily_clear_checks_a_minute_apart(self):
-        c, t0, clock = self.daily(), time.time(), [0.0]
-        fake = unittest.mock.Mock(wraps=time, time=lambda: t0 + clock[0])
-        reading = unittest.mock.Mock(return_value=(False, "the session is 'busy', not idle"))
-        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(notify, "idle_reading", reading):
-            for clock[0] in (0, 1, 30, 59.9, 60, 61, 100, 120.5):
-                c.tick(0, False)
-        self.assertEqual(reading.call_count, 3)  # at 0, 60 and 120.5
-
-    def fresh_clear(self, window, now, began, rec=None):
-        """A DailyClear with no record carried over (unless rec), made at local time now ("2026-09-27 06:27") for a
-        session that started at began (the same form, or None when that cannot be read); and the fake time."""
-        at = lambda x: time.mktime(time.strptime(x, "%Y-%m-%d %H:%M"))
-        clock = [at(now)]
-        fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0])
-        say = unittest.mock.patch.object(notify, "_say")
-        say.start()
-        self.addCleanup(say.stop)
-        with unittest.mock.patch.object(notify, "time", fake), \
-                unittest.mock.patch.object(notify, "clear_pane", return_value=("%7", "")), \
-                unittest.mock.patch.object(notify, "started_at", return_value=began and at(began)):
-            return notify.DailyClear(window, 1, rec), fake, clock, at
-
-    def test_daily_clear_leaves_alone_a_session_that_started_inside_todays_window(self):
-        c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 06:27", "2026-09-27 05:56")
-        self.assertEqual((c.rec["day"], c.rec["state"]), ("2026-09-27", "new"))
-        self.assertEqual(notify.clear_text(c.rec, clock[0]),
-                         "daily clear 04-09: started 05:56, inside today's window; next clear tomorrow")
-        reading = unittest.mock.Mock(return_value=(True, "s-before"))
-        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(notify, "idle_reading", reading):
-            for clock[0] in (at("2026-09-27 06:27"), at("2026-09-27 07:30"), at("2026-09-27 08:59")):
-                c.tick(0, False)
-            self.assertEqual(reading.call_count, 0)  # today is done for it
-            c.next, clock[0] = 0, at("2026-09-28 04:10")
-            c.tick(0, False)  # tomorrow: cleared as any other
-        self.assertEqual(reading.call_count, 1)
-        self.assertEqual(c.rec["day"], "2026-09-28")
-        self.assertIsNone(c.rec["state"])
-        c, *_ = self.fresh_clear("22-03", "2026-09-28 01:00", "2026-09-27 23:30")  # a window past midnight
-        self.assertEqual((c.rec["day"], c.rec["state"]), ("2026-09-27", "new"))
-
-    def test_notify_says_the_next_clear_is_tomorrow_for_a_session_that_started_after_todays_window(self):
-        for window, now, began, said in (
-                ("04-09", "2026-09-27 10:00", "2026-09-27 09:30", "started 09:30, after today's window"),
-                ("04-09", "2026-09-27 10:00", "2026-09-27 05:56", "started 05:56, inside today's window"),
-                ("22-03", "2026-09-28 10:00", "2026-09-28 04:00", "started 04:00, after today's window"),
-                ("22-03", "2026-09-28 10:00", "2026-09-27 23:30", "started 23:30, inside today's window")):
-            with self.subTest(window=window, began=began):
-                c, fake, clock, at = self.fresh_clear(window, now, began)
-                self.assertIsNone(c.rec.get("state"))  # its follower started after the window: nothing done today
-                self.assertEqual(notify.clear_text(c.rec, clock[0]),
-                                 f"daily clear {window}: {said}; next clear tomorrow")
-        for began in ("2026-09-27 03:59", None):  # it was due, or it may have been: said as before
-            c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 10:00", began)
-            self.assertEqual(notify.clear_text(c.rec, clock[0]), "daily clear 04-09: window passed without a clear")
-        c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 10:00", "2026-09-27 09:30")
-        self.assertEqual(notify.clear_text(c.rec, at("2026-09-28 10:00")),  # the next day's window passed: as before
-                         "daily clear 04-09: window passed without a clear")
-        with unittest.mock.patch.object(notify, "started_at", return_value=at("2026-09-27 09:30")):
-            old = notify.DailyClear("04-09", 1, {"window": "04-09", "pane": "%7", "off": None})  # kept no start
-        self.assertEqual(old.rec["began"], at("2026-09-27 09:30"))
-
-    def test_daily_clear_goes_on_for_a_session_older_than_todays_window_or_of_unknown_start(self):
-        for name, window, now, began, rec in (
-                ("started before the window opened", "04-09", "2026-09-27 06:27", "2026-09-27 03:59", None),
-                ("started yesterday", "04-09", "2026-09-27 06:27", "2026-09-26 05:00", None),
-                ("before a window past midnight", "22-03", "2026-09-28 01:00", "2026-09-27 21:30", None),
-                ("start cannot be read", "04-09", "2026-09-27 06:27", None, None),
-                ("follower started outside the window", "04-09", "2026-09-27 10:00", "2026-09-27 05:56", None),
-                ("record carried over", "04-09", "2026-09-27 06:27", "2026-09-27 05:56",
-                 {"window": "04-09", "pane": "%7", "off": None})):
-            with self.subTest(name):
-                c, *_ = self.fresh_clear(window, now, began, rec)
-                self.assertIsNone(c.rec.get("state"))
-        c, fake, clock, at = self.fresh_clear("04-09", "2026-09-27 10:00", "2026-09-27 05:56")
-        reading = unittest.mock.Mock(return_value=(False, "the session is 'busy', not idle"))
-        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(notify, "idle_reading", reading):
-            clock[0] = at("2026-09-28 04:30")
-            c.tick(0, False)
-        self.assertEqual(reading.call_count, 1)  # its next window: checked as always
-
-    def test_a_sessions_start_is_read_from_its_process(self):
-        began = notify.started_at(os.getpid())
-        if began is None:
-            self.skipTest("this process's start cannot be read here")
-        self.assertLessEqual(began, time.time())
-        self.assertGreater(began, time.time() - 86400)
-        self.assertIsNone(notify.started_at(2 ** 22 + 12345))  # no such process
-
-    def test_daily_clear_needs_two_idle_readings_a_minute_apart(self):
-        c, t0 = self.daily(), time.time()
-        busy, idle = (False, "the session is 'busy', not idle"), (True, "s-before")
-        with unittest.mock.patch.object(notify, "idle_reading") as reading, \
-                unittest.mock.patch.object(notify, "tmux", side_effect=RuntimeError("a stand-in")):
-            for dt, said, why in ((0, idle, "idle on one reading; a second one comes a minute later"),
-                                  (30, idle, "idle on readings less than a minute apart"),
-                                  (59, idle, "idle on readings less than a minute apart"),
-                                  (60, idle, "could not read when a key was last pressed (a stand-in)"),
-                                  (70, busy, "the session is 'busy', not idle"),
-                                  (140, idle, "idle on one reading; a second one comes a minute later"),
-                                  (150, idle, "idle on readings less than a minute apart")):
-                reading.return_value = said
-                self.assertEqual(c.why_not(t0 + dt, 0, False), why, dt)
-
-    def test_daily_clear_counts_an_unchanged_session_id_after_enter_as_not_cleared_and_tries_no_more_that_day(self):
-        c, sent = self.daily("0.01"), []
-        rule, empty, typed = self.PLAIN_RULE, self.BOX_EMPTY, self.BOX_TYPED
-
-        def tmux(*a):
-            if a[0] == "send-keys":
-                sent.append(list(a[3:]))
-            if a[0] == "capture-pane":
-                return self.pane(rule, typed if sent else empty, rule)
-            return "$3" if a[0] == "display-message" else ""
-        with unittest.mock.patch.object(notify, "tmux", tmux), \
-                unittest.mock.patch.object(notify, "idle_reading", return_value=(True, "s-before")), \
-                unittest.mock.patch.object(notify, "session_row", return_value={"sessionId": "s-before"}), \
-                unittest.mock.patch.object(notify, "CLEARED_WAIT", 0.2), \
-                unittest.mock.patch.object(notify, "TYPED_WAIT", 0), \
-                unittest.mock.patch.object(notify, "KEYS_QUIET", 0):
-            for _ in range(6):
-                c.tick(0, False)
-                time.sleep(0.02)
-        self.assertEqual(sent, [["-l", "/clear"], ["Enter"]])
-        self.assertEqual(c.rec["state"], "unconfirmed")
-        self.assertRegex(notify.clear_text(c.rec), r"^daily clear 00-24: Enter pressed at \d\d:\d\d, but no new "
-                                                   r"session was seen$")
-
-    def test_daily_clear_takes_its_clear_back_when_the_box_reads_more_than_that(self):
-        c, s = self.clearing_here(typed="\x1b[39m❯\xa0half-typed words\x1b[38;5;153m/clear\x1b[39m")
-        self.ticks(c, s, 2)
-        self.assertIn("the /clear was taken back", s.said[-1])
-        self.ticks(c, s, 3)
-        self.assertEqual(self.held_here(s, "there are words in the input box"), 2)  # the next checks find the words
-        self.assertEqual(self.sent_here(s), [["-l", "/clear"], ["BSpace"] * 6])
-
-    def test_daily_clear_leaves_it_for_the_day_when_the_box_cannot_be_read_after_clear_is_typed(self):
-        c, s = self.clearing_here(typed=[self.NAMED_RULE, "\x1b[39m❯\xa0/clear", "\x1b[39m  /clear  Clear the "
-                                         "conversation", "  /compact  Compact it", self.PLAIN_RULE])
-        t0 = s.t[0]
-        self.ticks(c, s, 2)
-        self.assertIn("/clear may be left in the box", s.said[-1])
-        self.assertEqual(len([x for x in s.calls if x[0] == "capture-pane"]),
-                         1 + 1 + notify.TYPED_READS)  # the check, then the reads over two seconds after typing
-        self.assertEqual(s.t[0] - t0, 2 * c.every + (1 + notify.TYPED_READS) * notify.TYPED_WAIT)
-        self.assertRegex(notify.clear_text(c.rec, s.t[0]), r"daily clear 00-24: /clear typed at \d\d:\d\d, but "
-                                                           r"then the input box could not be read: /clear may be left "
-                                                           r"in the box")
-        s.pane = s.pane_after
-        self.ticks(c, s, 3)  # the box is empty again, and still no second try that day
-        self.assertEqual(self.sent_here(s), [["-l", "/clear"]])
-
-    def test_daily_clear_types_nothing_outside_its_window_or_outside_the_sessions_pane(self):
-        h = time.localtime().tm_hour
-        c, s = self.clearing_here(typed=self.BOX_TYPED, window=f"{(h + 2) % 24:02d}-{(h + 3) % 24:02d}")
-        self.ticks(c, s, 3)
-        self.assertIn(f"daily clear: outside the window {(h + 2) % 24:02d}-", "\n".join(s.said))
-        self.assertEqual(self.sent_here(s), [])
-        c, s = self.clearing_here(typed=self.BOX_TYPED, pane_pid=1)  # the pane runs something else
-        self.assertRegex(s.said[0], r"^daily clear 00-24: off: the session \(pid \d+\) does not run in tmux pane %7")
-        self.assertRegex(notify.clear_text(c.rec), r"daily clear 00-24: off \(the session \(pid \d+\) does not run in")
-        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%7"}), \
-                unittest.mock.patch.object(notify, "tmux", s.tmux):
-            self.assertIn("The daily clear is off: the session (pid ", notify.clear_said(os.getpid(), "00-24", True))
-        self.ticks(c, s, 3)
-        self.assertEqual(self.sent_here(s), [])
-
     def test_notify_on_twice_from_one_session_starts_one_follower(self):
         with self.assertRaises(SystemExit) as e:  # not from a Claude Code session: it says why, starts nothing
             main(["--desk", str(self.desk.root), "notify", "on"])
@@ -9266,6 +8792,53 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(notify.alive(follower["pid"], follower["start"]))
         self.assertEqual(notify.live_records(self.desk), [])
         self.assertIn("notifies no session", self.hansa_out("notify"))
+
+    def test_notify_on_still_takes_clear_daily_and_says_where_the_daily_clear_went(self):
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            said = self.hansa_out("notify", "on", "--clear-daily", "04-09")
+        self.assertIn("now posts to this session", said)  # turned on as without the option
+        self.assertEqual(said.splitlines()[-1], notify.CLEAR_MOVED)  # and one line on where the daily clear went
+        self.assertIn("hansa coordinator --clear-daily HH-HH", notify.CLEAR_MOVED)
+        live = self.soon(lambda: notify.live_records(self.desk))
+        self.assertNotIn("clear", live[0])  # the follower clears nothing
+        log = (notify.private_dir(self.desk) / f"{live[0]['key']}.log").read_text()
+        self.assertNotIn("daily clear", log)
+        with self.in_session(p, sock):
+            self.assertEqual(self.hansa_out("notify", "on", "--clear-daily", "9am").splitlines()[-1],
+                             notify.CLEAR_MOVED)  # already on; any window, as start scripts give it
+            self.assertNotIn(notify.CLEAR_MOVED, self.hansa_out("notify", "on"))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "notify", "off", "--clear-daily", "04-09"])
+            self.assertIn("goes with hansa coordinator", str(e.exception.code))
+            self.hansa_out("notify", "off")
+
+    def test_a_register_written_before_the_daily_clear_left_the_follower_loads_and_its_clear_is_ignored(self):
+        p, sock = self.session()
+        key = notify.key_of({"pid": p.pid, "start": notify.proc_start(p.pid)})
+        old = {"key": key, "session": {"pid": p.pid, "start": notify.proc_start(p.pid)}, "socket": sock,
+               "name": "coord", "follower": {"pid": os.getpid(), "start": notify.proc_start(os.getpid())},
+               "uid": os.getuid(), "user": "someone", "since": time.time() - 60, "last_post": None, "pos": 0,
+               "seen": time.time() - 20, "ended": None,  # live, and due to be seen again
+               "clear": {"window": "04-09", "pane": "%7", "off": None, "began": time.time() - 3600,
+                         "day": "2026-09-27", "state": "left", "at": time.time(), "left": "the box read 'x'",
+                         "step": "back", "held": "a key was pressed"}}
+        notify.register_dir(self.desk).mkdir(parents=True, exist_ok=True)
+        (notify.register_dir(self.desk) / f"{key}.json").write_text(json.dumps(old))
+        self.assertEqual([r["key"] for r in notify.live_records(self.desk)], [key])
+        listed = notify.list_text(self.desk)
+        self.assertIn(f"pid {p.pid} (coord)", listed)
+        self.assertNotIn("daily clear", listed)
+        self.assertNotIn("/clear", listed)
+        self.assertIn(f"pid {p.pid} (coord)", views.status_text(views.status(self.desk)))
+        me = {k: v for k, v in old.items() if k != "clear"}
+        notify.handle(self.desk, {"op": "feed", "me": me, "pos": 0, "done": 0})  # its next write drops it
+        self.assertNotIn("clear", json.loads((notify.register_dir(self.desk) / f"{key}.json").read_text()))
+        # a follower started by an older hansa restarts on this code with --clear-daily on its command line: taken
+        with unittest.mock.patch.object(notify, "follow", return_value=0) as follow, self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "notify-follow", "--key", key, "--pid", str(p.pid), "--socket", sock,
+                  "--nonce", "n", "--clear-daily", "04-09"])
+        self.assertEqual(follow.call_args.args[1:], (key, {"pid": p.pid, "start": ""}, sock, "n", ""))
 
     def test_a_request_answered_on_the_page_reaches_the_session_that_asked_with_the_answer(self):
         skip_unless_ports(self)
@@ -10269,7 +9842,7 @@ class DeskTest(unittest.TestCase):
         self.soon(lambda: [x for x in notify.records(self.desk) if x["socket"] == str(self.tmp / "mine.sock")])
 
     def test_coordinator_takes_clear_daily_for_itself_and_gives_the_session_a_hook_after_a_clear(self):
-        show = self.tmp / "argv-claude"  # the session: its options, one per line
+        show = self.tmp / "argv-claude"  # the session: its options, one per line (and no version: no mod)
         show.write_text("#!/bin/sh\nfor x in \"$@\"; do echo \"$x\"; done\nsleep 1\n")
         show.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
@@ -10281,14 +9854,19 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("--clear-daily", argv)
         self.assertNotIn("04-09", argv)
         self.assertIn("dontAsk", argv)
-        self.assertIn("The daily clear is off: the session does not run in tmux", r.stderr)  # notices still go out
+        self.assertNotIn("tmux", r.stderr)  # outside tmux all the same
+        # no mod, no clear: the start says so, and nothing else clears it
+        self.assertIn("hansa: hansa did not hand over the daily clear 04-09, because hansa did not load the "
+                      "coordinator's mod (hansa could not tell which Claude Code this is from claude --version): the "
+                      "session is not cleared.", r.stderr.splitlines())
         hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["SessionStart"][0]
         self.assertEqual(hook["matcher"], "clear")
         code = Path(__file__).resolve().parent.parent
-        self.assertEqual(shlex.split(hook["hooks"][0]["command"]),
-                         [str(code / "bin" / "hansa"), "--desk", str(self.desk.root), "status"])  # hansa's own code
-        rec = self.soon(lambda: [x for x in notify.records(self.desk) if (x.get("clear") or {}).get("window") == "04-09"])
-        self.assertIn("does not run in tmux", rec[0]["clear"]["off"])
+        self.assertEqual(shlex.split(hook["hooks"][0]["command"]),  # hansa's own code, as the desk's owner
+                         [str(code / "bin" / "hansa"), "--desk", str(self.desk.root), "coordinator-cleared"])
+        rec = self.soon(lambda: notify.records(self.desk))
+        self.assertNotIn("clear", rec[0])  # the follower clears nothing
+        self.assertEqual(self.mod_record()["clear_daily"], "04-09")
         with self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "coordinator", "--clear-daily", "9am"])
         self.assertIn("such as 04-09", str(e.exception.code))
@@ -10756,6 +10334,217 @@ class DeskTest(unittest.TestCase):
                               "A long idle is (minutes)", "Compact while working at (tokens)"):
                         self.assertIn(w, page["settings"])
 
+    # -- the daily clear: hansa hands the window to the mod, and records each clear ---------------------------------
+
+    def test_the_start_record_holds_the_daily_clears_window_and_the_mod_gets_it(self):
+        argv, env, said = self.start_with_mod("--clear-daily", "22-03", "--permission-mode", "dontAsk")
+        self.assertEqual(env["HANSA_MOD_CLEAR_DAILY"], "22-03")
+        self.assertEqual(sorted(k for k in env if k.startswith("HANSA_MOD")), ["HANSA_MOD_CLEAR_DAILY", "HANSA_MOD_SETTINGS"])
+        self.assertFalse({"--clear-daily", "22-03"} & set(argv))
+        self.assertIn("dontAsk", argv)
+        self.assertNotIn("did not", said)
+        self.assertEqual(self.mod_record()["clear_daily"], "22-03")
+        argv, env, said = self.start_with_mod("--clear-daily=04-09")
+        self.assertEqual((env["HANSA_MOD_CLEAR_DAILY"], self.mod_record()["clear_daily"]), ("04-09", "04-09"))
+        # none given: none handed over, and the record says so
+        argv, env, said = self.start_with_mod()
+        self.assertNotIn("HANSA_MOD_CLEAR_DAILY", env)
+        self.assertEqual(self.mod_record()["clear_daily"], "")
+        # no mod: nothing handed over, the start says why, and the record keeps the window that was given
+        argv, env, said = self.start_with_mod("--clear-daily", "04-09", version="2.1.200")
+        self.assertNotIn("HANSA_MOD_CLEAR_DAILY", env)
+        self.assertIn("hansa: hansa did not hand over the daily clear 04-09, because hansa did not load the coordinator's "
+                      "mod (Claude Code 2.1.200 is older than 2.1.290): the session is not cleared.",
+                      self.mod_said.splitlines())
+        self.assertEqual((self.mod_record()["loaded"], self.mod_record()["clear_daily"]), (False, "04-09"))
+        # what root gives the account to record is checked: a window that is not one is not known
+        for bad in ("9am", 5, None, "04-04"):
+            plugin.record_start(self.desk, {**self.mod_record(), "clear_daily": bad}, root=True)
+            self.assertIsNone(self.mod_record()["clear_daily"], bad)
+        # given empty, or with spaces around it: refused as a window that is not one, before anything starts
+        for given in (["--clear-daily="], ["--clear-daily", ""], ["--clear-daily", " 04-09"], ["--clear-daily=04-09 "]):
+            with self.assertRaises(SystemExit) as e:
+                self.start_with_mod(*given)
+            window = given[-1].partition("=")[2] if "=" in given[-1] else given[-1]
+            self.assertEqual(e.exception.code, "hansa: --clear-daily takes a window of hours in local time, such as "
+                                               f"04-09; not {window!r}")
+
+    def cleared_hook(self) -> str:
+        """The coordinator's SessionStart hook after a /clear, run here: what it printed."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "coordinator-cleared"])
+        return out.getvalue()
+
+    def status_lines(self) -> list:
+        """hansa status, but its first line (which says the time)."""
+        return views.status_text(views.status(self.desk)).splitlines()[1:]
+
+    def test_the_hook_after_a_clear_records_it_and_prints_what_status_prints(self):
+        self.start_with_mod("--clear-daily", "04-09")
+        started = self.mod_record()
+        printed = self.cleared_hook().splitlines()
+        cleared = json.loads((self.desk.mod_dir / "cleared.json").read_text())
+        self.assertEqual(cleared["start"], started["start"])  # tied to this start
+        self.assertLess(abs(cleared["at"] - time.time()), 60)
+        self.assertEqual(printed[1:], self.status_lines())  # what hansa status prints, and nothing more
+        self.assertTrue(printed[0].startswith(f"desk {self.desk.root}"))
+        last = time.strftime("%m-%d %H:%M", time.localtime(cleared["at"]))
+        self.assertIn(f"daily clear 04-09: last cleared {last}.", printed)
+        self.assertEqual(self.mod_record(), started)  # a clear never changes the start's record
+        # every clear counts, a person's too, and with no window: recorded all the same
+        self.start_with_mod()
+        self.assertFalse((self.desk.mod_dir / "cleared.json").exists())  # a new start forgets the earlier clears
+        self.cleared_hook()
+        self.assertEqual(json.loads((self.desk.mod_dir / "cleared.json").read_text())["start"], self.mod_record()["start"])
+        self.assertIn("no daily clear, because the coordinator was started without --clear-daily.", self.status_lines())
+
+    def test_the_hook_says_one_line_when_it_cannot_record_and_records_nothing_when_not_the_desks_owner(self):
+        self.start_with_mod("--clear-daily", "04-09")
+        with unittest.mock.patch.object(plugin, "write_json", side_effect=OSError(28, "No space left on device")):
+            printed = self.cleared_hook().splitlines()
+        self.assertEqual(printed[1:-1], self.status_lines())  # status as ever, then one line
+        self.assertEqual(printed[-1], f"hansa: hansa could not record this clear in {self.desk.mod_dir / 'cleared.json'} "
+                                      "(OSError: [Errno 28] No space left on device): hansa status and the page do not "
+                                      "count it")
+        self.assertFalse((self.desk.mod_dir / "cleared.json").exists())
+        started = time.strftime("%m-%d %H:%M", time.localtime(self.mod_record()["start"]))
+        self.assertIn(f"daily clear 04-09: not cleared since the start at {started}.", self.status_lines())
+        # run by another account than the desk's owner (root, on the account's desk): status, and nothing recorded
+        with unittest.mock.patch.object(account, "owner", lambda path: 4242):
+            printed = self.cleared_hook().splitlines()
+        self.assertEqual(printed[1:], self.status_lines())
+        self.assertFalse((self.desk.mod_dir / "cleared.json").exists())
+
+    def restarted_at(self, t: float, window: str = "04-09", **rec) -> None:
+        """The coordinator's last start as made at local time t, with this window and loaded mod (rec: changed)."""
+        self.start_with_mod(f"--clear-daily={window}")
+        r = {**self.mod_record(), "start": t, **rec}
+        (self.desk.mod_dir / "start.json").write_text(json.dumps(r))
+        who = json.loads((self.desk.state_dir / "coordinator.json").read_text())
+        (self.desk.state_dir / "coordinator.json").write_text(json.dumps({**who, "at": t}))
+
+    def clear_at(self, now: float) -> str:
+        """The daily clear's line as status gives it at local time now."""
+        with unittest.mock.patch("time.time", return_value=now):
+            return plugin.clear_line(plugin.status(self.desk))
+
+    def test_status_says_the_daily_clear_case_by_case(self):
+        at = lambda d, h, m=0: time.mktime((2026, 9, d, h, m, 0, 0, 0, -1))  # noqa: E731 - local time, September
+        self.start_with_mod()
+        self.assertEqual(views.status(self.desk)["clear_line"],
+                         "no daily clear, because the coordinator was started without --clear-daily.")
+        self.start_with_mod("--clear-daily", "04-09", version="2.1.200")
+        self.assertEqual(views.status(self.desk)["clear_line"], "no daily clear 04-09, because hansa did not load the "
+                         "coordinator's mod (Claude Code 2.1.200 is older than 2.1.290).")
+        # next to the mod's line in hansa status
+        lines = self.status_lines()
+        self.assertEqual(lines[lines.index(views.status(self.desk)["clear_line"]) - 1][:29], "coordinator's session started")
+        # not cleared since the start, then cleared: the last clear's time
+        self.restarted_at(at(20, 10))
+        self.assertEqual(self.clear_at(at(21, 4, 30)), "daily clear 04-09: not cleared since the start at 09-20 10:00.")
+        (self.desk.mod_dir / "cleared.json").write_text(json.dumps({"start": at(20, 10), "at": at(21, 4, 20)}))
+        self.assertEqual(self.clear_at(at(21, 12)), "daily clear 04-09: last cleared 09-21 04:20.")
+        # windows that ended since the later of the start and the last clear: from two, a warning that counts them
+        self.assertEqual(self.clear_at(at(22, 9)), "daily clear 04-09: last cleared 09-21 04:20.")  # one ended
+        self.assertEqual(self.clear_at(at(23, 8, 59)), "daily clear 04-09: last cleared 09-21 04:20.")  # still open
+        self.assertEqual(self.clear_at(at(23, 9)), "WARNING: daily clear 04-09: last cleared 09-21 04:20; 2 windows "
+                         "ended since without a clear.")
+        (self.desk.mod_dir / "cleared.json").unlink()
+        self.assertEqual(self.clear_at(at(23, 12)), "WARNING: daily clear 04-09: not cleared since the start at "
+                         "09-20 10:00; 3 windows ended since without a clear.")
+        st = plugin.status(self.desk)
+        self.assertTrue(st["clear"]["warn"])
+        # a window the coordinator started inside does not count: the mod skips it
+        self.restarted_at(at(21, 5))
+        self.assertEqual(self.clear_at(at(22, 12)), "daily clear 04-09: not cleared since the start at 09-21 05:00.")
+        self.assertEqual(self.clear_at(at(23, 12)), "WARNING: daily clear 04-09: not cleared since the start at "
+                         "09-21 05:00; 2 windows ended since without a clear.")
+        # one past midnight: 22-03, started inside it
+        self.restarted_at(at(20, 23), "22-03")
+        self.assertEqual(self.clear_at(at(22, 4)), "daily clear 22-03: not cleared since the start at 09-20 23:00.")
+        self.assertEqual(self.clear_at(at(23, 2)), "daily clear 22-03: not cleared since the start at 09-20 23:00.")
+        self.assertEqual(self.clear_at(at(23, 3)), "WARNING: daily clear 22-03: not cleared since the start at "
+                         "09-20 23:00; 2 windows ended since without a clear.")
+        # an earlier start's clear (left there): none since this start
+        (self.desk.mod_dir / "cleared.json").write_text(json.dumps({"start": at(19, 10), "at": at(19, 23)}))
+        self.assertEqual(self.clear_at(at(21, 12)), "daily clear 22-03: not cleared since the start at 09-20 23:00.")
+        # a record of the clear that cannot be read: the last clear is not known
+        for bad in (b"\xff", b"[]", json.dumps({"start": at(20, 23), "at": "x"}).encode()):
+            (self.desk.mod_dir / "cleared.json").write_bytes(bad)
+            self.assertEqual(self.clear_at(at(21, 12)), "daily clear 22-03: the last clear is not known.", bad)
+        (self.desk.mod_dir / "cleared.json").unlink()
+        # root's session on an account's desk: hansa records no clear of it
+        self.restarted_at(at(20, 10), root=True)
+        self.assertEqual(self.clear_at(at(23, 12)), "daily clear 04-09: the last clear is not known (hansa records no "
+                         "clear of root's session on this desk).")
+        # a start record of an older hansa (no window in it), one that cannot be read, or none: not known
+        self.restarted_at(at(20, 10))
+        rec = self.mod_record()
+        for bad in (json.dumps({k: v for k, v in rec.items() if k != "clear_daily"}), json.dumps({**rec, "loaded": "x"}),
+                    json.dumps({**rec, "clear_daily": "9am"}), "\xff"):
+            (self.desk.mod_dir / "start.json").write_text(bad)
+            self.assertEqual(self.clear_at(at(23, 12)), "daily clear: not known.", bad)
+        (self.desk.mod_dir / "start.json").unlink()
+        self.assertEqual(self.clear_at(at(23, 12)), "daily clear: not known.")
+        self.assertIn("daily clear: not known.", self.status_lines())
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_says_the_daily_clear_in_both_languages(self):
+        from hansa import web
+        at = lambda d, h, m=0: time.mktime((2026, 9, d, h, m, 0, 0, 0, -1))  # noqa: E731
+        harness = self.tmp / "page.js"
+        script = self.PAGE_HARNESS.replace("console.log(JSON.stringify(nulls));",
+                                           "console.log(JSON.stringify({nulls, text: ids['#state'].textContent, "
+                                           "warn: ids['#state'].className}));")
+
+        def none():
+            self.start_with_mod()
+
+        def unloaded():
+            self.start_with_mod("--clear-daily", "04-09", version="2.1.200")
+
+        def last():
+            self.restarted_at(at(20, 10))
+            (self.desk.mod_dir / "cleared.json").write_text(json.dumps({"start": at(20, 10), "at": at(22, 4, 20)}))
+
+        def missed():
+            self.restarted_at(at(20, 10))
+
+        def root():
+            self.restarted_at(at(20, 10), root=True)
+
+        def unknown():
+            self.restarted_at(at(20, 10))
+            (self.desk.mod_dir / "start.json").write_text(json.dumps(
+                {k: v for k, v in self.mod_record().items() if k != "clear_daily"}))
+        for make, says, zh, warn in (
+                (none, "no daily clear, because the coordinator was started without --clear-daily.",
+                 "没有每日清空，因为协调席启动时没带 --clear-daily", "muted"),
+                (unloaded, "no daily clear 04-09, because hansa did not load the coordinator's mod",
+                 "没有每日清空 04-09，因为 hansa 没有加载协调席的 mod（Claude Code 2.1.200 is older than 2.1.290）", "warn"),
+                (last, "daily clear 04-09: last cleared 09-22 04:20.", "每日清空 04-09：上次清空在 09-22 04:20", "muted"),
+                (missed, "WARNING: daily clear 04-09: not cleared since the start at 09-20 10:00; 2 windows ended since "
+                 "without a clear.", "每日清空 04-09：自 09-20 10:00 启动以来没有清空过；此后已有 2 个时段过去而没有清空",
+                 "warn"),
+                (root, "daily clear 04-09: the last clear is not known", "每日清空 04-09：上次清空不知道（root", "muted"),
+                (unknown, "daily clear: not known.", "每日清空：不知道", "muted")):
+            make()
+            with unittest.mock.patch("time.time", return_value=at(22, 12)):
+                st = views.status(self.desk)
+            st.update(paused="", server_up=True, server=None, srt_missing="", disk=None, no_read_stop="",
+                      no_read_left_out=[])  # nothing else on the status line asks for attention
+            given = {"/api/settings": public_settings(self.desk), "/api/status": st, "/api/events": []}
+            for lang, words in (("en", says), ("zh-CN", zh)):
+                harness.write_text(script.replace('navigator: {language: "en"}', f'navigator: {{language: "{lang}"}}'))
+                r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                page = json.loads(r.stdout)
+                self.assertEqual(page["nulls"], [])
+                self.assertIn(words, page["text"], (make.__name__, lang))
+                self.assertEqual(page["warn"], warn, (make.__name__, lang))
+
     # -- a Linux server: the desk belongs to an account, the coordinator is root ---------------------
     # Tests cannot run as root, so the lookups that decide it are replaced: hansa "runs as root" on
     # "Linux", and the desk's owner is the test's own user, which stands for the account.
@@ -10994,6 +10783,17 @@ class DeskTest(unittest.TestCase):
                              {"idle_at": 300000})
             self.assertIn(self.MOD_LOADED, self.mod_line())
             self.assertIn("compact when idle at 300,000 tokens", views.status(self.desk)["compact_line"])
+            # its daily clear: handed to its mod as to any; its hook after a clear prints status and records nothing,
+            # so status does not know when it was last cleared
+            argv, env, said = start("2.1.296", "--clear-daily", "04-09")
+            self.assertEqual(env["HANSA_MOD_CLEAR_DAILY"], "04-09")
+            hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            self.assertEqual(shlex.split(hook)[-1], "status")
+            self.assertEqual((self.mod_record()["clear_daily"], self.mod_record()["root"]), ("04-09", True))
+            self.assertEqual(plugin.record_clear(self.desk), "")
+            self.assertFalse((self.desk.mod_dir / "cleared.json").exists())
+            self.assertEqual(views.status(self.desk)["clear_line"], "daily clear 04-09: the last clear is not known "
+                             "(hansa records no clear of root's session on this desk).")
             # root's own --autocompact, after hansa's: the record and status quote them all, as given
             start("2.1.296", "--autocompact", "600000", "--autocompact=700000")
             self.assertEqual(self.mod_record()["autocompact_options"],
