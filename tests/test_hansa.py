@@ -634,6 +634,10 @@ def sh_out(*args, cwd) -> str:
 
 
 
+FAKEHOME = str(Path(__file__).resolve().parent / "fakehome")
+ROOT_ABOVE = "HANSA_TESTS_ROOT_ABOVE"  # for a hansa started as a command (tests/fakehome), as root_above does
+
+
 @contextlib.contextmanager
 def as_home(home, **env):
     """With this folder as the home folder of the account the tests run as, in the password database (where
@@ -644,11 +648,19 @@ def as_home(home, **env):
         pw = real(uid)
         return pwd.struct_passwd((*pw[:5], str(home), *pw[6:]))
 
-    fake = str(Path(__file__).resolve().parent / "fakehome")
-    path = fake + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
+    path = FAKEHOME + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")
     with unittest.mock.patch.dict(os.environ, {"HOME": str(home), "HANSA_TESTS_HOME": str(home), "PYTHONPATH": path,
                                                **env}), unittest.mock.patch("pwd.getpwuid", getpwuid):
         yield
+
+
+def root_above(folder):
+    """With the folders above this one root's to account.owner, as they are outside the sandbox: in the Linux sandbox
+    they appear to belong to nobody, and plugin.folder_problem refuses them. This folder, what is in it and every
+    other path stay as they are (account.owner as it was)."""
+    above, owner = list(Path(os.path.realpath(folder)).parents), account.owner
+    return unittest.mock.patch.object(account, "owner",
+                                      lambda path: 0 if Path(os.path.realpath(path)) in above else owner(path))
 
 
 @contextlib.contextmanager
@@ -10186,9 +10198,11 @@ class DeskTest(unittest.TestCase):
         return f
 
     def start_with_mod(self, *extra, version="2.1.296", env=None):
-        """Start the coordinator in this process, catching the claude it would become: (argv, env, what it said)."""
+        """Start the coordinator in this process, catching the claude it would become: (argv, env, what it said). The
+        folders above the test's own are root's, as outside the sandbox (root_above)."""
         started, said = {}, io.StringIO()
-        with unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv, env=e)), \
+        with root_above(self.tmp), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv, env=e)), \
                 unittest.mock.patch.dict(os.environ, {"HANSA_CLAUDE": str(self.versioned_claude(version)),
                                                       "CLAUDE_CONFIG_DIR": str(self.tmp / "own-claude"), **(env or {})}), \
                 unittest.mock.patch("os.chdir"), unittest.mock.patch("hansa.notify.start", lambda *x, **k: None), \
@@ -10337,16 +10351,18 @@ class DeskTest(unittest.TestCase):
         self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
         worker, verifier = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
         self.assertIn("checking another worker's finished task", verifier[verifier.index("--append-system-prompt") + 1])
-        from hansa import run
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet")
-        design, design_env, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        for argv in (worker, verifier, design):
+        design = None
+        if not account.LINUX:  # design sessions do not run there (test_a_design_session_does_not_start_on_linux)
+            from hansa import run
+            self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
+                             model_asked="sonnet")
+            design, design_env, _ = run.design_command(self.desk, tid)
+            self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+            self.assertFalse({"HANSA_MOD_SETTINGS", "CLAUDE_CODE_PLUGIN_DIRS"} & set(design_env))
+        for argv in (worker, verifier) + ((design,) if design else ()):
             self.assertIn("-p" if argv is not design else "--session-id", argv)
             self.assertFalse({"--plugin-dir", "--autocompact"} & set(argv))
             self.assertFalse([x for x in argv if "coordinator-mod" in x])
-        self.assertFalse({"HANSA_MOD_SETTINGS", "CLAUDE_CODE_PLUGIN_DIRS"} & set(design_env))
 
     def test_an_install_puts_the_mod_in_place_and_the_coordinator_started_from_it_copies_it_into_the_desk(self):
         code = Path(__file__).resolve().parent.parent
@@ -10367,7 +10383,8 @@ class DeskTest(unittest.TestCase):
         show.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "PYTHONPATH")}
         r = subprocess.run([str(top / "bin" / "hansa"), "--desk", str(self.desk.root), "coordinator"], cwd=self.tmp,
-                           env={**env, "HANSA_CLAUDE": str(show), "CLAUDE_CONFIG_DIR": str(self.tmp / "own-claude")},
+                           env={**env, "HANSA_CLAUDE": str(show), "CLAUDE_CONFIG_DIR": str(self.tmp / "own-claude"),
+                                "PYTHONPATH": FAKEHOME, ROOT_ABOVE: str(self.tmp)},  # root_above, for its hansa
                            capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("did not", " ".join(r.stderr.split()))
@@ -10518,6 +10535,7 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(old.exists())
 
     def test_the_mods_copy_is_made_new_at_each_start_and_never_in_a_folder_another_account_could_change(self):
+        # the folders refused are the test's own, whoever owns those above them (root_above)
         self.desk.mod_dir.mkdir(parents=True)
         self.desk.mod_dir.chmod(0o777)
         self.addCleanup(self.desk.mod_dir.chmod, 0o700)
