@@ -88,6 +88,16 @@ lane, or waits for one.
   the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
   and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
 
+### Pinging a provider
+
+`hansa ping [PROVIDER]` sends one request ("Reply with the single word OK.") through the provider in a run of one
+turn, with no tools (`--tools ""`: no MCP server loads either) and no retries, for at most 90 seconds. It is ok
+when the answer says OK; the detail names the model. A model behind a compatible endpoint may still answer with a
+tool call, and the one turn ends there: a run that stopped at the turn limit after a tool call, with the model in
+its usage and no result, is ok too, with the detail "MODEL: answered, but stopped at the turn limit". Anything
+else is NOT ok, with the reason, and rests the provider where a task's run would (a usage limit, a rejected key). A
+ping during which the provider's key or settings changed is not recorded.
+
 ## A check's output
 
 `hansa show ID` gives a failed check's failing tests and its last lines. `hansa show ID --check` gives the task's

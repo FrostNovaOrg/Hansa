@@ -6251,7 +6251,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
         return {"ok": False, "detail": prob}
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
-    argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"]]
+    # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
+    argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
     argv += isolated(tmp)
     t0 = time.time()
     stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))
@@ -6262,8 +6263,12 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
                            capture_output=True, text=True, timeout=timeout)
         run = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
         ok = bool(run) and not run.get("is_error") and "ok" in (run.get("result") or "").lower()
-        if ok:
-            detail = ", ".join(run.get("modelUsage") or {})
+        # the model answered with a tool call and the one turn ran out: it is reachable all the same
+        stopped = (run.get("subtype"), run.get("stop_reason"), run.get("terminal_reason")) == \
+            ("error_max_turns", "tool_use", "max_turns") and bool(run.get("modelUsage")) and not run.get("result")
+        if ok or stopped:
+            ok, detail = True, ", ".join(run.get("modelUsage") or {})
+            detail += ": answered, but stopped at the turn limit" if stopped else ""
         else:
             kind, why = unusable_reason(run, r.stderr)
             said = re.search(r'"message"\s*:\s*"([^"]{1,120})"', f"{run.get('result') or ''} {r.stderr}")
