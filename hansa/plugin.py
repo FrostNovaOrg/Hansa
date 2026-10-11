@@ -124,7 +124,7 @@ def copy(d: Path, src: Path = MOD) -> tuple:
 def parse_window(text) -> tuple:
     """--clear-daily's window, HH-HH in local time (22-03 runs past midnight): (first hour, hour it ends). The mod
     reads it by the same rule (hooks/register.js: window)."""
-    m = WINDOW.match(str(text or "").strip())
+    m = WINDOW.fullmatch(text) if isinstance(text, str) else None  # as given: no spaces around it
     a, b = (int(m[1]), int(m[2]) or 24) if m else (-1, -1)
     if not (0 <= a <= 23 and 1 <= b <= 24 and a != b):
         raise ValueError(f"--clear-daily takes a window of hours in local time, such as 04-09; not {text!r}")

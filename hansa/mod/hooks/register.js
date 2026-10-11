@@ -182,6 +182,7 @@ async function check($, st) {
     const { context } = await $.session.usage()
     const now = await $.clock.now()
     if (!idle(st) || st.clearing || st.tried !== tried) return // a turn started, or another check acted, meanwhile
+    if (st.made === null) st.made = now // made before anything said when: as if now, so not in this window
     const tokens = context.tokens ?? 0
     const plan = daily(win, now, st)
     const d = decide(tokens, now - st.since, t, plan)

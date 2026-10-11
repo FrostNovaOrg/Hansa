@@ -1564,7 +1564,7 @@ def own_folder_rules(env: dict) -> list:
 
 def _clear_daily(rest: list) -> tuple:
     """hansa coordinator's own option among claude's: --clear-daily HH-HH. (window or '', the rest for claude)."""
-    out, clear, i = [], "", 0
+    out, clear, i = [], None, 0
     while i < len(rest):
         x = rest[i]
         if x == "--clear-daily" or x.startswith("--clear-daily="):
@@ -1577,12 +1577,12 @@ def _clear_daily(rest: list) -> tuple:
         else:
             out.append(x)
         i += 1
-    if clear:
+    if clear is not None:  # given, even empty: a window, or refused
         try:
             plugin.parse_window(clear)
         except ValueError as e:
             raise SystemExit(f"hansa: {e}")
-    return clear, out
+    return clear or "", out
 
 
 def _notified(desk: Desk, rest: list) -> list:

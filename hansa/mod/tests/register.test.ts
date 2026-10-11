@@ -18,7 +18,8 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
   mock.env(on, { HANSA_MOD_SETTINGS: SETTINGS, ...(clear === undefined ? {} : { HANSA_MOD_CLEAR_DAILY: clear }) })
   const files: Record<string, string> = { [SETTINGS]: desk(thresholds) }
   const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0, logs: [] as string[],
-    clears: [] as { command: string, args?: string, at: number }[], clearFails: 0 }
+    clears: [] as { command: string, args?: string, at: number }[], clearFails: 0,
+    during: null as null | (($) => Promise<unknown>) }
   on('fs.read', async ($, e) => {
     calls.reads += 1 // one each decision
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -39,6 +40,7 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
   })
   on('command.run', async ($, e) => {
     calls.clears.push({ command: e.command, args: e.args, at: clock.now() })
+    if (calls.during) await calls.during($) // what comes while the clear has not returned
     if (calls.clearFails > 0) { // the next ones fail: the engine's command.run rejects
       calls.clearFails -= 1
       throw new Error('not now')
@@ -573,6 +575,48 @@ test('a state made with no session.start (a reload): made at the first turn', as
   await turn($, 't1')
   await until(clock, 0, 8, 59)
   expect(calls.clears).toEqual([])
+})
+
+test('a state made mid-turn (a reload with no session.start nor turn.start): no clear in that window', async ($, on) => {
+  const { clock, calls } = setup(on, { value: 150_000 }, {}, { now: local(0, 4, 30), clear: '04-09' })
+  await $.classic.Stop(stopped()) // the first it hears of the session: the end of a turn it did not see start
+  await $.turn.complete(done('t1'))
+  await until(clock, 0, 8, 59)
+  expect(calls.clears).toEqual([])
+  await until(clock, 1, 4)
+  expect(calls.clears.map(c => c.at)).toEqual([local(1, 4)])
+})
+
+test('a state made mid-turn after this window\'s clear: not a second clear in it', async ($, on) => {
+  const { clock, calls } = setup(on, { value: 150_000 }, {}, { now: local(0, 6), clear: '04-09' })
+  await $.classic.Stop(stopped())
+  await $.turn.complete(done('t1'))
+  await until(clock, 0, 8, 59)
+  expect(calls.clears).toEqual([])
+})
+
+test('a state made at the very hour the window opens: made inside it, no clear in it', async ($, on) => {
+  const { clock, calls } = await started($, on, '04-09', 0, 4)
+  await turn($, 't1')
+  await until(clock, 0, 8, 59)
+  expect(calls.clears).toEqual([])
+})
+
+test('a Stop while the clear has not returned: nothing else is decided meanwhile', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls } = await started($, on, '04-09', 0, 3, 0, tokens)
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  calls.during = async () => { // the clear waits on Claude Code; a Stop with nothing waiting comes meanwhile
+    calls.during = null
+    await $.classic.Stop(stopped())
+    expect(calls.compact).toBe(0)
+  }
+  await clock.advance(5 * MIN)
+  expect(calls.clears.length).toBe(1)
+  expect(calls.compact).toBe(0) // the context is still large: compaction counts from the clear
+  await clock.advance(MIN)
+  expect(calls.compact).toBe(1)
 })
 
 for (const clear of [undefined, '', '9am', '04-04', '25-03']) {

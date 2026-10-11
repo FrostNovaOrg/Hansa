@@ -10237,6 +10237,13 @@ class DeskTest(unittest.TestCase):
         for bad in ("9am", 5, None, "04-04"):
             plugin.record_start(self.desk, {**self.mod_record(), "clear_daily": bad}, root=True)
             self.assertIsNone(self.mod_record()["clear_daily"], bad)
+        # given empty, or with spaces around it: refused as a window that is not one, before anything starts
+        for given in (["--clear-daily="], ["--clear-daily", ""], ["--clear-daily", " 04-09"], ["--clear-daily=04-09 "]):
+            with self.assertRaises(SystemExit) as e:
+                self.start_with_mod(*given)
+            window = given[-1].partition("=")[2] if "=" in given[-1] else given[-1]
+            self.assertEqual(e.exception.code, "hansa: --clear-daily takes a window of hours in local time, such as "
+                                               f"04-09; not {window!r}")
 
     def cleared_hook(self) -> str:
         """The coordinator's SessionStart hook after a /clear, run here: what it printed."""
