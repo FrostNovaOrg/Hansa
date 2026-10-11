@@ -19,7 +19,7 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
   const files: Record<string, string> = { [SETTINGS]: desk(thresholds) }
   const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0, logs: [] as string[],
     clears: [] as { command: string, args?: string, at: number }[], clearFails: 0,
-    during: null as null | (($) => Promise<unknown>) }
+    during: null as null | (($) => Promise<unknown>), usage: null as null | (() => Promise<unknown>) }
   on('fs.read', async ($, e) => {
     calls.reads += 1 // one each decision
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -29,7 +29,10 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
     calls.writes += 1
     return { value: undefined }
   })
-  on('session.usage', async () => ({ value: { context: { tokens: tokens.value, window: 1_000_000 }, rateLimits: [] } }))
+  on('session.usage', async () => {
+    if (calls.usage) await calls.usage() // what comes while the mod waits for the context's size
+    return { value: { context: { tokens: tokens.value, window: 1_000_000 }, rateLimits: [] } }
+  })
   on('session.compact', async () => {
     calls.compact += 1
     if (calls.refuse) throw new Error(calls.refuse)
@@ -602,6 +605,16 @@ test('a state made at the very hour the window opens: made inside it, no clear i
   expect(calls.clears).toEqual([])
 })
 
+test('a state made mid-turn at the very hour the window opens: made inside it, no clear in it', async ($, on) => {
+  const { clock, calls } = setup(on, { value: 150_000 }, {}, { now: local(0, 4), clear: '04-09' })
+  await $.classic.Stop(stopped()) // the first it hears of the session, at 04:00 to the millisecond
+  await $.turn.complete(done('t1'))
+  await until(clock, 0, 8, 59)
+  expect(calls.clears).toEqual([])
+  await until(clock, 1, 4)
+  expect(calls.clears.map(c => c.at)).toEqual([local(1, 4)])
+})
+
 test('a Stop while the clear has not returned: nothing else is decided meanwhile', async ($, on) => {
   const tokens = { value: 450_000 }
   const { clock, calls } = await started($, on, '04-09', 0, 3, 0, tokens)
@@ -616,6 +629,51 @@ test('a Stop while the clear has not returned: nothing else is decided meanwhile
   expect(calls.clears.length).toBe(1)
   expect(calls.compact).toBe(0) // the context is still large: compaction counts from the clear
   await clock.advance(MIN)
+  expect(calls.compact).toBe(1)
+})
+
+test('a Stop while the clear has not returned: no decision starts, not even a read of the settings', async ($, on) => {
+  const { clock, calls } = await started($, on, '04-09', 0, 3)
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  let read = -1
+  calls.during = async () => {
+    calls.during = null
+    const reads = calls.reads
+    await $.classic.Stop(stopped())
+    read = calls.reads - reads // said after the clear: what fails in here fails the clear, not the test
+  }
+  await clock.advance(5 * MIN)
+  expect(calls.clears.length).toBe(1)
+  expect(read).toBe(0)
+})
+
+test('a decision under way when the clear starts: it decides nothing once it sees the clear', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls } = await started($, on, '04-09', 0, 3, 0, tokens)
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  let asked = () => {}, release = () => {}
+  const clearAsked = new Promise<void>(r => { asked = r })
+  const released = new Promise<void>(r => { release = r })
+  let again: Promise<unknown> = Promise.resolve()
+  calls.usage = async () => { // the decision at 5 minutes asks the context's size; meanwhile another decides and clears
+    calls.usage = null
+    again = $.turn.complete(done('t1')) // the turn's end again (a Stop's decision may not run a command)
+    await clearAsked
+  }
+  calls.during = async () => { // the clear has not returned when the first decision goes on
+    calls.during = null
+    asked()
+    await released
+  }
+  await clock.advance(5 * MIN)
+  expect(calls.clears.length).toBe(1)
+  expect(calls.compact).toBe(0) // the context is large and long idle, but a clear is under way
+  release()
+  await again
+  expect(calls.compact).toBe(0)
+  await clock.advance(MIN) // compaction counts from the clear
   expect(calls.compact).toBe(1)
 })
 

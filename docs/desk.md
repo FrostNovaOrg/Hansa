@@ -122,9 +122,10 @@ once a day while it is idle, so it starts again from the desk's state, not from
 a summary of summaries. Automatic compaction keeps a full session going; it does
 not do what the daily clear does.
 
-It is off by default. hansa hands the window (local time; `22-03` runs past
-midnight) to its mod, for that start only, and the mod clears the session as
-`/clear` does, once in each window, when the session has been idle for 5
+It is off by default. A window given empty is refused at the start, as one that
+is not a window is; spaces around one are dropped. hansa hands the window
+(local time; `22-03` runs past midnight) to its mod, for that start only, and
+the mod clears the session as `/clear` does, once in each window, when the session has been idle for 5
 minutes: no turn (hansa's posts and anyone's messages start one) and no
 background work waiting. It skips the window the session started in. Inside the window
 idle compaction waits for the clear. Without the mod there is no daily clear,

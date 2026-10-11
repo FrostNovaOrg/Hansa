@@ -262,7 +262,7 @@ def record_start(desk: Desk, rec: dict, root: bool = False) -> None:
     why, v, opts = rec.get("why"), rec.get("version"), rec.get("autocompact_options")
     clean = {"start": rec.get("start") if _number(rec.get("start")) else None, "at": now(),
              "loaded": rec.get("loaded") if isinstance(rec.get("loaded"), bool) else None,
-             "why": " ".join(why.split())[:300] if isinstance(why, str) else "",
+             "why": _escaped(" ".join(why.split())[:300]) if isinstance(why, str) else "",
              "autocompact_options": opts if _words(opts) else None,
              "version": v if isinstance(v, str) and re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", v) else "",
              "clear_daily": _window(rec.get("clear_daily")), "root": root}
@@ -288,7 +288,7 @@ def record(desk: Desk, rec: dict) -> str:
 
 def start_lines(p: dict, clear: str = "") -> list:
     """What the start says hansa did not do, and why: a line each for the mod, --autocompact and the daily clear."""
-    old = not p["autocompact"] and not p.get("failed")  # a Claude Code to update
+    old = p.get("version") and not p["autocompact"] and not p.get("failed")  # a Claude Code to update
     return ([f"hansa did not load the coordinator's mod, because {p['why']}{' (claude update)' if old else ''}. {HELP}"]
             if not p["on"] else []) + ([f"hansa did not pass --autocompact, because {p['why']}."]
                                        if not p["autocompact"] else []) + (
@@ -321,9 +321,14 @@ def left_text(p: dict) -> str:
 
 
 # -- what hansa says of it -----------------------------------------------------------------------------------------
+def _escaped(text: str) -> str:
+    """Text with each character that is not printable (an escape sequence's ESC, say) written as Python writes it."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in text)
+
+
 def _quoted(words: list) -> str:
     """Words as a shell would take them, on one line."""
-    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in shlex.join(words))
+    return _escaped(shlex.join(words))
 
 
 def status(desk: Desk) -> dict | None:
@@ -344,7 +349,7 @@ def status(desk: Desk) -> dict | None:
     loaded = r.get("loaded") if isinstance(r.get("loaded"), bool) else None
     why = r.get("why") if loaded is False and isinstance(r.get("why"), str) else ""
     opts = r.get("autocompact_options")
-    return {"started": started, "loaded": loaded, "why": " ".join(why.split())[:300] or None,
+    return {"started": started, "loaded": loaded, "why": _escaped(" ".join(why.split())[:300]) or None,
             "autocompact": _quoted(opts) if _words(opts) else None, "clear": _clear(desk, r, start, loaded)}
 
 
