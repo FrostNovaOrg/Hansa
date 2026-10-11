@@ -108,6 +108,26 @@ try at another commit (one already running, say) is waited for and never taken
 as the answer, and it exits 0 only when the try at COMMIT passed. So a try asked
 again after the base moved never passes on an older commit's verdict.
 
+A full build can run for minutes with no output; an ssh silent that long can
+break with neither end noticing, and the release then waits out its time limit
+for an answer that never comes. So start the try there with `nohup`, its output
+then its exit code going to a fresh file named after the commit (a rerun never
+reads an earlier result), and poll for that code every 30 seconds or so with
+short ssh calls (connect timeout, keepalive) until it appears or time runs out:
+
+```sh
+c=$HANSA_RELEASE_COMMIT f=/path/to/tries/$c.log
+o="-o ConnectTimeout=20 -o ServerAliveInterval=10"
+ssh $o HOST "cd /path/to/checkout && nohup sh -c 'hansa lane try L --merge-check --at $c; echo try-exit=\$?' >$f 2>&1 </dev/null &" || exit 1
+end=$(( $(date +%s) + 3000 ))  # under the target's own time limit
+while [ "$(date +%s)" -lt "$end" ]; do
+  sleep 30
+  rc=$(ssh $o HOST "sed -n 's/^try-exit=//p' $f") || continue
+  [ -n "$rc" ] && exit "$rc"
+done
+exit 1
+```
+
 ### Stopping a release
 
 A release can be stopped: the coordinator with `hansa release --stop ID
