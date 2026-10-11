@@ -14,7 +14,8 @@ release targets, with `hansa lane target L NAME "<command>"
 [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
 (else the lane's `timeout_min`) and optionally another target of the lane
 that must have sent out the same commit first. An older unnamed release
-becomes the target `default`, keeping its tick for going out without asking.
+moves to `default` if absent, taking only its tick for the same command.
+Other unnamed ticks match nothing, even if `default` has the same command.
 `lane set L release CMD` (or `none`) forwards to `lane target L default` until
 the next version; it refuses a default target with its own options.
 `hansa lane target L` lists them, each with the way it runs. `hansa

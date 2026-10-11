@@ -479,9 +479,9 @@ function alertSection() {
     T.alertCmd, h("div", {}, bind(S.alert, "command"), S.alert.at ? h("div", {class:"muted"}, T.alertSavedAt(when(S.alert.at))) : null,
       h("div", {class:"muted"}, T.alertKeep), h("div", {class:"row"}, test, said))));
 }
-/* an entry of the releases without asking: [lane, target]; a lane name alone, or no target, is the lane's unnamed one */
-const listedKey = x => typeof x === "string" ? [x, "default"] : [x.lane, x.target || "default"];
-/* the release targets each lane has now: its named ones, or its release command as its one unnamed target ("") */
+/* an entry of the releases without asking: [lane, target]; an old unnamed entry stays distinct unless migrated */
+const listedKey = x => typeof x === "string" ? [x, ""] : [x.lane, x.target || ""];
+/* the release targets each lane has now: its named ones, or its former release command as target default */
 const laneTargets = l => l && l.targets && Object.keys(l.targets).length ? Object.keys(l.targets) : l && l.release ? ["default"] : [];
 const targetGone = (lane, t) => !laneTargets(S.lanes[lane]).includes(t);
 /* one tick per release target of each lane, and per entry on the list that no lane has now, said as such with

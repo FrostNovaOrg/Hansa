@@ -700,9 +700,6 @@ def status_text(st: dict) -> str:
     wr = max(map(len, rests), default=0)
     for p, rest in zip(st["providers"], rests):
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
-        if p.get("check"):
-            out.append(f"      last ping: {'ok' if p['check'].get('ok') else 'NOT ok'} - "
-                       f"{p['check'].get('detail', '')}")
     if [r for r in st.get("releases") or [] if r["state"] in release.OPEN]:
         out.append("releases (hansa release):")
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]

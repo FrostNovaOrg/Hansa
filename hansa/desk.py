@@ -1085,13 +1085,18 @@ def lane_targets(ln) -> dict:
 def migrate_releases(s: dict) -> None:
     """Read the former unnamed target as default, without writing settings or announcing a change."""
     lanes = s.get("lanes")
-    for ln in lanes.values() if isinstance(lanes, dict) else []:
-        if (isinstance(ln, dict) and ln.get("targets", {}) == {} and isinstance(ln.get("release"), str)
+    moved = {}
+    for name, ln in lanes.items() if isinstance(lanes, dict) else []:
+        if (isinstance(ln, dict) and isinstance(ln.get("targets", {}), dict)
+                and "default" not in ln.get("targets", {}) and isinstance(ln.get("release"), str)
                 and ln["release"].strip()):
-            ln["targets"] = {"default": {"command": ln.pop("release")}}
+            moved[name] = ln.pop("release")
+            ln["targets"] = {**ln.get("targets", {}), "default": {"command": moved[name]}}
     listed = s.get("releases_without_asking")
     for entry in listed if isinstance(listed, list) else []:
-        if isinstance(entry, dict) and entry.get("target", "") == "":
+        if (isinstance(entry, dict) and entry.get("target", "") == "" and isinstance(entry.get("lane"), str)
+                and entry["lane"] in moved
+                and entry.get("command", entry.get("release", "")) == moved[entry["lane"]]):
             entry["target"] = "default"
 
 
@@ -1191,10 +1196,9 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
 def listed_key(entry) -> tuple:
     """(lane, target) of an entry of the list; an entry without a target stands for the lane's unnamed one."""
     if isinstance(entry, str):
-        return entry, "default"
+        return entry, ""
     if isinstance(entry, dict):
-        target = entry.get("target", "")
-        return entry.get("lane"), "default" if target == "" else target
+        return entry.get("lane"), entry.get("target", "")
     return None, None
 
 
@@ -1211,6 +1215,8 @@ def record_listed(listed, lanes: dict, before=()) -> list:
         fresh = (isinstance(x, str) and x not in kept) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
         if fresh and _listed_ok(x):
             lane, target = listed_key(x)
+            if isinstance(x, str):  # a new tick by lane name; an old saved bare name is kept above
+                target = "default"
             x = {"lane": lane, "target": target, **listed_as(lanes.get(lane), target)}
         out.append(x)
     return out
@@ -1238,11 +1244,8 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
         return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
     if target not in lane_targets(ln):
         if zh:
-            return f"工作线 {lane} 现在没有发布目标 {target}" if target else f"工作线 {lane} 现在没有不带名字的发布命令"
-        if target:
-            return f"lane {lane} has no release target {target} now"
-        return (f"lane {lane} has no unnamed release command now (its targets have names)" if lane_targets(ln) else
-                f"lane {lane} has no release command now")
+            return f"工作线 {lane} 现在没有发布目标 {target or 'default'}"
+        return f"lane {lane} has no release target {target or 'default'} now"
     if not isinstance(entry, dict):
         return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
                 "the list was saved before hansa recorded each lane's repository, base branch and release command")

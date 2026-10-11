@@ -11037,7 +11037,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         self.assertIn("check", self.desk.provider_state()["claude"])
         self.assertEqual(len(self.events("provider_checked")), 1)
-        self.assertIn("last ping: ok", self.hansa("status"))
+        self.assertNotIn("last ping:", self.hansa("status"))
         self.assertIn("last ping:", self.hansa("explain", "provider", "claude"))
 
     @staticmethod
@@ -18294,6 +18294,12 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"].update(targets={"default": {"command": command}}, **lane)
         self.assertEqual(self.desk.save_settings(s), [])
 
+    def test_release_pointers_for_a_lane_without_targets_use_lane_target_default(self):
+        for said in (self.hansa("release"), self.hansa("explain", "lane", "a")):
+            with self.subTest(said=said):
+                self.assertRegex(said, r'hansa lane target (L|a) default "<command>"')
+                self.assertNotRegex(said, r"hansa lane set (L|a) release ")
+
     def settle_release(self, d, rid, timeout=20):
         from hansa import release
         end = time.time() + timeout
@@ -19583,14 +19589,14 @@ class DeskTest(unittest.TestCase):
         s["releases_without_asking"] = ["a"]  # as a page saved it before hansa recorded what it listed
         self.desk.settings_path.write_text(json.dumps(s))
         [u] = public_settings(self.desk)["release_unmatched"]
-        self.assertIn("before hansa recorded", u["why"])
+        self.assertEqual(u["why"], "lane a has no release target default now")
         # a save of something else keeps it as it was, as it keeps a recorded entry that no longer matches
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])), {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["releases_without_asking"], ["a"])
         self.hansa("release", "a")
         self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
         # the page's tick (its button to take them back in sends one) records it as the lane is now
-        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": ""}])),
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "default"}])),
                          {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["releases_without_asking"][0]["command"], "true")
         self.hansa("release", "a")
@@ -19697,9 +19703,9 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         shown = public_settings(self.desk)
         self.assertEqual(shown["problems"], [])
         self.assertEqual([(u["lane"], u["target"], u["gone"], u["was"], u["why"]) for u in shown["release_unmatched"]],
-                         [("a", "default", True, "", "lane a has no release target default now"),
-                          ("b", "default", True, "make deploy", "lane b has no release target default now"),
-                          ("c", "default", True, "", "lane c has no release target default now")])
+                         [("a", "", True, "", "lane a has no release target default now"),
+                          ("b", "", True, "make deploy", "lane b has no release target default now"),
+                          ("c", "", True, "", "lane c has no release target default now")])
         # they can be taken off the list: a save without them keeps only what is ticked
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "github"}])),
                          {"ok": True, "problems": []})
@@ -19721,8 +19727,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         out = json.loads(r.stdout)
         # every target each lane has, then each old entry, ticked as saved; the old ones said as such
         self.assertEqual([(x["lane"], x["target"], x["ticked"]) for x in out["ticks"]],
-                         [("a", "shop-test", True), ("a", "github", False), ("a", "default", True), ("b", "default", True), ("c", "default", True)])
-        gone = {x["lane"]: x["text"] for x in out["ticks"] if x["target"] == "default"}
+                         [("a", "shop-test", True), ("a", "github", False), ("a", "", True), ("b", "", True), ("c", "", True)])
+        gone = {x["lane"]: x["text"] for x in out["ticks"] if x["target"] == ""}
         for lane in "abc":
             self.assertIn("no lane has this release target now", gone[lane])
         self.assertIn("its command then: make deploy", gone["b"])
@@ -19731,6 +19737,33 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         # a click on the first tick unticks it alone
         self.assertEqual([listed for listed in out["after"] if isinstance(listed, dict) and listed.get("target") == "shop-test"], [])
         self.assertEqual(len(out["after"]), 3)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_settings_page_keeps_an_old_unnamed_tick_separate_from_default(self):
+        from hansa import release
+        self.with_targets(default="true", prod="false")
+        tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        s = self.desk.settings()
+        s["releases_without_asking"] = [tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        r = subprocess.run(["node", str(harness), str(page), "ticks"], input=json.dumps({"/api/settings": public_settings(self.desk)}),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual([(x["lane"], x["target"], x["ticked"]) for x in out["ticks"]],
+                         [("a", "default", False), ("a", "prod", False), ("a", "", True)])
+        self.assertIn("no lane has this release target now", out["ticks"][-1]["text"])
+        self.assertIn("its command then: true", out["ticks"][-1]["text"])
+        # The harness clicks default: only this explicit new tick lets it go out without asking.
+        self.assertEqual(out["after"], [tick, {"lane": "a", "target": "default"}])
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=out["after"])),
+                         {"ok": True, "problems": []})
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "default"))
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", ""))
+        self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_the_status_and_settings_tabs_show_no_null_for_sections_a_desk_has_not(self):
@@ -19887,6 +19920,115 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.hansa("lane", "target", "a", "prod", "true")
         self.assertTrue(release.lane_listed(self.desk.settings(), "a", "default"))
         self.assertEqual(self.desk.settings()["lanes"]["a"]["max_turns"], 300)
+
+    def test_an_old_unnamed_tick_never_covers_an_existing_default_target(self):
+        from hansa import release
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["lanes"]["a"]["targets"] = {"default": {"command": "true"}, "prod": {"command": "false"}}
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true", **target}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                before = self.desk.settings_path.read_bytes()
+                loaded = self.desk.settings()
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                [unmatched] = public_settings(self.desk)["release_unmatched"]
+                self.assertEqual((unmatched["lane"], unmatched["target"], unmatched["gone"], unmatched["was"]),
+                                 ("a", "", True, "true"))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertIn("waits for the principal's yes", self.hansa("release", "a", "default"))
+                self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
+                self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])),
+                                 {"ok": True, "problems": []})
+                self.assertFalse(release.lane_listed(self.desk.settings(), "a", "default"))
+
+    def test_release_migration_moves_only_a_tick_for_its_own_command(self):
+        from hansa import release
+        for entry in ({"command": "false"}, {"release": "false"}, {}):
+            with self.subTest(entry=entry):
+                s = self.desk.settings()
+                s["lanes"]["a"].pop("targets", None)
+                s["lanes"]["a"]["release"] = "true"
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", **entry}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                loaded = self.desk.settings()
+                self.assertEqual(loaded["lanes"]["a"]["targets"], {"default": {"command": "true"}})
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
+                # A later matching command does not turn this unmatched old entry into a new tick.
+                self.hansa("lane", "target", "a", "default", "false")
+                self.assertFalse(release.lane_listed(self.desk.settings(), "a", "default"))
+
+    def test_release_migration_keeps_other_named_targets_and_their_ticks(self):
+        from hansa import release
+        s = self.desk.settings()
+        s["lanes"]["a"].update(release="true", targets={"prod": {"command": "false"}})
+        old_tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        named_tick = {**old_tick, "target": "prod", "command": "false"}
+        s["releases_without_asking"] = [old_tick, named_tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        before = self.desk.settings_path.read_bytes()
+        loaded = self.desk.settings()
+        self.assertEqual(loaded["lanes"]["a"]["targets"], {"prod": {"command": "false"}, "default": {"command": "true"}})
+        self.assertNotIn("release", loaded["lanes"]["a"])
+        self.assertEqual(loaded["releases_without_asking"], [{**old_tick, "target": "default"}, named_tick])
+        self.assertTrue(release.lane_listed(loaded, "a", "default"))
+        self.assertTrue(release.lane_listed(loaded, "a", "prod"))
+        self.assertEqual(public_settings(self.desk)["problems"], [])
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_the_page_taking_entries_back_in_does_not_turn_an_unnamed_tick_into_default(self):
+        from hansa import release
+        self.with_targets(default="true", prod="false")
+        old_tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        named_tick = {**old_tick, "target": "prod"}  # its command has changed, so the page offers the button
+        s = self.desk.settings()
+        s["releases_without_asking"] = [old_tick, named_tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 2)
+        # The button sends each entry as a fresh {lane, target}, keeping the old unnamed entry unnamed.
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
+            {"lane": "a", "target": ""}, {"lane": "a", "target": "prod"}])), {"ok": True, "problems": []})
+        loaded = self.desk.settings()
+        self.assertFalse(release.lane_listed(loaded, "a", "default"))
+        self.assertTrue(release.lane_listed(loaded, "a", "prod"))
+        [unmatched] = public_settings(self.desk)["release_unmatched"]
+        self.assertEqual((unmatched["lane"], unmatched["target"], unmatched["gone"]), ("a", "", True))
+
+    def test_an_old_unnamed_tick_does_not_cover_default_when_both_release_forms_are_saved(self):
+        from hansa import release
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["lanes"]["a"].update(release="true", targets={"default": {"command": "true"}})
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true", **target}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                loaded = self.desk.settings()
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
+
+    def test_adding_default_does_not_revive_an_old_unnamed_tick_without_a_release(self):
+        from hansa import release
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["lanes"]["a"].pop("targets", None)
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true", **target}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                self.hansa("lane", "target", "a", "default", "true")
+                loaded = self.desk.settings()
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
+                self.assertIn("waits for the principal's yes", self.hansa("release", "a", "default"))
+                self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
 
     def test_lane_set_release_forwards_to_default_including_none(self):
         from hansa import release

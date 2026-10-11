@@ -116,11 +116,11 @@ def repo_key(repo) -> str:
     return str(Path(repo).expanduser().resolve())
 
 
-def lane_listed(s: dict, lane: str, target: str = "") -> bool:
+def lane_listed(s: dict, lane: str, target: str = "default") -> bool:
     """Whether the principal lets this release target of the lane go out without asking: it is on the list, and the
     lane has the repository and base branch, and the target the command, they had when the page saved the list. A
     tick for one target never covers another."""
-    return any(isinstance(x, dict) and listed_key(x) == (lane, target or "default") and not listed_mismatch(s, x)
+    return any(isinstance(x, dict) and listed_key(x) == (lane, target) and not listed_mismatch(s, x)
                for x in s.get("releases_without_asking") or [])
 
 
@@ -1317,7 +1317,7 @@ def line(desk: Desk, r: dict, s: dict | None = None) -> str:
 def list_text(desk: Desk) -> str:
     rs = releases(desk)
     if not rs:
-        return ("no releases yet. A lane's release command is set with hansa lane set L release \"<command>\", or its "
+        return ("no releases yet. A lane's release command is set with hansa lane target L default \"<command>\", or its "
                 "named targets with hansa lane target L NAME \"<command>\"; hansa release L [TARGET] [note] asks for one")
     s = desk.settings()
     live = [r for r in rs if r.get("state") in OPEN]
@@ -1357,7 +1357,7 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
                f"build files and release scripts), and a change touching one is merged only once a verification of "
                f"it holds"] if targets else [])
     if not targets:
-        return [f"  release: none (set one with hansa lane set {name} release \"<command>\", or name targets with "
+        return [f"  release: none (set one with hansa lane target {name} default \"<command>\", or name targets with "
                 f"hansa lane target {name} NAME \"<command>\")", "  last release: none", *listed]
     out = []
     for target, t in sorted(targets.items()):
