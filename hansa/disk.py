@@ -385,30 +385,34 @@ def ended_at(m: dict, tasks: dict):
 
 def _trim_one(f: Path, at: float, keep_head: bool = False) -> int | None:
     """Keep a log's tail, optionally its first TRIM_HEAD bytes too, with a trim line; return its size before,
-    or None if small, already cut or unreadable. Tail-only cuts start at a line when one starts in its first KB."""
+    or None if small, already cut or unreadable. Cuts follow nearby lines, or UTF-8 character boundaries."""
     try:
         size = f.stat().st_size
-        if size <= TRIM_KEEP + (TRIM_HEAD if keep_head else 1024):
+        if size <= TRIM_KEEP + (TRIM_HEAD if keep_head else 0) + 1024:
             return None
         with open(f, "rb") as fh:
             start = fh.read(TRIM_HEAD + 128)
             marker = b"[hansa trimmed this log on "
-            if start.startswith(marker) or start[TRIM_HEAD:].lstrip(b"\n").startswith(marker):
+            if start.startswith(marker) or marker in start[TRIM_HEAD - 1024:]:
                 return None  # including a head-and-tail cut now eligible for a tail-only cut
             fh.seek(size - TRIM_KEEP)
             tail = fh.read()
     except OSError:
         return None
     when = time.strftime('%Y-%m-%d %H:%M', time.localtime(at))
+    nl = tail.find(b"\n", 0, 1024)
+    tail = tail[nl + 1:] if nl >= 0 else tail
+    while tail and tail[0] & 0xC0 == 0x80:  # not in the middle of a character
+        tail = tail[1:]
     if keep_head:
-        head = start[:TRIM_HEAD]
+        nl = start.rfind(b"\n", TRIM_HEAD - 1024, TRIM_HEAD)
+        end = nl + 1 if nl >= 0 else TRIM_HEAD
+        while start[end] & 0xC0 == 0x80:
+            end -= 1
+        head = start[:end]
         head += (b"" if head.endswith(b"\n") else b"\n") + (
-            f"[hansa trimmed this log on {when}: cut {size - TRIM_HEAD - TRIM_KEEP:,} bytes]\n").encode()
+            f"[hansa trimmed this log on {when}: cut {size - len(head) - len(tail):,} bytes]\n").encode()
     else:
-        nl = tail.find(b"\n", 0, 1024)
-        tail = tail[nl + 1:] if nl >= 0 else tail
-        while tail and tail[0] & 0xC0 == 0x80:  # not in the middle of a character
-            tail = tail[1:]
         head = (f"[hansa trimmed this log on {when}: it was {size:,} "
                 f"bytes; its last {len(tail):,} bytes follow]\n").encode()
     try:
@@ -433,7 +437,8 @@ def trim(desk: Desk, at: float | None = None) -> list:
             old = isinstance(end, (int, float)) and at - end >= TRIM_AFTER
             passed = ({"setup.log": m.get("setup_exit") in (None, 0),
                        "check.log": (m.get("check") or {}).get("ok"),
-                       "merge-check.log": (m.get("merge_check_result") or {}).get("ok")}
+                       "merge-check.log": (m.get("merge_check_result") or {}).get("ok"),
+                       "merge-setup.log": (m.get("merge_check_result") or {}).get("ok")}
                       if m.get("state") == "merged" else {})
             for name in TRIMMED:
                 if not old and not passed.get(name):

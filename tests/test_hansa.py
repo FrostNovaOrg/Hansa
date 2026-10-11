@@ -18914,7 +18914,7 @@ class DeskTest(unittest.TestCase):
                                  check={"ok": True}, merge_check_result={"ok": True})
         folder = self.desk.tasks_dir / tid
         big = b"build output\n" * 60000
-        passed = ("setup.log", "check.log", "merge-check.log")
+        passed = ("setup.log", "check.log", "merge-check.log", "merge-setup.log")
         for name in (*disk.TRIMMED, "result.md", "run.json", "other.log"):
             (folder / name).write_bytes(big)
         before = self.desk.meta(tid)
@@ -18926,11 +18926,13 @@ class DeskTest(unittest.TestCase):
             if name not in passed:
                 self.assertEqual(data, big, name)
                 continue
-            self.assertEqual(data[:disk.TRIM_HEAD], big[:disk.TRIM_HEAD], name)
-            self.assertEqual(data[-disk.TRIM_KEEP:], big[-disk.TRIM_KEEP:], name)
-            marker = data[disk.TRIM_HEAD:-disk.TRIM_KEEP]
-            self.assertRegex(marker.decode(), rf"^\n?\[hansa trimmed this log on .*: cut "
-                                             rf"{len(big) - disk.TRIM_HEAD - disk.TRIM_KEEP:,} bytes\]\n$")
+            head, marker, rest = data.partition(b"[hansa trimmed this log on ")
+            cut, tail = rest.split(b"\n", 1)
+            self.assertEqual(head, big[:big.rfind(b"\n", 0, disk.TRIM_HEAD) + 1], name)
+            expected_tail = big[-disk.TRIM_KEEP:]
+            self.assertEqual(tail, expected_tail[expected_tail.find(b"\n") + 1:], name)
+            self.assertRegex((marker + cut).decode(), rf"^\[hansa trimmed this log on .*: cut "
+                            rf"{len(big) - len(head) - len(tail):,} bytes\]$")
         after = self.desk.meta(tid)
         self.assertEqual(after.pop("trimmed").keys(), set(passed))
         self.assertEqual(after, before)  # only the trim record changes
@@ -18938,19 +18940,86 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(self.desk.events_path.read_bytes().startswith(events))
         [e] = self.events("logs_trimmed")
         self.assertEqual((e["tasks"], e["files"]), ([tid], len(passed)))
-        # The cutoff is exactly 288 KB, including a log just one byte over it.
-        for size in (disk.TRIM_HEAD + disk.TRIM_KEEP - 1, disk.TRIM_HEAD + disk.TRIM_KEEP,
-                     disk.TRIM_HEAD + disk.TRIM_KEEP + 1):
-            with self.subTest(size=size):
+
+    def test_daily_trim_leaves_a_1_kb_margin_so_small_cuts_cannot_grow_logs(self):
+        from hansa import disk
+        at = time.time()
+        tid = self.desk.new_task("Merged build", state="merged", merged=at - 60, check={"ok": True})
+        log = self.desk.tasks_dir / tid / "check.log"
+        for extra in (-1, 0, 1, 1023, 1024, 1025):
+            with self.subTest(extra=extra):
+                size = disk.TRIM_HEAD + disk.TRIM_KEEP + extra
                 data = b"x" * size
-                (folder / "check.log").write_bytes(data)
+                log.write_bytes(data)
                 cut = disk.trim(self.desk, at)
-                if size <= disk.TRIM_HEAD + disk.TRIM_KEEP:
+                if extra <= 1024:
                     self.assertEqual(cut, [])
-                    self.assertEqual((folder / "check.log").read_bytes(), data)
+                    self.assertEqual(log.read_bytes(), data)
                 else:
                     self.assertEqual(cut, [(tid, "check.log", size)])
-                    self.assertIn(b": cut 1 bytes]\n", (folder / "check.log").read_bytes())
+                    self.assertIn(b": cut 1,025 bytes]\n", log.read_bytes())
+                    self.assertLess(log.stat().st_size, size)
+
+    def test_daily_trim_preserves_utf8_lines_and_scrubs_a_key_saved_after_the_cut(self):
+        from hansa import disk
+        at = time.time()
+        key = "sk-trim-later-123456"
+        for width, count in ((31, 12000), (1400, 300)):
+            with self.subTest(line_width=width):
+                tid = self.desk.new_task("Merged build", state="merged", merged=at - 60, check={"ok": True})
+                log = self.desk.tasks_dir / tid / "check.log"
+                big = (key + "\n" + ("界" * width + "\n") * count + key + "\n").encode()
+                # Both raw offsets split a multi-byte character; long lines also exercise the fallback.
+                self.assertEqual(big[disk.TRIM_HEAD] & 0xC0, 0x80)
+                self.assertEqual(big[-disk.TRIM_KEEP] & 0xC0, 0x80)
+                log.write_bytes(big)
+                self.assertEqual(disk.trim(self.desk, at), [(tid, "check.log", len(big))])
+                data = log.read_bytes()
+                data.decode("utf-8")  # strict decoding, as Desk.scrub uses
+                head, _, rest = data.partition(b"[hansa trimmed this log on ")
+                cut, tail = rest.split(b"\n", 1)
+                if width == 31:
+                    kept = head
+                    self.assertEqual(head, big[:big.rfind(b"\n", 0, disk.TRIM_HEAD) + 1])
+                    expected_tail = big[-disk.TRIM_KEEP:]
+                    self.assertEqual(tail, expected_tail[expected_tail.find(b"\n") + 1:])
+                else:
+                    kept = head[:-1]  # the separator's added newline
+                    self.assertGreaterEqual(len(kept), disk.TRIM_HEAD - 3)
+                    self.assertGreaterEqual(len(tail), disk.TRIM_KEEP - 3)
+                    self.assertTrue(big.startswith(kept))
+                    self.assertTrue(big.endswith(tail))
+                self.assertIn(f": cut {len(big) - len(kept) - len(tail):,} bytes]".encode(), cut)
+                self.assertEqual(data.count(key.encode()), 2)  # a key in each retained part
+                self.assertEqual(disk.trim(self.desk, at + 31 * 86400), [])
+                self.assertIsNone(disk._trim_one(log, at + 31 * 86400))  # also safe from a tail-only cut
+                self.assertEqual(log.read_bytes(), data)
+                self.desk.write_key("mimo", key)
+                scrubbed = log.read_text(encoding="utf-8")
+                self.assertNotIn(key, scrubbed)
+                self.assertEqual(scrubbed.count("[key of mimo]"), 2)
+
+    def test_daily_trim_cuts_merge_setup_at_once_only_when_the_merge_check_passed(self):
+        from hansa import disk
+        at = time.time()
+        big = b"merge setup output\n" * 60000
+        for ok in (True, False):
+            with self.subTest(merge_check_passed=ok):
+                tid = self.desk.new_task("Merged build", state="merged", merged=at - 60, setup_exit=0,
+                                         merge_check_result={"ok": ok})
+                log = self.desk.tasks_dir / tid / "merge-setup.log"
+                log.write_bytes(big)
+                self.assertEqual(disk.trim(self.desk, at), [(tid, "merge-setup.log", len(big))] if ok else [])
+                if ok:
+                    self.assertIn(b"[hansa trimmed this log on ", log.read_bytes())
+                    self.assertIn("merge-setup.log", self.desk.meta(tid)["trimmed"])
+                else:
+                    self.assertEqual(log.read_bytes(), big)
+
+    def test_daily_trim_docs_distinguish_task_records_from_release_events(self):
+        doc = (Path(__file__).resolve().parent.parent / "docs" / "desk.md").read_text()
+        self.assertIn("Task cuts appear in the record and `hansa show`, release cuts only in the event;",
+                      " ".join(doc.split()))
 
     def test_daily_trim_cuts_logs_of_tasks_left_at_done_for_30_days(self):
         from hansa import disk

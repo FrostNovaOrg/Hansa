@@ -62,9 +62,9 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 Once a day `hansa serve` cuts merged tasks' passed setup, check and merge check logs over 288 KB to their
 first 32 KB and last 256 KB, with a line counting the bytes cut. Failed logs wait 30 days; other logs of
 tasks ended (merged, cancelled, failed, replaced) or left at done that long, and ended releases' logs that
-old, keep their last 256 KB, under a line saying when and how big they were. The task's record and `hansa show`
-note each cut; no log is cut twice. Text, records, reports, results, screenshots, the event log and all
-other logs stay whole.
+old, keep their last 256 KB, under a line saying when and how big they were. Task cuts appear in the record
+and `hansa show`, release cuts only in the event; no log is cut twice. Text, records, reports, results,
+screenshots, the event log and all other logs stay whole.
 
 ## Hearing from hansa
 
