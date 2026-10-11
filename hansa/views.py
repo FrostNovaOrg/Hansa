@@ -304,8 +304,8 @@ def merge_lane_wait(desk: Desk, m: dict, tasks: list | None = None) -> str:
     return "slot" if sum(lane_occupied(x) for x in (desk.tasks() if tasks is None else tasks)) >= s["concurrency"] else ""
 
 
-def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
-    """Where a merging task's merge check is, in one line."""
+def merge_check_text(desk: Desk, m: dict, tasks: list | None = None, sentence: bool = False) -> str:
+    """Where a merging task's merge check is, in one line. sentence: one just queued, as hansa merge says it."""
     mc = m.get("merge_check") or {}
     lane = merge_check_lane(desk.settings(), m)
     base = desk.settings()["lanes"].get(m.get("lane"), {}).get("base") or "main"
@@ -322,12 +322,13 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None) -> str:
                                                       or "merges when `hansa serve` next looks (within seconds)"))
     other = merge_check_busy_with(desk, m, tasks)
     waiting = merge_lane_wait(desk, m, tasks)
-    return (f"merge check queued{again}: " + (f"waits for {ahead}" if ahead else
-                                              f"waits for lane {lane}, busy with {other}" if other else
-                                              f"waits for lane {lane}, held by a try" if waiting == "try" else
-                                              "waits for a free concurrency slot" if waiting == "slot" else
-                                              disk_short(desk) or not_looking(desk)
-                                              or "starts when `hansa serve` next looks (within seconds)"))
+    return (("The merge check is queued" if sentence else "merge check queued") + f"{again}: "
+            + (f"waits for {ahead}" if ahead else
+               f"waits for lane {lane}, busy with {other}" if other else
+               f"waits for lane {lane}, held by a try" if waiting == "try" else
+               "waits for a free concurrency slot" if waiting == "slot" else
+               disk_short(desk) or not_looking(desk)
+               or "starts when `hansa serve` next looks (within seconds)") + ("." if sentence else ""))
 
 
 def silent(r: dict) -> bool:
@@ -1288,8 +1289,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                            f" have one: hansa lane set {name} identity \"Name <email>\", or user.name and user.email"
                            f" in the repository's own config (an account's global identity is never taken)"),
             f"  providers, in order: {' > '.join(ln['providers'])} (the next one takes over when one hits its limit)",
-            f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
-            " (check included); set high, so reaching it means something went wrong",
+            *([] if ln.get("merge_lane") else  # it takes no work; its merge check's limit is below
+              [f"  per task: stopped at {ln.get('max_turns', 300)} turns or {ln.get('timeout_min', 240)} minutes"
+               " (check included); set high, so reaching it means something went wrong"]),
             "  work: none; a merge lane takes no work" if ln.get("merge_lane") else
             "  check after each task: " + (f"{ln['check']} (hansa runs it in the worktree after the worker ends,"
                                             " in the lane's sandbox;"
