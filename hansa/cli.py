@@ -1451,23 +1451,25 @@ def cmd_coordinator(a):
     argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
-    # when the session compacts: the account's plan may be the account's to write, so only numbers in range count
+    # when the session compacts while working: the account's plan may be the account's to write, so only a number in
+    # range counts. The mod reads the other three in the desk's settings file at each decision
     given = plan.get("compact") if isinstance(plan.get("compact"), dict) else {}
-    compact = compact_settings({"coordinator_compact": given})
-    # preparing the mod never stops the start: a step that fails leaves it off, and --autocompact with it
-    mod = plugin.plan(desk, claude, compact)
-    if theirs:  # root's copy and thresholds are root's own; the account's hansa records the start in the desk
-        mod = _record_roots_mod(theirs, desk, mod)
-    else:
-        mod = plugin.record(desk, mod)
-    argv += ["--autocompact", str(compact["working_at"])] if mod["autocompact"] else []
-    if mod["on"]:  # for this start only: hansa names the mod in no settings file, only its thresholds file here
+    working_at = compact_settings({"coordinator_compact": given})["working_at"]
+    # preparing the mod never stops the start: a step that fails leaves it off
+    mod = plugin.plan(desk, claude)
+    argv += ["--autocompact", str(working_at)] if mod["autocompact"] else []
+    if mod["on"]:  # for this start only: hansa names the mod in no settings file
         argv += ["--plugin-dir", mod["copy"]]
-        env["HANSA_MOD_SETTINGS"] = mod["settings"]
+        env["HANSA_MOD_SETTINGS"] = str(desk.settings_path)
     else:
-        print(f"hansa: {plugin.start_text(mod, compact['working_at'])}", file=sys.stderr)
+        print(f"hansa: {plugin.start_text(mod, working_at)}", file=sys.stderr)
     if plugin.left_text(mod):
         print(f"hansa: {plugin.left_text(mod)}", file=sys.stderr)
+    # what was passed, kept in the desk by its owner (root's, by the account's hansa) for status and the page
+    rec = plugin.start_record(mod, working_at, plan.get("started"))
+    unrecorded = _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
+    if unrecorded:
+        print(f"hansa: {unrecorded}", file=sys.stderr)
     # after a /clear (hansa's daily one, or anyone's) the fresh context starts from the desk's state; the hook is
     # hansa's own code, never the desk's files
     hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
@@ -1624,7 +1626,9 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
             old.rename(desk.state_dir / f"{name}.{int(time.time())}")
             desk.event("helper_retired", file=name)
     desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
-    write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": now()})
+    plugin.forget(desk)  # the earlier start's record of the mod, before this start prepares it
+    started = now()  # and when: this start's record of the mod is tied to it (plugin.status)
+    write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": started})
     kept, unkept, stops = no_read_parts(s, desk.root)
     if stops:  # Read would be open there to the session: it does not start
         raise SystemExit(f"hansa: {stop_text(stops)}")
@@ -1636,20 +1640,20 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
             "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p),
             "read": read, "read_refused": refused, "no_read": kept, "no_read_refused": unkept,
-            "compact": compact_settings(s)}
+            "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started}
 
 
-def _record_roots_mod(theirs: str, desk: Desk, mod: dict) -> dict:
-    """Root's start of the coordinator, recorded in the desk by the account's hansa; the mod as it is then (off, when
-    that failed). Never raises."""
+def _record_roots_mod(theirs: str, desk: Desk, rec: dict) -> str:
+    """Root's start of the coordinator, recorded in the desk by the account's hansa; '' when it was, else what the
+    start says. Never raises."""
     try:
-        r = account.run(theirs, ["coordinator-desk", "--by", str(account.uid()), "--mod",
-                                 json.dumps(plugin.start_record(mod))], desk.root, capture_output=True, text=True)
+        r = account.run(theirs, ["coordinator-desk", "--by", str(account.uid()), "--mod", json.dumps(rec)], desk.root,
+                        capture_output=True, text=True)
         said = json.loads(r.stdout).get("mod_unrecorded") if not r.returncode else (
             r.stderr.strip() or f"exit {r.returncode}")
     except (Exception, SystemExit) as e:  # noqa: BLE001 - SystemExit: no runuser
         said = f"{type(e).__name__}: {e}"
-    return plugin.failed(mod, "recording the start in the desk", said) if said and mod["on"] else mod
+    return plugin.unrecorded_text("the desk", said) if said else ""
 
 
 def cmd_coordinator_desk(a):
@@ -1660,7 +1664,7 @@ def cmd_coordinator_desk(a):
     try:  # root's start, recorded by the account
         plugin.record_start(desk, json.loads(a.mod), root=True)
         print(json.dumps({}))
-    except Exception as e:  # noqa: BLE001 - root starts without the mod
+    except Exception as e:  # noqa: BLE001 - root starts all the same
         print(json.dumps({"mod_unrecorded": f"{type(e).__name__}: {e}"}))
 
 
@@ -3054,7 +3058,7 @@ def main(argv=None):
                    "browser: its section of docs/; card: the whole card; topics: the topics, one line each")
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
-    p.add_argument("--mod", default="")  # only this: record root's start of its mod (plugin.start_record), as JSON
+    p.add_argument("--mod", default="")  # only this: record root's start of the mod (plugin.start_record), as JSON
     p.add_argument("--by", type=int, required=True)
     p = sub.add_parser("notify-follow")  # hidden: a follower (hansa/notify.py), started detached
     p.set_defaults(fn=cmd_notify_follow)

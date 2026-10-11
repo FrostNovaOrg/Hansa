@@ -80,8 +80,7 @@ const T = ZH ? {
   compactIdle:"空闲时压缩于（token）", compactLongIdle:"长时间空闲后压缩于（token）", longIdleMin:"长时间空闲指（分钟）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，协调席的 mod 压缩它：空闲一分钟后，若上下文达到第一个数（这时整个上下文还在提示缓存里）；长时间空闲（第三个数）后，若达到第二个数：赶在提示缓存（一小时）失效之前压缩，下一轮就从短的上下文开始，不必不走缓存地读一个长的。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第四个数时压缩（hansa coordinator 用 --autocompact 传给它）。token 数都在 100,000 到 1,000,000 之间，长时间空闲在 1 到 240 分钟之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或不小于第四个数），那个压缩就不会发生：Claude Code 自己先压缩了。第四个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。前三个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第四个数从会话下次启动起生效。协调席不能改它们。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modOn:t => `协调席的 mod：${t} 启动的会话带上了它`, modOff:(t, why) => `协调席的 mod：${t} 启动的会话没有带上它：${why}`,
-  modRoot:"；会话由 root 启动，这里的改动在它下次启动时才生效",
-  modKept:"hansa 没能把新的阈值写进 mod 的设置文件：在会话下次启动前，协调席的 mod 仍用原来的阈值。",
+  modUnknown:t => `协调席的 mod：hansa 不知道 ${t} 启动的会话是怎样启动的（那次启动没留下记录）`,
   auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"这条线的执行层、核验和设计会话不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
@@ -162,7 +161,6 @@ const T = ZH ? {
   general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a usage limit (min), for providers without their own", coordinator:"Coordinator",
   compactIdle:"Compact when idle at (tokens)", compactLongIdle:"Compact after a long idle at (tokens)", longIdleMin:"A long idle is (minutes)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it: after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache; after a long idle (the third figure) if it is at or above the second, before the prompt cache (an hour) lapses, so that the next turn starts from a short context instead of reading a long one uncached. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the fourth (hansa coordinator gives it with --autocompact). The token figures take 100,000 to 1,000,000; a long idle, 1 to 240 minutes. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or at or above the fourth, never comes: Claude Code compacts on its own first. A fourth figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first three applies from the session's next decision (when a turn ends, or a wait ends); a change to the fourth from the session's next start. The coordinator cannot change them. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
-  modKept:"hansa could not write the new thresholds into the mod's settings file: until the session's next start, the coordinator's mod keeps its earlier ones.",
   auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
   allow:"Rules the lane's workers, verifiers and design sessions are given without asking (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
@@ -292,11 +290,12 @@ function designBlock(m) {
 function modLine(m, line) {
   if (!m) return "";
   if (!ZH) return " · " + line;
+  if (!m.known) return " · " + T.modUnknown(m.started);
   if (!m.on) return " · " + T.modOff(m.started, m.why);
   const v = m.values, w = x => x.replace(/（.*）$/, "");
   return " · " + T.modOn(m.started) + "；" + [[T.compactIdle, "idle_at", "token"], [T.compactLongIdle, "long_idle_at", "token"],
     [T.longIdleMin, "long_idle_min", "分钟"], [T.compactWorking, "working_at", "token"]]
-    .map(([l, k, u]) => `${w(l)} ${v[k].toLocaleString("en")} ${u}`).join("，") + (m.root ? T.modRoot : "");
+    .map(([l, k, u]) => `${w(l)} ${v[k].toLocaleString("en")} ${u}`).join("，");
 }
 async function loadStatus() {
   const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);
@@ -311,7 +310,7 @@ async function loadStatus() {
     + (st.no_read_left_out || []).map(x => " · " + T.workersMayNotReadSkipped + ": " + x).join("")
     + modLine(st.mod, st.mod_line);
   $("#state").className = (st.paused || !st.server_up || (st.server && st.server.state === "stuck") || st.srt_missing
-    || (st.mod && !st.mod.on)
+    || (st.mod && (!st.mod.known || !st.mod.on))
     || (st.disk && (st.disk.low_text || (st.disk.unknown || []).length))
     || st.no_read_stop || (st.no_read_left_out || []).length) ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason});
@@ -412,11 +411,11 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], MOD_KEPT = "";
+let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [];
 async function loadSettings(problems) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
-  RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || []; MOD_KEPT = r.mod_kept || "";
+  RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
@@ -539,8 +538,7 @@ function renderSettings(problems) {
         T.compactIdle, bind(S.coordinator_compact, "idle_at", "number"),
         T.compactLongIdle, bind(S.coordinator_compact, "long_idle_at", "number"),
         T.longIdleMin, bind(S.coordinator_compact, "long_idle_min", "number"),
-        T.compactWorking, h("div", {}, bind(S.coordinator_compact, "working_at", "number"), h("div", {class:"muted"}, T.compactNote),
-          MOD_KEPT ? h("div", {class:"warn"}, ZH ? T.modKept : MOD_KEPT) : null)]),
+        T.compactWorking, h("div", {}, bind(S.coordinator_compact, "working_at", "number"), h("div", {class:"muted"}, T.compactNote))]),
       T.auditsCost, bind(S.coordinator, "audits_cost", "bool"),
       T.designSeat, (S.design = S.design || {provider:"", model:"", effort:""}, h("div", {class:"row"},
         pick(S.design, "provider", ["", ...Object.keys(S.providers)], [T.effortDefault, ...Object.keys(S.providers)]),

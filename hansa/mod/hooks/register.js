@@ -9,12 +9,20 @@
 // the session works it never interrupts: Claude Code's own auto-compact, at the window hansa gives it with
 // --autocompact, does that.
 //
-// hansa gives it, in the environment, HANSA_MOD_SETTINGS: hansa's small JSON file, {"idle_at": tokens,
-// "long_idle_at": tokens, "long_idle_min": minutes, ...}, read at each decision, so a change on hansa's page holds
-// from the next one. It writes no file of its own.
+// hansa gives it, in the environment, HANSA_MOD_SETTINGS: the desk's own settings file, the one hansa's page saves.
+// At each decision it reads there the three numbers under "coordinator_compact" (idle_at, long_idle_at in tokens,
+// long_idle_min in minutes), so a change on the page holds from the next decision; one absent, or out of the page's
+// range, is its default. It uses only those numbers: nothing else of the file is kept, logged or repeated. It writes
+// no file of its own.
 
 const IDLE_MS = 60_000 // shorter than the prompt cache's lifetime
 const MINUTE_MS = 60_000
+// Each threshold's default and range, as hansa's (desk.py: COMPACT_DEFAULTS, COMPACT_MOST)
+const THRESHOLDS = {
+  idle_at: [400_000, 100_000, 1_000_000],
+  long_idle_at: [200_000, 100_000, 1_000_000],
+  long_idle_min: [50, 1, 240],
+}
 
 // What one loaded copy of the mod knows
 function fresh() {
@@ -43,28 +51,34 @@ function said(err) {
   return String(err && err.message ? err.message : err).slice(0, 300)
 }
 
-// The thresholds in hansa's file as it is now: { idle_at, long_idle_at, long_idle_min }, each a positive whole
-// number, or null when it cannot be had (that rule then never compacts)
+// The thresholds in the desk's settings file as it is now: { idle_at, long_idle_at, long_idle_min }, or null when
+// the file cannot be read or parsed (then nothing compacts while idle)
 async function thresholds($) {
-  let x = null
+  let x
   try {
     const path = await $.env.get('HANSA_MOD_SETTINGS')
-    x = path ? JSON.parse(await $.fs.read(path)) : null
+    if (!path) return null
+    x = JSON.parse(await $.fs.read(path))
   } catch {
-    x = null
+    return null // what the read or the parse said is not repeated: it may quote the file
   }
-  const n = k => (x && Number.isInteger(x[k]) && x[k] > 0 ? x[k] : null)
-  return { idle_at: n('idle_at'), long_idle_at: n('long_idle_at'), long_idle_min: n('long_idle_min') }
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null
+  const cc = x.coordinator_compact && typeof x.coordinator_compact === 'object' ? x.coordinator_compact : {}
+  const t = {}
+  for (const [k, [byDefault, least, most]] of Object.entries(THRESHOLDS)) {
+    const v = cc[k]
+    t[k] = Number.isInteger(v) && v >= least && v <= most ? v : byDefault
+  }
+  return t
 }
 
 // The one decision, from the context's tokens, how long the session has been idle (ms) and the thresholds:
 // 'compact' now; { at } to decide again once it has been idle that long (ms); or null, nothing
 function decide(tokens, idleMs, t) {
+  if (!t) return null
   const due = [] // how long idle each rule the context is over asks for
-  if (t.idle_at !== null && tokens >= t.idle_at) due.push(IDLE_MS)
-  if (t.long_idle_at !== null && t.long_idle_min !== null && tokens >= t.long_idle_at) {
-    due.push(t.long_idle_min * MINUTE_MS)
-  }
+  if (tokens >= t.idle_at) due.push(IDLE_MS)
+  if (tokens >= t.long_idle_at) due.push(t.long_idle_min * MINUTE_MS)
   if (due.some(d => idleMs >= d)) return 'compact'
   return due.length ? { at: Math.min(...due) } : null
 }
@@ -81,7 +95,7 @@ async function compact($, st, tokens) {
   }
 }
 
-// When a turn ends and when a wait ends: decide, from the context and hansa's file as they are now. Never once a
+// When a turn ends and when a wait ends: decide, from the context and the settings file as they are now. Never once a
 // compact was asked for, skipped or refused, until another turn starts (whatever comes in between: a Stop)
 async function check($, st) {
   cancel(st)

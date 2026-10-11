@@ -160,16 +160,16 @@ coordinator's model and effort; the coordinator cannot change them:
   (no turn running, and the last `Stop` listed no background tasks and no session crons), the mod compacts after 60
   seconds with no new turn, while the whole context is still in the prompt cache.
 - **Compact after a long idle at** (default 200,000 tokens) and **a long idle is** (default 50 minutes): the same,
-  after that long. The prompt cache lasts an hour: compacting before it lapses costs little, and the next turn starts
-  from a short context instead of reading a long one uncached.
+  after that long, before the prompt cache (an hour) lapses: the next turn starts from a short context.
 - **Compact while working at** (default 550,000 tokens): Claude Code's own auto-compact, given as `--autocompact`.
 
-Token values take 100,000 to 1,000,000, the minutes 1 to 240. A new turn cancels a wait; after a compact (done,
-skipped or refused) the mod asks again only after a new turn. The first three apply from the session's next decision
-(when a turn or a wait ends), the fourth from its next start. The mod needs Claude Code 2.1.290 or later; with an
-older one, or when a step of preparing the mod fails, the session starts without the mod and without
-`--autocompact`, the start says why, and so do `hansa status` and the page. A session whose settings turn hooks off
-runs without the mod's rules, and hansa cannot see that; Claude Code's own auto-compact still applies to it.
+Tokens take 100,000 to 1,000,000, minutes 1 to 240. A new turn cancels a wait; after a compact (done, skipped or
+refused) the mod asks again only after a new turn. It reads the first three in the desk's settings file at each
+decision (a turn or a wait ends): a missing value is its default, a file it cannot read or parse means no idle
+compact. The fourth applies from the next start. The mod needs Claude Code 2.1.290 or later; `--autocompact` is given
+whenever Claude Code is new enough, whether or not the mod loads. When the mod is off, the start, `hansa status` and
+the page say why. A session whose settings turn hooks off runs without the mod's rules, and hansa cannot see that;
+Claude Code's own auto-compact still applies to it.
 
 ## Merge checks
 

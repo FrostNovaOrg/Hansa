@@ -1,16 +1,21 @@
 import { test, expect, mock } from 'claude-code/testing'
 
-const SETTINGS = '/desk/.hansa/coordinator-mod/settings.json'
+const SETTINGS = '/desk/settings.json'
 const MIN = 60_000
 const THRESHOLDS = { idle_at: 400_000, long_idle_at: 200_000, long_idle_min: 50, working_at: 550_000 }
+// The desk's settings file, as hansa's page saves it: the thresholds among the desk's other settings
+const desk = (thresholds: Record<string, unknown>) => JSON.stringify({
+  version: 1, concurrency: 2, coordinator: { provider: 'claude', model: 'opus' },
+  coordinator_compact: { ...THRESHOLDS, ...thresholds },
+})
 
-// Claude Code beneath the mod: a context whose size the test sets, hansa's thresholds file in memory, and what the
-// mod asked of it
+// Claude Code beneath the mod: a context whose size the test sets, the desk's settings file in memory, and what the
+// mod asked of it and logged
 function setup(on, tokens: { value: number }, thresholds: Record<string, unknown> = {}) {
   const clock = mock.clock(on, { now: 1_760_000_000_000 })
   mock.env(on, { HANSA_MOD_SETTINGS: SETTINGS })
-  const files: Record<string, string> = { [SETTINGS]: JSON.stringify({ ...THRESHOLDS, ...thresholds }) }
-  const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0 }
+  const files: Record<string, string> = { [SETTINGS]: desk(thresholds) }
+  const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0, logs: [] as string[] }
   on('fs.read', async ($, e) => {
     calls.reads += 1 // one each decision
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -32,8 +37,11 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
   on('classic.Stop', async () => ({}))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
-  on('ui.log', async () => ({ value: undefined }))
-  const set = (x: Record<string, unknown>) => { files[SETTINGS] = JSON.stringify({ ...THRESHOLDS, ...x }) }
+  on('ui.log', async ($, e) => {
+    calls.logs.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  const set = (x: Record<string, unknown>) => { files[SETTINGS] = desk(x) }
   return { clock, calls, files, set }
 }
 
@@ -62,6 +70,36 @@ test('idle above the threshold: it compacts once, after a minute', async ($, on)
   await clock.advance(2_000)
   expect(calls.compact).toBe(1)
   await clock.advance(5 * MIN)
+  expect(calls.compact).toBe(1)
+})
+
+// The exact edges: at the threshold itself, and at 60 seconds and 50 minutes to the millisecond
+
+test('idle: at exactly 400,000 it compacts at exactly 60 seconds, not a millisecond before', async ($, on) => {
+  const tokens = { value: 400_000 }
+  const { clock, calls } = setup(on, tokens, { long_idle_at: 1_000_000 })
+  await turn($, 't1')
+  await clock.advance(59_999)
+  expect(calls.compact).toBe(0)
+  await clock.advance(1)
+  expect(calls.compact).toBe(1)
+})
+
+test('idle: at 399,999 it does not compact at 60 seconds', async ($, on) => {
+  const tokens = { value: 399_999 }
+  const { clock, calls } = setup(on, tokens, { long_idle_at: 1_000_000 })
+  await turn($, 't1')
+  await clock.advance(120 * MIN)
+  expect(calls.compact).toBe(0)
+})
+
+test('long idle: at exactly 200,000 it compacts at exactly 50 minutes, not a millisecond before', async ($, on) => {
+  const tokens = { value: 200_000 }
+  const { clock, calls } = setup(on, tokens)
+  await turn($, 't1')
+  await clock.advance(50 * MIN - 1)
+  expect(calls.compact).toBe(0)
+  await clock.advance(1)
   expect(calls.compact).toBe(1)
 })
 
@@ -199,20 +237,47 @@ test('changed between turns: the next turn decides by the new thresholds', async
   expect(calls.compact).toBe(1)
 })
 
-test('no thresholds to be had: no compact', async ($, on) => {
-  const tokens = { value: 450_000 }
-  const { clock, calls, files, set } = setup(on, tokens)
-  files[SETTINGS] = 'root:x:0:0:root:/root:/bin/sh'
+test('a threshold absent from the file, or out of the page\'s range, is its default', async ($, on) => {
+  const tokens = { value: 400_000 }
+  const { clock, calls, files } = setup(on, tokens)
+  files[SETTINGS] = JSON.stringify({ version: 1 }) // a desk saved before these settings: all three defaults
   await turn($, 't1')
-  await clock.advance(60 * MIN)
+  await clock.advance(60_000)
+  expect(calls.compact).toBe(1)
+  tokens.value = 200_000
+  files[SETTINGS] = JSON.stringify({ coordinator_compact: { idle_at: 150_000 } }) // the other two: their defaults
+  await turn($, 't2')
+  await clock.advance(50 * MIN)
+  expect(calls.compact).toBe(2)
+  tokens.value = 300_000
+  files[SETTINGS] = JSON.stringify({ coordinator_compact: { idle_at: 5, long_idle_at: '250000', long_idle_min: 0 } })
+  await turn($, 't3')
+  await clock.advance(49 * MIN)
+  expect(calls.compact).toBe(2) // 5 and 0 are not taken: not at a minute, nor before 50
+  await clock.advance(MIN)
+  expect(calls.compact).toBe(3) // the default 200,000 and 50 minutes
+})
+
+test('a settings file that cannot be read or parsed: no compact while idle, and nothing of it said', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls, files } = setup(on, tokens)
+  for (const text of ['root:x:0:0:root:/root:/bin/sh', '["sk-secret-1234"]', 'null', '"sk-secret-1234"']) {
+    files[SETTINGS] = text
+    await turn($, `t-${text}`)
+    await clock.advance(60 * MIN)
+  }
   delete files[SETTINGS]
   await turn($, 't2')
   await clock.advance(60 * MIN)
   expect(calls.compact).toBe(0)
-  set({})
+  expect(calls.logs).toEqual([]) // nothing said of a file it could not read or parse: what is wrong may quote it
+  // the desk's other settings are never repeated: only the three numbers are used
+  files[SETTINGS] = JSON.stringify({ providers: { x: { key: 'sk-secret-1234' } }, coordinator_compact: THRESHOLDS })
   await turn($, 't3')
   await clock.advance(61_000)
   expect(calls.compact).toBe(1)
+  expect(calls.logs.join('\n')).not.toContain('sk-secret')
+  expect(calls.logs.join('\n')).not.toContain('root:x')
   expect(calls.writes).toBe(0) // it writes no file of its own
 })
 

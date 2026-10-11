@@ -234,8 +234,9 @@ def home_secrets() -> tuple:
 
 REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
 # When the coordinator's session compacts (hansa/plugin.py): idle_at and long_idle_at, in tokens, by the coordinator's
-# mod once a turn has ended and the session has been idle for a minute or for long_idle_min minutes; working_at, the
-# window hansa gives Claude Code's own auto-compact (--autocompact), which takes 100k to 1M. Each with its range
+# mod once a turn has ended and the session has been idle for a minute or for long_idle_min minutes (the mod reads
+# them here, in the desk's settings file, and keeps the same defaults and ranges: hansa/mod/hooks/register.js);
+# working_at, the window hansa gives Claude Code's own auto-compact (--autocompact), which takes 100k to 1M
 COMPACT_DEFAULTS = {"idle_at": 400_000, "long_idle_at": 200_000, "long_idle_min": 50, "working_at": 550_000}
 COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "long_idle_at": (100_000, 1_000_000), "long_idle_min": (1, 240),
                 "working_at": (100_000, 1_000_000)}
@@ -2315,9 +2316,6 @@ class Desk:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
             write_json(self.settings_path, new)
-            if (self.mod_dir / "settings.json").is_file():  # the coordinator's mod reads it at each decision
-                with contextlib.suppress(OSError):  # saved all the same: the page says the mod keeps what it read
-                    write_json(self.mod_dir / "settings.json", compact_settings(new))
         self.event("settings_saved", by=by, changed=changed)
         self.ready_news()
         return []
@@ -2627,7 +2625,6 @@ class Desk:
 
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
-    from . import plugin
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
@@ -2646,4 +2643,4 @@ def public_settings(desk: Desk) -> dict:
                  for lane, target in [listed_key(x)]]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
-            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s), "mod_kept": plugin.kept_text(desk)}
+            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}

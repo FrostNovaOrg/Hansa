@@ -1,33 +1,35 @@
 """The coordinator's mod: a Claude Code plugin hansa ships in hansa/mod/ and loads into the coordinator's session only.
 
 `hansa coordinator` starts the session with `--plugin-dir <a copy of hansa/mod>` and `--autocompact <working_at>`,
-both for that start only; hansa sets no environment variable but the one that names its thresholds file, and changes
-no settings file, so no worker, design session or `claude` the session starts gets it from hansa. The mod compacts
-the context once a turn has ended and the session is idle, at idle_at tokens after a minute and at long_idle_at after
-long_idle_min minutes (hooks/register.js says when exactly); while it works, Claude Code's own auto-compact does, at
-the window --autocompact gives. All are the principal's, on the page (desk.COMPACT_DEFAULTS).
+both for that start only; hansa sets no environment variable but HANSA_MOD_SETTINGS, the path of the desk's own
+settings file, and changes no settings file, so no worker, design session or `claude` the session starts gets it from
+hansa. The mod compacts the context once a turn has ended and the session is idle, at idle_at tokens after a minute
+and at long_idle_at after long_idle_min minutes (hooks/register.js says when exactly): it reads those three in the
+desk's settings file, the one the page saves, at each decision, so a change there needs nothing kept in step. While
+the session works, Claude Code's own auto-compact compacts it, at the window --autocompact gives (working_at, read
+when the session starts). All are the principal's, on the page (desk.COMPACT_DEFAULTS).
 
 It needs Claude Code NEEDS or later (mods, and --autocompact, on any endpoint). On an older one the session starts
-without the mod and without --autocompact, and the start says so. Preparing the mod (the version probe, the copy,
-its thresholds file, the start's record) never stops the session: a step that fails leaves the mod off, and
---autocompact with it, and the start says what failed. hansa says only what it knows at the start: whether the
-session was started with the mod, and why not (status). It reads none of the mod's files, and the mod writes none.
+without the mod and without --autocompact, and the start says so. --autocompact is given whenever Claude Code is new
+enough, whether or not the mod loads. Preparing the mod (the version probe, the copy, the start's record) never stops
+the session: a step that fails leaves the mod off, and the start says what failed. hansa says only what it knows at
+the start: whether the session was started with the mod, and why not (status). It reads none of the mod's files, and
+the mod writes none.
 
-Where things are kept (home):
-    plugin-XXXXXX/   the copy --plugin-dir loads, made new at each start in a folder hansa creates, readable and
-                     writable only by whoever runs the session; the earlier copies are removed
-    settings.json    the thresholds (desk.compact_settings), which the mod reads at each decision
-                     (HANSA_MOD_SETTINGS): the page's save writes them there, so a change holds without a restart
-home is the desk's .hansa/coordinator-mod/, except for root on an account's desk (see account.py): root neither
-reads nor writes in the desk, so its copy and thresholds are under root's home, in a folder of root's own, and a
-change on the page reaches them at the session's next start. In the desk's .hansa/coordinator-mod/, whoever runs it:
-    start.json       the last start: when, whether the mod is on and why not, by root or not, its thresholds
+Where things are kept:
+    plugin-XXXXXX/   the copy --plugin-dir loads (home), made new at each start in a folder hansa creates, readable and
+                     writable only by whoever runs the session; the earlier copies are removed. home is the desk's
+                     .hansa/coordinator-mod/, except for root on an account's desk (see account.py): root writes
+                     nothing in the desk, so its copy is under root's home, in a folder of root's own
+    start.json       in the desk's .hansa/coordinator-mod/, written by the desk's owner: this start, as passed to
+                     Claude Code (the mod loaded or not and why, the --autocompact value). Removed before the mod is
+                     prepared, and tied to this start (coordinator.json's at): an earlier start's is never shown
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -38,7 +40,7 @@ import time
 from pathlib import Path
 
 from . import account
-from .desk import COMPACT_DEFAULTS, Desk, compact_settings, now, write_json
+from .desk import COMPACT_MOST, Desk, compact_settings, now, write_json
 
 MOD = Path(__file__).with_name("mod")
 NEEDS = (2, 1, 290)  # Claude Code's version the mod and --autocompact need, on a compatible endpoint too
@@ -60,7 +62,7 @@ def _read(path, default=None):
 
 
 def home(desk: Desk) -> Path:
-    """Where this account keeps the copy and the thresholds for the desk's coordinator."""
+    """Where this account keeps the copy of the mod for the desk's coordinator."""
     if account.desk_account(desk.root):
         return Path.home() / ".hansa" / "coordinator-mod" / hashlib.sha1(str(desk.root).encode()).hexdigest()[:12]
     return desk.mod_dir
@@ -113,7 +115,7 @@ def copy(d: Path, src: Path = MOD) -> tuple:
 def version(claude: str) -> str:
     """The Claude Code version `claude --version` says (2.1.296), or '' when it says none."""
     try:
-        r = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        r = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
     except (OSError, ValueError, subprocess.TimeoutExpired):  # ValueError: what it printed is not UTF-8
         return ""
     m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", r.stdout or "")
@@ -134,16 +136,15 @@ def version_problem(v: str) -> str:
 
 
 def failed(mod: dict, step: str, e) -> dict:
-    """A step of preparing the mod failed: the session starts without the mod and without --autocompact."""
+    """A step of preparing the mod failed: the session starts without the mod (--autocompact as it was)."""
     said = f"{type(e).__name__}: {e}" if isinstance(e, BaseException) else str(e)
-    return {"on": False, "autocompact": False, "version": mod.get("version", ""), "failed": True,
-            "left": mod.get("left", []), "why": f"{step} failed ({' '.join(said.split())[:300]})"}
+    return {**mod, "on": False, "failed": True, "why": f"{step} failed ({' '.join(said.split())[:300]})"}
 
 
-def plan(desk: Desk, claude: str, values: dict) -> dict:
+def plan(desk: Desk, claude: str) -> dict:
     """Whether this start loads the mod and passes --autocompact, and why not: {on, autocompact, why, version, left}
-    (left: earlier copies that could not be removed). With the mod on, its copy is made and its thresholds file
-    written with these values: {copy, settings}. Never raises: a step that fails leaves both off (failed)."""
+    (left: earlier copies that could not be removed); with the mod on, its copy: {copy}. --autocompact whenever this
+    Claude Code is new enough. Never raises: a step that fails leaves the mod off (failed)."""
     out = {"on": False, "autocompact": False, "version": "", "left": []}
     step = "asking Claude Code its version (claude --version)"
     try:
@@ -151,49 +152,70 @@ def plan(desk: Desk, claude: str, values: dict) -> dict:
         old = version_problem(v)
         if old:
             return {**out, "why": old}
+        out["autocompact"] = True
+        step = "finding the folder for the mod's copy (the home folder)"
         d = home(desk)
         step = f"making the mod's folder {d}"
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
         bad = folder_problem(d)
         if bad:
-            return {**out, "autocompact": True,
-                    "why": f"its copy would be in a folder another account could change: {bad}"}
+            return {**out, "why": f"its copy would be in a folder another account could change: {bad}"}
         step = f"copying the mod into {d}"
         dest, out["left"] = copy(d)
-        step = f"writing the mod's settings file {d / 'settings.json'}"
-        write_json(d / "settings.json", values)
-        return {**out, "on": True, "autocompact": True, "why": "", "copy": str(dest),
-                "settings": str(d / "settings.json")}
+        return {**out, "on": True, "why": "", "copy": str(dest)}
     except Exception as e:  # noqa: BLE001 - the session starts all the same, without it
         return failed(out, step, e)
 
 
-def start_record(p: dict) -> dict:
-    """What the desk keeps of this start (start.json), made by whoever runs the session."""
-    return {"at": now(), "on": p["on"], "autocompact": p["autocompact"], "why": p.get("why", ""),
-            "version": p.get("version", "")}
+def _number(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def start_record(p: dict, working_at: int, start) -> dict:
+    """What the desk keeps of this start: what was passed to Claude Code. start: coordinator.json's at, which
+    coordinator_desk wrote for this start."""
+    return {"start": start, "plugin": p["on"], "autocompact": working_at if p["autocompact"] else None,
+            "why": p.get("why", ""), "version": p.get("version", "")}
+
+
+def forget(desk: Desk) -> None:
+    """Remove the earlier start's record, before the mod is prepared; as the desk's owner. Never raises: one left
+    there is not this start's, and status does not show it."""
+    try:
+        (desk.mod_dir / "start.json").unlink()
+    except OSError:
+        pass
 
 
 def record_start(desk: Desk, rec: dict, root: bool = False) -> None:
-    """Keep this start in the desk, as the desk's owner. root: root's session on the account's desk."""
-    clean = {k: rec.get(k) for k in ("at", "on", "autocompact", "why", "version")}
+    """Keep this start in the desk, as the desk's owner, with only what a record holds (rec may be root's, given to
+    the account's hansa). root: root's session on the account's desk."""
+    ac, why, v = rec.get("autocompact"), rec.get("why"), rec.get("version")
+    clean = {"start": rec.get("start") if _number(rec.get("start")) else None, "at": now(),
+             "plugin": rec.get("plugin") is True,
+             "autocompact": ac if isinstance(ac, int) and not isinstance(ac, bool)
+             and COMPACT_MOST["working_at"][0] <= ac <= COMPACT_MOST["working_at"][1] else None,
+             "why": " ".join(why.split())[:300] if isinstance(why, str) else "",
+             "version": v if isinstance(v, str) and re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", v) else "",
+             "root": root}
     desk.mod_dir.mkdir(parents=True, exist_ok=True)
-    write_json(desk.mod_dir / "start.json", {**clean, "root": root, **compact_settings(desk.settings())})
+    write_json(desk.mod_dir / "start.json", clean)
 
 
-def record(desk: Desk, mod: dict) -> dict:
-    """Keep this start in the desk; the mod as it is then (off, when that failed, and that start kept if it can be).
-    A mod already off is kept off for its own reason."""
+def unrecorded_text(where, e) -> str:
+    """What the start says when its record could not be written."""
+    said = f"{type(e).__name__}: {e}" if isinstance(e, BaseException) else str(e)
+    return (f"hansa could not record this start in {where} ({' '.join(said.split())[:300]}): hansa status and the "
+            "page say they do not know how this session was started")
+
+
+def record(desk: Desk, rec: dict) -> str:
+    """Keep this start in the desk; '' when it was, else what the start says. Never raises."""
     try:
-        record_start(desk, start_record(mod))
-        return mod
-    except Exception as e:  # noqa: BLE001
-        if not mod["on"]:
-            return mod
-        off = failed(mod, f"recording the start in {desk.mod_dir / 'start.json'}", e)
-    with contextlib.suppress(Exception):
-        record_start(desk, start_record(off))
-    return off
+        record_start(desk, rec)
+        return ""
+    except Exception as e:  # noqa: BLE001 - the session starts all the same
+        return unrecorded_text(desk.mod_dir / "start.json", e)
 
 
 def start_text(p: dict, working_at: int) -> str:
@@ -221,43 +243,37 @@ def values_text(v: dict) -> str:
 
 
 def status(desk: Desk) -> dict | None:
-    """The coordinator's mod as hansa status and the page show it: what hansa knew when the session started. None
-    before a session was started with it in mind, or when that start's record cannot be read."""
-    r = _read(desk.mod_dir / "start.json")
-    if not isinstance(r, dict) or not isinstance(r.get("at"), (int, float)) or isinstance(r.get("at"), bool):
+    """The coordinator's mod as hansa status and the page show it: what hansa knew when the session started
+    ({known: False} when that start left no record of its own). None before a coordinator was started."""
+    who = _read(desk.state_dir / "coordinator.json")
+    start = who.get("at") if isinstance(who, dict) else None
+    if not _number(start):
         return None
     try:
-        started = time.strftime("%m-%d %H:%M", time.localtime(r["at"]))
+        started = time.strftime("%m-%d %H:%M", time.localtime(start))
     except (OverflowError, OSError, ValueError):
         return None
-    on, root = r.get("on") is True, r.get("root") is True
-    values = compact_settings({"coordinator_compact": r})
-    held = _read(desk.mod_dir / "settings.json") if on and not root else None
-    if isinstance(held, dict):  # the page's save reaches this session's file: the thresholds it decides by now
-        values.update({k: v for k, v in compact_settings({"coordinator_compact": held}).items() if k != "working_at"})
-    return {"on": on, "root": root, "started": started, "why": " ".join(str(r.get("why") or "").split())[:300],
+    r = _read(desk.mod_dir / "start.json")
+    if not isinstance(r, dict) or r.get("start") != start:  # none, or an earlier start's that was left there
+        return {"known": False, "started": started}
+    ac = r.get("autocompact")
+    ac = ac if isinstance(ac, int) and not isinstance(ac, bool) else None
+    # the first three: what the mod reads at its next decision; the fourth: what was passed at the start
+    values = {**compact_settings(desk.settings()), "working_at": ac}
+    return {"known": True, "on": r.get("plugin") is True and ac is not None, "root": r.get("root") is True,
+            "started": started, "why": " ".join(str(r.get("why") or "").split())[:300], "autocompact": ac,
             "values": values}
 
 
 def status_line(st: dict) -> str:
-    """hansa status's line on the coordinator's mod: the session was started with it, or without it and why."""
+    """hansa status's line on the coordinator's mod: the session was started with it, or without it and why, or
+    hansa does not know."""
     head = f"coordinator's mod: the session started {st['started']} was started "
+    if not st["known"]:
+        return (f"coordinator's mod: hansa does not know how the session started {st['started']} was started (that "
+                f"start left no record). {HELP}")
     if not st["on"]:
-        return head + f"without it: {st['why']}. {HELP}"
-    return (head + "with it; " + values_text(st["values"])
-            + ("; root started it, so a change on the page reaches it at its next start" if st["root"] else ""))
-
-
-def kept_text(desk: Desk) -> str:
-    """What the page says when the page's thresholds did not reach the mod's thresholds file of the last start;
-    '' when they did."""
-    r = _read(desk.mod_dir / "start.json")
-    path = desk.mod_dir / "settings.json"
-    if not isinstance(r, dict) or r.get("on") is not True or r.get("root") is True or not path.exists():
-        return ""
-    held = _read(path)
-    want = compact_settings(desk.settings())
-    if isinstance(held, dict) and all(held.get(k) == want[k] for k in COMPACT_DEFAULTS if k != "working_at"):
-        return ""
-    return (f"hansa could not write the new thresholds into {path}: the coordinator's mod keeps its earlier ones "
-            "until the session's next start")
+        return (head + f"without it: {st['why']}"
+                + (f"; Claude Code compacts at {st['autocompact']:,} tokens" if st["autocompact"] else "")
+                + f". {HELP}")
+    return head + "with it; " + values_text(st["values"])
