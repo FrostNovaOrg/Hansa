@@ -35,6 +35,9 @@ from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_pro
                    one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
+from .srt_output import protected
+
+SRT_OUTPUT = shlex.join(protected([]))
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
@@ -85,7 +88,7 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 #   <its own temporary folder> <worker command...> (the two folders of run_tmp, both removed after it)
 SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
 line=$4
-rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- /bin/sh -c "$1" </dev/null 2>&1 3>&-
+rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- """ + SRT_OUTPUT + """ /bin/sh -c "$1" </dev/null 2>&1 3>&-
   echo $? >&3; } | cat >"$2"; } 3>&1 )
 [ "$rc" = 0 ] || {
   rm -rf "$5" "$8"
@@ -113,7 +116,7 @@ shift 3; exec "$@"
 # The lane's check, in srt; its exit code goes to a file, so a restarted server can still read it.
 # Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
 # sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings> <its own temporary folder>
-CHECK_SCRIPT = WRITE_FILE + '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; write_file "$2" "$?"; } | cat; rm -rf "$3" "$6"'
+CHECK_SCRIPT = WRITE_FILE + '{ "$4" --settings "$5" -- ' + SRT_OUTPUT + ' sh -c "$1" 2>&1; write_file "$2" "$?"; } | cat; rm -rf "$3" "$6"'
 # `hansa lane try`: the lane's setup, then its check, each in srt as for a task; the first that fails ends it.
 # Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
 # and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
@@ -121,7 +124,7 @@ CHECK_SCRIPT = WRITE_FILE + '{ "$4" --settings "$5" -- sh -c "$1" 2>&1; write_fi
 TRY_SCRIPT = (WRITE_FILE + """d=$1 srt=$2
 run() {
   t0=$(date +%s)
-  rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- /bin/sh -c "$2" </dev/null 2>&1 3>&-
+  rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- """ + SRT_OUTPUT + """ /bin/sh -c "$2" </dev/null 2>&1 3>&-
     echo $? >&3; } | cat >"$d/$1.log"; } 3>&1 )
   rm -rf "$4" "$5"
   write_file "$d/$1.exit" "$rc $(( $(date +%s) - t0 ))"
@@ -497,7 +500,7 @@ def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
     rec = {"found": bool(path), "path": path or "", "ran": False, "said": "", "at": now()}
     if path:
         try:
-            r = subprocess.run([path, "--settings", str(settings_file), "--", "true"], cwd=str(cwd),
+            r = subprocess.run([path, "--settings", str(settings_file), "--", *protected(["true"])], cwd=str(cwd),
                                env={**env, "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
                                capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
             rec["ran"] = r.returncode == 0
@@ -696,7 +699,7 @@ def _srt_true(path: str, settings: dict, tmp: str, cwd, argv=("/usr/bin/true",))
     f = Path(tmp) / "try-settings.json"
     write_json(f, settings)
     try:
-        r = subprocess.run([path, "--settings", str(f), "--", *argv], cwd=str(cwd),
+        r = subprocess.run([path, "--settings", str(f), "--", *protected(argv)], cwd=str(cwd),
                            env={**base_env(), "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
     except subprocess.TimeoutExpired:

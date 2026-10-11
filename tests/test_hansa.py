@@ -502,6 +502,9 @@ import json, os, stat, sys
 os.environ["TMPDIR"] = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp/claude"
 args = sys.argv[1:]
 cut = args.index("--")
+command = args[cut + 1:]
+if len(command) > 1 and command[1].endswith("/srt_output.py"):
+    args[cut + 1:] = command[2:]  # record the wrapped command; execute the relay below
 settings = json.load(open(args[args.index("--settings") + 1]))
 mode = os.fstat(1).st_mode
 with open(LOG, "a") as f:
@@ -537,7 +540,7 @@ if args[cut + 1:cut + 2] == ["/bin/sh"] and args[-1].endswith("/hansa-git-open-t
         if how == "needs_kept" and not kept(shlex.split(rest)[0]):
             print("not kept: " + shlex.split(rest)[0])
     sys.exit(0)
-os.execvp(args[cut + 1], args[cut + 1:])
+os.execvp(command[0], command)
 '''
 
 
@@ -1000,7 +1003,7 @@ class FailedWriteTest(unittest.TestCase):
         srt.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
         srt.chmod(0o755)
         for label, source in (("check", run.CHECK_SCRIPT), ("try", run.TRY_SCRIPT), ("release", release.SCRIPT)):
-            self.assertNotIn(sys.executable, source, "completion must not start Python")
+            self.assertNotIn(sys.executable, source.replace(run.SRT_OUTPUT, ""), "completion must not start Python")
             for failing in (True, False):
                 for destination in ("file", "link", "read-only", "new"):
                     with self.subTest(writer=label, partial=failing, destination=destination):
@@ -1335,6 +1338,215 @@ class FailedWriteTest(unittest.TestCase):
                 if p.poll() is None:
                     p.terminate()
                 p.communicate(timeout=10)
+
+
+class SrtOutputTest(unittest.TestCase):
+    """Every srt launch, with non-blocking inherited output and a reader paused until a burst starts."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.out = b"O" * (6 * 1024 * 1024 - 1) + b"\n"
+        self.err = b"E" * (6 * 1024 * 1024 - 1) + b"\n"
+        (self.tmp / "out").write_bytes(self.out)
+        (self.tmp / "err").write_bytes(self.err)
+        self.srt = self.bin / "srt"
+        self.srt.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
+            import fcntl, os, sys
+            for fd in (1, 2):
+                fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
+            command = sys.argv[sys.argv.index("--") + 1:]
+            os.execvp(command[0], command)
+            '''))
+        self.srt.chmod(0o755)
+        cat = self.bin / "cat"
+        cat.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f'''\
+            import os, sys, time
+            if len(sys.argv) == 1:
+                end = time.monotonic() + 10
+                while not os.path.exists(os.environ["OUTPUT_READY"]) and time.monotonic() < end:
+                    time.sleep(.001)
+                time.sleep(.2)
+            os.execv({shutil.which('cat')!r}, [{shutil.which('cat')!r}, *sys.argv[1:]])
+            '''))
+        cat.chmod(0o755)
+        self.writer = self.tmp / "writer.py"
+        self.writer.write_text(textwrap.dedent('''\
+            import fcntl, json, os, subprocess, sys
+            from pathlib import Path
+            folder, source, mode, rc = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+            flags = [bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK) for fd in (1, 2)]
+            (folder / "ready").touch()
+            counts = []
+            for fd, name in ((1, "out"), (2, "err")):
+                data = (source / name).read_bytes()
+                if mode == "cat":
+                    code = subprocess.call(["cat", str(source / name)], stdout=fd)
+                    counts.append(len(data) if code == 0 else -code)
+                else:
+                    try:
+                        counts.append(os.write(fd, data))  # deliberately no retry: detect silent loss too
+                    except BlockingIOError:
+                        counts.append(-1)
+            (folder / "report").write_text(json.dumps({"flags": flags, "counts": counts}))
+            sys.exit(rc)
+            '''))
+        self.env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}
+        self.popen = subprocess.Popen  # also used while the launch sites' subprocess calls are patched
+
+    def command(self, folder, mode, rc):
+        return shlex.join([sys.executable, str(self.writer), str(folder), str(self.tmp), mode, str(rc)])
+
+    def report(self, folder):
+        self.assertEqual(json.loads((folder / "report").read_text()),
+                         {"flags": [False, False], "counts": [len(self.out), len(self.err)]})
+
+    def paused_run(self, argv, **kwargs):
+        env = kwargs.get("env", self.env)
+        ready = Path(env["OUTPUT_READY"])
+        with self.popen(argv, cwd=kwargs.get("cwd"), env=env, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=kwargs.get("stderr", subprocess.PIPE)) as proc:
+            end = time.monotonic() + 10
+            while not ready.exists() and proc.poll() is None and time.monotonic() < end:
+                time.sleep(.001)
+            time.sleep(.2)
+            stdout, stderr = proc.communicate(timeout=15)
+        self.assertEqual(stdout, self.out + self.err if kwargs.get("stderr") == subprocess.STDOUT else self.out)
+        if stderr is not None:
+            self.assertEqual(stderr, self.err)
+        if kwargs.get("text"):
+            stdout, stderr = stdout.decode(), stderr.decode()
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+    def test_setup_check_merge_and_try_keep_bursts_and_exit_codes(self):
+        from hansa import run
+        for place in ("setup", "merge-setup", "check", "merge-check", "try-setup", "try-check", "try-merge-check"):
+            for mode in ("write", "cat"):
+                for rc in (0, 23):
+                    with self.subTest(place=place, mode=mode, exit=rc):
+                        folder = self.tmp / f"{place}-{mode}-{rc}"
+                        folder.mkdir()
+                        tmp, own = folder / "tmp", folder / "own"
+                        tmp.mkdir()
+                        own.mkdir()
+                        command = self.command(folder, mode, rc)
+                        log, exit_file = folder / "log", folder / "exit"
+                        cwd = folder
+                        if place in ("setup", "merge-setup"):
+                            cwd = folder / "wt"
+                            sh("git", "init", "-q", "--separate-git-dir", str(folder / "git"), str(cwd), cwd=folder)
+                            source = run.SETUP_SCRIPT
+                            args = [command, str(log), str(folder / "errors"), (cwd / ".git").read_text().strip(),
+                                    str(tmp), str(self.srt), "unused", str(own), "/bin/sh", "-c", "exit 41"]
+                        elif place.startswith("try-"):
+                            source = run.TRY_SCRIPT
+                            step = place[4:]
+                            log, exit_file = folder / f"{step}.log", folder / f"{step}.exit"
+                            args = [str(folder), str(self.srt), step, command, "unused", str(tmp), str(own)]
+                        else:
+                            source = run.CHECK_SCRIPT
+                            args = [command, str(exit_file), str(tmp), str(self.srt), "unused", str(own)]
+                        script = folder / "script.sh"
+                        script.write_text(source)
+                        env = {**self.env, "OUTPUT_READY": str(folder / "ready")}
+                        with log.open("wb") if place in ("check", "merge-check") else open(os.devnull, "wb") as output:
+                            result = subprocess.run(["/bin/sh", str(script), *args], cwd=cwd, env=env,
+                                                    stdout=output, stderr=subprocess.PIPE, timeout=20)
+                        self.assertEqual(log.read_bytes(), self.out + self.err)
+                        self.report(folder)
+                        if place in ("setup", "merge-setup"):
+                            self.assertEqual(result.returncode, 41 if rc == 0 else 97)
+                            self.assertEqual(Path(str(log) + ".done").exists(), rc == 0)
+                            if rc:
+                                self.assertIn("failed (exit 23)", (folder / "errors").read_text())
+                        else:
+                            record = exit_file.read_text()
+                            if place.startswith("try-"):
+                                self.assertRegex(record, rf"^{rc} [0-9]+\n$")
+                            else:
+                                self.assertEqual(record, f"{rc}\n")
+                        self.assertFalse(tmp.exists() or own.exists())
+
+    def test_small_output_is_live_and_completion_has_no_new_wait(self):
+        import select
+        from hansa.srt_output import protected
+        done = self.tmp / "done"
+        command = f'printf "live\\n"; while [ ! -f {shlex.quote(str(done))} ]; do sleep .01; done; exit 23'
+        with self.popen([str(self.srt), "--", *protected(["/bin/sh", "-c", command])],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], 2)
+                self.assertTrue(ready, "ordinary output was held until the command ended")
+                self.assertEqual(os.read(proc.stdout.fileno(), 5), b"live\n")
+            finally:
+                done.touch()
+                remainder, _ = proc.communicate(timeout=2)
+            self.assertEqual(remainder, b"")
+            self.assertEqual(proc.returncode, 23)
+
+    def test_preview_keeps_bursts_and_exit_codes(self):
+        from hansa import preview
+        class Launched(Exception):
+            pass
+        for rc in (0, 23):
+            with self.subTest(exit=rc):
+                folder = self.tmp / f"preview-{rc}"
+                folder.mkdir()
+                command = self.command(folder, "write", rc)
+                args = ["preview.py", str(folder / "log"), "state", "5", str(self.srt), "unused",
+                        str(folder), "task", str(folder), command, "ready", "not-ready", "--", "true"]
+                def launch(argv, **kwargs):
+                    kwargs["env"]["OUTPUT_READY"] = str(folder / "ready")
+                    result = self.paused_run(argv, **kwargs)
+                    self.assertEqual(result.stdout, self.out + self.err)
+                    self.assertEqual(result.returncode, rc)
+                    self.report(folder)
+                    raise Launched  # stop after the actual launch; no preview or worker left running
+                with unittest.mock.patch.object(preview.sys, "argv", args), \
+                        unittest.mock.patch.object(preview, "Kept"), \
+                        unittest.mock.patch.object(preview.subprocess, "Popen", launch), self.assertRaises(Launched):
+                    preview.main()
+
+    def test_startup_and_sandbox_probes_keep_bursts_and_exit_codes(self):
+        from hansa import run
+        for place in ("startup", "sandbox", "git-open"):
+            for rc in (0, 23):
+                with self.subTest(place=place, exit=rc):
+                    folder = self.tmp / f"{place}-{rc}"
+                    folder.mkdir()
+                    command = self.command(folder, "write", rc)
+                    env = {**self.env, "OUTPUT_READY": str(folder / "ready")}
+                    with unittest.mock.patch.dict(os.environ, env), \
+                            unittest.mock.patch.object(run, "base_env", return_value=env), \
+                            unittest.mock.patch.object(run.subprocess, "run", self.paused_run):
+                        if place == "startup":
+                            true = self.bin / "true"
+                            true.write_text("#!/bin/sh\nexec " + command + "\n")
+                            true.chmod(0o755)
+                            desk = types.SimpleNamespace(state_dir=folder / "state")
+                            if rc:
+                                with self.assertRaises(run.SrtCannotRun):
+                                    run.try_srt(desk, "unused", str(folder), folder)
+                            else:
+                                self.assertEqual(run.try_srt(desk, "unused", str(folder), folder), str(self.srt))
+                            rec = json.loads((desk.state_dir / "srt.json").read_text())
+                            self.assertEqual(rec["ran"], rc == 0)
+                            if rc:
+                                self.assertTrue(rec["said"].endswith("(exit 23)"))
+                        elif place == "sandbox":
+                            ran, said, out = run._srt_true(str(self.srt), {}, str(folder), folder,
+                                                         ["/bin/sh", "-c", command])
+                            self.assertEqual(out.encode(), self.out)
+                            self.assertEqual(ran, rc == 0)
+                            self.assertEqual(said, "" if rc == 0 else f"{self.err[:300].decode()} (exit 23)")
+                        else:
+                            with unittest.mock.patch.object(run, "git_open_try", return_value=command):
+                                refused, written, said = run._srt_writes(str(self.srt), {}, str(folder), folder, [])
+                            self.assertEqual((refused, written), ("", ""))
+                            self.assertEqual(said, "" if rc == 0 else f"{self.err[:300].decode()} (exit 23)")
+                    self.report(folder)
 
 
 class DeskTest(unittest.TestCase):
