@@ -2191,6 +2191,8 @@ class DeskTest(unittest.TestCase):
             self.skipTest(f"writing /proc/self/oom_score_adj is refused here: {probe.stdout.strip()}")
         self.assertEqual(probe.returncode, 0, probe.stderr)
         parent_score = Path("/proc/self/oom_score_adj").read_text()
+        if int(parent_score) >= 500:  # a worker inherits it: 500 would show without hansa's wrapper
+            self.skipTest(f"the suite itself already runs at oom_score_adj {parent_score.strip()}, as in a lane's check")
         fake = self.tmp / "claude"
         fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
             import json, sys
@@ -2205,6 +2207,63 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text().strip(), "500")
         self.assertEqual(Path("/proc/self/oom_score_adj").read_text(), parent_score)
+
+    def test_the_oom_wrapper_gives_way_to_the_command_so_the_recorded_pid_is_the_commands(self):
+        from hansa import run
+        ready = self.tmp / "worker-pid"
+        fake = self.tmp / "claude"
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f'''\
+            import os, sys, time
+            sys.stdin.read()
+            open({str(ready)!r} + ".part", "w").write(str(os.getpid()))
+            os.replace({str(ready)!r} + ".part", {str(ready)!r})
+            time.sleep(60)
+            '''))
+        tid = self.desk.new_task("Stay running")
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        # bash and dash exec a -c string's last command by themselves: a command after it, which never runs
+        # once the script execs, makes the script's own exec what gives the worker the shell's pid
+        with unittest.mock.patch.object(account, "LINUX", True), \
+                unittest.mock.patch.object(run, "OOM_SCRIPT", run.OOM_SCRIPT + "\n:"):
+            proc = run.start(self.desk, tid, "a", "claude")
+        self.addCleanup(proc.wait, timeout=10)
+        self.addCleanup(proc.kill)
+        end = time.time() + 20
+        while not ready.exists() and proc.poll() is None and time.time() < end:
+            time.sleep(0.05)
+        self.assertTrue(ready.exists(), (self.desk.raw_dir(tid) / "run.err").read_text())
+        pid = self.desk.meta(tid)["pid"]
+        self.assertEqual(pid, proc.pid)
+        self.assertEqual(pid, int(ready.read_text()))  # without exec, the shell's pid, and the worker its child
+        args = run._args(pid)
+        self.assertIn(str(fake), args)
+        self.assertNotIn("hansa-oom", args)
+        self.assertNotIn("/bin/sh", args)
+
+    def test_a_program_that_cannot_be_found_fails_to_start_as_it_did_without_the_oom_wrapper(self):
+        from hansa import run
+        said = {}
+        for linux in (False, True):
+            for missing in (str(self.tmp / "no-such-claude"), "hansa-no-such-claude"):
+                with self.subTest(linux=linux, missing=missing):
+                    tid = self.desk.new_task("Start a missing program")
+                    # gone after claude_bin found it, or never found by Popen: claude_bin's own fallback would be the real one
+                    with unittest.mock.patch.object(account, "LINUX", linux), \
+                            unittest.mock.patch.object(run, "claude_bin", lambda: missing):
+                        self.assertEqual(run.with_oom_score([missing, "-p"], str(self.tmp), dict(os.environ)),
+                                         [missing, "-p"])
+                        Dispatcher(self.desk).tick()
+                    m = self.desk.meta(tid)
+                    self.assertEqual(m["state"], "failed", m)
+                    self.assertIn(missing, m["error"])
+                    self.assertNotIn("hansa-oom", m["error"])
+                    said[linux, missing] = m["error"]
+        for missing in (str(self.tmp / "no-such-claude"), "hansa-no-such-claude"):
+            self.assertEqual(said[True, missing], said[False, missing])
+        # one that is found is still wrapped
+        with unittest.mock.patch.object(account, "LINUX", True):
+            self.assertEqual(run.with_oom_score(["sh", "-c", "true"], str(self.tmp), dict(os.environ))[3:],
+                             ["hansa-oom", "sh", "-c", "true"])
 
     def test_show_gives_the_text_hansa_read_queued_running_and_finished(self):
         f = self.tmp / "task.md"

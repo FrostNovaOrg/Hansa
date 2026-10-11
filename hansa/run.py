@@ -44,9 +44,15 @@ SRT_OUTPUT = shlex.join(protected([]))
 OOM_SCRIPT = '{ printf "500\\n" > /proc/self/oom_score_adj; } 2>/dev/null || :\nexec "$@"'
 
 
-def with_oom_score(argv: list) -> list:
-    """Prefer workers and lane commands when Linux's kernel has to kill a process for memory."""
-    return ["/bin/sh", "-c", OOM_SCRIPT, "hansa-oom", *argv] if account.LINUX else argv
+def with_oom_score(argv: list, cwd=None, env=None) -> list:
+    """Prefer workers and lane commands when Linux's kernel has to kill a process for memory. A program
+    Popen would not find (as it looks: by path from cwd, else in env's PATH) starts without the wrapper,
+    so Popen still raises and hansa says so, where the shell would print "not found" and exit 127."""
+    prog = argv[0]
+    dirs = [""] if os.path.dirname(prog) else os.get_exec_path(env)
+    found = any(os.path.isfile(p) and os.access(p, os.X_OK)
+                for p in (os.path.join(cwd or "", d, prog) for d in dirs))
+    return ["/bin/sh", "-c", OOM_SCRIPT, "hansa-oom", *argv] if account.LINUX and found else argv
 
 
 # Only the wording providers use for "out of quota", so a task that is itself
@@ -3811,7 +3817,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                     setup_ran=bool(lane.get("setup")), resumed=None)  # a new session: an earlier try's resume is not its own
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
-            proc = subprocess.Popen(with_oom_score(command), cwd=str(wt), env=env, stdin=stdin, stdout=out,
+            proc = subprocess.Popen(with_oom_score(command, str(wt), env), cwd=str(wt), env=env, stdin=stdin, stdout=out,
                                     stderr=err, start_new_session=True)
         with recording_start(desk, ("task", tid, sid), proc.pid, proc):
             desk.update(tid, phase="", model_asked=model, effort_used=effort, effort_from=effort_from, pid=proc.pid,
@@ -3892,7 +3898,7 @@ def resume(desk: Desk, tid: str):
         with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
             stdin.write(note.encode("utf-8"))
             stdin.seek(0)
-            proc = subprocess.Popen(with_oom_score(argv), cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
+            proc = subprocess.Popen(with_oom_score(argv, str(wt), env), cwd=str(wt), env=env, stdin=stdin, stdout=out, stderr=err,
                                     start_new_session=True)
         with recording_start(desk, None, proc.pid, proc):
             desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
@@ -4432,7 +4438,7 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
         with open(raw / "check.log", "wb") as out:
             proc = subprocess.Popen(with_oom_score(["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "check.exit"), tmp,
-                                                   srt, settings, own]), cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                                   srt, settings, own], str(wt), env), cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         with recording_start(desk, ("check", tid, token), proc.pid, proc):
             desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
@@ -4909,7 +4915,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
         desk.update(tid, merge_check=mc)
         with open(raw / "merge-check.log", "wb") as out:
-            proc = subprocess.Popen(with_oom_score(argv), cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out,
+            proc = subprocess.Popen(with_oom_score(argv, str(wt), env), cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
         with recording_start(desk, ("merge", tid, token), proc.pid, proc):
             desk.update(tid, merge_check={**mc, "phase": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
@@ -5133,7 +5139,7 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
              "tmp": tmps, **steps}
         write_try(desk, lane_name, t)
         with open(d / "try.err", "wb") as err:
-            proc = subprocess.Popen(with_oom_score(["/bin/sh", "-c", TRY_SCRIPT, token, str(d), srt, *args]), cwd=str(wt), env=env,
+            proc = subprocess.Popen(with_oom_score(["/bin/sh", "-c", TRY_SCRIPT, token, str(d), srt, *args], str(wt), env), cwd=str(wt), env=env,
                                     stdin=subprocess.DEVNULL, stdout=err, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         with recording_start(desk, ("try", lane_name, token), proc.pid, proc):
