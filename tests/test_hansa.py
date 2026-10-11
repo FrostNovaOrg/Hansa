@@ -10174,8 +10174,9 @@ class DeskTest(unittest.TestCase):
         real_run, fed = subprocess.run, []
 
         def gone_first(cmd, **kw):  # the account cannot read the file: only root's copy of the text counts
-            brief.unlink()
-            fed.append(kw.get("input"))
+            if cmd[0] == account.runuser_bin():  # the shared patch also catches build()'s uncached git lookup
+                brief.unlink()
+                fed.append(kw.get("input"))
             return real_run(cmd, **kw)
         with unittest.mock.patch.object(account.subprocess, "run", side_effect=gone_first), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -18293,6 +18294,41 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((seen.get("HANSA_OWN_VAR"), seen.get("HANSA_RELEASE")), ("from-hansa", "1"))
         self.assertEqual(seen.get("HANSA_RELEASE_COMMIT"), r["commit"])
 
+    def assert_release_waits_for_merge_check_on_lane(self, rid, tid, lane):
+        from hansa import release
+        s, r = self.desk.settings(), release.get(self.desk, rid)
+        row = next(r for r in views.status(self.desk)["releases"] if r["id"] == rid)
+        for zh, expected, shown in (
+                (False, f"waits for {tid}'s merge check on lane {lane}, on the same repository",
+                 {"wait": release.waits_text(self.desk, s, r), "state": release.state_text(self.desk, r, s),
+                  "page": row["what"], "release": self.hansa("release"), "status": self.hansa("status"),
+                  "explain": self.hansa("explain", "lane", "a")}),
+                (True, f"等同一仓库上工作线 {lane} 的 {tid} 合并验收结束",
+                 {"wait": release.waits_text(self.desk, s, r, zh=True),
+                  "state": release.state_text(self.desk, r, s, zh=True), "page": row["what_zh"]})):
+            for surface, text in shown.items():
+                with self.subTest(zh=zh, surface=surface):
+                    self.assertIn(expected, text)
+
+    def test_a_release_waiting_for_a_merge_check_names_the_merge_lane(self):
+        from hansa import release
+        go = self.tmp / "go"
+        d, tid = self.merge_lane_task(f"while [ ! -f {go} ]; do sleep 0.1; done")
+        self.hansa("merge", tid)
+        d.tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["lane"], m["merge_check"]["lane"], m["merge_check"]["phase"]), ("a", "m", "running"))
+        try:
+            self.with_release("true")
+            self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
+            self.hansa("release", "a")
+            d.tick()
+            self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+            self.assert_release_waits_for_merge_check_on_lane(1, tid, "m")
+        finally:
+            go.write_text("")
+            self.settle_merge(d, tid)
+
     def test_a_release_and_a_merge_on_one_repository_wait_for_each_other(self):
         from hansa import release
         go = self.tmp / "go"
@@ -18335,7 +18371,7 @@ class DeskTest(unittest.TestCase):
         for _ in range(3):
             d.tick()
         self.assertEqual(release.get(self.desk, rid)["state"], "approved")
-        self.assertIn(f"waits for {t2}'s merge check", self.hansa("release"))
+        self.assert_release_waits_for_merge_check_on_lane(rid, t2, "a")
         (self.tmp / (go.name + "2")).write_text("")
         self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
         d.tick()
