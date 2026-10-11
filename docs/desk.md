@@ -6,6 +6,9 @@
 
 Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
 A write that fails leaves the previous file, with its permissions, and no temporary file.
+The full-disk tests disable `shutil`'s fast-copy paths while injecting a partial write,
+so copied evidence reaches the same failing `write` on macOS and Linux. The helper
+restores the flags afterwards, including removing flags absent from that Python.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
 in `secrets/` (mode 600) and are never shown or sent anywhere but to the

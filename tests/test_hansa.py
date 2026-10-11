@@ -691,12 +691,15 @@ def partial_write(path, after=None):
         opened[fd] = Path(name)
         return fd
 
+    # Fast copies bypass File.write. copy_file_range's flag is new in Python 3.14;
+    # create=True handles missing flags, and each patch restores its original state.
     with unittest.mock.patch("builtins.open", lambda *a, **kw: opening(real_open, *a, **kw)), \
             unittest.mock.patch("io.open", lambda *a, **kw: opening(real_io_open, *a, **kw)), \
             unittest.mock.patch("os.open", os_open), \
             unittest.mock.patch("os.fdopen", lambda *a, **kw: opening(real_fdopen, *a, **kw)), \
             unittest.mock.patch("shutil._HAS_FCOPYFILE", False, create=True), \
-            unittest.mock.patch("shutil._USE_CP_SENDFILE", False, create=True):
+            unittest.mock.patch("shutil._USE_CP_SENDFILE", False, create=True), \
+            unittest.mock.patch("shutil._USE_CP_COPY_FILE_RANGE", False, create=True):
         yield hit
 
 
