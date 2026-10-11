@@ -1,7 +1,8 @@
 # On a Linux server
 
 The [README](../README.md#quick-start) covers the usual setup, where the desk belongs to the user who runs
-hansa. Here: a Linux server where the principal works as root, and what a lane's commands meet in Linux's sandbox.
+hansa. Here: a Linux server where the principal works as root, what a lane's commands meet in Linux's sandbox,
+and what the kernel stops first when memory runs out.
 
 ## The coordinator as root, the desk as an ordinary account
 
@@ -40,12 +41,6 @@ the account's repository settings name. In `manual` mode any command other than
 `hansa` waits for the principal's approval.
 
 ## What a lane's commands meet in Linux's sandbox
-
-On Linux, hansa sets `oom_score_adj` to 500 outside the sandbox before starting workers, verifications,
-setups, checks, merge checks and lane tries; their children inherit it, so the kernel prefers killing them
-when memory runs out, while `hansa serve`, the coordinator and releases keep their scores (a refused
-write does not stop the run). This does not choose among the workers; systemd-oomd, where it runs,
-picks by other rules.
 
 What a lane's commands meet in the sandbox there (bubblewrap), which
 `hansa explain lane` repeats:
@@ -137,3 +132,15 @@ To see what Java says in a lane after an upgrade, run
 TMPDIR, what `findmnt`, `df` and `FileStore.isReadOnly()` say for TMPDIR and
 the worktree, whether a write there works, and the untracked files git lists at
 the top of the worktree (the first 3, and how many more), in at most 14 lines.
+
+## When memory runs out
+
+On Linux, hansa sets `oom_score_adj` to 500 outside the sandbox before
+starting workers, verifications, setups, checks, merge checks and lane tries;
+their children inherit it, so the kernel prefers killing them when memory runs
+out, while `hansa serve`, the coordinator and releases keep their scores. A
+short shell sets the score and then replaces itself with the command (`exec`),
+so the process hansa records is the command's own. A refused write does not
+stop the run, and a program that cannot be found starts without that shell,
+so hansa says it could not start as before. This does not choose among the
+workers; systemd-oomd, where it runs, picks by other rules.
