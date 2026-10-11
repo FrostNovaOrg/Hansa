@@ -41,6 +41,12 @@ the account's repository settings name. In `manual` mode any command other than
 
 ## What a lane's commands meet in Linux's sandbox
 
+On Linux, hansa sets `oom_score_adj` to 500 outside the sandbox before starting workers, verifications,
+setups, checks, merge checks and lane tries; their children inherit it, so the kernel prefers killing them
+when memory runs out, while `hansa serve`, the coordinator and releases keep their scores (a refused
+write does not stop the run). This does not choose among the workers; systemd-oomd, where it runs,
+picks by other rules.
+
 What a lane's commands meet in the sandbox there (bubblewrap), which
 `hansa explain lane` repeats:
 - **The mount table can call a writable folder read-only.** The sandbox mounts

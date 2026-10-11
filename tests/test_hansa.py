@@ -2074,6 +2074,138 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
         self.assertTrue((self.repo / "hello.txt").exists())
 
+    def assert_oom_launches(self, linux):
+        from hansa import release, run
+        kinds = ("worker", "verification", "setup", "check", "merge check", "merge setup", "try", "resume", "release")
+        popen = subprocess.Popen
+        for kind in kinds:
+            with self.subTest(kind=kind, linux=linux):
+                folder = self.tmp / kind.replace(" ", "-")
+                folder.mkdir()
+                repo = folder / "repo"
+                sh("git", "clone", "-q", str(self.repo), str(repo), cwd=folder)
+                desk = init_desk(folder / "desk", str(repo), "a")
+                s = desk.settings()
+                s["lanes"]["a"].update(check="true", merge_check="true", release="true",
+                                         setup="true" if kind in ("setup", "merge setup", "try") else "")
+                self.assertEqual(desk.save_settings(s), [])
+                lane = desk.settings()["lanes"]["a"]
+                calls = []
+
+                def launch(argv, **kwargs):
+                    if not kwargs.get("start_new_session"):
+                        return popen(argv, **kwargs)
+                    self.assertNotIn("preexec_fn", kwargs)
+                    calls.append(argv)
+                    # Capture the real launch site without executing its commands or leaving work running.
+                    proc = popen(["/usr/bin/true"], **kwargs)
+                    proc.wait(timeout=10)
+                    return proc
+
+                with unittest.mock.patch.object(account, "LINUX", linux), \
+                        unittest.mock.patch.object(subprocess, "Popen", side_effect=launch):
+                    if kind == "release":
+                        r = release.ask(desk, "a")
+                        self.assertEqual(release.answer(desk, r["id"], True, commit=r["commit"], command=r["command"]),
+                                         {"ok": True})
+                        self.assertIsNotNone(release.start(desk, r["id"]))
+                    elif kind == "try":
+                        run.write_try(desk, "a", {"phase": "queued"})
+                        self.assertIsNotNone(run.start_try(desk, "a", lane))
+                        for tmp in run.read_try(desk, "a")["tmp"]:
+                            self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+                    else:
+                        tid = desk.new_task("Launch fixture", lane="a", kind="verify" if kind == "verification" else "work")
+                        self.addCleanup(run.remove_sandbox_tmp, desk, tid)
+                        if kind == "check":
+                            wt = run.prepare(desk, "a", lane, desk.meta(tid))[0]
+                            desk.update(tid, state="running", phase="checking", provider="claude", worktree=str(wt))
+                            self.assertIsNotNone(run.start_check(desk, tid, "a", lane))
+                        elif kind in ("merge check", "merge setup"):
+                            head = sh_out("git", "rev-parse", "HEAD", cwd=repo)
+                            sh("git", "branch", f"task/{tid}", head, cwd=repo)
+                            desk.update(tid, state="merging", provider="claude", head=head, branch=f"task/{tid}",
+                                        merge_check={"phase": "queued"})
+                            self.assertIsNotNone(run.start_merge_check(desk, tid, "a", lane))
+                        else:
+                            self.assertIsNotNone(run.start(desk, tid, "a", "claude"))
+                            if kind == "resume":
+                                write_json(desk.raw_dir(tid) / "run.json", {"subtype": "success"})
+                                with unittest.mock.patch.object(run, "read_detail", return_value=["leftover command"]):
+                                    self.assertIsNotNone(run.resume(desk, tid))
+                                calls.pop(0)  # check the resumed launch independently of the first start
+                self.assertEqual(len(calls), 1)
+                argv = calls[0]
+                if linux and kind != "release":
+                    self.assertEqual(argv[:4], ["/bin/sh", "-c",
+                                               '{ printf "500\\n" > /proc/self/oom_score_adj; } 2>/dev/null || :\nexec "$@"',
+                                               "hansa-oom"])
+                    argv = argv[4:]
+                else:
+                    self.assertNotIn("hansa-oom", argv)
+                    self.assertNotIn("/proc/self/oom_score_adj", " ".join(argv))
+                # The original command stays intact, outside srt and before any setup.
+                scripts = {"setup": run.SETUP_SCRIPT, "merge setup": run.SETUP_SCRIPT,
+                           "check": run.CHECK_SCRIPT, "merge check": run.CHECK_SCRIPT,
+                           "try": run.TRY_SCRIPT, "release": release.SCRIPT}
+                if kind in scripts:
+                    self.assertEqual(argv[:3], ["/bin/sh", "-c", scripts[kind]])
+                else:
+                    expected = json.loads((desk.raw_dir(tid) / run.RESUME_ARGV).read_text())
+                    if kind == "resume":
+                        expected[expected.index("--session-id")] = "--resume"
+                    self.assertEqual(argv, expected)
+
+    def test_linux_run_command_lines_raise_the_oom_score_but_releases_do_not(self):
+        self.assert_oom_launches(linux=True)
+
+    def test_macos_run_command_lines_keep_the_original_commands(self):
+        self.assert_oom_launches(linux=False)
+
+    def test_a_refused_oom_score_write_still_executes_the_command(self):
+        from hansa import run
+        script = run.OOM_SCRIPT.replace("/proc/self/oom_score_adj", str(self.tmp / "missing" / "oom_score_adj"))
+        with unittest.mock.patch.object(account, "LINUX", True), \
+                unittest.mock.patch.object(run, "OOM_SCRIPT", script):
+            argv = run.with_oom_score([sys.executable, "-c", "import sys; print(sys.argv[1]); sys.exit(7)",
+                                       "an argument with spaces; $still_literal"])
+        self.assertEqual(argv[:4], ["/bin/sh", "-c", script, "hansa-oom"])
+        result = subprocess.run(argv, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, "an argument with spaces; $still_literal\n")
+        self.assertEqual(result.stderr, "")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "oom_score_adj is Linux only")
+    def test_a_linux_worker_reads_its_own_oom_score_as_500(self):
+        # Probe in a child, independently of hansa's wrapper, without changing the suite's score.
+        probe = subprocess.run([sys.executable, "-c", textwrap.dedent('''\
+            import sys
+            try:
+                with open("/proc/self/oom_score_adj", "w") as f:
+                    f.write("500\\n")
+            except OSError as e:
+                print(e)
+                sys.exit(1)
+            ''')], capture_output=True, text=True)
+        if probe.returncode == 1:
+            self.skipTest(f"writing /proc/self/oom_score_adj is refused here: {probe.stdout.strip()}")
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        parent_score = Path("/proc/self/oom_score_adj").read_text()
+        fake = self.tmp / "claude"
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
+            import json, sys
+            sys.stdin.read()
+            with open("/proc/self/oom_score_adj") as f:
+                score = int(f.read())
+            print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                              "result": str(score)}))
+            '''))
+        tid = self.desk.new_task("Read the worker's OOM score")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text().strip(), "500")
+        self.assertEqual(Path("/proc/self/oom_score_adj").read_text(), parent_score)
+
     def test_show_gives_the_text_hansa_read_queued_running_and_finished(self):
         f = self.tmp / "task.md"
         f.write_text("Add hello.txt\n" + "".join(f"line {i}\n" for i in range(2, 13)))
