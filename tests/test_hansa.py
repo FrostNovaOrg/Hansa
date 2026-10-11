@@ -503,8 +503,8 @@ os.environ["TMPDIR"] = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp/claude"
 args = sys.argv[1:]
 cut = args.index("--")
 command = args[cut + 1:]
-if len(command) > 1 and command[1].endswith("/srt_output.py"):
-    args[cut + 1:] = command[3:]  # record the wrapped command; execute the relay below
+if len(command) > 5 and command[5].endswith("/srt_output.py"):
+    args[cut + 1:] = command[7:]  # record the wrapped command; execute the relay below
 settings = json.load(open(args[args.index("--settings") + 1]))
 mode = os.fstat(1).st_mode
 with open(LOG, "a") as f:
@@ -1368,8 +1368,9 @@ class SrtOutputTest(unittest.TestCase):
             if "--settings" in sys.argv and os.path.isfile(sys.argv[sys.argv.index("--settings") + 1]):
                 settings = json.load(open(sys.argv[sys.argv.index("--settings") + 1]))
                 for path in settings.get("filesystem", {}).get("denyRead", []):
-                    if len(command) > 1 and (command[1] == path or command[1].startswith(path.rstrip("/") + "/")):
-                        print("cannot read " + command[1] + ": Permission denied", file=sys.stderr)
+                    hidden = next((arg for arg in command if arg == path or arg.startswith(path.rstrip("/") + "/")), None)
+                    if hidden:
+                        print("cannot read " + hidden + ": Permission denied", file=sys.stderr)
                         sys.exit(2)
             if os.environ.get("SRT_SYSTEM") == "linux":
                 proc = subprocess.Popen(command, start_new_session=True)
@@ -1509,6 +1510,36 @@ class SrtOutputTest(unittest.TestCase):
             self.assertEqual(remainder, b"")
             self.assertEqual(proc.returncode, 23)
 
+    def test_relay_keeps_the_commands_environment_before_python_starts(self):
+        from hansa import run, srt_output
+        # Every lane command starts with a shell; inspect its complete environment with a
+        # native env, so another Python startup cannot hide a change made by the relay.
+        utf8 = "C.UTF-8" if sys.platform.startswith("linux") else "en_US.UTF-8"
+        locales = [{}, {"LANG": "C"}, {"LC_ALL": "C"}, {"LC_CTYPE": "C"},
+                   {"LANG": "C", "LC_ALL": "C", "LC_CTYPE": "C"},
+                   {"LANG": utf8}, {"LC_ALL": utf8}, {"LC_CTYPE": utf8}, {"LC_CTYPE": ""}]
+        for locale in locales:
+            for cf in (None, "", "0x123:0x0:0x0"):
+                for lane_lang in (None, "en_US.ISO8859-1"):
+                    with self.subTest(locale=locale, cf=cf, lane_lang=lane_lang):
+                        env = {"PATH": "/usr/bin:/bin", **locale}
+                        if cf is not None:
+                            env["__CF_USER_TEXT_ENCODING"] = cf
+                        with unittest.mock.patch.object(run, "sandbox_env", return_value={"LANG": lane_lang} if lane_lang else {}), \
+                                unittest.mock.patch.object(run, "sandbox_prelude", return_value=""):
+                            command = ["/bin/sh", "-c", run.in_sandbox(None, {}, "exec /usr/bin/env -0")]
+                        direct = subprocess.run(command, env=env, capture_output=True, check=True, timeout=5)
+                        relayed = subprocess.run(srt_output.protected(command), env=env, capture_output=True, check=True, timeout=5)
+                        self.assertEqual(sorted(relayed.stdout.split(b"\0")), sorted(direct.stdout.split(b"\0")))
+
+    def test_protected_picks_command_exit_on_linux_and_pipe_eof_on_macos(self):
+        from hansa import srt_output
+        command = ["/bin/sh", "-c", "echo done"]
+        for platform, mode in (("linux", "command"), ("darwin", "eof")):
+            with self.subTest(platform=platform), unittest.mock.patch.object(srt_output.sys, "platform", platform):
+                argv = srt_output.protected(command)
+                self.assertEqual(argv[4:], [sys.executable, str(Path(srt_output.__file__).resolve()), mode, *command])
+
     def test_preview_keeps_bursts_and_exit_codes(self):
         from hansa import preview
         class Launched(Exception):
@@ -1617,8 +1648,8 @@ class SrtOutputTest(unittest.TestCase):
 
     def edge_run(self, system, place, command, folder, reader_gone=False):
         from hansa import run, srt_output
-        relay = [sys.executable, str(Path(srt_output.__file__).resolve()),
-                 "command" if system == "linux" else "eof"]
+        with unittest.mock.patch.object(srt_output.sys, "platform", "linux" if system == "linux" else "darwin"):
+            relay = srt_output.protected([])
         env = {**self.env, "SRT_SYSTEM": system, "SRT_GROUP": str(folder / "group"),
                "OUTPUT_READY": str(folder / "ready")}
         if place == "relay":
@@ -1728,7 +1759,7 @@ class SrtOutputTest(unittest.TestCase):
             self.assertTrue(result[0], "the drained snapshot still waited on a live writer")
             return result
 
-        with unittest.mock.patch.object(srt_output.sys, "argv", ["relay", "command", "unused"]), \
+        with unittest.mock.patch.object(srt_output.sys, "argv", ["relay", "command", "unused", "", ""]), \
                 unittest.mock.patch.object(srt_output.subprocess, "Popen", return_value=proc), \
                 unittest.mock.patch.object(srt_output.os, "fstat", return_value=types.SimpleNamespace(st_dev=1, st_ino=1)), \
                 unittest.mock.patch.object(srt_output.select, "select", ready), \
@@ -1774,6 +1805,24 @@ class SrtOutputTest(unittest.TestCase):
                 run.try_srt(desk, f, str(folder), folder)
             self.assertIn("output relay and true with these sandbox settings", str(failed.exception))
             self.assertIn("Permission denied", str(failed.exception))
+            for hint in ("workers may not read", sys.executable, f"prefix {sys.prefix}",
+                         str(Path(run.__file__).resolve().parent)):
+                self.assertIn(hint, str(failed.exception))
+
+    def test_startup_failure_names_python_and_hansas_folder(self):
+        from hansa import run
+        desk = types.SimpleNamespace(state_dir=self.tmp / "state")
+        failures = [subprocess.CompletedProcess([], 2, "", "cannot read Python"),
+                    subprocess.TimeoutExpired("srt", 1), OSError("cannot start Python")]
+        for result in failures:
+            with self.subTest(result=result), \
+                    unittest.mock.patch.object(run.shutil, "which", return_value=str(self.srt)), \
+                    unittest.mock.patch.object(run.subprocess, "run", side_effect=[result]), \
+                    self.assertRaises(run.SrtCannotRun) as failed:
+                run.try_srt(desk, "unused", str(self.tmp), self.tmp)
+            for hint in ("output relay", "workers may not read", sys.executable, f"prefix {sys.prefix}",
+                         str(Path(run.__file__).resolve().parent)):
+                self.assertIn(hint, str(failed.exception))
 
 
 class DeskTest(unittest.TestCase):
@@ -12996,12 +13045,19 @@ class DeskTest(unittest.TestCase):
         self.assertIn(str(self.desk.secrets_dir), self.sandbox_of(argv)["filesystem"]["denyRead"])
         self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=31))["ok"])
 
-    def test_deny_read_cannot_hide_the_relay_or_its_python_on_either_system_or_in_a_venv(self):
+    def test_deny_read_fences_the_relay_but_not_python_dependencies(self):
         from hansa import desk as hdesk, run
         code = str(Path(hdesk.__file__).resolve().parent)
-        _, said, stops = hdesk.deny_parts([code], self.desk.root, {"a": {"repo": code}})
-        self.assertEqual(stops, said, "a lane repository overlap must still stop runs")
-        self.assertIn("output relay", stops[0])
+        alias = self.tmp / "relay-link"
+        alias.symlink_to(Path(code) / "srt_output.py")
+        for path in (code, str(Path(code) / "srt_output.py"), str(alias)):
+            with self.subTest(path=path):
+                _, said, stops = hdesk.deny_parts([path], self.desk.root, {"a": {"repo": code}})
+                self.assertEqual(stops, said, "a lane repository overlap must still stop runs")
+                self.assertIn("output relay", stops[0])
+                refused = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                self.assertFalse(refused["ok"], refused)
+                self.assertIn("output relay", " ".join(refused["problems"]))
         other_code = str(Path(code) / "card.md")  # hiding another file does not hide the relay
         self.assertEqual(hdesk.deny_parts([other_code], self.desk.root), ([other_code], [], []))
         for platform in ("linux", "darwin"):
@@ -13036,22 +13092,19 @@ class DeskTest(unittest.TestCase):
                             unittest.mock.patch.object(hdesk.sysconfig, "get_config_var", side_effect=config.get), \
                             unittest.mock.patch.object(hdesk.site, "getsitepackages", return_value=[str(modules)]), \
                             unittest.mock.patch.object(hdesk.site, "getusersitepackages", return_value=str(user_site)), \
-                            unittest.mock.patch.dict(os.environ, {"PATH": f"{prefix / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
-                        bad = [code, str(Path(code) / "srt_output.py"), str(executable), str(prefix), str(base),
-                               str(stdlib), str(stdlib / "subprocess.py"), str(modules), str(link),
-                               str(base / "lib/python311.zip"), str(prefix / "pyvenv.cfg"),
-                               str(base / "lib/libpython3.11.so"), str(user_site)]
+                            unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+                        allowed = [str(executable), str(prefix), str(base), str(stdlib), str(stdlib / "subprocess.py"),
+                                   str(modules), str(modules / "package"), str(link), str(base / "lib/python311.zip"),
+                                   str(prefix / "pyvenv.cfg"), str(base / "lib/libpython3.11.so"), str(user_site),
+                                   str(user_site / "package")]
                         if platform == "darwin":
-                            bad.append(str(base / "Python"))
-                        for path in bad:
+                            allowed += [str(base / "Python"), str(base / "Resources/Python.app")]
+                        for path in allowed:
                             with self.subTest(path=path):
                                 good, said, stops = hdesk.deny_parts([path, str(beside)], self.desk.root)
-                                self.assertEqual(good, [str(beside)])
-                                self.assertEqual(stops, said, "a PATH overlap must still stop runs")
-                                self.assertIn("output relay", stops[0])
-                                refused = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
-                                self.assertFalse(refused["ok"], refused)
-                                self.assertIn("output relay", " ".join(refused["problems"]))
+                                self.assertEqual(good, [path, str(beside)])
+                                self.assertEqual((said, stops), ([], []))
+                                self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[path]))["ok"])
                         self.assertEqual(hdesk.deny_parts([str(beside)], self.desk.root), ([str(beside)], [], []))
         # An old saved entry stops a real worker start with the refusal reason, before any setup or check.
         s = self.desk.settings()

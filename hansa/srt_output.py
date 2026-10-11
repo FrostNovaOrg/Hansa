@@ -14,7 +14,11 @@ import threading
 
 
 def protected(command):
-    return [sys.executable, str(Path(__file__).resolve()),
+    # Save these before Python starts: locale coercion and macOS's framework launcher
+    # can change them. The leading x distinguishes an empty value from an unset variable.
+    return ["/bin/sh", "-c", 'exec "$@" "${LC_CTYPE+x}${LC_CTYPE-}" '
+            '"${__CF_USER_TEXT_ENCODING+x}${__CF_USER_TEXT_ENCODING-}"', "hansa-output",
+            sys.executable, str(Path(__file__).resolve()),
             "command" if sys.platform.startswith("linux") else "eof", *command]
 
 
@@ -31,7 +35,13 @@ def main():
     # Preserve stdout/stderr ordering when the caller merged them, and separate streams for probes.
     out, err = os.fstat(1), os.fstat(2)
     merged = (out.st_dev, out.st_ino) == (err.st_dev, err.st_ino)
-    proc = subprocess.Popen(sys.argv[2:], stdout=subprocess.PIPE,
+    env = dict(os.environ)
+    for name, saved in zip(("LC_CTYPE", "__CF_USER_TEXT_ENCODING"), sys.argv[-2:]):
+        if saved:
+            env[name] = saved[1:]
+        else:
+            env.pop(name, None)
+    proc = subprocess.Popen(sys.argv[2:-2], env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT if merged else subprocess.PIPE, bufsize=0)
     streams = {proc.stdout: 1}
     if not merged:

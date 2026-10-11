@@ -516,7 +516,9 @@ def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
     write_json(desk.state_dir / "srt.json", rec)
     if not rec["ran"]:
         raise SrtCannotRun(rec["said"] if not path else
-                           f"srt ({path}) could not run hansa's output relay and true with these sandbox settings: {rec['said']}")
+                           f"srt ({path}) could not run hansa's output relay and true with these sandbox settings: {rec['said']}. "
+                           f"Check whether an entry on 'workers may not read' hides the Python hansa runs with "
+                           f"({sys.executable}, prefix {sys.prefix}) or hansa's folder ({Path(__file__).resolve().parent}).")
     return path
 
 

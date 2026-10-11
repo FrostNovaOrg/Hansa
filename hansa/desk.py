@@ -1820,29 +1820,11 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
         fenced.append((DATA, _above, f"it is {DATA}, the volume macOS keeps everything on, or a folder above it"))
     if root:
         fenced.append((str(root), _above, f"it is {root}, the desk, or a folder above it"))
-    # Setups and checks run our relay inside srt, with this Python, before the lane's env.
+    # Setups and checks run our relay inside srt, before the lane's env.
     # These are hard refusals even when also on the PATH or above a lane's repository.
     code = os.path.dirname(os.path.abspath(__file__))
     for p in (code, os.path.join(code, "srt_output.py")):
         fenced.append((p, _above, f"it hides {p}, hansa's output relay: setups and checks need to read it"))
-    prefixes = {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}
-    python = _hops(sys.executable) if sys.executable else []
-    python += [os.path.join(p, "pyvenv.cfg") for p in prefixes]
-    library = sysconfig.get_config_var("LDLIBRARY")
-    if library:
-        python += _hops(os.path.join(sysconfig.get_config_var("LIBDIR") or sys.base_prefix, library))
-    framework = sysconfig.get_config_var("PYTHONFRAMEWORK")
-    if framework:
-        python.append(os.path.join(sys.base_prefix, framework))
-    modules = sysconfig.get_paths()
-    python += [modules.get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")]
-    python += [site.getusersitepackages(), *site.getsitepackages()]
-    python += [p for p in sys.path if p.startswith("/") and any(_above(top, p) for top in prefixes)]
-    for p in dict.fromkeys(p for p in python if p and p.startswith("/")):
-        fenced.append((p, _overlaps, f"it hides {p}, the Python hansa's output relay runs with or loads from: "
-                                    "setups and checks need to read it"))
-    fenced += [(p, _above, f"it hides {p}, the prefix of the Python hansa's output relay runs with: setups and "
-                           "checks need to read it") for p in sorted(prefixes) if p.startswith("/")]
     settled = set()  # the reasons for which an entry is left out of runs rather than stopping them
     for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
         if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
