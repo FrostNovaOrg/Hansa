@@ -641,7 +641,7 @@ def status_text(st: dict) -> str:
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
         if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
-    out += [f"sandbox try: {st['try_note']}"] if st.get("try_note") else []
+    out += [f"sandbox probe: {st['try_note']}"] if st.get("try_note") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
@@ -700,6 +700,9 @@ def status_text(st: dict) -> str:
     wr = max(map(len, rests), default=0)
     for p, rest in zip(st["providers"], rests):
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
+        if p.get("check"):
+            out.append(f"      last ping: {'ok' if p['check'].get('ok') else 'NOT ok'} - "
+                       f"{p['check'].get('detail', '')}")
     if [r for r in st.get("releases") or [] if r["state"] in release.OPEN]:
         out.append("releases (hansa release):")
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
@@ -1114,7 +1117,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    f" · cache write {u.get('cache_write') or 0:,}")
     review = (f"hansa merge {tid}" if v and v["verdict"] == "holds"
               else f"hansa diff {tid} --stat, then hansa verify {tid} (code or tests) or hansa merge {tid} (text only)")
-    nxt = {"done": f"hansa retry {tid} \"what to change\" · hansa cancel {tid} to close it" if not m.get("commits")
+    nxt = {"done": f"hansa retry {tid} \"what to change\" · hansa close {tid} to close it" if not m.get("commits")
            else f"{review} · hansa retry {tid} \"what to change\"" if not chk or chk["ok"]
            else (f"{recheck_step(chk, tid)} (runs the check "
                  f"again and merges if it passes) · hansa retry {tid} \"make the check pass: ...\" · "
@@ -1152,9 +1155,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         nxt["done"] = f"hansa retry {tid} --update \"settle the markers in {', '.join(m['markers'])}\""
     if m.get("leaked") and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
-                       f"hansa ask (they may want to change that key) · hansa cancel {tid}")
+                       f"hansa ask (they may want to change that key) · hansa close {tid}")
     if verifying:
-        nxt = {"done": f"read the report above, then merge or send back {m.get('parent')}",
+        nxt = {"done": f"read the report above, then merge or send back {m.get('parent')} · hansa close {tid} to close it",
                "failed": f"hansa verify {m.get('parent')} to try again", "running": f"hansa cancel {tid} to stop it",
                "queued": "hansa status shows what it is waiting for"}
         if m.get("closed"):  # its task is closed: nothing is left to do with it
@@ -1387,7 +1390,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"  {'login' if p['kind'] == 'subscription' else 'endpoint'}: {where}"
             + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
-            f"  last check: {st.get('check') or 'never'}"])
+            f"  last ping: {st.get('check') or 'never'}"])
     if what == "task":
         return show_text(desk, name)
     if what == "states":
@@ -1432,9 +1435,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "too, since srt is a node script (an error such as `env: node: No such file or directory`, exit 127, "
             "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime`, or fix the "
             "server's PATH, then restart hansa serve. Then, for a task whose "
-            "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the lane's check "
+            "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the merge check "
             "again and merges if it passes; a task whose setup could not run: hansa retry ID.",
-            "Before it starts a worker, a verifier or a design session, it tries that run's sandbox the same way: "
+            "Before it starts a worker, a verifier or a design session, it probes that run's sandbox the same way: "
             "srt with the settings Claude Code is given, on /usr/bin/true, then a write of what git needs open "
             "there (the worktree's own index and git folder; for a design session, its branch's ref's .lock and "
             "objects/), and of what it must keep, to see that the deny patterns match (a new file atop the "
@@ -1446,13 +1449,13 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "refuses (found by trying each part alone, or the path written); the principal's alert is told once for each lane "
             "and reason. Only what was refused is held: a design session's sandbox is another than its lane's "
             "workers', so its refusal holds the lane's design sessions, and a worker's or a verifier's holds the "
-            "lane's workers and verifiers; hansa status says which. Held tasks start by themselves once a try "
-            "passes: after a fix, restart hansa serve, which as it starts tries again the sandbox of each held lane "
+            "lane's workers and verifiers; hansa status says which. Held tasks start by themselves once a probe "
+            "passes: after a fix, restart hansa serve, which as it starts probes again the sandbox of each held lane "
             "(a worker's in the lane's worktree, a design session's in its design worktree), clears the hold when "
-            "the try passes and keeps it with the new reason when it fails (so does a change of the settings, at "
+            "the probe passes and keeps it with the new reason when it fails (so does a change of the settings, at "
             "the next task's start). Without srt the run starts as before, in Claude Code's own sandbox, "
             "which never runs a command outside it. Claude Code carries its own copy of the sandbox library, which "
-            "may differ from the srt installed, so the try is a guard, not proof: when a run's first Bash calls "
+            "may differ from the srt installed, so the probe is a guard, not proof: when a run's first Bash calls "
             "say the sandbox could not start (sandbox-exec: or bwrap: before any call succeeded), hansa stops the "
             "run and holds its task the same way.",
             *([f"  {LINUX_TRY_NOTE[0].upper()}{LINUX_TRY_NOTE[1:]}."] if account.LINUX else []),
@@ -1495,14 +1498,14 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "status says the last clear, and warns when windows passed without one. hansa notify on no longer clears.",
             "  now: " + (", ".join(who) if who else "no session")])
     return "\n".join([
-        "What you can look up: hansa explain lane <name> | provider <name> | task <id> | server | notify",
+        "What you can look up: hansa explain lane <name> | provider <name> | server | notify",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
         f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
         *read_lines(desk, s),
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), the floor of free space under "
-        "which nothing new starts (hansa disk-floor), lane briefs (hansa lane brief) and "
+        "which nothing new starts (hansa disk-floor), lanes' standing instructions (hansa lane brief) and "
         "pause/resume.",
         release_settings_line(s),
         alert.explain_line(s)])

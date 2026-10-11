@@ -71,9 +71,9 @@ A write-list entry that hansa would now refuse when a run starts (one saved befo
 was there, or one whose link has since been pointed elsewhere) is left out of that run, and `hansa show`
 says so ([A lane's write list and env](#a-lanes-write-list-and-env)).
 
-Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the desk's card,
+Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the card,
 and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
-verifier or a design session read the desk's card or `notes/`.
+verifier or a design session read the card or `notes/`.
 
 ## Git's folders
 

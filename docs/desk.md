@@ -76,7 +76,7 @@ a design session ended; a merge check ended; the principal answered or closed a
 request (with the answer); the principal answered a release; a release ended
 (done, or failed with its exit code and last lines) or became void; a provider
 an open request names became ready when it was not as the request was made
-(once, looked at on a key or settings save, a `hansa check`, or its rest after a usage
+(once, looked at on a key or settings save, a `hansa ping`, or its rest after a usage
 limit running out; the request may be done: if it is, the coordinator closes it
 with `hansa ask --close N "<why>"`); `hansa serve` stopped, or, still running,
 finished no round for 5 minutes (busy or stuck), and then that it runs again;
@@ -94,7 +94,7 @@ another ended first posts what was missed meanwhile, as it is now.
 Which session hears what: a task or request goes to the session that made it
 (`hansa add`, `retry`, `verify`, `merge`, `design` and `ask` record it) while
 that session has a follower; otherwise to every session hansa posts to, as do
-desk-wide events. A cancel is not posted to the session whose `hansa cancel`
+desk-wide events. A cancel or close is not posted to the session whose command
 made it. A session started with `hansa coordinator` is posted to by itself;
 any other session runs `hansa notify on` once (`hansa notify off` stops it).
 `hansa notify` lists the sessions hansa posts to, and `hansa explain notify`

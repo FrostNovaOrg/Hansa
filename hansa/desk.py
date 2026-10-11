@@ -304,7 +304,7 @@ def compact_settings(s: dict) -> dict:
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
     return {"repo": repo, "base": base, "providers": providers or ["claude"],
-            "allow": list(DEFAULT_ALLOW), "network": [], "env": {}, "max_turns": 300, "timeout_min": 240}
+            "allow": list(DEFAULT_ALLOW), "network": [], "env": {}, "max_turns": 200, "timeout_min": 240}
 
 
 def now() -> float:
@@ -1079,7 +1079,20 @@ def lane_targets(ln) -> dict:
     if isinstance(named, dict) and named:
         return {k: v for k, v in named.items() if isinstance(v, dict)}
     cmd = ln.get("release")
-    return {"": {"command": cmd}} if isinstance(cmd, str) and cmd.strip() else {}
+    return {"default": {"command": cmd}} if isinstance(cmd, str) and cmd.strip() else {}
+
+
+def migrate_releases(s: dict) -> None:
+    """Read the former unnamed target as default, without writing settings or announcing a change."""
+    lanes = s.get("lanes")
+    for ln in lanes.values() if isinstance(lanes, dict) else []:
+        if (isinstance(ln, dict) and ln.get("targets", {}) == {} and isinstance(ln.get("release"), str)
+                and ln["release"].strip()):
+            ln["targets"] = {"default": {"command": ln.pop("release")}}
+    listed = s.get("releases_without_asking")
+    for entry in listed if isinstance(listed, list) else []:
+        if isinstance(entry, dict) and entry.get("target", "") == "":
+            entry["target"] = "default"
 
 
 def target_name(target) -> str:
@@ -1169,7 +1182,7 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
     all empty when there is no such lane)."""
     if not isinstance(ln, dict) or not isinstance(ln.get("repo"), str):
         return {"repo": "", "base": "", "command": "", "after": ""}
-    t = lane_targets(ln).get(target, {})
+    t = lane_targets(ln).get(target or "default", {})
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
             "command": str(t.get("command") or ""), "after": str(t.get("after") or ""),
             **({"fixed": "yes"} if t.get("fixed") else {})}
@@ -1178,9 +1191,10 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
 def listed_key(entry) -> tuple:
     """(lane, target) of an entry of the list; an entry without a target stands for the lane's unnamed one."""
     if isinstance(entry, str):
-        return entry, ""
+        return entry, "default"
     if isinstance(entry, dict):
-        return entry.get("lane"), entry.get("target", "")
+        target = entry.get("target", "")
+        return entry.get("lane"), "default" if target == "" else target
     return None, None
 
 
@@ -2327,6 +2341,7 @@ class Desk:
         loaded = read_json(self.settings_path, {})
         if isinstance(loaded, dict):
             s.update(loaded)
+        migrate_releases(s)
         for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
             # a merge_check of only spaces, written by hand, is unset, as hansa lane set makes it: never a command
             if isinstance(ln, dict) and isinstance(ln.get("merge_check"), str) and not ln["merge_check"].strip():
@@ -2348,6 +2363,9 @@ class Desk:
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
             old = self.settings()
+            if isinstance(new, dict):
+                new = copy.deepcopy(new)
+                migrate_releases(new)
             first = page_list_problems(new, old, self.root) if by == "page" and isinstance(new, dict) else []
             if first:
                 return first

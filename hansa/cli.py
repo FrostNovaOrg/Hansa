@@ -89,10 +89,10 @@ TOPICS = {
 # explain targets that moved to hansa help, and the form that replaces each: still answered, for one release
 EXPLAIN_RETIRED = {"states": "hansa help states"}
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
-COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "design")),
+COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close", "design")),
                   ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "cost")),
                   ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "pause", "resume")),
-                  ("the desk", ("init", "serve", "web", "coordinator", "check", "help")))
+                  ("the desk", ("init", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by hansa verify and the reviewer
@@ -816,12 +816,12 @@ def _retry(desk: Desk, a) -> None:
             + (f" What to change: {note}" if note else ""))
     report = desk.tasks_dir / a.id / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
-        text += "\nThe previous attempt's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
+        text += "\nThe earlier task's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
     vid = m.get("verify")  # the latest verification of the attempt, whatever it found, given whole
     vreport = desk.tasks_dir / vid / "result.md" if vid else None
     if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
         verdict = desk.meta(vid).get("verdict") or "none"
-        text += (f"\n\nThe report of {vid}, the verification of the previous attempt (a worker who ran the change "
+        text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
                  f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
     if a.browser and not desk.settings().get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued. "
@@ -832,11 +832,11 @@ def _retry(desk: Desk, a) -> None:
     base = (desk.settings()["lanes"].get(m.get("lane")) or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
         opts.update(start_from=m["head"], update=True)
-        text += (f"\nYou start from the previous attempt's last commit ({m['head'][:10]}), with {base} as it is now "
+        text += (f"\nYou start from the earlier task's last commit ({m['head'][:10]}), with {base} as it is now "
                  f"merged into it.")
     elif not a.fresh and m.get("head"):
         opts.update(start_from=m["head"], base=m["base"])
-        text += f"\nYou start from the previous attempt's last commit ({m['head'][:10]})."
+        text += f"\nYou start from the earlier task's last commit ({m['head'][:10]})."
     tid = desk.new_task(text, **opts)
     write_text(desk.tasks_dir / tid / NOTE_FILE, desk.redact(note) + "\n")  # later rounds quote it
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
@@ -889,10 +889,9 @@ def cmd_cancel(a):
             desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now(), cancel_by=by)
         elif m["state"] == "running":  # hansa serve stops it; stopping it here as well is only quicker
             m = desk.update(a.id, cancel=True, cancel_by=by)
-        elif m["state"] == "done" and m.get("kind") == "verify":  # it has ended: it keeps its state and verdict
-            desk.update(a.id, closed=m.get("closed") or f"closed: {a.id} was closed with hansa cancel")
         elif m["state"] == "done":
-            desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by)
+            raise SystemExit(f"hansa: {a.id} is finished; cancel stops queued, running or merging work. "
+                             f"To close it without merging: hansa close {a.id}; nothing was changed")
         elif m["state"] == "merging":  # the merge check stops; the task goes back to waiting for review
             mc = m.get("merge_check") or {}
             if mc.get("phase") == "queued":
@@ -900,7 +899,7 @@ def cmd_cancel(a):
             else:
                 desk.update(a.id, merge_check={**mc, "cancel": True})
         else:
-            raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running, merging or unmerged finished tasks "
+            raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running or merging tasks "
                              f"can be cancelled")
         if m["state"] != "merging":
             close_verification(desk, m, f"closed: {a.id} was cancelled", by)
@@ -914,13 +913,30 @@ def cmd_cancel(a):
         desk.event("merge_check_cancel", task=a.id)
         print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
         return
-    if m["state"] == "done" and m.get("kind") == "verify":  # not cancelled: closed, or already closed before
-        if not m.get("closed"):
-            desk.event("verification_closed", task=a.id, by="hansa cancel")
-        print(f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else ""))
-        return
     desk.event("task_cancel", task=a.id)
     print(f"{a.id} cancelled")
+
+
+def cmd_close(a):
+    desk = Desk.find(a.desk)
+    by = notify.session_here()
+    with desk.lock():
+        m = desk.meta(a.id)
+        if m["state"] != "done":
+            raise SystemExit(f"hansa: {a.id} is {m['state']}; only finished tasks or verifications can be closed; "
+                             "nothing was changed")
+        if m.get("kind") == "verify":
+            desk.update(a.id, closed=m.get("closed") or f"closed: {a.id} was closed with hansa close")
+        else:
+            desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by)
+        close_verification(desk, m, f"closed: {a.id} was cancelled", by)
+    if m.get("kind") == "verify":
+        if not m.get("closed"):
+            desk.event("verification_closed", task=a.id, by="hansa close")
+        print(f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else ""))
+    else:
+        desk.event("task_cancel", task=a.id)
+        print(f"{a.id} closed without merging")
 
 
 def cmd_verify(a):
@@ -1225,6 +1241,9 @@ def cmd_notify_feed(a):
 
 
 def cmd_explain(a):
+    if a.what == "task":
+        print(f"hansa explain task {a.name or 'ID'} is now hansa show {a.name or 'ID'}; "
+              "this form goes in the next release")
     if a.what in EXPLAIN_RETIRED:  # for one release: the old form still answers, and says the new one
         print(f"hansa explain {a.what} is now {EXPLAIN_RETIRED[a.what]}; this form goes in the next release")
     if a.all and a.what != "lane":
@@ -1266,6 +1285,10 @@ def cmd_cost(a):
 
 
 def cmd_check(a):
+    raise SystemExit("hansa: hansa check is now hansa ping [PROVIDER]; nothing was run")
+
+
+def cmd_ping(a):
     desk = Desk.find(a.desk)
     names = [a.provider] if a.provider else sorted(desk.settings()["providers"])
     for n in names:
@@ -2015,6 +2038,18 @@ def cmd_lane(a):
                   f"every worker in the lane gets them from its next task on")
             return
         value = _lane_value(a.field, a.values)
+        if a.field == "release":
+            t = new["lanes"][a.name].get("targets", {}).get("default")
+            if t and set(t) - {"command"}:
+                raise SystemExit(f"hansa: lane {a.name} already has a default target with its own options; "
+                                 f"use hansa lane target {a.name} default to change that kind of target; "
+                                 "nothing was changed")
+            command = value or "none"
+            result = _lane_target(desk, argparse.Namespace(name=a.name, target="default", command=[command],
+                                                          minutes=None, after=None, fixed=None), new)
+            print(f"hansa lane set {a.name} release is now hansa lane target {a.name} default "
+                  f"{shlex.quote(command)}; this form goes in the next release")
+            return result
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
         if value is None:  # unset: the check's command and limit, hansa's own message forms
             new["lanes"][a.name].pop(a.field, None)
@@ -2028,14 +2063,6 @@ def cmd_lane(a):
         desk.event("lane_command_changed", lane=a.name, field=a.field, old=old, new=value)
         print(f"The lane's {a.field} runs outside the worker, so this change is recorded. Tell the principal, in "
               f"the conversation, what you changed and why.")
-    if a.field == "release" and old != value:
-        desk.event("lane_command_changed", lane=a.name, field="release", old=old, new=value)
-        print(f"The lane's release command sends its base branch out: hansa runs it as the desk's account, outside "
-              f"the sandbox, only after the principal says yes on the page, so this change is recorded and a release "
-              f"asked with the old command no longer runs. Tell the principal, in the conversation, what you changed "
-              f"and why. Ask for a release with: hansa release {a.name} \"<note>\"")
-    if a.field == "release":
-        _say_forbidden(desk, a.name, new["lanes"][a.name], "")
     identity = _identity_differs(a.name, new["lanes"]) if a.field == "identity" else ""
     if identity:
         print(identity)
@@ -2171,8 +2198,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         for name, t in sorted(shown.items()):
             print(_target_text(name, t, ln))
         if not shown:
-            print(f"lane {a.name} has no release target: hansa lane target {a.name} NAME \"<command>\" names one "
-                  f"(or hansa lane set {a.name} release \"<command>\" sets its one unnamed target)")
+            print(f"lane {a.name} has no release target: hansa lane target {a.name} NAME \"<command>\" names one")
         return
     if len(a.command) > 1:
         raise SystemExit("hansa: a target takes one command line; quote it if it has spaces. Nothing was changed. " + see_more("release-flow"))
@@ -2285,7 +2311,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
     if review:
         raise SystemExit(f"hansa: {what} still has {', '.join(review)} finished and waiting for review; "
                          f"nothing was changed. Merging needs the lane: clear them first with hansa merge "
-                         f"or hansa cancel")
+                         f"or hansa close")
     if read_try(desk, name).get("phase") in ("queued", "running"):
         raise SystemExit(f"hansa: a try of lane {name} is queued or running in its worktree; nothing was changed. "
                          f"Wait for it (hansa lane try {name} waits too), then remove the lane")
@@ -2304,7 +2330,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
     if known:
         del new["lanes"][name]
         _save(desk, new)
-        print(f"lane {name} removed; its brief stays in {desk.lanes_dir / name}")
+        print(f"lane {name} removed; its standing instructions stay in {desk.lanes_dir / name}")
     for wt, st in states.items():
         if st.get("why"):
             print(f"Its worktree {wt} stays: {st['why']}. The principal can look at it and delete it; if git in its "
@@ -2650,7 +2676,7 @@ def _as_desk_account(a, argv: list) -> None:
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="hansa", description="A file-based desk for a team of Claude Code agents. "
                                  "`hansa help` lists the commands and the topics, `hansa help card` prints the "
-                                 "agent card.")
+                                 "card.")
     ap.add_argument("--version", action=_Version, nargs=0, help="show which hansa this is and exit")
     ap.add_argument("--desk", help="desk directory (default: the desk containing the current directory, or HANSA_DESK)")
     sub = ap.add_subparsers(dest="cmd", metavar="command")
@@ -2707,7 +2733,7 @@ def main(argv=None):
     p.add_argument("paths", nargs="*", metavar="path", help="only these files or folders")
     p.add_argument("--stat", action="store_true")
     p.add_argument("--new", action="store_true", help="for a follow-up (hansa retry): only what it added on top of the "
-                                                      "earlier attempt's last commit")
+                                                      "earlier task's last commit")
     p = add("git", cmd_git, "run a git command that reads (log, show, diff, grep ...) in a lane's repository, or "
             "with --worktree in its worktree, as the desk's account")
     p.description += (". It refuses git commands and options that write, run a program named on the command line, or "
@@ -2718,24 +2744,27 @@ def main(argv=None):
     p.add_argument("args", nargs=argparse.REMAINDER, metavar="git-args")
     p = add("merge", cmd_merge, "merge a finished task into the lane's base branch")
     p.add_argument("id")
-    p.add_argument("--despite-check", action="store_true", help="merge even though the lane's check failed (recorded)")
-    p.add_argument("--recheck", action="store_true", help="run the lane's check again on the task merged onto the base "
+    p.add_argument("--despite-check", action="store_true", help="merge now with no merge check, despite a failed check "
+                   "or a 'does not hold' verdict (recorded); never past release files or a key")
+    p.add_argument("--recheck", action="store_true", help="run the merge check (the lane's merge_check when set) "
+                   "on the task merged onto the base "
                    "as it is now, and merge exactly that if it passes (after a check that failed or could not run for "
                    "the machine's sake, once that is fixed; recorded)")
     p.epilog = see_more("merge-check")
-    p = add("retry", cmd_retry, "queue a follow-up to a task")
+    p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
+            "your note; this task becomes replaced")
     p.add_argument("id")
     p.add_argument("note", nargs="*")
-    p.description = ("queue a follow-up to a task. Its worker is given the original task, one line per earlier round "
-                     "(its id, how it ended, the start of its note), this note, the previous attempt's "
-                     "report and, when that attempt was verified, the latest verification's report whole, with its "
+    p.description = (p.description + ". Its worker is given the original task, one line per earlier round "
+                     "(its id, how it ended, the start of its note), this note, the earlier task's "
+                     "report and, when that earlier task was verified, the latest verification's report whole, with its "
                      "verdict, whatever the verdict was. Earlier notes are not carried, so repeat in this note what "
                      "still holds of them. The follow-up replaces the earlier task: the earlier "
                      "task is replaced at once (its verification, if one is open, closed), and the follow-up is the "
                      "one to review and merge.")
     p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
-    p.add_argument("--fresh", action="store_true", help="start from the base branch, not the previous attempt")
-    p.add_argument("--update", action="store_true", help="continue from the previous attempt with the base as it is "
+    p.add_argument("--fresh", action="store_true", help="start from the base branch, not the earlier task")
+    p.add_argument("--update", action="store_true", help="continue from the earlier task with the base as it is "
                    "now merged into its branch; a conflict is left in the files for the worker to settle")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--browser", action="store_true", help="give the follow-up a browser")
@@ -2743,7 +2772,7 @@ def main(argv=None):
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
     p.description = ("have a worker run a finished task's change to see whether it holds (never merged). By default "
                      "it runs on the task's own lane, with that lane's provider and model, and waits there behind "
-                     "the lane's other tasks. --lane L runs it on lane L instead: a check by another model is a "
+                     "the lane's other tasks. --lane L runs it on lane L instead: a verification by another model is a "
                      "stronger one, and an idle lane starts it sooner.")
     p.add_argument("id")
     p.add_argument("note", nargs="*", help="what to look at in particular")
@@ -2753,16 +2782,19 @@ def main(argv=None):
                    "lists; by default it runs on the task's own lane. A lane on the same repository as the task's; "
                    "use it to have another model check the task, or when the task's lane is busy")
     p.epilog = see_more("browser", "effort")
-    p = add("cancel", cmd_cancel, "stop a queued or running task, or close a finished one without merging")
+    p = add("cancel", cmd_cancel, "stop a queued or running task or verification; on a merging task, stop its merge "
+            "check and return it to review; finished work needs close")
+    p.add_argument("id")
+    p = add("close", cmd_close, "close a finished task or verification without merging")
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")
     add("resume", cmd_resume, "let new tasks start again")
-    p = add("release", cmd_release, "ask for a release of a lane's base branch (its release command, run by hansa "
+    p = add("release", cmd_release, "ask for a release of a lane's base branch (a named target, run by hansa "
             "after the principal's yes on the page), or list the releases")
     p.description = ("hansa release L [TARGET] [note]: ask for a release of lane L's base branch as it is now, by "
-                     "one of its release targets: its release command (hansa lane set L release \"...\"), or a named "
-                     "target (hansa lane target L NAME \"...\"); TARGET is needed when the lane has more than one. "
+                     "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
+                     "the lane has more than one. "
                      "hansa records the commit, the target and its command, the note, the commits that go out (on no "
                      "remote-tracking branch and not in that target's last release) and the files they change; a word "
                      "the principal keeps from going out, in the command line or in a line, a file name or a message "
@@ -2827,10 +2859,10 @@ def main(argv=None):
                      "verifications and design sessions cannot close requests")
     p.add_argument("text", nargs="*", help="the request; with --close, why it is closed")
     p.add_argument("--close", type=int, metavar="N", help="close open request #N of this desk, saying why")
-    p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | task ID | "
+    p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | "
             "server | notify")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify", *EXPLAIN_RETIRED],
-                   metavar="lane | provider | task | server | notify")
+                   metavar="lane | provider | server | notify")
     p.epilog = "What a task's states mean: hansa help states; hansa help topics lists the other topics."
     p.add_argument("name", nargs="?")
     p.add_argument("--all", action="store_true", help="with lane NAME: the whole built-in list of what its workers "
@@ -2838,7 +2870,7 @@ def main(argv=None):
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")
     lane = p.add_subparsers(dest="action", metavar="add | set | target | brief | remove | try")
     q = lane.add_parser("add", help="a new lane on a git checkout", description=(
-        "A new lane on a git checkout. A lane runs one task at a time, in its own full worktree (the repository's "
+        "A new lane on a git checkout, stopped at 200 turns by default. A lane runs one task at a time, in its own full worktree (the repository's "
         "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
         "concurrency in all, and to split work among providers give each its own lane with its provider order. "
         "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax; so write its preview "
@@ -2929,10 +2961,10 @@ def main(argv=None):
         "check's merge too), the merge of the base into a task's branch, and a design session's commits. Unset, "
         "hansa takes the repository's own user.name and user.email from its local config (git config --local), "
         "never the account's global one; with neither it writes hansa <hansa@localhost>. A lane whose release goes "
-        "to a public repository should have one, on the lane or in the repository's config. release is the command line that sends the base branch out (git push "
-        "origin main, say): hansa runs it after the principal's yes on the page (hansa release L). It is the lane's one "
-        "unnamed release target; a lane that sends its base branch out in more than one way names its targets "
-        "instead (hansa lane target L NAME ...), and then has no release. A release command (or a target's, with hansa "
+        "to a public repository should have one, on the lane or in the repository's config. release forwards to "
+        "hansa lane target L default COMMAND (or none) until the next version, printing that form; a default target "
+        "with its own options is refused. A release target sends the base branch out (git push origin main, say), "
+        "after the principal's yes on the page (hansa release L). A release command (with hansa "
         "lane target) that holds one of the principal's forbidden words is kept, and hansa says the word and where at "
         "once; a release with it is refused. release_files is the list of files the lane's releases build and run "
         "outside the sandbox (a Maven pom's plugins, a build script, the release script itself), as paths or globs "
@@ -2957,9 +2989,9 @@ def main(argv=None):
         "NAME \"<command>\" sets one (a new one, or a new command for one); --minutes N gives it its own time limit "
         "(1-1440; none: the lane's timeout_min); --after OTHER says it goes out only with a commit target OTHER of "
         "the same lane already sent out (none: no order). Options alone change only those fields. hansa lane target "
-        "L NAME none takes it out. The lane's release command (hansa lane set L release) is its one unnamed target: "
-        "a lane has either that or named targets, so take it out (hansa lane set L release none) when you name its "
-        "first target. hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
+        "L NAME none takes it out. An older unnamed release is now the target default, keeping its tick. "
+        "hansa lane set L release COMMAND (or none) still forwards to lane target L default until the next version. "
+        "hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
         "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
         "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
         "command, --after and --fixed keeps it; --minutes alone does not untick). A release runs in the lane's "
@@ -2995,7 +3027,7 @@ def main(argv=None):
         "Remove a lane with no task queued, running or waiting for review, and its worktrees (git worktree remove, "
         "as the desk's account). When a worktree holds changes not committed or commits no branch keeps, nothing is "
         "removed unless --keep or --discard says what to do with them. For a lane that is gone but whose worktree "
-        "is still there, it removes the worktree the same way. The lane's brief stays."))
+        "is still there, it removes the worktree the same way. The lane's standing instructions stay."))
     q.add_argument("name")
     q.add_argument("--keep", action="store_true", help="put what the worktree holds that no branch keeps on a new "
                    "branch hansa-kept/NAME-DATE of the lane's repository, then remove it")
@@ -3071,7 +3103,10 @@ def main(argv=None):
                    "each turn, its steps, the conversation's length at its first step, its worth and the tools it "
                    "called; then totals by what started them. No message text")
     p.epilog = see_more("cost-figures")
-    p = add("check", cmd_check, "send one tiny request through a provider (or all)")
+    p = sub.add_parser("check", description="hansa check is now hansa ping [PROVIDER]; this form runs nothing")
+    p.set_defaults(fn=cmd_check)
+    p.add_argument("provider", nargs="?")
+    p = add("ping", cmd_ping, "send one tiny request through a provider (or all)")
     p.add_argument("provider", nargs="?")
     p = add("serve", cmd_serve, "run the dispatcher and the web page (keep it running)")
     p.add_argument("--host", default="127.0.0.1")
@@ -3097,7 +3132,7 @@ def main(argv=None):
                    "for this start only")
     p.epilog = see_more("linux-root", "inbox")
     p = add("help", cmd_help, "list the commands and the topics; with a command, that command's help; with a topic, "
-            "that topic; card: the whole agent card")
+            "that topic; card: the whole card")
     p.add_argument("words", nargs="*", metavar="COMMAND | TOPIC | card | topics", help="a command, such as verify: "
                    "its help, as hansa verify --help prints it (lane add: that subcommand's); a topic, such as "
                    "browser: its section of docs/; card: the whole card; topics: the topics, one line each")

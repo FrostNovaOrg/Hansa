@@ -6,6 +6,8 @@ effort, tasks with a browser, merging, what work costs, and the states a task go
 
 ## Time limits, and work left running in the background
 
+New lanes stop at 200 turns; saved lanes keep their limits (`hansa lane set L max_turns 200` lowers one).
+
 One Bash call of a task or verification worker may run as long as the lane's
 check may, plus 5 minutes, but never past the worker's own limit: hansa sets
 Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most
@@ -173,7 +175,8 @@ design session starts its own preview, as before.
 
 `hansa merge ID` merges a task's branch into its lane's base branch. A failed
 check blocks it unless the coordinator says `--despite-check` (recorded), and
-so does a verification that does not hold.
+so does a verification that does not hold. That flag skips the merge check
+even when the base moved; it never overrides release files or a key.
 
 A [merge lane](desk.md) serves its repository and base's checks with its own worktree, sandbox, env, setup, command and limit; otherwise they use the task's lane as below. With a merge lane, a command of its own means its merge command differs from the task lane's check, which the task already passed.
 
@@ -202,6 +205,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   check as above if it has.
 - **Cancelling.** `hansa cancel ID` on a `merging` task stops its merge check
   and puts the task back in review.
+- **Closing.** `hansa close ID` closes a finished task without merging, or a finished verification
+  while keeping its verdict. `cancel` on finished work refuses and points to `close`.
 - **`--recheck`.** `hansa merge ID --recheck` goes the same way whether or not
   the base has moved: the task merged onto the base's tip, the lane's setup and
   merge check run there when the lane is free, and exactly that merged if it
@@ -237,8 +242,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
 
 ## Sending a task back
 
-`hansa retry ID "<what to change>"` sends a task back: a follow-up takes its
-place, and is the one to review and merge. The follow-up's worker gets the
+`hansa retry ID "<what to change>"` queues a follow-up with a new id from the
+earlier task's last commit; the earlier task becomes replaced. The follow-up's worker gets the
 original task, one line per earlier round (its id, how it ended, the start of
 its note), this round's note, the previous report and the latest
 verification's report, with its verdict. Earlier notes are not carried, so

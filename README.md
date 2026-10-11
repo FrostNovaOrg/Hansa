@@ -66,7 +66,7 @@ directly, on its own branch, and it comes back like a finished task.
 
 | Term | What it is |
 |---|---|
-| **Principal** | The person who owns the desk. On the web page they set providers, keys, models and prices, answer the agents' requests, and approve or refuse releases (a release can also be answered in the conversation, with the one-time code the principal's alert carries). |
+| **Principal** | The person the desk works for. On the web page they set providers, keys, models and prices, answer the agents' requests, and approve or refuse releases (a release can also be answered in the conversation, with the one-time code the principal's alert carries). |
 | **Coordinator** | An interactive Claude Code session in the desk (`hansa coordinator`). It plans, queues, reviews and merges work through `hansa`, and sets up the lanes. It runs outside the sandbox, so it can install what a lane needs; Claude Code asks the principal before each command not already allowed. Its whole interface is [`hansa/card.md`](hansa/card.md). |
 | **Helpers** | Three subagents in the coordinator's session: `scout` (looks something up) and `reviewer` (reads a high-stakes change) only read; `operator` does one hands-on job on the machine, such as installing software. |
 | **Worker** | One `claude -p` run per task, or per verification (`hansa verify`). It may run any command, inside Claude Code's sandbox: its commands write only in its worktree and the folders its lane allows, and reach only its lane's hosts. It never commits. |
@@ -74,7 +74,7 @@ directly, on its own branch, and it comes back like a finished task.
 | **Lane** | A git checkout the workers work on: its base branch, a worktree of its own, its provider order, the hosts and folders its workers may reach, and its setup, check and release commands. A lane runs one task at a time; lanes on the same repository run tasks side by side, up to `hansa concurrency`. |
 | **Provider** | Where a run's model comes from: a Claude Code login (a subscription), or any endpoint that speaks the Anthropic API, with its key. A provider that hits its usage limit rests, and its task moves to the lane's next ready provider, or waits for one. |
 | **Check** | A lane's test command. hansa runs it on each task's branch, in the lane's sandbox; a failed check blocks the merge unless the coordinator overrides it, which is recorded. |
-| **Release** | Sending a lane's base branch out with its release command, or one of its named release targets, after the principal's yes. It runs outside the sandbox, as the desk's account. |
+| **Release** | Sending a lane's base branch out through one of its named release targets, after the principal's yes. It runs outside the sandbox, as the desk's account. |
 
 ## Quick start
 
@@ -142,7 +142,7 @@ ssh -L 8765:127.0.0.1:8765 HOST /path/to/hansa/bin/hansa --desk /path/to/desk we
 `hansa serve` serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
 Anthropic API, with its key), their models and effort defaults, and the prices hansa counts tokens at. A new
 desk starts with one provider, `claude`: the Claude Code login of the account hansa runs as.
-`hansa check` sends one tiny request through each provider to see that it answers. The page follows the
+`hansa ping [PROVIDER]` sends one tiny request through a provider (all when omitted) to see that it answers. The page follows the
 browser's language: English, or Chinese.
 
 ### 5. Start the coordinator
@@ -166,7 +166,7 @@ does not hear it; only you can change that.
 The coordinator runs these; you can run them too. Every coordinator command is in
 [`hansa/card.md`](hansa/card.md), which `hansa help card` prints; `hansa help` alone lists the commands and
 the topics, and `hansa help <topic>` prints one from `docs/`. `hansa --help` lists every command, the
-principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `hansa <command> --help` (or
+principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `hansa <command> --help` (or
 `hansa help <command>`) gives all of a command's options.
 
 | Command | What it does |
@@ -176,14 +176,15 @@ principal's (`init`, `serve`, `web`, `coordinator`, `check`) among them, and `ha
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
 | `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; never merged |
 | `hansa merge ID` | Merge a finished task into its lane's base branch |
-| `hansa retry ID "<what to change>"` | Queue a follow-up on top of that attempt (`--fresh`: from the base; `--update`: with the base merged in) |
-| `hansa design "<brief>" [--lane L]` | Open a session the principal joins to shape one feature (macOS) |
+| `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task (`--fresh`: from the base; `--update`: with the base merged in) |
+| `hansa cancel ID`, `hansa close ID` | Stop queued, running or merging work; close finished work without merging |
+| `hansa design "<what to shape>" [--lane L]` | Open a session the principal joins to shape one feature (macOS) |
 | `hansa release L [TARGET] ["<note>"]` | Ask for a release of lane L's base branch; it runs after the principal's yes (a target ticked to go out without asking needs none) |
 | `hansa release yes\|no ID CODE` | Pass on the principal's answer to a release, given in the conversation with their alert's one-time code |
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
 | `hansa ask "<request>"` | Put a request on the principal's page |
 | `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
-| `hansa explain [lane L \| provider P \| task ID \| server \| notify]` | This desk's current settings and state, and where each comes from |
+| `hansa explain [lane L \| provider P \| server \| notify]` | This desk's current settings and state, and where each comes from |
 
 ## What keeps it safe
 
@@ -240,7 +241,7 @@ Everything a desk holds is plain files in one folder:
 desk/
 ├── settings.json          the principal's settings (set on the page) and the lanes (the coordinator's)
 ├── secrets/               provider keys; written by the page, never shown
-├── CLAUDE.md              the coordinator's card, a copy of hansa/card.md
+├── CLAUDE.md              the card, a copy of hansa/card.md
 ├── .claude/               the coordinator's permission rules and helpers (your own rules: settings.local.json)
 ├── lanes/<lane>/brief.md  standing instructions sent to every worker in a lane
 ├── tasks/<id>/            each task's text, record and report, and what its processes wrote, keys removed
@@ -286,7 +287,7 @@ output.
 |---|---|
 | [`hansa/card.md`](hansa/card.md) | The coordinator's whole interface: how work moves, every command, what it may change. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
-| [Workers and the sandbox](docs/sandbox.md) | What workers, verifiers and design sessions may touch; git's folders; the sandbox try; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
+| [Workers and the sandbox](docs/sandbox.md) | What workers, verifiers and design sessions may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
 | [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits, browser tasks and the preview |
 | [Releases and alerts](docs/releases.md) | Release targets, answers by one-time code, files a release runs, stopping a release, the principal's alert command |
 | [On a Linux server](docs/linux-server.md) | The coordinator as root, the desk as an ordinary account; what a lane's commands meet in Linux's sandbox |

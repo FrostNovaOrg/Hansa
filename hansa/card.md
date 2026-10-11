@@ -1,4 +1,4 @@
-# Desk card
+# The card
 
 You coordinate worker agents through `hansa`. This card is the whole interface:
 you never need to read hansa's code. If a command's output leaves you unsure what
@@ -59,27 +59,28 @@ Details are under `hansa help <topic>`; `hansa help topics` lists them (and the 
 | `hansa status` | whether `hansa serve` runs and the web page's address and port, lanes, running (each run's provider, model and effort), queued (and why it waits), waiting for review, failed, providers, usage in the last 24 h |
 | `hansa add "<task>" [--lane L] [--effort high] [--model M] [--title T] [--max-turns N] [--browser]` | queue a task; `--file PATH` reads the text from a file, once, when the task is queued; `--max-turns` sets this one task's ceiling of turns instead of its lane's; `--browser` gives this one task a browser; `--model` counts only on a Claude subscription provider |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | the provider, model and effort its run started with, the task's first lines as hansa read it, its report, changed files, refused commands, usage, and what to do next; for a check or merge check that failed, the failing tests (names and tracebacks, by the markers of unittest, pytest, JUnit/Surefire, go test, jest and Gradle) or the errors that kept them from running (Maven's compile errors, go's build errors) lifted out of its output, then always its last 15 lines; `--full`: all of that with the whole text; `--report`: the report alone, whole (for a verification, its verdict and report); `--check`: its last check and its last merge check, each apart: how it ended, the file with its whole output and that file's size, and its last 20 lines, under a first line that says what follows; `--check-log` / `--merge-check-log`: that one's whole output alone, keys removed |
-| `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier attempt's last commit |
+| `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base, only those paths when given; `--new`, for a follow-up: only what it added on top of the earlier task's last commit |
 | `hansa git L [--worktree] <git command>` | a git command that reads (`log`, `show`, `diff`, `status`, `grep`, `blame`, `ls-files`, `ls-tree`, `cat-file`, `rev-parse`, `rev-list`, `merge-base`, `shortlog`, `describe`, `name-rev`; `branch` and `tag` only to list) in lane L's repository, where every `task/<id>` branch is, or with `--worktree` in its worktree, keys hidden. Use it to read; a git command of your own with `push` in it is refused. It refuses git commands and options that write, run a program named on the command line, or read outside the repository; it runs as the desk's account, so a program the repository's own settings name (a filter driver, say) runs as that account, not as root |
-| `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; a failed check blocks it unless you say `--despite-check` (recorded). If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the lane's check again first, even when the base has not moved, and merges only if it passes (recorded). For long merge checks and busy lanes: `hansa lane add m --like a`, give m its own caches with `write` and `env`, then `hansa lane set m merge_lane true`; one per repository and base, taking no work and refused with work queued or running there, it runs their merge checks with its own worktree, sandbox, env, setup, command and limit, keeping the task lane's merge message and identity; chosen when the check starts, it holds only itself. With every concurrency slot busy, a merge check takes the next slot before new work when a task ends anywhere, and that task's lane waits about one merge check; raising concurrency by one removes the wait if the machine can run the check beside the lanes' work |
+| `hansa merge <id> [--recheck \| --despite-check]` | merge the task branch into the lane's base branch; `--despite-check`: merge now with no merge check, despite a failed check or a "does not hold" verdict (recorded); never past release files or a key. If the base has moved since the task was made, it first checks the two together (see below). `--recheck` runs the merge check (the lane's `merge_check` when set) first, even when the base has not moved, and merges only if it passes (recorded). For long merge checks and busy lanes: `hansa lane add m --like a`, give m its own caches with `write` and `env`, then `hansa lane set m merge_lane true`; one per repository and base, taking no work and refused with work queued or running there, it runs their merge checks with its own worktree, sandbox, env, setup, command and limit, keeping the task lane's merge message and identity; chosen when the check starts, it holds only itself. With every concurrency slot busy, a merge check takes the next slot before new work when a task ends anywhere, and that task's lane waits about one merge check; raising concurrency by one removes the wait if the machine can run the check beside the lanes' work |
 | `hansa release --stop ID ["<reason>"]` | call release ID off: one not started yet is closed as stopped; a running one's command gets TERM, then KILL 30 s later, and is recorded as stopped (the server may be left half-switched) |
 | `hansa release L [TARGET] ["<note>"]` | ask for a release of lane L's base branch as it is now, by one of its release targets (TARGET is needed when the lane has more than one): hansa runs that target's command after the principal's yes on the page (see Releasing). `hansa release` alone lists the open and recent releases |
 | `hansa release yes\|no ID CODE [reason]` | pass on the principal's answer to release ID, said in the conversation with the one-time code of their alert (see Releasing); never guess a code |
-| `hansa retry <id> "<what to change>" [--fresh \| --update] [--effort high] [--browser]` | queue a follow-up on top of that attempt (`--fresh`: start from base; `--update`: with the current base merged in, see below); the follow-up replaces it. Its worker gets the original task, one line per earlier round, this note, the previous report and, when that attempt was verified, the latest verification's report whole, with its verdict. Earlier notes are not carried, so repeat what still holds. `hansa show` of a follow-up says which round it is, the earlier rounds and how many a verification found do not hold. `--file PATH` reads a long note from a file (`-`: standard input); `--effort` and `--browser` as for `hansa add`. Options may come before or after the note |
-| `hansa design "<brief>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below); `--file PATH` reads the brief from a file (`-`: standard input) |
+| `hansa retry <id> "<what to change>" [--fresh \| --update] [--effort high] [--browser]` | queue a follow-up task (new id) that continues from this task's last commit with your note; this task becomes replaced (`--fresh`: start from base; `--update`: with the current base merged in, see below). Its worker gets the original task, one line per earlier round, this note, the previous report and, when that earlier task was verified, the latest verification's report whole, with its verdict. Earlier notes are not carried, so repeat what still holds. `hansa show` of a follow-up says which round it is, the earlier rounds and how many a verification found do not hold. `--file PATH` reads a long note from a file (`-`: standard input); `--effort` and `--browser` as for `hansa add`. Options may come before or after the note |
+| `hansa design "<what to shape>" [--lane L] [--title T]` | open a design session for one feature: the principal joins it and shapes the feature with it directly (see below); `--file PATH` reads what to shape from a file (`-`: standard input) |
 | `hansa verify <id> ["what to look at"] [--lane L] [--effort high] [--browser]` | a worker runs that task's change to see whether it holds; its verdict shows in `hansa show <id>`; never merged. It runs on the task's own lane unless `--lane L` puts it on another lane on the same repository |
-| `hansa cancel <id>` | stop a queued or running task, or close a finished one without merging; on a `merging` task it stops the merge check and the task goes back to review |
+| `hansa cancel <id>` | stop a queued or running task or verification; on a `merging` task it stops the merge check and the task goes back to review; finished work is refused, pointing to `close` |
+| `hansa close <id>` | close a finished task or verification without merging |
 | `hansa notify [on \| off]` | list the sessions hansa posts to; `on` / `off`: start or stop posting to this session (see Hearing from hansa) |
 | `hansa wait [id ...] [--timeout MIN]` | return when one of those tasks (default: all queued or running) finishes or fails, or the principal answers a request; run it in the background only when hansa does not post to your session |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
-| `hansa explain [lane L [--all] \| provider P \| task ID \| server \| notify]` | this desk's current settings and state, and where each comes from; `notify`: how hansa posts to your session and which sessions it posts to; `server`: also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
+| `hansa explain [lane L [--all] \| provider P \| server \| notify]` | this desk's current settings and state, and where each comes from; `notify`: how hansa posts to your session and which sessions it posts to; `server`: also where the web page is; `lane L` gives the built-in list of what workers may not read as a count, and `--all` name by name |
 | `hansa lane` | one line per lane: name, repository, base branch, provider order, its message forms when set, and the merge lane it uses or the lanes it serves (takes no work) |
-| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--network HOST ...] [--allow RULE ...] [--release-files "PATH ..."]` | a new lane on a git checkout, complete in one command; the base branch defaults to the checkout's current one; `--network`: the hosts its workers, setup and check may reach (default: none). A lane without a check has its tasks merged untested |
-| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, merge_lane, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release targets, release_files, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's brief is kept as `brief-before-DATE.md` |
-| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (the lane's one unnamed release target), `note` (one value; none: empty), `merge_lane` (true or false; unset: false), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below), `identity` (below), `release_files` (paths or globs, separated by spaces, whose changes merge only once verified: see Releasing) |
+| `hansa lane add L --repo PATH [--base B] [--providers P1,P2] [--check "<cmd>"] [--setup "<cmd>"] [--merge-check "<cmd>"] [--merge-timeout MIN] [--network HOST ...] [--allow RULE ...] [--release-files "PATH ..."]` | a new lane on a git checkout, stopped at 200 turns by default; the base branch defaults to the checkout's current one; `--network`: the hosts its workers, setup and check may reach (default: none). A lane without a check has its tasks merged untested |
+| `hansa lane add L --like OTHER [--base B] [--providers P1,P2] [--check ...] ...` | a new lane that starts as a copy of lane OTHER (repository, base, providers, setup, check, merge_check, merge_lane, preview, network, write, env, allow, limits including merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release targets, release_files, note, standing instructions; setup, check and preview run outside the worker, so read what was copied), each option given replacing that field; later changes to OTHER do not reach it. Not with `--repo`. An earlier lane L's standing instructions are kept as `brief-before-DATE.md` |
+| `hansa lane set L FIELD [VALUE ...]` | change one field of a lane: `providers`, `allow`, `network`, `write` (the whole new list), `env` (`NAME=VALUE` pairs, replacing the lane's), `base`, `check`, `merge_check`, `preview`, `setup`, `release` (forwards to `lane target L default` until the next version; refused if default has its own options), `note` (one value; none: empty), `merge_lane` (true or false; unset: false), `max_turns`, `timeout_min`, `merge_timeout_min`, `preview_wait_s` (a whole number; none takes `merge_timeout_min` or `preview_wait_s` out), `commit_message`, `merge_message` (below), `identity` (below), `release_files` (paths or globs, separated by spaces, whose changes merge only once verified: see Releasing) |
 | `hansa lane set L identity "Name <email>"` | the author and committer of every commit hansa makes for the lane: a task's commit, its merge into the base (the merge check's too), the merge of the base into a task's branch, a design session's commits, the commit `hansa lane remove --keep` makes. A name and an email in angle brackets, one line, no `<` or `>` inside either; also `hansa lane add --identity`, copied by `--like`. None: unset, and then hansa takes the repository's own `user.name` and `user.email` from its local config (`git config --local`), never the account's global one, and with neither writes `hansa <hansa@localhost>`. `hansa explain lane L` shows which is in use; `lane add` and `lane set L identity` say in one line when it differs from another (not merge) lane's on the same repository |
 | `hansa lane set L commit_message\|merge_message "<form>"` | the form of the messages hansa writes into the lane's repository: the task's commit (and the merge of the base into its branch on `retry --update`), and its merge into the base; one line with `{task}`, `{title}`, `{lane}`, holding `{task}` or `{title}`; none: hansa's own (`t0001: <title>`, `Merge t0001: <title>`). A lane whose release goes to a public repository usually leaves `{task}` out. With no `--title`, a task's title is its text's first line cut at 80 characters; `hansa add` says when it cut one a `{title}` form puts in commits: give one with `--title` |
-| `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. A lane has either its `release` command or named targets (see Releasing) |
+| `hansa lane target L [NAME ["<command>" \| none] [--minutes N\|none] [--after T\|none] [--fixed [none]]]` | list lane L's release targets, or set or remove a named one: its command, its own time limit (1-1440 minutes; none: the lane's `timeout_min`), another target of the lane that must have sent out the same commit first, and with `--fixed` that it runs from a checkout of the commit made for it, holding nothing (its command names `$HANSA_RELEASE_COMMIT`, never the base branch); options alone change only those; none takes the target out. An older unnamed release becomes `default`, keeping its tick (see Releasing) |
 | `hansa lane try L` | run the lane's setup and check once where tasks run (its worktree at the base's tip, its sandbox, the server's environment), with no worker, and print how each ended; after changing the setup, check, network or write list, or moving the desk. `--merge-check`: the setup and the merge check's command instead of the check, under its time limit. `--at COMMIT`: only at that commit, refused with nothing run unless it is the base's tip; a try at another commit is waited for, never taken as the answer; exit 0 only when the try at COMMIT passed. `--log`: print each step's whole output of the last try (with `--merge-check`: of the last merge-check try), keys removed, kept in `lanes/L/` until the next one. Refused while a task holds the lane |
 | `hansa lane brief L ["<text>" \| --file PATH]` | print a lane's standing instructions, or replace them (recorded); the only way to change them |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree (also the worktree left of a lane already gone); refused while one of its tasks is queued, running or waiting for review. A worktree holding changes not committed or commits no branch keeps is removed only with `--keep` (they go on a new branch `hansa-kept/L-DATE`) or `--discard` |
@@ -198,7 +199,7 @@ gets depends on what the change touches, which `hansa diff <id> --stat` shows:
   unsure) shows in `hansa show <id>`; hansa will not merge while it runs, nor after
   "does not hold" unless you say `--despite-check`.
 - A verification runs on the task's own lane, with its provider, unless you say
-  `--lane L`. One by another model is a stronger check than the same model
+  `--lane L`. One by another model is a stronger verification than the same model
   checking itself. Use `--lane` when the task's lane uses a provider new to the
   desk, or when that lane is busy and another lane on the same repository is not.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and
@@ -230,7 +231,7 @@ When a merge lane is set (the merge item above), the lane used for merge checks 
   the task back in review. `--despite-check` merges at once without it
   (recorded).
 - `hansa merge <id> --recheck` goes the same way whether or not the base has
-  moved: the task merged onto the base's tip, the lane's setup and check run
+  moved: the task merged onto the base's tip, the lane's setup and merge check run
   there when the lane is free, and exactly that merged if the check passes. Use
   it for a task whose check failed or could not run for the machine's sake, once
   that is fixed. The event log records that the check was run again, and by whom.
@@ -261,7 +262,7 @@ to a public repository, a deploy to production) waits for the principal:
   a public repository should have one set, on the lane (`hansa lane set L
   identity "Name <email>"`) or in the repository's config; an account's
   personal identity is never taken up by itself.
-- Set the lane's release command once: `hansa lane set L release "<command>"`,
+- Set a release target: `hansa lane target L default "<command>"`,
   one shell command line, such as `git push origin main`, or a push, a wait
   for CI (`gh run watch --exit-status ...`) and a deploy script. The change is
   recorded; tell the principal what it runs and why. A command that holds one
@@ -281,16 +282,16 @@ to a public repository, a deploy to production) waits for the principal:
   does not let it through, nor does anything else. `hansa explain lane L`
   shows the list, and advises one for a lane with release targets and none.
 - A lane whose base branch goes out in more than one way names its release
-  targets instead: `hansa lane target L push "git push origin main"`, `hansa
+  targets: `hansa lane target L push "git push origin main"`, `hansa
   lane target L test "./install.sh test" --minutes 600`, `hansa lane target L
   prod "./install.sh prod" --minutes 600 --after test`. Each has its own
   command, its own time limit (else the lane's `timeout_min`) and, with
   `--after`, a target that must have sent out the same commit first: `prod` is
   asked only for a commit `test` already sent out (done), and is refused, in
   one line saying which release goes first, otherwise; hansa looks again when
-  it is about to start. A lane has either its `release` command (its one
-  unnamed target) or named targets: take `release` out (`hansa lane set L
-  release none`) when you name the first. `hansa lane target L` lists them,
+  it is about to start. An older unnamed release becomes the target
+  `default`, and its tick for going out without asking moves with it.
+  `lane set L release` forwards there until the next version. `hansa lane target L` lists them,
   each with the way it runs.
 - A target whose release takes long (an install that waits until nobody uses
   the server) runs from a fixed checkout: `hansa lane target L test --fixed`
@@ -338,12 +339,12 @@ to a public repository, a deploy to production) waits for the principal:
   merge commit, and sends the task back for review saying where. Then: a
   retry that takes them out (`hansa retry ID --fresh "..."`: one that
   continues keeps the commits; a word in the title, add the task again with
-  another `--title`), or ask the principal. The release's check stays, the
+  another `--title`), or ask the principal. The word scan stays, the
   last net.
   All the outgoing commits are checked (the page shows at most 200, and says
   how many were checked). A word is matched within one line only (a phrase
   split over a line break is not found), and only in text hansa can read as
-  UTF-8 (a UTF-16 file is not looked into): the check is a net, not a proof.
+  UTF-8 (a UTF-16 file is not looked into): the word scan is a net, not a proof.
 - It then waits for the principal's yes on the page, unless the principal lists
   the target as released without asking (the principal ticks each target on
   its own; a tick for one never covers another). That list holds each target
@@ -445,7 +446,7 @@ you will not hear hansa; the principal can change that.
 Changes come in three sizes. Something a sentence or two can say ("make this
 bigger", "move that to the left") is an ordinary task. A new feature, or an
 improvement the principal wants to shape by looking at it over a few rounds,
-gets a design session: `hansa design "<brief>" --lane L`. A system that is nearly
+gets a design session: `hansa design "<what to shape>" --lane L`. A system that is nearly
 all new is designed elsewhere and comes to you as a finished design.
 - hansa opens the session in seconds, on its own branch in a separate directory,
   and asks the principal to join. It changes the real code there and shows them
@@ -806,7 +807,7 @@ replaces. The file is yours and the principal's to keep: write there what you wo
 without asking. Keep it short, since you reread it at every turn; `hansa status`
 says its size and when it is long. Plans and findings go in other files under
 `notes/`. Workers do not see it, and no worker, verifier or design session may read `notes/` or
-this card: rules for a lane's workers go in its brief
+this card: rules for a lane's workers go in its standing instructions
 (`hansa lane brief L`). If the file is missing, nothing loads and nothing breaks.
 
 @notes/PROJECT.md
