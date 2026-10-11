@@ -292,8 +292,6 @@ to a public repository, a deploy to production) waits for the principal:
   it is about to start. An older unnamed release becomes the target
   `default` if absent, taking only its tick for the same command.
   Other unnamed ticks match nothing, even if `default` has the same command.
-  The page says these old ticks cover no target now and asks the principal to
-  tick `default` again if it should go out without asking.
   `lane set L release` forwards there until the next version. `hansa lane target L` lists them,
   each with the way it runs.
 - A target whose release takes long (an install that waits until nobody uses
