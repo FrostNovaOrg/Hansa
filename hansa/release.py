@@ -58,7 +58,7 @@ from pathlib import Path
 from . import without_session
 from .desk import WRITE_FILE, Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json, write_text
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
-                  run_running, save_stopped, serve_step,
+                  run_running, save_stopped, serve_step, recording_start, retry_start_failure,
                   merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
 OPEN = ("waiting", "approved", "starting", "running")
@@ -1009,7 +1009,8 @@ def _launch(desk: Desk, r: dict, token: str, cwd) -> subprocess.Popen:
         proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["command"], str(d / f"{rid}.exit")],
                                 cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out,
                                 stderr=subprocess.STDOUT, start_new_session=True)
-    change(desk, rid, lambda x: {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+    with recording_start(desk, ("release", rid, token), proc.pid, proc):
+        change(desk, rid, lambda x: {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
     return proc
 
 
@@ -1064,8 +1065,20 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
     return r
 
 
+def _not_started(desk: Desk, r: dict, e: Exception) -> None:
+    why = desk.redact(f"it could not start: {e}")[:600]
+    if change(desk, r["id"], lambda x: {"state": "failed", "problem": why, "ended": now()}
+              if x.get("state") in ("approved", "starting") else None):
+        desk.event("release_ended", id=r["id"], lane=r.get("lane"), target=r.get("target") or "",
+                   commit=r.get("commit"), ok=False, exit=None, problem=why)
+    desk.failed_starts.pop(("release", r["id"], (get(desk, r["id"]) or {}).get("launch")), None)
+
+
 def _recover(desk: Desk, r: dict) -> None:
     """A release an earlier server left starting: take over its run, or finish it; never start it again."""
+    key = ("release", r["id"], r.get("launch"))
+    if retry_start_failure(desk, key, lambda e: _not_started(desk, r, e)):
+        return
     try:
         found = leader(pids_with_arg(r.get("launch") or "", r.get("started")))
     except CannotLook:
@@ -1075,8 +1088,12 @@ def _recover(desk: Desk, r: dict) -> None:
             return
         found = None
     if found:
-        change(desk, r["id"], lambda x: {"state": "running", "pid": found, "pid_start": proc_start(found)}
-               if x.get("state") == "starting" else None)
+        try:
+            with recording_start(desk, key, found):
+                change(desk, r["id"], lambda x: {"state": "running", "pid": found, "pid_start": proc_start(found)}
+                       if x.get("state") == "starting" else None)
+        except Exception as e:
+            _not_started(desk, r, e)
         return
     if not (log_dir(desk) / f"{r['id']}.exit").exists():
         change(desk, r["id"], lambda x: {"lost": "hansa serve stopped as it started the release, so whether its command "
@@ -1163,11 +1180,7 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pe
             try:
                 proc = start(desk, r["id"])
             except Exception as e:  # noqa: BLE001 - say: nothing went out, and the release says why
-                why = desk.redact(f"it could not start: {e}")[:600]
-                if change(desk, r["id"], lambda x: {"state": "failed", "problem": why, "ended": now()}
-                          if x.get("state") in ("approved", "starting") else None):
-                    desk.event("release_ended", id=r["id"], lane=r.get("lane"), target=r.get("target") or "",
-                               commit=r.get("commit"), ok=False, exit=None, problem=why)
+                _not_started(desk, r, e)
                 continue
             if proc:
                 procs[r["id"]] = proc
