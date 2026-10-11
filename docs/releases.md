@@ -118,7 +118,7 @@ short ssh calls (connect timeout, keepalive) until it appears or time runs out:
 ```sh
 c=$HANSA_RELEASE_COMMIT f=/path/to/tries/$c.log
 o="-o ConnectTimeout=20 -o ServerAliveInterval=10"
-ssh $o HOST "cd /path/to/checkout && nohup sh -c 'hansa lane try L --merge-check --at $c; echo try-exit=\$?' >$f 2>&1 </dev/null &" || exit 1
+ssh $o HOST "nohup sh -c '/path/to/hansa/bin/hansa --desk /path/to/desk lane try L --merge-check --at $c; echo try-exit=\$?' >$f 2>&1 </dev/null &" || exit 1
 end=$(( $(date +%s) + 3000 ))  # under the target's own time limit
 while [ "$(date +%s)" -lt "$end" ]; do
   sleep 30
