@@ -19,6 +19,15 @@ asking (its plan and findings; how it keeps them short is at the end of
 [The daily clear](#the-daily-clear)); everything else it edits asks as before,
 and the closed files stay closed.
 
+Saving a key also removes its UTF-8 bytes from already kept task text and output
+(`task.md`, `note.md`, `result.md`, `run.json`, `run.err`, `setup.log`, `check.log`,
+`merge-check.log`, `merge-setup.log`, `merge-check.err`) and lanes' `try.log` and
+`merge-check-try.log`. Other bytes, including bytes that are not UTF-8, stay as
+they were; files without the key are not rewritten. `meta.json` and `asks.json`
+still use JSON replacement. This does not extend the files scrubbed on a key save:
+preview logs, release logs and private raw output are outside that list, and the
+event log stays append-only.
+
 The project's own rules (how it builds, what may never go out, who decides what)
 go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
 `@notes/PROJECT.md` (Claude Code's import syntax for memory files), so Claude Code

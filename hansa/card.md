@@ -760,6 +760,10 @@ here; work that needs code changed or a browser goes to a worker.
   replaces it with [key of <provider>]. If a change itself holds a key, `hansa show`
   says so and hansa never merges it: redo the work with `hansa retry <id> --fresh`
   and tell the principal with `hansa ask`.
+  Saving a key also scrubs already kept task text and worker/setup/check/merge-check
+  output and lanes' try logs, even with bytes that are not UTF-8, leaving all other
+  bytes intact; preview logs, release logs and private raw output are outside this
+  scrub, and the event log stays append-only (docs/desk.md).
 - When a task ends, hansa stops every process it left running (a dev server, a
   watcher) before it commits and before the lane's check runs, so the check runs
   without them; `hansa show` lists them. Found: what `hansa serve` recorded below the

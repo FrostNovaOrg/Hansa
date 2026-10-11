@@ -2505,17 +2505,26 @@ class Desk:
         log only ever grows, so it keeps it."""
         tasks = self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []
         lanes = list(self.lanes_dir.iterdir()) if self.lanes_dir.is_dir() else []
+        key_bytes, marker = key.encode("utf-8"), f"[key of {provider}]"
         for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED),
                   *(d / name for d in lanes for name in ("try.log", "merge-check-try.log"))]:
+            if f.name not in ("meta.json", "asks.json"):
+                try:
+                    data = f.read_bytes()
+                except OSError:
+                    continue
+                changed = data.replace(key_bytes, marker.encode("utf-8"))
+                if changed != data:
+                    write_bytes(f, changed)
+                continue
             try:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
             if key in text:
-                text = text.replace(key, f"[key of {provider}]")
+                text = text.replace(key, marker)
                 self.writes += f.name == "meta.json"
-                write_json(f, json.loads(text)) if f.name in ("meta.json", "asks.json") \
-                    else write_text(f, text)
+                write_json(f, json.loads(text))
 
     def raw_dir(self, tid: str) -> Path:
         """Where a task's processes write before hansa removes keys from what they wrote: under

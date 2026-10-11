@@ -4402,6 +4402,27 @@ class DeskTest(unittest.TestCase):
         self.assertIn("[key of mimo]", report.read_text())
         self.assertNotIn(later, views.show_text(self.desk, tid))
 
+    def test_a_key_saved_later_is_removed_from_a_log_with_non_utf8_bytes(self):
+        later = "sk-saved-later-0654"
+        tid = self.desk.new_task("A check log")
+        log = self.desk.tasks_dir / tid / "check.log"
+        before = b"\xffbefore\r\n" + later.encode("utf-8") + b"\x00after\xfe\r\n"
+        log.write_bytes(before)
+        self.desk.write_key("mimo", later)
+        self.assertNotIn(later.encode("utf-8"), log.read_bytes())
+        self.assertEqual(log.read_bytes(), before.replace(later.encode("utf-8"), b"[key of mimo]"))
+
+    def test_saving_a_key_does_not_write_a_file_without_it(self):
+        from hansa.desk import write_bytes
+        tid = self.desk.new_task("A check log")
+        log = self.desk.tasks_dir / tid / "check.log"
+        before = b"no key here\r\n"
+        log.write_bytes(before)
+        with unittest.mock.patch("hansa.desk.write_bytes", wraps=write_bytes) as writer:
+            self.desk.write_key("mimo", "sk-saved-later-0654")
+        self.assertNotIn(log, [call.args[0] for call in writer.call_args_list])
+        self.assertEqual(log.read_bytes(), before)
+
     def test_a_key_that_only_a_merge_commit_brings_is_found(self):
         from hansa.run import keys_in_change
         key = "sk-test-in-merge-0987"
