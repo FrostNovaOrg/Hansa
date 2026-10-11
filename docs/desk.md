@@ -201,6 +201,8 @@ cancelled or over their time limit. Free space: once writes work again, it recor
 stopped at its limit as timed out. After a restart, a check's end is found without running the check again;
 a worker's exit code that could not be recorded stays unknown, as before.
 
+If serve restarts before it can save a failed start's record, ordinary recovery applies: the stopped process is gone, workers and verifications return to the queue, checks and merge checks run again, releases are recorded as lost and tries end.
+
 The floor holds for each volume by its own size. A volume smaller than four times the floor has a quarter of its
 size as its floor: on a Linux server that mounts `/tmp` as a tmpfs (systemd's default size is half the memory), an
 8 GB machine has a 3.9 GB `/tmp`, which under the default floor of 10 GB holds back only under about 1 GB free,

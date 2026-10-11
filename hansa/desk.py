@@ -2254,6 +2254,7 @@ class Desk:
         # how many times this process wrote a task's or a release's record: a list of them read before it changed
         # may be out of date (hansa serve reads the tasks and the releases once a round, and again only after this)
         self.writes = 0
+        self.failed_starts = {}  # stopped launches whose failed-start record may still need disk space
 
     @classmethod
     def find(cls, explicit: str | None = None) -> "Desk":
