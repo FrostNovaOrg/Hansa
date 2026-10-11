@@ -14028,8 +14028,6 @@ class DeskTest(unittest.TestCase):
         told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
         self.assertFalse(told["ok"], told)
         self.assertIn("press Reload", told["problems"][0])
-        self.assertIn(f"meanwhile the coordinator added to what workers may not read (hansa hide): {keys}",
-                      told["problems"][0])
         s = self.desk.settings()
         self.assertEqual((s["workers_may_not_read"], s["cool_minutes"]), ([keys], 30))
         # reloaded, the page saves and keeps it, with who added it
@@ -14059,33 +14057,66 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.settings()["workers_may_not_read"], [keys])
         self.assertEqual([e["path"] for e in self.events("no_read_added")], [keys])
 
-    def test_hansa_hide_judges_only_the_paths_given_not_the_settings_already_saved(self):
+    def test_hansa_hide_judges_each_path_as_a_page_save_would_problems_already_saved_too(self):
         target = (self.tmp / "target").resolve()
         target.mkdir()
         link = self.tmp.resolve() / "link"
         link.symlink_to(target)
         keys, more = str(self.tmp.resolve() / "keys"), str(self.tmp.resolve() / "more")
-        # a lane saved before its rule was refused: the page warns of it, and so the command adds all the same
+        # a lane saved before its rule was refused: the page saves, and warns of it; so does the command
         s = self.desk.settings()
         s["lanes"]["a"]["allow"] = ["WebFetch"]
         write_json(self.desk.settings_path, s)
-        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))["ok"])
+        page = self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))
+        self.assertTrue(page["ok"], page)
         told, code = self.hide(keys)
         self.assertEqual(code, 0, told)
         self.assertIn(f"added to what workers may not read: {keys}\n", told)
-        # an entry that went bad later: said in hansa explain's words, after the result, and left as it is
+        self.assertTrue(told.endswith("".join(f"warning: {x}\n" for x in page["lane_warnings"])), told)
+        # an entry that went bad later: the page refuses a save then, and so the command refuses the path, in its words
         link.unlink()
         link.symlink_to("/usr/lib")
+        page = self.page_save(lambda s: s["workers_may_not_read"].append(more))
+        self.assertFalse(page["ok"], page)
         told, code = self.hide(more)
-        self.assertEqual(code, 0, told)
-        self.assertIn(f"added to what workers may not read: {more}\n", told)
-        [line] = [x for x in told.splitlines() if x.startswith("not applied")]
-        self.assertTrue(line.startswith(f"not applied, and no run starts: {link}: it is /usr/lib"), line)
-        self.assertTrue(told.endswith(line + "\n"), told)
-        self.assertIn("      " + line + "\n", self.hansa("explain", "lane", "a"))
+        self.assertEqual((told, code), (f"refused: {more}\n" + "".join(f"  {x}\n" for x in page["problems"]), 1))
+        self.assertIn(f"{link}: it is /usr/lib", told)
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(link), keys])
+
+    def test_hansa_hide_refuses_a_path_an_old_problem_hides_a_new_one_of(self):
+        # a listed link pointed into lane a's write folder after both were saved: SHARED/new is a problem of its own,
+        # though the page names the old one first
+        shared, target = (self.tmp / "SHARED").resolve(), (self.tmp / "target").resolve()
+        target.mkdir()
+        (shared / "old").mkdir(parents=True)
+        link = self.tmp.resolve() / "link"
+        link.symlink_to(target)
         s = self.desk.settings()
-        self.assertEqual(s["workers_may_not_read"], [str(link), keys, more])
-        self.assertEqual(s["lanes"]["a"]["allow"], ["WebFetch"])
+        s["lanes"]["a"]["write"] = [str(shared)]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))["ok"])
+        link.unlink()
+        link.symlink_to(shared / "old")
+        new = str(shared / "new")
+        page = self.page_save(lambda s: s["workers_may_not_read"].append(new))
+        self.assertFalse(page["ok"], page)
+        told, code = self.hide(new)
+        self.assertEqual((told, code), (f"refused: {new}\n" + "".join(f"  {x}\n" for x in page["problems"]), 1))
+        self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(link)])
+        self.assertEqual(self.events("no_read_added"), [])
+
+    def test_hansa_hide_writes_only_the_list_and_who_added_it(self):
+        keys = str(self.tmp.resolve() / "keys")
+        s = json.loads(self.desk.settings_path.read_text())
+        s.pop("coordinator_compact", None)  # absent, and a blank check: each stays as saved
+        s.pop("cool_minutes", None)
+        s["lanes"]["a"]["merge_check"] = "   "
+        write_json(self.desk.settings_path, s)
+        self.assertEqual(self.hide(keys)[1], 0)
+        after = json.loads(self.desk.settings_path.read_text())
+        self.assertEqual((after.pop("workers_may_not_read"), list(after.pop("workers_may_not_read_added"))), ([keys], [keys]))
+        s.pop("workers_may_not_read", None)
+        self.assertEqual(after, s)
 
     def test_only_hansa_hide_writes_who_added_an_entry(self):
         keys, other = str(self.tmp.resolve() / "keys"), str(self.tmp.resolve() / "other")
@@ -17537,6 +17568,24 @@ class DeskTest(unittest.TestCase):
         problems = self.desk.save_settings(second["settings"], rev=second["rev"])
         self.assertTrue(problems and "changed since" in problems[0], problems)
         self.assertEqual((self.desk.settings()["concurrency"], self.desk.settings().get("cool_minutes", 30)), (3, 30))
+
+    def test_a_stale_page_is_refused_before_any_other_check(self):
+        target = (self.tmp / "target").resolve()
+        target.mkdir()
+        link = self.tmp.resolve() / "link"
+        link.symlink_to(target)
+        self.assertTrue(self.page_save(lambda s: s.update(workers_may_not_read=[str(link)]))["ok"])
+        loaded = json.loads(json.dumps(public_settings(self.desk)))  # the principal's page, open
+        link.unlink()
+        link.symlink_to("/usr/lib")  # an entry gone bad, which a fresh page's save is refused for
+        s = self.desk.settings()
+        s["concurrency"] = 3  # and the settings changed since the page loaded them
+        self.assertEqual(self.desk.save_settings(s), [])
+        loaded["settings"]["workers_may_not_read"].append(str(self.tmp.resolve() / "keys"))
+        told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+        self.assertEqual(told, {"ok": False, "problems": [
+            "the settings changed since this page loaded them (another tab or a command); press Reload, then make the "
+            "change again"]})
 
     def test_a_check_that_ran_on_a_replaced_key_is_not_recorded(self):
         import hansa.run as run

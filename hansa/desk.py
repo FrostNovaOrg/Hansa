@@ -1922,6 +1922,22 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
     return good, p, stops
 
 
+def page_list_problems(new: dict, on_disk: dict, root=None) -> list:
+    """What a page save refuses first, of what workers may not read and the folders the coordinator may read."""
+    kept, changed = [], new.get("workers_may_not_read", []) != on_disk.get("workers_may_not_read")
+    if isinstance(new.get("workers_may_not_read", []), list):
+        kept, bad = deny_split(new.get("workers_may_not_read", []), root, new.get("lanes"))
+        if bad and changed:  # each must hold now; one that went bad later does not keep the rest from saving
+            return bad
+    # each must be there now; and none may open what the list above, when it changed, closes
+    if changed or new.get("coordinator_read", []) != on_disk.get("coordinator_read"):
+        gone = read_split(new.get("coordinator_read", []), root, new.get("providers"), denied=kept)[1]
+        if new.get("coordinator_read", []) == on_disk.get("coordinator_read"):  # only what the new list closes
+            gone = [g for g in gone if "what workers may not read" in g]
+        return gone
+    return []
+
+
 def hidden_by(s: dict) -> dict:
     """Who added each entry of what workers may not read that the coordinator added (HIDDEN_BY): {entry: {by, at}}."""
     by = s.get(HIDDEN_BY)
@@ -2324,18 +2340,17 @@ class Desk:
         except OSError:
             return ""
 
-    def save_settings(self, new: dict, by: str = "", rev: str | None = None) -> list:
-        """rev: the settings_rev() the change was made on; a save over newer settings is refused."""
+    def save_settings(self, new: dict, by: str = "", rev: str | None = None, dry: bool = False) -> list:
+        """rev: the settings_rev() the change was made on; a save over newer settings is refused, before any other
+        check. dry: only judge it, writing nothing."""
         with self.lock():
             if rev is not None and rev != self.settings_rev():
-                old = self.settings()
-                listed = new.get("workers_may_not_read") if isinstance(new, dict) else None
-                hidden = [x for x in hidden_by(old) if isinstance(listed, list) and x not in listed]
                 return ["the settings changed since this page loaded them (another tab or a command); "
-                        "press Reload, then make the change again"
-                        + (f"; meanwhile the coordinator added to what workers may not read (hansa hide): "
-                           f"{', '.join(hidden)}, which this page does not show yet" if hidden else "")]
+                        "press Reload, then make the change again"]
             old = self.settings()
+            first = page_list_problems(new, old, self.root) if by == "page" and isinstance(new, dict) else []
+            if first:
+                return first
             if by != "page":  # the principal's alone: a command that changes them changes nothing
                 theirs = [k for k in PRINCIPAL_ONLY if new.get(k, []) != old.get(k, [])]
                 if theirs:
@@ -2373,7 +2388,7 @@ class Desk:
                     if work:
                         problems.append(f"lane {name}: cannot become a merge lane while {', '.join(work)} is queued "
                                         "or running there; a merge lane takes no work")
-            if problems:
+            if problems or dry:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
             write_json(self.settings_path, new)
@@ -2382,51 +2397,42 @@ class Desk:
         return []
 
     def hide(self, paths: list, by: str = "coordinator") -> tuple:
-        """hansa hide: add each path to what workers may not read, each on its own checked as the page checks an
-        entry (web._save_settings: deny_split, read_split for the coordinator's folders it would close, the limit,
-        and validate for the lanes'), and recorded as added by `by`. What is wrong with the settings already saved
-        neither stops an addition nor is changed by it. ([entries added], [(path, the entry it already is)],
-        [(path, [why, ...])])."""
+        """hansa hide: add each path to what workers may not read, in turn, if a page save of the settings with it
+        added would be taken (save_settings, dry): any problem that save has refuses the path, in its words, one
+        already in the settings too. Each addition is recorded as by `by`; only the list and that record are
+        written. ([entries added], [(path, the entry it already is)], [(path, [why, ...])], [the page's warnings])."""
         added, there, refused = [], [], []
         with self.lock():
             s = self.settings()
             listed = s.get("workers_may_not_read")
             if not isinstance(listed, list):
-                return [], [], [(x, [DENY_LIST_WHY]) for x in paths]
+                return [], [], [(x, [DENY_LIST_WHY]) for x in paths], []
             listed, hidden = list(listed), hidden_by(s)
-
-            def problems(entries):  # what the page refuses of a list: of the settings, and the coordinator's folders
-                denied = deny_split(entries, self.root, s.get("lanes"))[0]
-                return validate({**s, "workers_may_not_read": entries}, self.root) + [
-                    g for g in read_split(s.get("coordinator_read", []), self.root, s.get("providers"),
-                                          denied=denied)[1] if "what workers may not read" in g]
             for x in paths:
-                kept, bad = deny_split([x], self.root, s.get("lanes"))
+                kept = deny_split([x], self.root, s.get("lanes"))[0]
                 same = next((e for e in listed if isinstance(e, str) and e.startswith("/") and kept
                              and _seen(stored(e)) == _seen(kept[0])), None)
-                if bad:
-                    refused.append((x, bad))
-                elif same is not None:  # however it is spelled
+                if same is not None:  # however it is spelled
                     there.append((x, same))
-                elif len(listed) >= MAX_DENY:
-                    refused.append((x, [DENY_LIST_WHY]))
-                else:  # only what this path brings: a problem already there is not its
-                    before = set(problems(listed))
-                    more = [g for g in problems(listed + kept) if g not in before]
-                    if more:
-                        refused.append((x, more))
-                    else:
-                        listed.append(kept[0])
-                        hidden[kept[0]] = {"by": by, "at": now()}
-                        added.append(kept[0])
-            if added:  # not save_settings: it would judge the whole settings, and it keeps the record as it was
-                write_json(self.settings_path, {**s, "workers_may_not_read": listed, HIDDEN_BY: hidden})
+                    continue
+                entry = kept[0] if kept else x
+                why = self.save_settings({**s, "workers_may_not_read": listed + [entry]}, by="page", dry=True)
+                if why:
+                    refused.append((x, why))
+                else:
+                    listed.append(entry)
+                    hidden[entry] = {"by": by, "at": now()}
+                    added.append(entry)
+            if added:  # not save_settings: every other setting stays as the disk has it, and the record is hansa's
+                saved = read_json(self.settings_path, {})
+                write_json(self.settings_path, {**(saved if isinstance(saved, dict) else {}),
+                                                "workers_may_not_read": listed, HIDDEN_BY: hidden})
         if added:
             self.event("settings_saved", by=by, changed=["workers_may_not_read", HIDDEN_BY])
             self.ready_news()
         for x in added:
             self.event("no_read_added", path=x, by=by)
-        return added, there, refused
+        return added, there, refused, lane_warnings(s) if added else []
 
     def keys_in_release(self, old: dict, new: dict) -> list:
         """A new or changed release command that holds a key the desk knows: refused, as the command is stored and

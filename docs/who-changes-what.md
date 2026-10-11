@@ -28,9 +28,9 @@ applied does, is in [Workers and the sandbox](sandbox.md#what-workers-verifiers-
 
 These are the principal's alone, but for one thing: the coordinator may add to
 what workers may not read with `hansa hide PATH [PATH ...]`, since an entry
-only takes something away from workers. Each path is checked on its own as the
-page checks an entry: one the page would refuse is refused, with its reason,
-and one already on the list, however it is spelled, is not added again.
+only takes something away from workers. Each path is judged as a page save
+adding it: any problem, even one already saved, refuses it, with the page's
+reason; and one already on the list, however spelled, is not added again.
 hansa records each addition as the coordinator's, with when, writes an event
 (`no_read_added`) for it, and shows it beside the entry on the page and in
 `hansa explain lane L`; an entry the principal saves on the page is the
@@ -40,7 +40,7 @@ from its next start. Only the principal removes an entry, on the page: removing
 one gives workers something back (keys, logins), so there is no command for it,
 and no command of the coordinator's may take one out. A page loaded before an
 addition does not drop it on saving: as for any change made since it loaded,
-the save is refused, says what the coordinator added, and asks for Reload.
+the save is refused before any other check, and asks for Reload.
 
 When the coordinator needs anything else here changed (a folder it keeps
 needing to read, say), it asks with `hansa ask`; it never edits the desk's

@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, views, without_session
-from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, no_read_unusable, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, write_text)
@@ -2468,7 +2468,7 @@ def cmd_hide(a):
         raise SystemExit("hansa: hansa hide PATH [PATH ...]: name at least one full path to keep workers from reading "
                          "(such as /opt/myproject/keys); nothing was changed")
     desk = Desk.find(a.desk)
-    added, there, refused = desk.hide(a.paths)
+    added, there, refused, warnings = desk.hide(a.paths)
     for x in added:
         print(f"added to what workers may not read: {x}")
     for x, same in there:
@@ -2480,8 +2480,8 @@ def cmd_hide(a):
         print("Runs that start from now on are kept from it; a run already going keeps the sandbox it started with. "
               "Your own Read is denied there from your next start. Only the principal removes an entry, on the web "
               "page (Settings).")
-    for x in no_read_unusable(desk.settings(), desk.root):  # already on the list: the principal's to settle
-        print(x)
+    for x in warnings:  # as the page shows them on saving: the lanes' to fix, not the list's
+        print(f"warning: {x}")
     if refused:
         raise SystemExit(1)
 
@@ -3023,7 +3023,7 @@ def main(argv=None):
     p = add("hide", cmd_hide, "add folders or files to what workers may not read; only the principal removes one, on "
             "the web page")
     p.description = ("Add each full path to what workers may not read (the principal's list on the web page, Settings), "
-                     "each checked as the page checks an entry: one the page would refuse is refused, with the page's "
+                     "each judged as a page save adding it: any problem, even an old one, refuses it, with the page's "
                      "reason, and one already there, however it is spelled, is not added again. Each addition is "
                      "recorded as the coordinator's, with when, and shown so on the page and in hansa explain lane L. "
                      "Runs that start from now on are kept from it, and Read is denied there to the coordinator from "
