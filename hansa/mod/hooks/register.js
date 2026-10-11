@@ -196,10 +196,14 @@ async function check($, st) {
   }
 }
 
-// The turn's end and its Stop may come in either order: the session is idle from the later of them
-async function ended($, st) {
+// The turn's end and its Stop may come in either order: the session is idle from the later of them. Claude Code
+// refuses a compact or a clear under the Stop hook (it would wait on the turn the hook holds): after a Stop, the
+// decision comes once the hook has returned
+async function ended($, st, stop = false) {
   if (idle(st) && st.since === null) st.since = await $.clock.now()
-  await check($, st)
+  if (!stop) return check($, st)
+  cancel(st)
+  st.pending = $.clock.after(0, () => check($, st))
 }
 
 export function register(on) {
@@ -230,7 +234,7 @@ export function register(on) {
     if (st.stop.background || st.stop.crons) { // the session waits for work of its own: not idle
       st.since = null
       cancel(st)
-    } else await ended($, st)
+    } else await ended($, st, true)
     return result
   }).catch(() => undefined) // never decides a Stop: failed, it is left out
 
