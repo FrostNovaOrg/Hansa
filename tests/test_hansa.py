@@ -9750,7 +9750,7 @@ class DeskTest(unittest.TestCase):
         # the start's record: what was passed to Claude Code, tied to this start
         rec = self.mod_record()
         self.assertEqual({k: rec[k] for k in ("plugin", "autocompact", "why", "version", "root")},
-                         {"plugin": True, "autocompact": 550000, "why": "", "version": "2.1.296", "root": False})
+                         {"plugin": True, "autocompact": "550000", "why": "", "version": "2.1.296", "root": False})
         self.assertEqual(rec["start"], json.loads((self.desk.state_dir / "coordinator.json").read_text())["at"])
         # each start: a new copy in a new folder; the earlier copy is removed, what Claude Code wrote there with it
         (copy / ".claude-plugin" / "types").mkdir()
@@ -9783,10 +9783,71 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(plugin, "version", saving):
             argv, env, _ = self.start_with_mod()
         self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
-        self.assertEqual(self.mod_record()["autocompact"], 550000)
+        self.assertEqual(self.mod_record()["autocompact"], "550000")
         self.assertEqual(json.loads(Path(env["HANSA_MOD_SETTINGS"]).read_text())["coordinator_compact"], changed)
         self.assertIn("compact when idle at 300,000 tokens, compact after a long idle at 150,000 tokens, a long idle is "
                       "30 minutes, compact while working at 550,000 tokens", plugin.status_line(plugin.status(self.desk)))
+
+    def test_status_takes_the_window_from_the_command_line_claude_code_is_started_with(self):
+        # the window is the last --autocompact Claude Code is given, in either spelling, whoever put it there: hansa's
+        # comes first and the caller's after it. What Claude Code receives is left as it is
+        for extra, window, words in (
+                ((), "550000", "550,000 tokens"),
+                (("--autocompact", "700000"), "700000", "700,000 tokens"),
+                (("--autocompact=700000",), "700000", "700,000 tokens"),
+                (("--autocompact", "600000", "--autocompact=650000"), "650000", "650,000 tokens"),
+                (("--autocompact=650000", "--autocompact", "700000"), "700000", "700,000 tokens"),
+                (("--autocompact", "auto"), "auto", "auto (as given to --autocompact)"),  # the mod loaded all the same
+                (("--", "--autocompact=100000"), "550000", "550,000 tokens")):  # after --, a prompt: not an option
+            argv, _, said = self.start_with_mod(*extra)
+            self.assertEqual(argv[len(argv) - len(extra):], list(extra), extra)
+            self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")  # hansa's own, before the caller's
+            self.assertEqual(self.mod_record()["autocompact"], window, extra)
+            self.assertIn("was started with it; compact when idle at 400,000 tokens, compact after a long idle at "
+                          f"200,000 tokens, a long idle is 50 minutes, compact while working at {words}",
+                          plugin.status_line(plugin.status(self.desk)), extra)
+        # the mod off: the start's line and status say the window it was given
+        argv, _, said = self.start_with_mod("--autocompact", "700000", version="2.1.200")
+        self.assertEqual(argv.count("--autocompact"), 1)
+        self.assertIn("The session does not compact when idle; Claude Code compacts at 700,000 tokens.", said)
+        self.assertIn("was started without it: Claude Code 2.1.200 is older than 2.1.290, which the mod needs; Claude "
+                      "Code compacts at 700,000 tokens", plugin.status_line(plugin.status(self.desk)))
+        self.start_with_mod(version="2.1.200")
+        self.assertIn("The session does not compact when idle; Claude Code compacts at its own window.",
+                      " ".join(self.mod_said.split()))
+        self.assertNotIn("Claude Code compacts", plugin.status_line(plugin.status(self.desk)))
+        with unittest.mock.patch.object(plugin, "home", side_effect=KeyError("no home")):
+            argv, _, said = self.start_with_mod("--autocompact=700000")
+        self.assertIn("The session does not compact when idle; Claude Code compacts at 700,000 tokens.", said)
+        self.assertIn("Claude Code compacts at 700,000 tokens", plugin.status_line(plugin.status(self.desk)))
+
+    def test_status_reads_the_thresholds_as_the_mod_reads_them(self):
+        # from the file the mod reads, as it reads it (hooks/register.js: thresholds), and nowhere else
+        self.start_with_mod()
+        path = self.desk.settings_path
+        saved = path.read_bytes()
+        self.addCleanup(path.write_bytes, saved)
+        s = json.loads(saved)
+
+        def says(text):
+            path.write_text(text)
+            return plugin.status_line(plugin.status(self.desk))
+        # whole numbers as the mod's Number.isInteger takes them; one absent or out of range is its default
+        self.assertIn("with it; compact when idle at 150,000 tokens, compact after a long idle at 300,000 tokens, a long "
+                      "idle is 50 minutes, compact while working at 550,000 tokens",
+                      says(json.dumps({**s, "coordinator_compact": {"idle_at": 150000.0, "long_idle_at": 3e5,
+                                                                    "long_idle_min": 0}})))
+        self.assertIn("with it; compact when idle at 400,000 tokens, compact after a long idle at 200,000 tokens, a long "
+                      "idle is 7 minutes", says(json.dumps({"coordinator_compact": {"long_idle_min": 7}})))
+        # a file the mod cannot read or parse: it compacts nothing while idle, and status says that, not the defaults
+        for text in ("not json", "[]", "null", '{"coordinator_compact": {"idle_at": NaN}}', b"\xff"):
+            line = says(text) if isinstance(text, str) else (path.write_bytes(text), plugin.status_line(
+                plugin.status(self.desk)))[1]
+            self.assertIn("with it; it cannot read the desk's settings file now, so it does not compact when idle; "
+                          "compact while working at 550,000 tokens", line, text)
+            self.assertNotIn("400,000", line)
+        path.unlink()
+        self.assertIn("it cannot read the desk's settings file now", plugin.status_line(plugin.status(self.desk)))
 
     def test_workers_do_not_load_the_coordinators_mod(self):
         self.start_with_mod()  # its copy and record are in the desk now
@@ -10052,9 +10113,19 @@ class DeskTest(unittest.TestCase):
                 ("2.1.296", self.MOD_WORDS, "空闲时压缩于 400,000 token", "muted"),
                 ("2.1.200", "Claude Code 2.1.200 is older than 2.1.290, which the mod needs",
                  "没有带上它：Claude Code 2.1.200 is older", "warn"),
-                ("unrecorded", self.MOD_UNKNOWN, "hansa 不知道", "warn")):
+                ("caller", "compact while working at 700,000 tokens", "工作中压缩于 700,000 token", "muted"),
+                ("unrecorded", self.MOD_UNKNOWN, "hansa 不知道", "warn"),
+                ("unread", "with it; it cannot read the desk's settings file now",
+                 "读不了桌上的设置文件，所以空闲时不压缩；工作中压缩于 550,000 token", "muted")):
             if version == "unrecorded":
                 (self.desk.mod_dir / "start.json").unlink()
+            elif version == "caller":
+                self.start_with_mod("--autocompact=700000")
+            elif version == "unread":
+                self.start_with_mod()
+                saved = self.desk.settings_path.read_bytes()
+                self.addCleanup(self.desk.settings_path.write_bytes, saved)
+                self.desk.settings_path.write_text("not json")
             else:
                 self.start_with_mod(version=version)
             st = views.status(self.desk)
@@ -10191,7 +10262,7 @@ class DeskTest(unittest.TestCase):
                 main(["--desk", str(self.desk.root), "status"])
         self.assertIn("needs runuser", str(e.exception.code))
 
-    def coordinator_as_root(self, env):
+    def coordinator_as_root(self, env, *extra):
         """Start the coordinator in this process as "root", catching the claude it would become."""
         started = {}
         with unittest.mock.patch.object(account.os, "execve", side_effect=AssertionError("it switched")), \
@@ -10199,7 +10270,7 @@ class DeskTest(unittest.TestCase):
                 unittest.mock.patch("os.chown", side_effect=AssertionError("root changed an owner")), \
                 unittest.mock.patch.dict(os.environ, env), unittest.mock.patch("os.chdir"), \
                 unittest.mock.patch("hansa.notify.start", lambda *x, **k: started.update(follower=x)):
-            main(["--desk", str(self.desk.root), "coordinator"])
+            main(["--desk", str(self.desk.root), "coordinator", *extra])
         return started
 
     def test_roots_follower_reads_the_desk_through_the_account_and_keeps_its_own_files_at_home(self):
@@ -10282,11 +10353,11 @@ class DeskTest(unittest.TestCase):
         root_home.mkdir()
         desk_side = (str(self.desk.root), str(self.repo.resolve()))  # the account's; everything else stands for root's
 
-        def start(version="2.1.296"):
+        def start(version="2.1.296", *extra):
             said = io.StringIO()
             with contextlib.redirect_stderr(said):
                 started = self.coordinator_as_root({"HANSA_CLAUDE": str(self.versioned_claude(version)),
-                                                    "CLAUDE_CONFIG_DIR": str(self.tmp / "root-claude")})
+                                                    "CLAUDE_CONFIG_DIR": str(self.tmp / "root-claude")}, *extra)
             return started["argv"], started["env"], " ".join(said.getvalue().split())
         with unittest.mock.patch.object(account, "owner", lambda p: os.getuid() if str(p).startswith(desk_side) else 0), \
                 unittest.mock.patch.dict(os.environ, {"HOME": str(root_home)}):
@@ -10302,7 +10373,7 @@ class DeskTest(unittest.TestCase):
             self.assertFalse(list(self.desk.mod_dir.glob("plugin*")))  # root wrote nothing in the desk
             self.assertIn("--mod", json.loads(log.read_text().splitlines()[-1]))  # the account recorded root's start
             rec = self.mod_record()
-            self.assertEqual((rec["plugin"], rec["autocompact"], rec["root"]), (True, 550000, True))
+            self.assertEqual((rec["plugin"], rec["autocompact"], rec["root"]), (True, "550000", True))
             self.assertEqual(rec["start"], json.loads((self.desk.state_dir / "coordinator.json").read_text())["at"])
             # a change on the page reaches root's session as any other: at its next decision, from that file
             self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact={"idle_at": 300000})),
@@ -10312,6 +10383,10 @@ class DeskTest(unittest.TestCase):
             line = plugin.status_line(plugin.status(self.desk))
             self.assertIn("was started with it; compact when idle at 300,000 tokens", line)
             self.assertNotIn("next start", line)
+            # root's own --autocompact, after hansa's: the record and status say the window Claude Code takes
+            start("2.1.296", "--autocompact", "600000", "--autocompact=700000")
+            self.assertEqual(self.mod_record()["autocompact"], "700000")
+            self.assertIn("compact while working at 700,000 tokens", plugin.status_line(plugin.status(self.desk)))
             # a folder of root's that the account could change: no mod; --autocompact, as Claude Code is new enough
             sub = copy.parent
             sub.chmod(0o777)

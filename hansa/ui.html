@@ -81,6 +81,7 @@ const T = ZH ? {
   compactNote:"一轮以回答结束、会话空闲后，协调席的 mod 压缩它：空闲一分钟后，若上下文达到第一个数（这时整个上下文还在提示缓存里）；长时间空闲（第三个数）后，若达到第二个数：赶在提示缓存（一小时）失效之前压缩，下一轮就从短的上下文开始，不必不走缓存地读一个长的。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第四个数时压缩（hansa coordinator 用 --autocompact 传给它）。token 数都在 100,000 到 1,000,000 之间，长时间空闲在 1 到 240 分钟之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或不小于第四个数），那个压缩就不会发生：Claude Code 自己先压缩了。第四个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。前三个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第四个数从会话下次启动起生效。协调席不能改它们。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modOn:t => `协调席的 mod：${t} 启动的会话带上了它`, modOff:(t, why) => `协调席的 mod：${t} 启动的会话没有带上它：${why}`,
   modUnknown:t => `协调席的 mod：hansa 不知道 ${t} 启动的会话是怎样启动的（那次启动没留下记录）`,
+  modUnread:"它现在读不了桌上的设置文件，所以空闲时不压缩", modOwnWindow:"Claude Code 自己的窗口",
   auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"这条线的执行层、核验和设计会话不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
@@ -292,10 +293,13 @@ function modLine(m, line) {
   if (!ZH) return " · " + line;
   if (!m.known) return " · " + T.modUnknown(m.started);
   if (!m.on) return " · " + T.modOff(m.started, m.why);
-  const v = m.values, w = x => x.replace(/（.*）$/, "");
+  // the window as Claude Code was given it: a number of tokens, or what the last --autocompact said
+  const v = m.values, w = x => x.replace(/（.*）$/, ""), n = (x, u) => typeof x === "number" ? `${x.toLocaleString("en")} ${u}`
+    : x === null ? T.modOwnWindow : x;
+  const working = `${w(T.compactWorking)} ${n(v.working_at, "token")}`;
+  if (v.idle_at === null) return " · " + T.modOn(m.started) + "；" + T.modUnread + "；" + working;
   return " · " + T.modOn(m.started) + "；" + [[T.compactIdle, "idle_at", "token"], [T.compactLongIdle, "long_idle_at", "token"],
-    [T.longIdleMin, "long_idle_min", "分钟"], [T.compactWorking, "working_at", "token"]]
-    .map(([l, k, u]) => `${w(l)} ${v[k].toLocaleString("en")} ${u}`).join("，");
+    [T.longIdleMin, "long_idle_min", "分钟"]].map(([l, k, u]) => `${w(l)} ${n(v[k], u)}`).concat(working).join("，");
 }
 async function loadStatus() {
   const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);

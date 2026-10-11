@@ -22,8 +22,12 @@ Where things are kept:
                      .hansa/coordinator-mod/, except for root on an account's desk (see account.py): root writes
                      nothing in the desk, so its copy is under root's home, in a folder of root's own
     start.json       in the desk's .hansa/coordinator-mod/, written by the desk's owner: this start, as passed to
-                     Claude Code (the mod loaded or not and why, the --autocompact value). Removed before the mod is
-                     prepared, and tied to this start (coordinator.json's at): an earlier start's is never shown
+                     Claude Code (the mod loaded or not and why, and the window: the last --autocompact of its command
+                     line, the caller's options included). Removed before the mod is prepared, and tied to this start
+                     (coordinator.json's at): an earlier start's is never shown
+
+What status and the page say of a running session comes from that record, and the thresholds from the desk's settings
+file, read as the mod reads it (thresholds).
 """
 from __future__ import annotations
 
@@ -40,7 +44,7 @@ import time
 from pathlib import Path
 
 from . import account
-from .desk import COMPACT_MOST, Desk, compact_settings, now, write_json
+from .desk import COMPACT_DEFAULTS, COMPACT_MOST, Desk, now, write_json
 
 MOD = Path(__file__).with_name("mod")
 NEEDS = (2, 1, 290)  # Claude Code's version the mod and --autocompact need, on a compatible endpoint too
@@ -171,11 +175,27 @@ def _number(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
-def start_record(p: dict, working_at: int, start) -> dict:
-    """What the desk keeps of this start: what was passed to Claude Code. start: coordinator.json's at, which
+def given(cmd: list, option: str) -> list:
+    """The values of option in a command line, in order, in either spelling (--option N, --option=N); none after a
+    bare --, where the options end."""
+    out = []
+    for i, x in enumerate(cmd[1:], 1):
+        if x == "--":
+            break
+        if x == option:
+            out.append(cmd[i + 1] if i + 1 < len(cmd) else "")
+        elif x.startswith(option + "="):
+            out.append(x[len(option) + 1:])
+    return out
+
+
+def start_record(p: dict, cmd: list, start) -> dict:
+    """What the desk keeps of this start: what Claude Code is started with, cmd its whole command line. The window is
+    the last --autocompact there, whoever put it there: Claude Code takes the last. start: coordinator.json's at, which
     coordinator_desk wrote for this start."""
-    return {"start": start, "plugin": p["on"], "autocompact": working_at if p["autocompact"] else None,
-            "why": p.get("why", ""), "version": p.get("version", "")}
+    windows = given(cmd, "--autocompact")
+    return {"start": start, "plugin": p["on"] and p.get("copy") in given(cmd, "--plugin-dir"),
+            "autocompact": windows[-1] if windows else None, "why": p.get("why", ""), "version": p.get("version", "")}
 
 
 def forget(desk: Desk) -> None:
@@ -193,8 +213,7 @@ def record_start(desk: Desk, rec: dict, root: bool = False) -> None:
     ac, why, v = rec.get("autocompact"), rec.get("why"), rec.get("version")
     clean = {"start": rec.get("start") if _number(rec.get("start")) else None, "at": now(),
              "plugin": rec.get("plugin") is True,
-             "autocompact": ac if isinstance(ac, int) and not isinstance(ac, bool)
-             and COMPACT_MOST["working_at"][0] <= ac <= COMPACT_MOST["working_at"][1] else None,
+             "autocompact": "".join(c for c in ac if c.isprintable())[:40] if isinstance(ac, str) else None,
              "why": " ".join(why.split())[:300] if isinstance(why, str) else "",
              "version": v if isinstance(v, str) and re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", v) else "",
              "root": root}
@@ -218,16 +237,22 @@ def record(desk: Desk, rec: dict) -> str:
         return unrecorded_text(desk.mod_dir / "start.json", e)
 
 
-def start_text(p: dict, working_at: int) -> str:
-    """What the start says of the mod when it is off, in one line; '' when it is on."""
+def window_text(w) -> str:
+    """The window Claude Code was given (the last --autocompact, as given), in words."""
+    if w is None:
+        return "its own window"
+    if isinstance(w, int) or re.fullmatch(r"\d{1,12}", w):
+        return f"{int(w):,} tokens"
+    return f"{w} (as given to --autocompact)"
+
+
+def start_text(p: dict, window) -> str:
+    """What the start says of the mod when it is off, in one line; '' when it is on. window: the record's."""
     if p["on"]:
         return ""
-    if not p["autocompact"]:
-        return (f"the coordinator's mod is off, and so is --autocompact: {p['why']}"
-                + ("" if p.get("failed") else " (claude update)") + ". The session does not compact when idle, and "
-                "Claude Code compacts at its own window. " + HELP)
-    return (f"the coordinator's mod is off: {p['why']}. The session does not compact when idle; Claude Code "
-            f"compacts at {working_at:,} tokens. " + HELP)
+    return (f"the coordinator's mod is off{'' if p['autocompact'] else ', and so is --autocompact'}: {p['why']}"
+            + ("" if p["autocompact"] or p.get("failed") else " (claude update)") + ". The session does not compact "
+            f"when idle; Claude Code compacts at {window_text(window)}. " + HELP)
 
 
 def left_text(p: dict) -> str:
@@ -237,9 +262,34 @@ def left_text(p: dict) -> str:
 
 
 # -- what hansa says of it -----------------------------------------------------------------------------------------
+def _whole(x) -> bool:
+    """A whole number as the mod's Number.isInteger takes one: 400000, and 400000.0 or 4e5 too."""
+    return _number(x) and x == int(x)
+
+
+def thresholds(path) -> dict | None:
+    """The three the mod reads at each decision, read as it reads them (hooks/register.js: thresholds): one absent or
+    out of range is its default; None when the file cannot be read or parsed, and then it compacts nothing while
+    idle."""
+    def no(x):
+        raise ValueError(x)  # NaN, Infinity: not JSON to the mod
+    try:
+        x = json.loads(Path(path).read_bytes().decode("utf-8"), parse_constant=no)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(x, dict):
+        return None
+    cc = x.get("coordinator_compact") if isinstance(x.get("coordinator_compact"), dict) else {}
+    return {k: int(cc[k]) if _whole(cc.get(k)) and COMPACT_MOST[k][0] <= cc[k] <= COMPACT_MOST[k][1] else v
+            for k, v in COMPACT_DEFAULTS.items() if k != "working_at"}
+
+
 def values_text(v: dict) -> str:
     """The thresholds in their words: compact when idle at 400,000 tokens, ..."""
-    return ", ".join(f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS)
+    window = f"{WORDS['working_at'][0]} {window_text(v['working_at'])}"
+    if v["idle_at"] is None:
+        return "it cannot read the desk's settings file now, so it does not compact when idle; " + window
+    return ", ".join([*(f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS if k != "working_at"), window])
 
 
 def status(desk: Desk) -> dict | None:
@@ -256,11 +306,12 @@ def status(desk: Desk) -> dict | None:
     r = _read(desk.mod_dir / "start.json")
     if not isinstance(r, dict) or r.get("start") != start:  # none, or an earlier start's that was left there
         return {"known": False, "started": started}
-    ac = r.get("autocompact")
-    ac = ac if isinstance(ac, int) and not isinstance(ac, bool) else None
-    # the first three: what the mod reads at its next decision; the fourth: what was passed at the start
-    values = {**compact_settings(desk.settings()), "working_at": ac}
-    return {"known": True, "on": r.get("plugin") is True and ac is not None, "root": r.get("root") is True,
+    ac = r.get("autocompact") if isinstance(r.get("autocompact"), str) else None
+    # the first three: what the mod reads at its next decision, from the file it reads (None: it cannot read it); the
+    # fourth: the window Claude Code was given, a number of tokens when it was one
+    read = thresholds(desk.settings_path) or {k: None for k in WORDS if k != "working_at"}
+    values = {**read, "working_at": int(ac) if ac and re.fullmatch(r"\d{1,12}", ac) else ac}
+    return {"known": True, "on": r.get("plugin") is True, "root": r.get("root") is True,
             "started": started, "why": " ".join(str(r.get("why") or "").split())[:300], "autocompact": ac,
             "values": values}
 
@@ -274,6 +325,7 @@ def status_line(st: dict) -> str:
                 f"start left no record). {HELP}")
     if not st["on"]:
         return (head + f"without it: {st['why']}"
-                + (f"; Claude Code compacts at {st['autocompact']:,} tokens" if st["autocompact"] else "")
+                + (f"; Claude Code compacts at {window_text(st['autocompact'])}" if st["autocompact"] is not None
+                   else "")
                 + f". {HELP}")
     return head + "with it; " + values_text(st["values"])

@@ -204,13 +204,14 @@ test('a threshold changed during a wait is the one used when the wait ends', asy
   set({ long_idle_at: 350_000 })
   await clock.advance(45 * MIN)
   expect(calls.compact).toBe(1)
-  // the idle threshold lowered under the context while it waits for the long idle: used when that wait ends
+  // the idle threshold lowered under the context while it waits for the long idle, and the long idle's raised above
+  // it: when that wait ends, only the idle rule can compact
   set({})
   await turn($, 't3')
   await clock.advance(10 * MIN)
-  set({ idle_at: 250_000 })
+  set({ idle_at: 250_000, long_idle_at: 350_000 })
   await clock.advance(39 * MIN)
-  expect(calls.compact).toBe(1)
+  expect(calls.compact).toBe(1) // decided when the wait ends, not when the file changes
   await clock.advance(2 * MIN)
   expect(calls.compact).toBe(2)
 })
@@ -237,25 +238,42 @@ test('changed between turns: the next turn decides by the new thresholds', async
   expect(calls.compact).toBe(1)
 })
 
-test('a threshold absent from the file, or out of the page\'s range, is its default', async ($, on) => {
-  const tokens = { value: 400_000 }
+// Each default, and each value out of range, in a case only its own rule can satisfy: the other rule is set out of reach
+// (idle_at or long_idle_at at 1,000,000), so a wrong default cannot pass through it
+const OFF = 1_000_000
+for (const [what, cc, tokens, notBefore, at] of [
+  ['idle_at absent: 400,000', { long_idle_at: OFF }, 400_000, MIN - 1, MIN],
+  ['idle_at absent: not 399,999', { long_idle_at: OFF }, 399_999, 120 * MIN, null],
+  ['long_idle_at absent: 200,000', { idle_at: OFF, long_idle_min: 50 }, 200_000, 50 * MIN - 1, 50 * MIN],
+  ['long_idle_at absent: not 199,999', { idle_at: OFF, long_idle_min: 50 }, 199_999, 120 * MIN, null],
+  ['long_idle_min absent: 50 minutes', { idle_at: OFF, long_idle_at: 200_000 }, 300_000, 50 * MIN - 1, 50 * MIN],
+  ['idle_at out of range (5)', { idle_at: 5, long_idle_at: OFF }, 300_000, 120 * MIN, null],
+  ['long_idle_at not a number (\'250000\')', { idle_at: OFF, long_idle_at: '250000' }, 200_000, 50 * MIN - 1, 50 * MIN],
+  ['long_idle_min out of range (0)', { idle_at: OFF, long_idle_min: 0 }, 300_000, 50 * MIN - 1, 50 * MIN],
+] as const) {
+  test(`a threshold absent from the file, or out of the page's range, is its default: ${what}`, async ($, on) => {
+    const value = { value: tokens }
+    const { clock, calls, files } = setup(on, value)
+    files[SETTINGS] = JSON.stringify({ version: 1, coordinator_compact: cc }) // nothing else of the three
+    await turn($, 't1')
+    await clock.advance(notBefore)
+    expect(calls.compact).toBe(0)
+    if (at !== null) {
+      await clock.advance(at - notBefore)
+      expect(calls.compact).toBe(1)
+    }
+  })
+}
+
+test('a desk saved before these settings: the defaults', async ($, on) => {
+  const tokens = { value: 300_000 } // under the idle default: only the long idle can compact, at 50 minutes
   const { clock, calls, files } = setup(on, tokens)
-  files[SETTINGS] = JSON.stringify({ version: 1 }) // a desk saved before these settings: all three defaults
+  files[SETTINGS] = JSON.stringify({ version: 1 })
   await turn($, 't1')
-  await clock.advance(60_000)
+  await clock.advance(50 * MIN - 1)
+  expect(calls.compact).toBe(0)
+  await clock.advance(1)
   expect(calls.compact).toBe(1)
-  tokens.value = 200_000
-  files[SETTINGS] = JSON.stringify({ coordinator_compact: { idle_at: 150_000 } }) // the other two: their defaults
-  await turn($, 't2')
-  await clock.advance(50 * MIN)
-  expect(calls.compact).toBe(2)
-  tokens.value = 300_000
-  files[SETTINGS] = JSON.stringify({ coordinator_compact: { idle_at: 5, long_idle_at: '250000', long_idle_min: 0 } })
-  await turn($, 't3')
-  await clock.advance(49 * MIN)
-  expect(calls.compact).toBe(2) // 5 and 0 are not taken: not at a minute, nor before 50
-  await clock.advance(MIN)
-  expect(calls.compact).toBe(3) // the default 200,000 and 50 minutes
 })
 
 test('a settings file that cannot be read or parsed: no compact while idle, and nothing of it said', async ($, on) => {
