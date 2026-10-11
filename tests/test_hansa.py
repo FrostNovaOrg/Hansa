@@ -13986,7 +13986,11 @@ class DeskTest(unittest.TestCase):
         self.assertFalse(page["ok"], page)
         told, code = self.hide(more)
         self.assertEqual((told, code), (f"refused: {more}\n" + "".join(f"  {x}\n" for x in page["problems"]), 1))
-        self.assertIn(f"{link}: it is /usr/lib", told)
+        # the folder named is the first system folder that is /usr/lib on the disk: /lib, on a Linux with a merged /usr
+        named = re.search(rf"{re.escape(str(link))}: it is (/.+?), where the system keeps its programs and libraries",
+                          told)
+        self.assertTrue(named, told)
+        self.assertEqual(os.path.realpath(named[1]), os.path.realpath("/usr/lib"), told)
         self.assertEqual(self.desk.settings()["workers_may_not_read"], [str(link), keys])
 
     def test_hansa_hide_refuses_a_path_an_old_problem_hides_a_new_one_of(self):
