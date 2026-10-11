@@ -563,11 +563,12 @@ here; work that needs code changed or a browser goes to a worker.
   that applies (`floor 1.0 GB for this 3.9 GB volume`). Free space rather than lower the floor: a lane
   whose builds leave large outputs in its worktree (`target/`, `build/`,
   `node_modules/`), or fill a cache of its own, should clean them in its setup.
-  A task's folder keeps what its setup, check and merge check printed; once a
-  day `hansa serve` cuts each such log of a task that ended (merged, cancelled,
-  failed, replaced) more than 30 days ago to its last 256 KB, under a first line
-  saying so, and `hansa show` says it was trimmed. The task's text, record,
-  report and result stay whole, and so does the event log.
+  Once a day `hansa serve` cuts merged tasks' passed setup/check/merge check logs
+  over 289 KB to first 32 + last 256 KB, with a line counting bytes cut. Failed
+  logs wait 30 days; ended tasks' (merged, cancelled, failed, replaced), tasks
+  left at done and ended releases' logs that old keep their last 256 KB. A log
+  is cut once; `hansa show` notes task cuts. Text, records, reports, results, the event
+  log and every other log stay whole.
 - A lane's setup, check and preview run outside the worker: hansa runs them
   itself, not a worker's or a design session's rules. The setup and
   check run in the lane's sandbox (its network and write lists apply); so

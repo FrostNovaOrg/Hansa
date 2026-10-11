@@ -59,12 +59,12 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 | A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
 | A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |
 
-Since a task's logs are not capped, once a day `hansa serve` trims those of every task that ended (merged,
-cancelled, failed or replaced) more than 30 days ago: each of the logs above (not the text, record, report or
-result, nor the screenshots) is cut to its last 256 KB, from the start of a line, under a first line that says
-it was trimmed, when, and how big it was. The task's record notes it, and `hansa show` says which logs were
-trimmed, when, and their size before. A task still open, or one that ended less than 30 days ago, keeps all of
-its logs; the event log is not touched.
+Once a day `hansa serve` cuts merged tasks' passed setup, check and merge check logs over 289 KB to their
+first 32 KB and last 256 KB, with a line counting the bytes cut. Failed logs wait 30 days; other logs of
+tasks ended (merged, cancelled, failed, replaced) or left at done that long, and ended releases' logs that
+old, keep their last 256 KB, under a line saying when and how big they were. Task cuts appear in the record
+and `hansa show`, release cuts only in the event; no log is cut twice. Text, records, reports, results,
+screenshots, the event log and all other logs stay whole.
 
 ## Hearing from hansa
 

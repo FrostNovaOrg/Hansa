@@ -20,10 +20,10 @@ changes (disk_look_failed, disk_look_ok), not each round: the event log is never
 
 What old tasks kept (trim): a task's folder keeps its text, record (meta.json), report (result.md) and result
 (run.json), which stay whole, and the output of its processes, of which only the preview's is capped (PREVIEW_KEEP).
-A check that prints a long build log keeps all of it. So once a day hansa serve cuts each kept log (TRIMMED) of a
-task that ended (ENDED) more than TRIM_AFTER ago to its last TRIM_KEEP bytes, under a first line saying it was
-trimmed, when, and how big it was; the task's record says so too (`trimmed`), and hansa show. The event log is not
-touched.
+Once a day hansa serve cuts merged tasks' passed setup, check and merge check logs to their first TRIM_HEAD and
+last TRIM_KEEP bytes, with a line counting the bytes cut. Other kept logs (TRIMMED) of tasks that ended (ENDED)
+or stayed done more than TRIM_AFTER ago, and ended releases' logs that old, keep their last TRIM_KEEP bytes.
+The task's record says so too (`trimmed`), and hansa show. The event log is not touched.
 """
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ SMALL = 4  # a volume smaller than this many times the floor gets 1/SMALL of its
 STARTS = "no new task, verification, try, merge or merge check, design session or release"
 TRIM_AFTER = 30 * 86400  # a task that ended this long ago has its kept logs trimmed
 TRIM_KEEP = 256 * 1024  # bytes of a trimmed log kept, its end
+TRIM_HEAD = 32 * 1024  # also kept at the start of a merged task's passed log
 TRIM_EVERY = 86400  # seconds between hansa serve's trims
 # what a task's processes wrote that hansa keeps in its folder: the worker's errors, the setup's, check's and merge
 # check's output, the preview's (capped already, but long)
@@ -372,7 +373,7 @@ def explain_lines(desk: Desk, s: dict) -> list:
 # -- what old tasks kept ---------------------------------------------------------------------------------------------
 def ended_at(m: dict, tasks: dict):
     """When a task ended, for trimming; None when it has not or it cannot be told."""
-    if m.get("state") not in ENDED:
+    if m.get("state") not in (*ENDED, "done"):
         return None
     if m["state"] == "merged" and m.get("merged"):
         return m["merged"]
@@ -382,24 +383,39 @@ def ended_at(m: dict, tasks: dict):
     return m.get("finished")
 
 
-def _trim_one(f: Path, at: float) -> int | None:
-    """Cut a log to its last TRIM_KEEP bytes (from the start of a line, when one starts in its first KB) under a
-    line saying so; its size before, or None when it is small enough or cannot be read."""
+def _trim_one(f: Path, at: float, keep_head: bool = False) -> int | None:
+    """Keep a log's tail, optionally its first TRIM_HEAD bytes too, with a trim line; return its size before,
+    or None if small, already cut or unreadable. Cuts follow nearby lines, or UTF-8 character boundaries."""
     try:
         size = f.stat().st_size
-        if size <= TRIM_KEEP + 1024:  # small, or trimmed already
+        if size <= TRIM_KEEP + (TRIM_HEAD if keep_head else 0) + 1024:
             return None
         with open(f, "rb") as fh:
+            start = fh.read(TRIM_HEAD + 128)
+            marker = b"[hansa trimmed this log on "
+            if start.startswith(marker) or marker in start[TRIM_HEAD - 1024:]:
+                return None  # including a head-and-tail cut now eligible for a tail-only cut
             fh.seek(size - TRIM_KEEP)
             tail = fh.read()
     except OSError:
         return None
+    when = time.strftime('%Y-%m-%d %H:%M', time.localtime(at))
     nl = tail.find(b"\n", 0, 1024)
     tail = tail[nl + 1:] if nl >= 0 else tail
     while tail and tail[0] & 0xC0 == 0x80:  # not in the middle of a character
         tail = tail[1:]
-    head = (f"[hansa trimmed this log on {time.strftime('%Y-%m-%d %H:%M', time.localtime(at))}: it was {size:,} "
-            f"bytes; its last {len(tail):,} bytes follow]\n").encode()
+    if keep_head:
+        nl = start.rfind(b"\n", TRIM_HEAD - 1024, TRIM_HEAD)
+        end = nl + 1 if nl >= 0 else TRIM_HEAD
+        floor = end - 3  # UTF-8 has at most three continuation bytes.
+        while end > floor and start[end] & 0xC0 == 0x80:
+            end -= 1
+        head = start[:end]
+        head += (b"" if head.endswith(b"\n") else b"\n") + (
+            f"[hansa trimmed this log on {when}: cut {size - len(head) - len(tail):,} bytes]\n").encode()
+    else:
+        head = (f"[hansa trimmed this log on {when}: it was {size:,} "
+                f"bytes; its last {len(tail):,} bytes follow]\n").encode()
     try:
         write_bytes(f, head + tail, follow_symlinks=False)
     except OSError:
@@ -408,28 +424,48 @@ def _trim_one(f: Path, at: float) -> int | None:
 
 
 def trim(desk: Desk, at: float | None = None) -> list:
-    """Trim the kept logs of the tasks that ended more than TRIM_AFTER ago (once a day, from hansa serve); what was
-    trimmed, as (task, file, size before)."""
+    """Daily trim: merged tasks' passed logs, old ended/done tasks and old ended releases. Return
+    (task or 'release #ID', file, size before) for each cut."""
+    from . import release
     at = at or time.time()
     tasks = {m["id"]: m for m in desk.tasks() if isinstance(m.get("id"), str)}
     done = []
     for tid, m in tasks.items():
-        end = ended_at(m, tasks)
-        if not isinstance(end, (int, float)) or at - end < TRIM_AFTER:
-            continue
         cut = {}
         with desk.lock():  # as a key's scrub of the same files takes it (Desk.scrub)
+            m = desk.meta(tid)  # a done task may have queued a merge since tasks() was read
+            end = ended_at(m, tasks)
+            old = isinstance(end, (int, float)) and at - end >= TRIM_AFTER
+            passed = ({"setup.log": m.get("setup_exit") in (None, 0),
+                       "check.log": (m.get("check") or {}).get("ok"),
+                       "merge-check.log": (m.get("merge_check_result") or {}).get("ok"),
+                       "merge-setup.log": (m.get("merge_check_result") or {}).get("ok")}
+                      if m.get("state") == "merged" else {})
             for name in TRIMMED:
-                size = _trim_one(desk.tasks_dir / tid / name, at)
+                if not old and not passed.get(name):
+                    continue
+                size = _trim_one(desk.tasks_dir / tid / name, at, keep_head=bool(passed.get(name)))
                 if size is not None:
                     cut[name] = {"at": round(at, 3), "bytes": size}
                     done.append((tid, name, size))
             if cut:
                 desk.change(tid, lambda x: {"trimmed": {**(x.get("trimmed") or {}), **cut}})
-    if done:
-        desk.event("logs_trimmed", tasks=sorted({t for t, _, _ in done}), files=len(done),
-                   bytes=sum(n for _, _, n in done))
-    return done
+    releases = []
+    with desk.lock():
+        for r in release.releases(desk):
+            end = r.get("ended")
+            if r.get("state") in release.OPEN or not isinstance(end, (int, float)) or at - end < TRIM_AFTER:
+                continue
+            name = f"{r['id']}.log"
+            size = _trim_one(release.log_dir(desk) / name, at)
+            if size is not None:
+                releases.append((r["id"], name, size))
+    if done or releases:
+        desk.event("logs_trimmed", tasks=sorted({t for t, _, _ in done}), files=len(done) + len(releases),
+                   bytes=sum(n for _, _, n in done) + sum(n for _, _, n in releases),
+                   **({"releases": [rid for rid, _, _ in releases]}
+                      if releases else {}))
+    return done + [(f"release #{rid}", name, size) for rid, name, size in releases]
 
 
 def trimmed_text(m: dict) -> str:
@@ -437,7 +473,7 @@ def trimmed_text(m: dict) -> str:
     t = m.get("trimmed") or {}
     if not isinstance(t, dict) or not t:
         return ""
-    return (f"logs trimmed (the task ended over {TRIM_AFTER // 86400} days ago; each keeps its last "
-            f"{TRIM_KEEP // 1024} KB): "
+    return (f"logs trimmed (merged passed: first {TRIM_HEAD // 1024} + last {TRIM_KEEP // 1024} KB; "
+            f"other ended/done over {TRIM_AFTER // 86400} days: last {TRIM_KEEP // 1024} KB): "
             + ", ".join(f"{n} on {time.strftime('%Y-%m-%d', time.localtime(x.get('at') or 0))} (was "
                         f"{(x.get('bytes') or 0) / 2 ** 20:.1f} MB)" for n, x in sorted(t.items()) if isinstance(x, dict)))
