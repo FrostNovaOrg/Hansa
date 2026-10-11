@@ -21003,7 +21003,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         alert.send_due(self.desk, gather=0)
         said, refused = self.code_answer("yes", "1", f"{code[:3].lower()} {code[3:]}")  # as said: any case, a space
         self.assertEqual(refused, "")
-        self.assertIn("release #1 of lane a is approved", said)
+        self.assertIn("release #1 of lane a target default is approved", said)
         self.assertNotIn(code, said)
         r = release.get(self.desk, 1)
         self.assertEqual((r["state"], r["answered_by"], r["channel"]), ("approved", "coordinator", "code"))
