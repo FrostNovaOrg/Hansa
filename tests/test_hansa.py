@@ -245,9 +245,15 @@ if compat and os.environ.get("FAKE_REFUSE_ON_COMPAT"):
 if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a provider failure its first `times` times
     what, times, count = os.environ["FAKE_NET"].split(":", 2)
     n = int(open(count).read()) if os.path.exists(count) else 0
+    if os.environ.get("FAKE_NET_SEE"):
+        head = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        open(os.environ["FAKE_NET_SEE"], "a").write(json.dumps({
+            "head": head, "partial": open("partial.txt").read() if os.path.exists("partial.txt") else None,
+            "system": sys.argv[sys.argv.index("--append-system-prompt") + 1]}) + "\n")
     open(count, "w").write(str(n + 1))
     if n < int(times):
-        open("partial.txt", "w").write("half done\n")
+        if not os.environ.get("FAKE_NET_NO_COMMIT"):
+            open("partial.txt", "w").write(os.environ.get("FAKE_NET_PARTIAL", "half done for " + os.environ["HANSA_TASK"] + "\n"))
         status = int(what) if what.isdigit() else None
         text = {"econnreset": "API Error: Connection dropped (ECONNRESET)", "529": "API Error: Repeated 529 Overloaded errors",
                 "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
@@ -7781,10 +7787,10 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["attempts"][0]["provider"], "mimo")
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "mimo"))
 
-    def net_lane(self, what: str, times: int) -> Path:
+    def net_lane(self, what: str, times: int, **env) -> Path:
         count = self.tmp / f"net-{what}-{times}"
         s = self.desk.settings()
-        s["lanes"]["a"]["env"] = {"FAKE_NET": f"{what}:{times}:{count}"}
+        s["lanes"]["a"]["env"] = {"FAKE_NET": f"{what}:{times}:{count}", **env}
         self.assertEqual(self.desk.save_settings(s), [])
         return count
 
@@ -7794,15 +7800,26 @@ class DeskTest(unittest.TestCase):
                           ("529", "the provider was overloaded (HTTP 529)"),
                           ("500", "the provider had a server error (HTTP 500)")):
             with self.subTest(what, times=1):
-                count = self.net_lane(what, 1)
+                seen = self.tmp / f"{what}-starts.jsonl"
+                count = self.net_lane(what, 1, FAKE_NET_SEE=str(seen))
                 tid = self.desk.new_task("Add hello.txt")
                 m = self.settle(Dispatcher(self.desk), tid)
                 self.assertEqual((m["state"], m["provider"], m["error"]), ("done", "claude", ""), m)
                 self.assertEqual(count.read_text(), "2")
                 self.assertEqual([(a["provider"], a["error"], a["kind"]) for a in m["attempts"]], [("claude", why, "network")])
-                self.assertEqual(m["files"], ["hello.txt"])  # what the first run left is not in the second's change
+                self.assertEqual(m["files"], ["hello.txt", "partial.txt"])
+                first, second = map(json.loads, seen.read_text().splitlines())
+                kept = self.git_out("rev-parse", f"task/{tid}-try1")
+                self.assertEqual((first["head"], second["head"]), (m["base"], kept))
+                self.assertNotEqual(kept, m["base"])
+                self.assertEqual(second["partial"], f"half done for {tid}\n")
+                self.assertIn("You carry on an interrupted run of this same task, from that run's commits "
+                              f"({kept[:12]}).", second["system"])
                 self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")  # it does not rest
-                self.assertIn(f"earlier try on claude: {why}", views.show_text(self.desk, tid))
+                shown = views.show_text(self.desk, tid)
+                self.assertIn(f"earlier try on claude: {why}", shown)
+                self.assertIn(f"  started from: base {m['base'][:12]}", shown)
+                self.assertIn(f"run started from: earlier run's commit {kept[:12]}", shown)
                 self.assertEqual(main(["--desk", str(self.desk.root), "merge", tid]), 0)
             with self.subTest(what, times=2):
                 count = self.net_lane(what, 2)
@@ -7822,6 +7839,50 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
         self.assertEqual(run.network_reason({"is_error": False, "result": "Fixed the ECONNRESET on a dropped connection"}, ""), "")
         self.assertEqual(run.network_reason({"is_error": True, "result": "I could not do it"}, ""), "")
+
+    def automatic_restart_from_base(self, reason: str, **env):
+        for what in ("econnreset", "limit"):
+            with self.subTest(what):
+                seen = self.tmp / f"{what}-starts.jsonl"
+                count = self.net_lane(what, 1, FAKE_NET_SEE=str(seen), **env)
+                tid = self.desk.new_task("Add hello.txt")
+                d = Dispatcher(self.desk)
+                if what == "limit":
+                    end = time.time() + 20
+                    while time.time() < end and not self.desk.meta(tid).get("attempts"):
+                        d.tick()
+                        time.sleep(0.1)
+                    queued = self.desk.meta(tid)
+                    self.assertEqual(queued["state"], "queued", queued)
+                    self.assertIn(reason, views.show_text(self.desk, tid))
+                    self.desk.set_provider_state("claude", cool_until=0)
+                m = self.settle(d, tid)
+                self.assertEqual((m["state"], count.read_text()), ("done", "2"), m)
+                first, second = map(json.loads, seen.read_text().splitlines())
+                self.assertEqual((first["head"], second["head"]), (m["base"], m["base"]))
+                self.assertIsNone(second["partial"])
+                self.assertEqual(m["files"], ["hello.txt"])
+                self.assertNotIn("You carry on an interrupted run", second["system"])
+                shown = views.show_text(self.desk, tid)
+                self.assertIn(f"run started from: base {m['base'][:12]} ({reason})", shown)
+                kept = self.git_out("rev-parse", f"task/{tid}-try1")
+                if env.get("FAKE_NET_NO_COMMIT"):
+                    self.assertEqual(kept, m["base"])
+                else:
+                    self.assertNotEqual(kept, m["base"])
+                    self.assertEqual(self.git_out("show", f"{kept}:partial.txt"), env["FAKE_NET_PARTIAL"].strip())
+
+    def test_an_automatic_rerun_starts_from_base_when_the_commit_holds_a_key(self):
+        key = "sk-test-interrupted-run-0987"
+        self.desk.write_key("mimo", key)
+        self.automatic_restart_from_base("the interrupted run's commits hold a key", FAKE_NET_PARTIAL=key + "\n")
+
+    def test_an_automatic_rerun_starts_from_base_when_the_commit_holds_conflict_markers(self):
+        self.automatic_restart_from_base("the interrupted run's commits hold conflict markers",
+                                         FAKE_NET_PARTIAL="<<<<<<< ours\nfirst\n=======\nsecond\n>>>>>>> theirs\n")
+
+    def test_an_automatic_rerun_starts_from_base_when_the_run_left_no_commits(self):
+        self.automatic_restart_from_base("the interrupted run left no commits", FAKE_NET_NO_COMMIT="1")
 
     def test_a_failed_run_that_only_quotes_a_timeout_or_overloaded_is_not_run_again(self):
         from hansa import run
@@ -8005,7 +8066,8 @@ class DeskTest(unittest.TestCase):
 
     def test_a_usage_limit_costs_no_try_and_the_task_starts_again_after_the_rest(self):
         from hansa import run
-        count = self.net_lane("limit", 1)
+        seen = self.tmp / "limit-starts.jsonl"
+        count = self.net_lane("limit", 1, FAKE_NET_SEE=str(seen))
         s = self.desk.settings()
         s["lanes"]["a"]["env"]["FAKE_LIMIT_TEXT"] = "You've hit your session limit · resets 3pm (Europe/Berlin)"
         self.assertEqual(self.desk.save_settings(s), [])
@@ -8039,6 +8101,17 @@ class DeskTest(unittest.TestCase):
         m = self.settle(d, tid)
         self.assertEqual((m["state"], m["error"]), ("done", ""), m)
         self.assertEqual(count.read_text(), "2")
+        first, second = map(json.loads, seen.read_text().splitlines())
+        kept = self.git_out("rev-parse", f"task/{tid}-try1")
+        self.assertEqual((first["head"], second["head"]), (m["base"], kept))
+        self.assertNotEqual(kept, m["base"])
+        self.assertEqual(second["partial"], f"half done for {tid}\n")
+        self.assertEqual(m["files"], ["hello.txt", "partial.txt"])
+        self.assertIn("You carry on an interrupted run of this same task, from that run's commits "
+                      f"({kept[:12]}).", second["system"])
+        shown = views.show_text(self.desk, tid)
+        self.assertIn(f"  started from: base {m['base'][:12]}", shown)
+        self.assertIn(f"run started from: earlier run's commit {kept[:12]}", shown)
         self.assertNotIn("waits for the rest", views.show_text(self.desk, tid))
 
     def test_a_provider_that_hits_its_limit_after_each_rest_uses_up_the_task_s_tries(self):

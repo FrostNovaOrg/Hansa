@@ -3550,9 +3550,10 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
     repo = Path(lane["repo"])
     tid = meta["id"]
     desk.update(tid, repo=resolved(str(repo)) or str(repo))  # where its branch is, whatever the lane is later
-    updating = bool(meta.get("update") and meta.get("start_from"))
+    restart = meta.get("restart") if meta.get("kind") not in ("verify", "design") else None
+    updating = bool(meta.get("update") and meta.get("start_from") and not restart)
     base = git("rev-parse", lane.get("base") or "main", cwd=repo) if updating or not meta.get("base") else meta["base"]
-    start = meta.get("start_from") or base
+    start = restart["commit"] if restart else meta.get("start_from") or base
     wt = wt or desk.worktrees_dir / lane_name
     ready_worktree(desk, repo, wt, tid, start)
     branch = f"task/{tid}"
@@ -3569,6 +3570,9 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None 
             desk, wt, tid, lane.get("base") or "main", base,
             update_message(lane, lane_name, tid, meta.get("title") or "", lane.get("base") or "main"),
             identity_env(lane)))
+    desk.update(tid, run_start=restart or {
+        "commit": wgit(desk, wt, "rev-parse", "HEAD"),
+        "source": "earlier task's commit" if meta.get("start_from") else "base"})
     return wt, base
 
 
@@ -3735,6 +3739,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     s = desk.settings()
     lane, p = s["lanes"][lane_name], s["providers"][pname]
     wt, base = prepare(desk, lane_name, lane, meta)
+    meta = desk.meta(tid)
     model = (meta.get("model") if p["kind"] == "subscription" else "") or p["model"]  # other providers: their own
     effort = meta.get("effort") or p.get("effort", "")
     effort_from = "task" if meta.get("effort") else "provider" if effort else ""  # views.effort_text says it
@@ -3746,6 +3751,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
                                                                  long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
+    if (meta.get("run_start") or {}).get("source") == "earlier run's commit":
+        system += ("\nYou carry on an interrupted run of this same task, from that run's commits "
+                   f"({meta['run_start']['commit'][:12]}).\n")
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
@@ -3759,7 +3767,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         cfg, extra = browser_for(desk, tid, s["browser"])
         argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
         argv += ["--mcp-config", str(cfg)]
-    conflicts = desk.meta(tid).get("update_conflicts") if meta.get("update") else None
+    conflicts = desk.meta(tid).get("update_conflicts") if meta.get("update") and not meta.get("restart") else None
     if conflicts is not None:
         note = UPDATE_NOTE if conflicts else UPDATE_CLEAN_NOTE
         argv[argv.index("--append-system-prompt") + 1] += note.format(base=lane.get("base") or "main",
@@ -4359,7 +4367,21 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             # (resumed) is keyed to its session, and its usage is in this run's: a new try starts without it
             tries = [*attempts[:-1], {**attempts[-1], **run_numbers(meta, fields)}]
             kept = {"usage": {}, "turns": None}
-        again = {"resumed": None} if final == "queued" else {}
+        again = {"resumed": None, "restart": None} if final == "queued" else {}
+        if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
+                and meta.get("kind") not in ("verify", "design") and (kind == "quota" or net)):
+            # Continue only the recorded, safe work of a run interrupted by the provider. A manual follow-up's
+            # start_from stays separate: even that task starts from the base when this run cannot be carried on.
+            reasons = []
+            if not fields.get("head") or not fields.get("commits"):
+                reasons.append("the interrupted run left no commits")
+            if fields.get("leaked"):
+                reasons.append("the interrupted run's commits hold a key")
+            if fields.get("markers"):
+                reasons.append("the interrupted run's commits hold conflict markers")
+            again["restart"] = {"commit": meta["base"] if reasons else fields["head"],
+                                "source": "base" if reasons else "earlier run's commit",
+                                "why": "; ".join(reasons)}
         if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
             kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
                 "provider": meta.get("provider", ""), "at": now(), **run_numbers(meta, fields),
@@ -4384,7 +4406,7 @@ def run_numbers(meta: dict, fields: dict) -> dict:
     return {"usage": fields.get("usage") or {}, "turns": fields.get("turns"), "session_id": fields.get("session_id", ""),
             "launch": meta.get("launch", ""), "ran_from": meta.get("started"), "ended": fields.get("finished") or now(),
             "model": meta.get("model_asked", ""), "effort": meta.get("effort_used", ""),
-            "effort_from": meta.get("effort_from", "")}
+            "effort_from": meta.get("effort_from", ""), "run_start": meta.get("run_start")}
 
 
 def keep_lost_run(desk: Desk, m: dict) -> dict:
