@@ -18,16 +18,8 @@ milliseconds, up to the most) for a long build or suite, and to run it in the
 foreground, in one Bash call, never in the background while they end their
 turn.
 
-A failed write in `hansa serve` does not prevent time-limit or cancellation stops. When a timeout mark cannot
-be saved, that server remembers the stop and saves the mark before recording the end once writes work again.
-It finishes processes that already ended before checking limits: a run that ended just inside its limit,
-seen just outside it, keeps its actual end, even if recording that end first failed.
-
-When recording an end fails, serve retains a worker's or verification's process and exit code in memory for
-another round. A check's or merge check's exit file stays on disk until its end is recorded, so a restarted
-server finds that end without running the check again. Memory cannot survive a restart: a worker's exit code
-that the old server could not record remains unknown, as before. A new server does not infer a timeout from
-the time at which it finds a process already ended.
+A failed write in `hansa serve` does not keep it from stopping runs at their time limit: see
+[Free space](desk.md#free-space).
 
 A worker ends with a short report: its last message before a notice from its
 own background work (a watch it started timing out, say) opened another turn
