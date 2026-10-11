@@ -1315,7 +1315,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             return f"{st['reason']}; saving a new key brings it back"
         if str(st.get("reason", "")).startswith("not logged in"):
             if p["kind"] == "compatible":  # no login of its own: the saved key did not arrive
-                return f"{st['reason']}; saving a new key brings it back, or `hansa check {name}` once it arrives"
+                return f"{st['reason']}; saving a new key brings it back, or `hansa ping {name}` once it arrives"
             # start Claude Code exactly as the worker does: on macOS a login made with
             # CLAUDE_CONFIG_DIR set, even to ~/.claude, may land in another keychain entry
             login = f"CLAUDE_CONFIG_DIR={shlex.quote(p['config_dir'])} claude" if p.get("config_dir") else "claude"
@@ -1324,7 +1324,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
                 who = account.name_of(account.uid())
                 as_root = f"env {login}" if p.get("config_dir") else login
                 how += f" as {who} (from root: `runuser -u {who} -- {as_root}`)"
-            return f"{st['reason']}; log in with {how}, then `hansa check {name}` brings it back"
+            return f"{st['reason']}; log in with {how}, then `hansa ping {name}` brings it back"
         how = rest_text(st)
         return (f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
                 + (f": {how}" if how else ""))

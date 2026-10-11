@@ -304,7 +304,7 @@ def compact_settings(s: dict) -> dict:
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
     return {"repo": repo, "base": base, "providers": providers or ["claude"],
-            "allow": list(DEFAULT_ALLOW), "network": [], "env": {}, "max_turns": 300, "timeout_min": 240}
+            "allow": list(DEFAULT_ALLOW), "network": [], "env": {}, "max_turns": 200, "timeout_min": 240}
 
 
 def now() -> float:
@@ -1079,7 +1079,25 @@ def lane_targets(ln) -> dict:
     if isinstance(named, dict) and named:
         return {k: v for k, v in named.items() if isinstance(v, dict)}
     cmd = ln.get("release")
-    return {"": {"command": cmd}} if isinstance(cmd, str) and cmd.strip() else {}
+    return {"default": {"command": cmd}} if isinstance(cmd, str) and cmd.strip() else {}
+
+
+def migrate_releases(s: dict) -> None:
+    """Read the former unnamed target as default, without writing settings or announcing a change."""
+    lanes = s.get("lanes")
+    moved = {}
+    for name, ln in lanes.items() if isinstance(lanes, dict) else []:
+        if (isinstance(ln, dict) and isinstance(ln.get("targets", {}), dict)
+                and "default" not in ln.get("targets", {}) and isinstance(ln.get("release"), str)
+                and ln["release"].strip()):
+            moved[name] = ln.pop("release")
+            ln["targets"] = {**ln.get("targets", {}), "default": {"command": moved[name]}}
+    listed = s.get("releases_without_asking")
+    for entry in listed if isinstance(listed, list) else []:
+        if (isinstance(entry, dict) and entry.get("target", "") == "" and isinstance(entry.get("lane"), str)
+                and entry["lane"] in moved
+                and entry.get("command", entry.get("release", "")) == moved[entry["lane"]]):
+            entry["target"] = "default"
 
 
 def target_name(target) -> str:
@@ -1169,7 +1187,7 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
     all empty when there is no such lane)."""
     if not isinstance(ln, dict) or not isinstance(ln.get("repo"), str):
         return {"repo": "", "base": "", "command": "", "after": ""}
-    t = lane_targets(ln).get(target, {})
+    t = lane_targets(ln).get(target or "default", {})
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
             "command": str(t.get("command") or ""), "after": str(t.get("after") or ""),
             **({"fixed": "yes"} if t.get("fixed") else {})}
@@ -1197,6 +1215,8 @@ def record_listed(listed, lanes: dict, before=()) -> list:
         fresh = (isinstance(x, str) and x not in kept) or (isinstance(x, dict) and set(x) <= {"lane", "target"})
         if fresh and _listed_ok(x):
             lane, target = listed_key(x)
+            if isinstance(x, str):  # a new tick by lane name; an old saved bare name is kept above
+                target = "default"
             x = {"lane": lane, "target": target, **listed_as(lanes.get(lane), target)}
         out.append(x)
     return out
@@ -1224,11 +1244,8 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
         return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
     if target not in lane_targets(ln):
         if zh:
-            return f"工作线 {lane} 现在没有发布目标 {target}" if target else f"工作线 {lane} 现在没有不带名字的发布命令"
-        if target:
-            return f"lane {lane} has no release target {target} now"
-        return (f"lane {lane} has no unnamed release command now (its targets have names)" if lane_targets(ln) else
-                f"lane {lane} has no release command now")
+            return f"工作线 {lane} 现在没有发布目标 {target or 'default'}"
+        return f"lane {lane} has no release target {target or 'default'} now"
     if not isinstance(entry, dict):
         return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
                 "the list was saved before hansa recorded each lane's repository, base branch and release command")
@@ -2327,6 +2344,7 @@ class Desk:
         loaded = read_json(self.settings_path, {})
         if isinstance(loaded, dict):
             s.update(loaded)
+        migrate_releases(s)
         for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
             # a merge_check of only spaces, written by hand, is unset, as hansa lane set makes it: never a command
             if isinstance(ln, dict) and isinstance(ln.get("merge_check"), str) and not ln["merge_check"].strip():
@@ -2348,6 +2366,9 @@ class Desk:
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
             old = self.settings()
+            if isinstance(new, dict):
+                new = copy.deepcopy(new)
+                migrate_releases(new)
             first = page_list_problems(new, old, self.root) if by == "page" and isinstance(new, dict) else []
             if first:
                 return first

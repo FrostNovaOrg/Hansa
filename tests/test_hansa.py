@@ -4959,7 +4959,7 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("setup before each task:", explained)
             self.assertNotIn("before it merges any task", explained)
             self.assertNotIn("per task:", explained)  # it takes no work; its merge check's limit is shown
-        self.assertIn("  per task: stopped at 300 turns or 240 minutes", self.hansa("explain", "lane", "a"))
+        self.assertIn("  per task: stopped at 200 turns or 240 minutes", self.hansa("explain", "lane", "a"))
 
     def test_merge_lane_hansa_merge_says_in_a_sentence_what_its_merge_check_waits_for(self):
         from hansa import run
@@ -8178,11 +8178,11 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["attempts"][0]["error"], "not logged in (Please run /login)")
         prob = provider_problem(self.desk, self.desk.settings(), "mimo")
         self.assertIn("not logged in (Please run /login)", prob)
-        self.assertIn("hansa check mimo", prob)
+        self.assertIn("hansa ping mimo", prob)
         self.assertIn("saving a new key", prob)
         self.assertNotIn("CLAUDE_CONFIG_DIR", prob)
         self.assertNotIn("log in", prob)
-        self.assertIn("hansa check mimo", views.explain_text(self.desk, "provider", "mimo"))
+        self.assertIn("hansa ping mimo", views.explain_text(self.desk, "provider", "mimo"))
 
         def answer(argv, **kwargs):  # logged in now
             return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
@@ -8239,7 +8239,7 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(prob.startswith("not logged in (Please run /login); log in with"), prob)
         shown = {p["name"]: p["problem"] for p in views.status(self.desk)["providers"]}
         self.assertEqual(shown["claude"], prob)
-        self.assertIn("hansa check claude", prob)
+        self.assertIn("hansa ping claude", prob)
         self.assertIn("log in with `claude`", prob)
         self.assertNotIn("CLAUDE_CONFIG_DIR", prob)
         s = self.desk.settings()
@@ -8247,7 +8247,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         prob = provider_problem(self.desk, self.desk.settings(), "claude")
         self.assertIn(f"CLAUDE_CONFIG_DIR={shlex.quote(str(self.desk.root / 'claude-home'))} claude", prob)
-        self.assertIn("hansa check claude", prob)
+        self.assertIn("hansa ping claude", prob)
         s["providers"]["claude"]["config_dir"] = "/Users/me/claude two"  # pastes as one word
         self.assertEqual(self.desk.save_settings(s), [])
         prob = provider_problem(self.desk, self.desk.settings(), "claude")
@@ -8535,7 +8535,7 @@ class DeskTest(unittest.TestCase):
         self.desk.update(vid, state="running")
         with self.in_session(a, sa):
             self.hansa_out("cancel", "t0001")
-            self.hansa_out("cancel", "t0004")  # and so its running verification, which hansa serve then stops
+            self.hansa_out("close", "t0004")  # and so its running verification, which hansa serve then stops
         self.desk.update(vid, state="cancelled", error="cancelled")
         with self.in_session(b, sb):
             self.hansa_out("cancel", "t0002")
@@ -11153,6 +11153,25 @@ class DeskTest(unittest.TestCase):
         self.assertIn(str(self.desk.root / "CLAUDE.md"),
                       json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["claudeMdExcludes"])
 
+    def test_check_points_to_ping_without_sending_a_request(self):
+        before = self.desk.events_path.read_bytes()
+        with unittest.mock.patch("hansa.cli.check_provider") as pinged:
+            self.assertIn("hansa ping [PROVIDER]; nothing was run", self.refused("check", "claude"))
+            self.assertIn("hansa ping [PROVIDER]; nothing was run", self.refused("check"))
+        pinged.assert_not_called()
+        self.assertEqual(self.desk.events_path.read_bytes(), before)
+
+    def test_ping_uses_the_same_request_and_keeps_old_provider_records(self):
+        from hansa import run
+        with unittest.mock.patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"type": "result", "result": "OK"}), "")) as request:
+            self.assertIn("claude: ok", self.hansa("ping", "claude"))
+        self.assertEqual(request.call_count, 1)
+        self.assertIn("check", self.desk.provider_state()["claude"])
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        self.assertNotIn("last ping:", self.hansa("status"))
+        self.assertIn("last ping:", self.hansa("explain", "provider", "claude"))
+
     @staticmethod
     def sandbox_of(argv):
         return json.loads(argv[argv.index("--settings") + 1]).get("sandbox")
@@ -11315,14 +11334,14 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         self.assertEqual(self.hansa_out("help", "lane", "add"), out.getvalue())
-        self.assertTrue(self.hansa_out("help", "card").startswith("# Desk card"))
+        self.assertTrue(self.hansa_out("help", "card").startswith("# The card"))
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("help", "nosuch")
         self.assertIn("no command or topic nosuch; hansa help topics lists the topics", str(e.exception.code))
         # alone: an index, not the card: every command, then every topic with what it holds
         index = self.hansa_out("help")
         self.assertLessEqual(len(index.splitlines()), 40)
-        self.assertNotIn("# Desk card", index)
+        self.assertNotIn("# The card", index)
         for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator"):
             self.assertIn(name, index)
         self.assertNotIn("notify-follow", index)  # the hidden ones stay hidden
@@ -11341,6 +11360,26 @@ class DeskTest(unittest.TestCase):
         said = self.hansa_out("explain", "states")
         self.assertTrue(said.startswith("hansa explain states is now hansa help states"), said)
         self.assertIn("replaced", said)
+
+    def test_explain_task_points_to_show_and_forwards_its_output(self):
+        tid = self.desk.new_task("A task to look at")
+        said = self.hansa("explain", "task", tid)
+        pointer, output = said.split("\n", 1)
+        self.assertIn(f"hansa explain task {tid} is now hansa show {tid}", pointer)
+        self.assertEqual(output, self.hansa("show", tid))
+        self.assertNotIn("task ID", self.hansa("help", "explain"))
+        self.assertNotIn("task <id>", self.hansa("explain"))
+
+    def test_merge_retry_and_verify_help_use_the_words_the_commands_mean(self):
+        merge = " ".join(self.hansa("help", "merge").split())
+        self.assertIn("merge now with no merge check, despite a failed check or a 'does not hold' verdict", merge)
+        self.assertIn("never past release files or a key", merge)
+        self.assertIn("run the merge check (the lane's merge_check when set)", merge)
+        retry = " ".join(self.hansa("help", "retry").split())
+        self.assertIn("queue a follow-up task (new id) that continues from this task's last commit with your note; "
+                      "this task becomes replaced", retry)
+        self.assertNotIn("attempt", retry)
+        self.assertIn("a verification by another model", " ".join(self.hansa("help", "verify").split()))
 
     def test_every_hansa_help_pointer_leads_somewhere(self):
         """Every hansa help WORD written in hansa's code, the card, the helpers' files, docs/ and the README is a
@@ -15654,8 +15693,52 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Look around"))
         self.assertEqual((m["state"], m.get("commits"), m.get("check")), ("done", 0, None), m)
         self.assertIn("nothing to merge", views.show_text(self.desk, m["id"]))
-        main(["--desk", str(self.desk.root), "cancel", m["id"]])
+        main(["--desk", str(self.desk.root), "close", m["id"]])
         self.assertEqual(self.desk.meta(m["id"])["state"], "cancelled")
+
+    def test_cancel_of_finished_work_changes_nothing_and_points_to_close(self):
+        tid = self.desk.new_task("Finished task")
+        vid = self.desk.new_task("Its verification", kind="verify", parent=tid, lane="a")
+        self.desk.update(tid, state="done", verify=vid,
+                         merge_check_result={"ok": False, "note": "exit 1"})  # the merge check just failed
+        self.desk.update(vid, state="done", verdict="holds")
+        before = [(self.desk.tasks_dir / t / "meta.json").read_bytes() for t in (tid, vid)]
+        events = self.desk.events_path.read_bytes()
+        for t in (tid, vid):
+            self.assertIn(f"hansa close {t}; nothing was changed", self.refused("cancel", t))
+        self.assertEqual([(self.desk.tasks_dir / t / "meta.json").read_bytes() for t in (tid, vid)], before)
+        self.assertEqual(self.desk.events_path.read_bytes(), events)
+
+    def test_close_of_finished_work_keeps_the_stored_states(self):
+        tid = self.desk.new_task("Finished task")
+        vid = self.desk.new_task("Its verification", kind="verify", parent=tid, lane="a")
+        self.desk.update(tid, state="done", verify=vid)
+        self.desk.update(vid, state="done", verdict="does not hold")
+        self.assertIn("closed; it stays done, verdict: does not hold", self.hansa("close", vid))
+        closed = self.desk.meta(vid)
+        self.assertEqual((closed["state"], closed["verdict"]), ("done", "does not hold"))
+        self.assertIn("closed without merging", self.hansa("close", tid))
+        self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(tid)["error"]),
+                         ("cancelled", "closed without merging"))
+        self.assertEqual(self.desk.meta(vid), closed)
+        self.assertEqual([e["task"] for e in self.events("task_cancel")], [tid])
+        self.assertEqual([e["task"] for e in self.events("verification_closed")], [vid])
+        self.assertIn("only a finished", self.refused("merge", tid))
+        queued = self.desk.new_task("Still queued")
+        self.assertIn("only finished tasks or verifications", self.refused("close", queued))
+        self.assertEqual(self.desk.meta(queued)["state"], "queued")
+
+    def test_close_keeps_finished_work_unchanged_when_the_record_cannot_be_written(self):
+        for kind in ("task", "verify"):
+            tid = self.desk.new_task("Finished work", kind=kind, lane="a")
+            self.desk.update(tid, state="done", **({"verdict": "holds"} if kind == "verify" else {}))
+            record = self.desk.tasks_dir / tid / "meta.json"
+            before = record.read_bytes()
+            with partial_write(record) as hit, self.assertRaises(OSError):
+                self.hansa("close", tid)
+            self.assertTrue(hit)
+            self.assertEqual(record.read_bytes(), before)
+            self.assertIn("closed", self.hansa("close", tid))  # it can be closed once writes work again
 
     def test_the_verification_tells_tests_for_a_defect_from_coverage_tests(self):
         from hansa.run import VERIFY_TASK
@@ -15698,7 +15781,7 @@ class DeskTest(unittest.TestCase):
                 main(["--desk", str(self.desk.root), "retry", tid, "fix", "what", "it", "found"])
             new = self.desk.meta(tid)["replaced_by"]
             text = (self.desk.tasks_dir / new / "task.md").read_text()
-            self.assertIn(f"The report of {vid}, the verification of the previous attempt", text)
+            self.assertIn(f"The report of {vid}, the verification of the earlier task", text)
             self.assertIn(f"its verdict: {verdict}):\n{vreport}", text)  # whole, marked as the verification's
             self.settle(d, new)
             tid = new
@@ -15756,7 +15839,7 @@ class DeskTest(unittest.TestCase):
     def test_a_follow_up_gives_the_original_one_line_per_earlier_round_this_note_and_two_reports(self):
         tid = self.desk.new_task(self.ORIGINAL, lane="a")
         chain, texts = [tid], {}
-        # each round: how the previous attempt ended, its verification's verdict (None: not verified) and report,
+        # each round: how the earlier task ended, its verification's verdict (None: not verified) and report,
         # and the form of the follow-up
         plan = [("done", None, "", ()), ("failed", "does not hold", "V1 found the badge missing", ("--fresh",)),
                 ("done", "holds", "V2 saw the badge", ()), ("done", "unsure", "V3 could not start the page", ()),
@@ -15769,12 +15852,12 @@ class DeskTest(unittest.TestCase):
             new, text = self.follow_up(prev, *form, note)
             earlier = [f"N{j}-TAIL" for j in range(k)] + [f"R{j}:" for j in range(k)] + \
                 [p[2] for p in plan[:k] if p[2]]
-            carried = [f"The previous attempt's report:\nR{k}: the report of round {k}."]
+            carried = [f"The earlier task's report:\nR{k}: the report of round {k}."]
             if vreport:
-                carried.append(f"The report of {vid}, the verification of the previous attempt (a worker who ran the "
+                carried.append(f"The report of {vid}, the verification of the earlier task (a worker who ran the "
                                f"change to see whether it holds; its verdict: {verdict or 'none'}):\n{vreport}")
             else:
-                earlier.append("the verification of the previous attempt")
+                earlier.append("the verification of the earlier task")
             self.assert_follow_up(new, text, chain, note, carried, earlier)
             how = state + (", not verified" if verdict is None else
                            f", verified by {vid} (verdict: {verdict or 'none'})")
@@ -15795,7 +15878,7 @@ class DeskTest(unittest.TestCase):
         tid = self.desk.new_task(self.ORIGINAL, lane="a")
         self.ended(tid, "done", "OLD REPORT 1")
         old = self.desk.new_task(self.ORIGINAL + f"\n\n---\nFollow-up to {tid} (done). What to change: OLD NOTE 1"
-                                 + "\nThe previous attempt's report:\nOLD REPORT 1", parent=tid, lane="a")
+                                 + "\nThe earlier task's report:\nOLD REPORT 1", parent=tid, lane="a")
         self.desk.update(tid, state="replaced", replaced_by=old)  # as hansa did then: no record of how it ended
         self.ended(old, "done", "OLD REPORT 2")
         new, text = self.follow_up(old, "the new note")
@@ -15808,7 +15891,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(text.count(self.ORIGINAL), 1)
         self.assertEqual(re.findall(r"^- (t\d+): ", text, re.M), [tid, old, new])
         self.assertIn(f"\n- {new}: failed, not verified; its note: \"the new note\"; ", text)
-        self.assertIn(f"\nFollow-up to {new} (failed).\nThe previous attempt's report:\nNEW REPORT 3", text)
+        self.assertIn(f"\nFollow-up to {new} (failed).\nThe earlier task's report:\nNEW REPORT 3", text)
         for x in ("OLD NOTE 1", "OLD REPORT", "What to change"):
             self.assertNotIn(x, text)
         self.ended(third, "done", "REPORT 4")
@@ -15822,14 +15905,14 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         new, text = self.follow_up(tid, "--update", "bring it up to date")
         self.assert_follow_up(new, text, [tid], "bring it up to date", [
-            "The previous attempt's report:\nAdded hello.txt. Checked it exists.",
-            f"\nYou start from the previous attempt's last commit ({m['head'][:10]}), with main as it is now merged "
+            "The earlier task's report:\nAdded hello.txt. Checked it exists.",
+            f"\nYou start from the earlier task's last commit ({m['head'][:10]}), with main as it is now merged "
             f"into it."], [])
         m2 = self.settle(d, new)
         self.assertEqual(m2["state"], "done", m2)
         third, text = self.follow_up(new, "keep", "going")
         self.assert_follow_up(third, text, [tid, new], "keep going", [
-            f"\nYou start from the previous attempt's last commit ({m2['head'][:10]}).",
+            f"\nYou start from the earlier task's last commit ({m2['head'][:10]}).",
             f"\n- {new}: done, not verified; its note: \"bring it up to date\"; "], ["merged into it"])
         self.assertEqual(text.count("Added hello.txt. Checked it exists."), 1)  # the previous report only
 
@@ -16468,7 +16551,7 @@ class DeskTest(unittest.TestCase):
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "failed")
         self.assertEqual(m["model_asked"], "mimo-x")  # a task's --model is for Claude providers only
-        self.assertTrue(m["error"].startswith("stopped at the ceiling of 300 turns: the task was probably too big"), m)
+        self.assertTrue(m["error"].startswith("stopped at the ceiling of 200 turns: the task was probably too big"), m)
         shown = views.show_text(self.desk, tid)
         self.assertIn("Stopped at the ceiling before it wrote its report", shown)
         self.assertIn("week badge is still in English", shown)
@@ -16477,7 +16560,7 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "retry", tid, "only the detail page"])
         follow = (self.desk.tasks_dir / "t0002" / "task.md").read_text()
-        self.assertIn("The previous attempt's report:", follow)
+        self.assertIn("The earlier task's report:", follow)
         self.assertIn("week badge is still in English", follow)
 
     def transcript_run(self, kind: str, key: str = "", env=None) -> str:
@@ -16880,7 +16963,7 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "verify", t2, "--lane", "a"])
         v3 = self.desk.meta(t2)["verify"]
         with contextlib.redirect_stdout(io.StringIO()):
-            main(["--desk", str(self.desk.root), "cancel", t2])
+            main(["--desk", str(self.desk.root), "close", t2])
         self.assertEqual((self.desk.meta(v3)["lane"], self.desk.meta(v3)["state"], self.desk.meta(v3)["error"]),
                          ("a", "cancelled", f"closed: {t2} was cancelled"))  # stopped with its task, from another lane
 
@@ -16929,8 +17012,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.meta(v3)["state"], "queued")
         with contextlib.redirect_stdout(io.StringIO()) as out:
             main(["--desk", str(self.desk.root), "merge", t1])
-            main(["--desk", str(self.desk.root), "cancel", t2])
-            main(["--desk", str(self.desk.root), "cancel", t3])
+            main(["--desk", str(self.desk.root), "close", t2])
+            main(["--desk", str(self.desk.root), "close", t3])
         self.assertNotIn("nothing verified", out.getvalue())  # v1 holds, kept after the merge
         self.assertIsNone(self.desk.meta(t1).get("unverified"))
         for v, t, why in ((v1, t1, "merged"), (v2, t2, "cancelled")):
@@ -16946,15 +17029,15 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{v1}, the verification of {t1}, ended: verdict: holds",
                       notify.task_line(self.desk, self.desk.meta(v1)))
         self.assertNotIn("merge or send back", notify.task_line(self.desk, self.desk.meta(v1)))
-        t4 = self.desk.new_task("Add hello.txt 4")  # hansa cancel on an ended verification itself: kept as well
+        t4 = self.desk.new_task("Add hello.txt 4")  # hansa close on an ended verification itself: kept as well
         self.settle(d, t4)
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "verify", t4])
         v4 = self.desk.meta(t4)["verify"]
         self.settle(d, v4)
-        for v, why in ((v4, f"closed: {v4} was closed with hansa cancel"), (v1, f"closed: {t1} was merged")):
+        for v, why in ((v4, f"closed: {v4} was closed with hansa close"), (v1, f"closed: {t1} was merged")):
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                main(["--desk", str(self.desk.root), "cancel", v])
+                main(["--desk", str(self.desk.root), "close", v])
             self.assertEqual(out.getvalue(), f"{v} closed; it stays done, verdict: holds\n")
             m = self.desk.meta(v)
             self.assertEqual((m["state"], m["verdict"], m.get("error", ""), m["closed"]), ("done", "holds", "", why))
@@ -16997,7 +17080,7 @@ class DeskTest(unittest.TestCase):
         self.settle(d, t2)
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "verify", t2])
-            main(["--desk", str(self.desk.root), "cancel", t2])
+            main(["--desk", str(self.desk.root), "close", t2])
         v2 = self.desk.meta(t2)["verify"]
         shown = views.show_text(self.desk, v2)
         self.assertTrue(shown.startswith(f"{v2} · cancelled · "), shown)
@@ -18071,11 +18154,28 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "lane", "remove", "b"])
         self.assertIn(f"{tid} finished and waiting for review", str(e.exception.code))
-        self.assertIn("hansa merge or hansa cancel", str(e.exception.code))
+        self.assertIn("hansa merge or hansa close", str(e.exception.code))
         self.assertIn("b", self.desk.settings()["lanes"])
         self.desk.update(tid, state="cancelled")
         self.hansa("lane", "remove", "b")
         self.assertNotIn("b", self.desk.settings()["lanes"])
+
+    def test_a_lane_added_now_stops_at_200_and_saved_lanes_keep_their_limits(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["max_turns"] = 300
+        self.desk.settings_path.write_text(json.dumps(s))  # an older lane's own limit
+        self.assertIn("stopped at 200 turns", self.hansa("lane", "add", "b", "--repo", str(self.repo)))
+        self.assertEqual((self.desk.settings()["lanes"]["a"]["max_turns"],
+                          self.desk.settings()["lanes"]["b"]["max_turns"]), (300, 200))
+        self.hansa("lane", "set", "b", "env", "FAKE_STOP_AT_TURNS=1")
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["b"]["providers"] = ["mimo"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Stop at the limit", lane="b"))
+        self.assertTrue(m["error"].startswith("stopped at the ceiling of 200 turns"), m)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["max_turns"], 300)
 
     def test_explain_lane_names_the_command_that_made_or_last_changed_it(self):
         first = views.explain_text(self.desk, "lane", "a").splitlines()[0]
@@ -18327,8 +18427,14 @@ class DeskTest(unittest.TestCase):
 
     def with_release(self, command, **lane):
         s = self.desk.settings()
-        s["lanes"]["a"].update(release=command, **lane)
+        s["lanes"]["a"].update(targets={"default": {"command": command}}, **lane)
         self.assertEqual(self.desk.save_settings(s), [])
+
+    def test_release_pointers_for_a_lane_without_targets_use_lane_target_default(self):
+        for said in (self.hansa("release"), self.hansa("explain", "lane", "a")):
+            with self.subTest(said=said):
+                self.assertRegex(said, r'hansa lane target (L|a) default "<command>"')
+                self.assertNotRegex(said, r"hansa lane set (L|a) release ")
 
     def settle_release(self, d, rid, timeout=20):
         from hansa import release
@@ -18379,7 +18485,7 @@ class DeskTest(unittest.TestCase):
         for x in ("releaseYes:", "releaseNo:", "releaseNamed:", "releasesWithoutAsking:", "releaseForbidden:"):
             self.assertEqual(ui.count(x), 2, x)
         self.assertIn('"/api/release/answer"', ui)
-        self.assertIn("#1 lane a at", views.status_text(views.status(self.desk)))
+        self.assertIn("#1 lane a target default at", views.status_text(views.status(self.desk)))
         # the page's yes: to the release as the page showed it
         self.assertFalse(release.answer(self.desk, 1, True, "", "0" * 40, r["command"])["ok"])
         self.assertEqual(release.answer(self.desk, 1, True, "", sha, r["command"]), {"ok": True})
@@ -18402,8 +18508,8 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(any("release #1 of lane a" in x and "done" in x for x in heard), heard)
         self.assertIn("done", self.hansa("release"))
         told = self.hansa("explain", "lane", "a")
-        self.assertIn("release: sh ./deploy.sh", told)
-        self.assertIn("last release: #1 lane a at " + sha[:10], told)
+        self.assertIn("release target default: sh ./deploy.sh", told)
+        self.assertIn("last release of default: #1 lane a target default at " + sha[:10], told)
         # the next one shows only what came since
         self.commit_in_repo("b.txt", "b\n")
         with self.in_session(p, sock):
@@ -18454,7 +18560,7 @@ class DeskTest(unittest.TestCase):
         self.with_release(f"touch {out}")
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         told = self.hansa("release", "a")
-        self.assertIn("on the principal's list of lanes released without asking", told)
+        self.assertIn("on the principal's list of releases without asking", told)
         self.assertEqual(release.get(self.desk, 1)["state"], "approved")
         r = self.settle_release(Dispatcher(self.desk), 1)
         self.assertEqual(r["state"], "done", r)
@@ -18550,7 +18656,7 @@ class DeskTest(unittest.TestCase):
         self.with_release(f"touch {out}")
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
         [entry] = self.desk.settings()["releases_without_asking"]
-        self.assertEqual(entry, {"lane": "a", "target": "", "repo": str(self.repo.resolve()), "base": "main",
+        self.assertEqual(entry, {"lane": "a", "target": "default", "repo": str(self.repo.resolve()), "base": "main",
                                  "command": f"touch {out}", "after": ""})
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
 
@@ -19326,9 +19432,9 @@ class DeskTest(unittest.TestCase):
     def test_a_release_command_set_with_a_forbidden_word_is_said_at_once_and_kept(self):
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["maplebox"])), {"ok": True, "problems": []})
         out = self.hansa("lane", "set", "a", "release", "scp target/app.jar /Users/MapleBox/deploy/")
-        self.assertIn("Warning: lane a's release command holds \"maplebox\"", out)
+        self.assertIn("Warning: lane a's release target default holds \"maplebox\"", out)
         self.assertIn("scp target/app.jar /Users/MapleBox/deploy/", out)
-        self.assertEqual(self.desk.settings()["lanes"]["a"]["release"], "scp target/app.jar /Users/MapleBox/deploy/")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["default"]["command"], "scp target/app.jar /Users/MapleBox/deploy/")
         self.assertNotIn("Warning", self.hansa("lane", "set", "a", "release", "none"))
         self.assertNotIn("Warning", self.hansa("lane", "target", "a", "push", "git push origin main"))
         out = self.hansa("lane", "target", "a", "test", "./install.sh /home/maplebox/test")
@@ -19474,7 +19580,7 @@ class DeskTest(unittest.TestCase):
     def test_a_release_command_holding_a_key_is_refused_on_saving(self):
         self.desk.write_key("demo", "sk-demo-release-123456")
         said = self.refused("lane", "set", "a", "release", "curl -H 'Authorization: sk-demo-release-123456' https://x")
-        self.assertIn("the release command holds the key of demo", said)
+        self.assertIn("the release command of target default holds the key of demo", said)
         self.assertIn("read the key from where the tool keeps it", said)
         self.assertNotIn("sk-demo-release-123456", said)
         self.assertEqual(self.desk.settings()["lanes"]["a"].get("release", ""), "")
@@ -19482,7 +19588,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["release"] = "deploy sk-demo-release-123456"
         self.assertTrue(any("holds the key of demo" in x for x in self.desk.save_settings(s)))
         self.hansa("lane", "set", "a", "release", "./deploy --token-file ~/.config/deploy/token")  # a key read by the tool
-        self.assertEqual(self.desk.settings()["lanes"]["a"]["release"], "./deploy --token-file ~/.config/deploy/token")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["default"]["command"], "./deploy --token-file ~/.config/deploy/token")
 
     def test_the_page_looks_once_at_whether_a_waiting_release_still_applies_for_both_languages(self):
         from hansa import release
@@ -19529,7 +19635,7 @@ class DeskTest(unittest.TestCase):
             self.assertIn("only the coordinator asks for a release", self.refused("release", "a"))
         self.assertEqual(release.releases(self.desk), [])
         self.hansa("lane", "set", "a", "release", "none")
-        self.assertIn("lane a has no release command", self.refused("release", "a"))
+        self.assertIn("lane a has no release target", self.refused("release", "a"))
         self.assertIn("no releases yet", self.hansa("release"))
 
     def test_a_release_stops_at_the_lanes_time_limit(self):
@@ -19882,14 +19988,14 @@ class DeskTest(unittest.TestCase):
         s["releases_without_asking"] = ["a"]  # as a page saved it before hansa recorded what it listed
         self.desk.settings_path.write_text(json.dumps(s))
         [u] = public_settings(self.desk)["release_unmatched"]
-        self.assertIn("before hansa recorded", u["why"])
+        self.assertEqual(u["why"], "lane a has no release target default now")
         # a save of something else keeps it as it was, as it keeps a recorded entry that no longer matches
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])), {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["releases_without_asking"], ["a"])
         self.hansa("release", "a")
         self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
         # the page's tick (its button to take them back in sends one) records it as the lane is now
-        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": ""}])),
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "default"}])),
                          {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["releases_without_asking"][0]["command"], "true")
         self.hansa("release", "a")
@@ -19958,6 +20064,17 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.assertIn(rule, css)
         self.assertNotIn("max-content 1fr", css)
 
+    def test_both_page_languages_name_ping_operator_and_the_design_sandbox(self):
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        for label in ('check:"Ping"', 'lastCheck:"last ping"', 'lastCheck:"上次 Ping"',
+                      'helper_operator:"operator"', 'helper_operator:"操作"',
+                      'helper_verifier:"earlier helper: verifier"', 'helper_verifier:"早期助手：验收官"',
+                      'the preview command is run by the design session, in its own sandbox',
+                      '设计会话在自己的沙箱里'):
+            self.assertIn(label, ui)
+        self.assertEqual(ui.count('check:"Ping"'), 2)
+        self.assertNotIn('release:T.laneRelease', ui)
+
     def principals_release_desk(self):
         """A desk with lane a and two release targets, one with a long command of few spaces,
         lanes b, c and d with no release, and three old entries for the unnamed releases of a, b and c."""
@@ -19985,9 +20102,9 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         shown = public_settings(self.desk)
         self.assertEqual(shown["problems"], [])
         self.assertEqual([(u["lane"], u["target"], u["gone"], u["was"], u["why"]) for u in shown["release_unmatched"]],
-                         [("a", "", True, "", "lane a has no unnamed release command now (its targets have names)"),
-                          ("b", "", True, "make deploy", "lane b has no release command now"),
-                          ("c", "", True, "", "lane c has no release command now")])
+                         [("a", "", True, "", "lane a has no release target default now"),
+                          ("b", "", True, "make deploy", "lane b has no release target default now"),
+                          ("c", "", True, "", "lane c has no release target default now")])
         # they can be taken off the list: a save without them keeps only what is ticked
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "github"}])),
                          {"ok": True, "problems": []})
@@ -20010,7 +20127,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         # every target each lane has, then each old entry, ticked as saved; the old ones said as such
         self.assertEqual([(x["lane"], x["target"], x["ticked"]) for x in out["ticks"]],
                          [("a", "shop-test", True), ("a", "github", False), ("a", "", True), ("b", "", True), ("c", "", True)])
-        gone = {x["lane"]: x["text"] for x in out["ticks"] if not x["target"]}
+        gone = {x["lane"]: x["text"] for x in out["ticks"] if x["target"] == ""}
         for lane in "abc":
             self.assertIn("no lane has this release target now", gone[lane])
         self.assertIn("its command then: make deploy", gone["b"])
@@ -20019,6 +20136,33 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         # a click on the first tick unticks it alone
         self.assertEqual([listed for listed in out["after"] if isinstance(listed, dict) and listed.get("target") == "shop-test"], [])
         self.assertEqual(len(out["after"]), 3)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_settings_page_keeps_an_old_unnamed_tick_separate_from_default(self):
+        from hansa import release
+        self.with_targets(default="true", prod="false")
+        tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        s = self.desk.settings()
+        s["releases_without_asking"] = [tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        r = subprocess.run(["node", str(harness), str(page), "ticks"], input=json.dumps({"/api/settings": public_settings(self.desk)}),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual([(x["lane"], x["target"], x["ticked"]) for x in out["ticks"]],
+                         [("a", "default", False), ("a", "prod", False), ("a", "", True)])
+        self.assertIn("no lane has this release target now", out["ticks"][-1]["text"])
+        self.assertIn("its command then: true", out["ticks"][-1]["text"])
+        # The harness clicks default: only this explicit new tick lets it go out without asking.
+        self.assertEqual(out["after"], [tick, {"lane": "a", "target": "default"}])
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=out["after"])),
+                         {"ok": True, "problems": []})
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "default"))
+        self.assertFalse(release.lane_listed(self.desk.settings(), "a", ""))
+        self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_the_status_and_settings_tabs_show_no_null_for_sections_a_desk_has_not(self):
@@ -20093,15 +20237,15 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.hansa("concurrency", "2")
         s = self.desk.settings()
         self.assertEqual(([x["lane"] for x in s["releases_without_asking"]], s["release_forbidden"],
-                          s["lanes"]["a"]["release"]), (["a"], ["secret"], "git push origin main"))
+                          s["lanes"]["a"]["targets"]["default"]["command"]), (["a"], ["secret"], "git push origin main"))
         self.assertFalse(self.page_save(lambda s: s.update(release_forbidden=["two\nlines"]))["ok"])
         self.assertFalse(self.page_save(lambda s: s.update(releases_without_asking=["Not A Lane"]))["ok"])
         told = self.hansa("explain")
         self.assertIn("you cannot set them", told)
         # its release command changed since the page saved the list: it waits for the yes until the list is saved again
-        self.assertIn("lanes a are on that list, but their repository, base branch or release command is no longer", told)
+        self.assertIn("lanes a target default are on that list, but their repository, base branch or release command is no longer", told)
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"])), {"ok": True, "problems": []})
-        self.assertIn("for lanes a, which the principal lets go out without asking", self.hansa("explain"))
+        self.assertIn("for lanes a target default, which the principal lets go out without asking", self.hansa("explain"))
 
     # -- release targets (hansa lane target; hansa release L TARGET) ---------------------------------------------
     def with_targets(self, **targets):
@@ -20125,18 +20269,21 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         s["releases_without_asking"] = [{"lane": "a", "repo": str(self.repo.resolve()), "base": "main",
                                          "release": f"echo x >> {out}"}]  # as a page before targets saved it
         self.desk.settings_path.write_text(json.dumps(s))
+        saved = self.desk.settings_path.read_bytes()
+        events = self.desk.events_path.read_bytes()
         self.assertEqual(public_settings(self.desk)["problems"], [])
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
+        self.assertEqual(self.desk.settings_path.read_bytes(), saved)
+        self.assertEqual(self.desk.events_path.read_bytes(), events)
         told = self.hansa("release", "a", "first", "cut")
-        self.assertIn("on the principal's list of lanes released without asking", told)
-        self.assertNotIn("target", told)
+        self.assertIn("lane a target default is on the principal's list of releases without asking", told)
         r = release.get(self.desk, 1)
-        self.assertEqual((r["state"], r["target"], r["note"]), ("approved", "", "first cut"))
+        self.assertEqual((r["state"], r["target"], r["note"]), ("approved", "default", "first cut"))
         self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
         self.assertEqual(out.read_text(), "x\n")
-        self.assertIn("#1 lane a at", self.hansa("release"))
-        self.assertIn("release: echo x", self.hansa("explain", "lane", "a"))
-        self.assertIn("(unnamed: the release command)", self.hansa("lane", "target", "a"))
+        self.assertIn("#1 lane a target default at", self.hansa("release"))
+        self.assertIn("default: echo x", self.hansa("explain", "lane", "a"))
+        self.assertIn("default: echo x", self.hansa("lane", "target", "a"))
         # a request recorded before targets had names is the unnamed target's last release
         release.change(self.desk, 1, lambda x: {"target": None})
         self.commit_in_repo("b.txt", "b\n")
@@ -20144,6 +20291,170 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertEqual((release.get(self.desk, 2)["since_release"], release.get(self.desk, 2)["count"]), (1, 1))
         # the entry is left as it was saved
         self.assertEqual(self.desk.settings()["releases_without_asking"][0].get("release"), f"echo x >> {out}")
+
+    def test_release_migration_moves_the_unnamed_tick_and_keeps_old_requests_working(self):
+        from hansa import release
+        from hansa.desk import listed_key
+        s = self.desk.settings()
+        command = "true"
+        s["lanes"]["a"].update(release=command, max_turns=300)
+        old_tick = {"lane": "a", "target": "", "repo": str(self.repo.resolve()), "base": "main",
+                    "command": command, "after": ""}
+        s["releases_without_asking"] = [old_tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        before = self.desk.settings_path.read_bytes()
+        migrated = self.desk.settings()
+        self.assertEqual(migrated["lanes"]["a"]["targets"], {"default": {"command": command}})
+        self.assertNotIn("release", migrated["lanes"]["a"])
+        [tick] = migrated["releases_without_asking"]
+        self.assertEqual(tick, {**old_tick, "target": "default"})
+        self.assertEqual(listed_key(tick), ("a", "default"))
+        self.assertTrue(release.lane_listed(migrated, "a", "default"))
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        self.hansa("release", "a")
+        # A release already waiting in an older desk has no target name. It must still apply and run.
+        release.change(self.desk, 1, lambda r: {"target": ""})
+        self.assertEqual(release.stale(self.desk, self.desk.settings(), release.get(self.desk, 1)), "")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.hansa("lane", "target", "a", "prod", "true")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "default"))
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["max_turns"], 300)
+
+    def test_an_old_unnamed_tick_never_covers_an_existing_default_target(self):
+        from hansa import release
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["lanes"]["a"]["targets"] = {"default": {"command": "true"}, "prod": {"command": "false"}}
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true", **target}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                before = self.desk.settings_path.read_bytes()
+                loaded = self.desk.settings()
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                [unmatched] = public_settings(self.desk)["release_unmatched"]
+                self.assertEqual((unmatched["lane"], unmatched["target"], unmatched["gone"], unmatched["was"]),
+                                 ("a", "", True, "true"))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertIn("waits for the principal's yes", self.hansa("release", "a", "default"))
+                self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
+                self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["nowhere"])),
+                                 {"ok": True, "problems": []})
+                self.assertFalse(release.lane_listed(self.desk.settings(), "a", "default"))
+
+    def test_release_migration_moves_only_a_tick_for_its_own_command(self):
+        from hansa import release
+        for entry in ({"command": "false"}, {"release": "false"}, {}):
+            with self.subTest(entry=entry):
+                s = self.desk.settings()
+                s["lanes"]["a"].pop("targets", None)
+                s["lanes"]["a"]["release"] = "true"
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", **entry}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                loaded = self.desk.settings()
+                self.assertEqual(loaded["lanes"]["a"]["targets"], {"default": {"command": "true"}})
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
+                # A later matching command does not turn this unmatched old entry into a new tick.
+                self.hansa("lane", "target", "a", "default", "false")
+                self.assertFalse(release.lane_listed(self.desk.settings(), "a", "default"))
+
+    def test_release_migration_keeps_other_named_targets_and_their_ticks(self):
+        from hansa import release
+        s = self.desk.settings()
+        s["lanes"]["a"].update(release="true", targets={"prod": {"command": "false"}})
+        old_tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        named_tick = {**old_tick, "target": "prod", "command": "false"}
+        s["releases_without_asking"] = [old_tick, named_tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        before = self.desk.settings_path.read_bytes()
+        loaded = self.desk.settings()
+        self.assertEqual(loaded["lanes"]["a"]["targets"], {"prod": {"command": "false"}, "default": {"command": "true"}})
+        self.assertNotIn("release", loaded["lanes"]["a"])
+        self.assertEqual(loaded["releases_without_asking"], [{**old_tick, "target": "default"}, named_tick])
+        self.assertTrue(release.lane_listed(loaded, "a", "default"))
+        self.assertTrue(release.lane_listed(loaded, "a", "prod"))
+        self.assertEqual(public_settings(self.desk)["problems"], [])
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_the_page_taking_entries_back_in_does_not_turn_an_unnamed_tick_into_default(self):
+        from hansa import release
+        self.with_targets(default="true", prod="false")
+        old_tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true"}
+        named_tick = {**old_tick, "target": "prod"}  # its command has changed, so the page offers the button
+        s = self.desk.settings()
+        s["releases_without_asking"] = [old_tick, named_tick]
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 2)
+        # The button sends each entry as a fresh {lane, target}, keeping the old unnamed entry unnamed.
+        self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
+            {"lane": "a", "target": ""}, {"lane": "a", "target": "prod"}])), {"ok": True, "problems": []})
+        loaded = self.desk.settings()
+        self.assertFalse(release.lane_listed(loaded, "a", "default"))
+        self.assertTrue(release.lane_listed(loaded, "a", "prod"))
+        [unmatched] = public_settings(self.desk)["release_unmatched"]
+        self.assertEqual((unmatched["lane"], unmatched["target"], unmatched["gone"]), ("a", "", True))
+
+    def test_an_old_unnamed_tick_does_not_cover_default_when_both_release_forms_are_saved(self):
+        from hansa import release
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["lanes"]["a"].update(release="true", targets={"default": {"command": "true"}})
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true", **target}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                loaded = self.desk.settings()
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
+
+    def test_adding_default_does_not_revive_an_old_unnamed_tick_without_a_release(self):
+        from hansa import release
+        for target in ({}, {"target": ""}):
+            with self.subTest(target=target):
+                s = self.desk.settings()
+                s["lanes"]["a"].pop("targets", None)
+                tick = {"lane": "a", "repo": str(self.repo.resolve()), "base": "main", "command": "true", **target}
+                s["releases_without_asking"] = [tick]
+                self.desk.settings_path.write_text(json.dumps(s))
+                self.hansa("lane", "target", "a", "default", "true")
+                loaded = self.desk.settings()
+                self.assertFalse(release.lane_listed(loaded, "a", "default"))
+                self.assertEqual(loaded["releases_without_asking"], [tick])
+                self.assertEqual(len(public_settings(self.desk)["release_unmatched"]), 1)
+                self.assertIn("waits for the principal's yes", self.hansa("release", "a", "default"))
+                self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
+
+    def test_lane_set_release_forwards_to_default_including_none(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "prod", "true")
+        said = self.hansa("lane", "set", "a", "release", "echo hello")
+        self.assertIn("hansa lane target a default 'echo hello'", said)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"],
+                         {"prod": {"command": "true"}, "default": {"command": "echo hello"}})
+        self.tick_targets("default")
+        self.hansa("lane", "set", "a", "release", "echo hello")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "default"))
+        self.assertIn("hansa lane target a default none", self.hansa("lane", "set", "a", "release", "none"))
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"], {"prod": {"command": "true"}})
+
+    def test_lane_set_release_refuses_a_default_target_of_another_kind(self):
+        for options in ({"fixed": True}, {"after": "prod"}, {"timeout_min": 10}):
+            with self.subTest(options=options):
+                s = self.desk.settings()
+                s["lanes"]["a"]["targets"] = {"prod": {"command": "true"},
+                                                 "default": {"command": "true", **options}}
+                self.assertEqual(self.desk.save_settings(s), [])
+                before = self.desk.settings_path.read_bytes()
+                for command in ("echo hello", "none"):
+                    said = self.refused("lane", "set", "a", "release", command)
+                    self.assertIn("already has a default target with its own options", said)
+                    self.assertIn("hansa lane target a default", said)
+                    self.assertEqual(self.desk.settings_path.read_bytes(), before)
 
     def test_two_targets_one_listed_and_one_not(self):
         from hansa import release
@@ -20154,8 +20465,6 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
                          [("release", "push"), ("release", "test")])
         listed = self.hansa("lane", "target", "a")
         self.assertIn(f"push: touch {push}", listed)
-        # a lane has its unnamed target or named ones, not both
-        self.assertIn("named release targets", self.refused("lane", "set", "a", "release", "git push"))
         self.tick_targets("test")
         [entry] = self.desk.settings()["releases_without_asking"]
         self.assertEqual(entry, {"lane": "a", "target": "test", "repo": str(self.repo.resolve()), "base": "main",
@@ -20324,6 +20633,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
     def test_the_page_refuses_a_malformed_target_entry(self):
         self.with_targets(test="true")
         for bad in ({"lane": "a", "target": "Not A Target"}, {"lane": "a", "target": 5},
+                    {"lane": "a", "target": 0}, {"lane": "a", "target": False}, {"lane": "a", "target": None},
                     {"lane": "a", "target": "test", "when": "always"}, {"lane": "Not A Lane", "target": "test"},
                     {"target": "test"}):
             said = self.page_save(lambda s: s.update(releases_without_asking=[bad]))
@@ -20860,7 +21170,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.hansa("release", "a", "first")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
-        self.assertIn("release #1 (lane a, target (unnamed)) · code ", self.alerted(out)[-1]["text"])
+        self.assertIn("release #1 (lane a, target default) · code ", self.alerted(out)[-1]["text"])
         self.assertIn("or answer on the page · main at", self.alerted(out)[-1]["text"])
         release.void(self.desk, 1, "the test says so")
         alert.send_due(self.desk, gather=0)
@@ -20877,7 +21187,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.settle_release(d, rid)
             alert.send_due(self.desk, gather=0)
             self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting,release_ended")
-            self.assertIn(f"release #{rid} of lane a, target (unnamed) (main at", self.alerted(out)[-1]["text"])
+            self.assertIn(f"release #{rid} of lane a, target default (main at", self.alerted(out)[-1]["text"])
             self.assertIn(end, self.alerted(out)[-1]["text"])
         self.assertIn("(exit 4)", self.alerted(out)[-1]["text"])
         # one refused for a forbidden word
@@ -21137,7 +21447,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertEqual(q["kind"], "release_waiting")
         self.assertIn(f"· code {code}: to release it, give this code to the coordinator in the conversation (this "
                       "release only, once, 24 hours; send it nowhere else), or answer on the page · main at", q["text"])
-        self.assertTrue(q["text"].startswith(f"release #1 (lane a, target (unnamed)) · code {code}:"))
+        self.assertTrue(q["text"].startswith(f"release #1 (lane a, target default) · code {code}:"))
         # only a keyed hash is kept, with a key in secrets/
         r = release.get(self.desk, 1)
         self.assertNotIn(code, json.dumps(r))
@@ -21234,7 +21544,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         alert.send_due(self.desk, gather=0)
         said, refused = self.code_answer("yes", "1", f"{code[:3].lower()} {code[3:]}")  # as said: any case, a space
         self.assertEqual(refused, "")
-        self.assertIn("release #1 of lane a is approved", said)
+        self.assertIn("release #1 of lane a target default is approved", said)
         self.assertNotIn(code, said)
         r = release.get(self.desk, 1)
         self.assertEqual((r["state"], r["answered_by"], r["channel"]), ("approved", "coordinator", "code"))
@@ -21776,11 +22086,11 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.hansa("verify", t1)
         vid = self.desk.meta(t1)["verify"]
         self.assertEqual(self.settle(d, vid)["state"], "done")
-        self.hansa("cancel", vid)  # the verification itself, closed first
-        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa cancel")
-        self.hansa("cancel", t1)
+        self.hansa("close", vid)  # the verification itself, closed first
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa close")
+        self.hansa("close", t1)
         self.assertEqual(self.desk.meta(t1)["state"], "cancelled")
-        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa cancel")
+        self.assertEqual(self.desk.meta(vid)["closed"], f"closed: {vid} was closed with hansa close")
 
     def test_workers_may_not_read_mavens_master_password_but_may_read_the_build_settings(self):
         from hansa.desk import home_secrets

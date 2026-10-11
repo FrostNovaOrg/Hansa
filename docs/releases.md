@@ -10,12 +10,14 @@ there; a lane's release command (a push, a wait for CI such as `gh run watch
 --exit-status`, a deploy script) is how the base branch goes out. A lane
 that sends it out in more than one way (a push to the public repository, an
 install on a test server, an install on the production server) names its
-release targets instead, with `hansa lane target L NAME "<command>"
+release targets, with `hansa lane target L NAME "<command>"
 [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
 (else the lane's `timeout_min`) and optionally another target of the lane
-that must have sent out the same commit first; a lane has either the
-`release` command (its one unnamed target) or named targets: take `release`
-out (`hansa lane set L release none`) when the first named target is set.
+that must have sent out the same commit first. An older unnamed release
+moves to `default` if absent, taking only its tick for the same command.
+Other unnamed ticks match nothing, even if `default` has the same command.
+`lane set L release CMD` (or `none`) forwards to `lane target L default` until
+the next version; it refuses a default target with its own options.
 `hansa lane target L` lists them, each with the way it runs. `hansa
 release L [TARGET] [note]` (TARGET needed when there is more than one)
 records the request (a new request for the same target replaces one still

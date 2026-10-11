@@ -85,7 +85,7 @@ def log_dir(desk: Desk) -> Path:
 
 def releases(desk: Desk) -> list:
     rs = read_json(releases_file(desk), [])
-    return [r for r in rs if isinstance(r, dict)] if isinstance(rs, list) else []
+    return [{**r, "target": r.get("target") or "default"} for r in rs if isinstance(r, dict)] if isinstance(rs, list) else []
 
 
 def get(desk: Desk, rid) -> dict | None:
@@ -116,7 +116,7 @@ def repo_key(repo) -> str:
     return str(Path(repo).expanduser().resolve())
 
 
-def lane_listed(s: dict, lane: str, target: str = "") -> bool:
+def lane_listed(s: dict, lane: str, target: str = "default") -> bool:
     """Whether the principal lets this release target of the lane go out without asking: it is on the list, and the
     lane has the repository and base branch, and the target the command, they had when the page saved the list. A
     tick for one target never covers another."""
@@ -380,7 +380,7 @@ def named_files(command: str, files: list) -> list:
 def last_out(desk: Desk, lane: str, repo: str, base: str, target: str = "") -> dict | None:
     """The last release of the lane's target that went out, of this repository and base branch (a request recorded
     before targets had names is the lane's unnamed target's)."""
-    done = [r for r in releases(desk) if r.get("lane") == lane and (r.get("target") or "") == target
+    done = [r for r in releases(desk) if r.get("lane") == lane and (r.get("target") or "") == (target or "default")
             and r.get("state") == "done" and r.get("repo") == repo_key(repo) and r.get("base") == base]
     return done[-1] if done else None
 
@@ -411,9 +411,9 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
                          "Nothing was asked")
     targets = lane_targets(ln)
     if not targets:
-        raise SystemExit(f"hansa: lane {lane} has no release command; set it first: hansa lane set {lane} release "
-                         "\"<the command that sends the base branch out>\", or name targets with hansa lane target "
-                         f"{lane} NAME \"<command>\" (and tell the principal). Nothing was asked")
+        raise SystemExit(f"hansa: lane {lane} has no release target; set it first: hansa lane target "
+                         f"{lane} NAME \"<the command that sends the base branch out>\" "
+                         "(and tell the principal). Nothing was asked")
     if target is None:
         if len(targets) > 1:
             raise SystemExit(f"hansa: lane {lane} has {len(targets)} release targets ({', '.join(sorted(targets))}); "
@@ -1317,7 +1317,7 @@ def line(desk: Desk, r: dict, s: dict | None = None) -> str:
 def list_text(desk: Desk) -> str:
     rs = releases(desk)
     if not rs:
-        return ("no releases yet. A lane's release command is set with hansa lane set L release \"<command>\", or its "
+        return ("no releases yet. A lane's release command is set with hansa lane target L default \"<command>\", or its "
                 "named targets with hansa lane target L NAME \"<command>\"; hansa release L [TARGET] [note] asks for one")
     s = desk.settings()
     live = [r for r in rs if r.get("state") in OPEN]
@@ -1357,7 +1357,7 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
                f"build files and release scripts), and a change touching one is merged only once a verification of "
                f"it holds"] if targets else [])
     if not targets:
-        return [f"  release: none (set one with hansa lane set {name} release \"<command>\", or name targets with "
+        return [f"  release: none (set one with hansa lane target {name} default \"<command>\", or name targets with "
                 f"hansa lane target {name} NAME \"<command>\")", "  last release: none", *listed]
     out = []
     for target, t in sorted(targets.items()):
