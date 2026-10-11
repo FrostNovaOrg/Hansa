@@ -2723,6 +2723,626 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((m["state"], m["check"]["ok"], m["check"]["tail"]), ("done", True, ["all passed"]), m)
         self.assertFalse(marker.exists())
 
+    # Serve write failures. Columns: room on disk / one write fails / all writes fail until space returns.
+    # | round step        | failing write                         | all columns  |
+    # | heartbeat         | heartbeat                             | matrix       |
+    # | finishing worker  | worker's meta.json                    | matrix       |
+    # | recovering        | recovered task's meta.json            | matrix       |
+    # | check             | checked task's meta.json              | matrix       |
+    # | merge check       | merge_checked event                   | matrix       |
+    # | time limits       | timed_out in meta.json                | matrix       |
+    # | cancels           | none at stop; cancelled end next round| matrix       |
+    # | tries             | tries/a.json                          | matrix       |
+    # | releases          | releases.json                         | matrix       |
+    # | starting new work | task's claim, before any process starts| matrix      |
+    # Every cell checks later steps in base order, continued rounds, stops, actual ends after recovery,
+    # and no second start. The focused tests below cover retained exits, restarts and the serve loop.
+
+    def serve_process(self, d, *, code=None, phase="", cancel=False, overdue=False, kind="work"):
+        """A real short worker/check, or a sleeper that only serve should stop; no git changes to make."""
+        from hansa import run
+        tid = self.desk.new_task("A serve write-failure fixture", kind=kind, lane="a")
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)" if code is None else
+                                 f"import sys; sys.exit({code})"], start_new_session=True)
+        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+        self.desk.update(tid, state="running", phase=phase, provider="claude", pid=proc.pid,
+                         pid_start=run.proc_start(proc.pid), started=time.time() - (30000 if overdue else 0),
+                         launch=f"fixture-{tid}", cancel=cancel)
+        if code is not None:
+            proc.wait(timeout=10)
+        d.procs[tid] = proc
+        return tid, proc
+
+    def failed_round(self, d):
+        """tick may report its first error after doing the round; as serve does, ask it again next round."""
+        try:
+            d.tick()
+        except OSError as e:
+            self.assertEqual(e.errno, errno.ENOSPC)
+
+    def test_a_failed_heartbeat_still_stops_overdue_and_cancelled_workers(self):
+        d = Dispatcher(self.desk)
+        overdue, p = self.serve_process(d, overdue=True)
+        cancelled, q = self.serve_process(d, cancel=True)
+        with unittest.mock.patch("hansa.run.beat", side_effect=OSError(errno.ENOSPC, "disk full")):
+            self.failed_round(d)
+        self.assertIsNotNone(p.poll(), "heartbeat failure skipped time limits")
+        self.assertIsNotNone(q.poll(), "heartbeat failure skipped cancels")
+        self.assertEqual(self.settle(d, overdue)["timed_out"], True)
+        self.assertEqual(self.settle(d, cancelled)["state"], "cancelled")
+
+    def test_a_failed_timeout_mark_still_stops_and_later_records_the_timeout(self):
+        d = Dispatcher(self.desk)
+        tid, proc = self.serve_process(d, overdue=True)
+        write = write_json
+
+        def full(path, data):
+            if Path(path) == self.desk.tasks_dir / tid / "meta.json" and data.get("timed_out"):
+                raise OSError(errno.ENOSPC, "disk full")
+            return write(path, data)
+        with unittest.mock.patch("hansa.desk.write_json", side_effect=full):
+            self.failed_round(d)
+            self.assertIsNotNone(proc.poll(), "failed timeout mark prevented the stop")
+            self.failed_round(d)  # still no room to save the stop or the end
+            self.assertIn(tid, d.procs)
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["timed_out"], m["exit"]), ("failed", True, proc.returncode))
+        self.assertIn("ceiling", m["error"])
+
+    def test_a_worker_or_verifier_keeps_its_exit_until_its_end_is_recorded(self):
+        for kind in ("work", "verify"):
+            with self.subTest(kind=kind):
+                d = Dispatcher(self.desk)
+                tid, proc = self.serve_process(d, code=7, kind=kind, overdue=True)
+                real = self.desk.change
+
+                def full(task, decide):
+                    if task == tid:
+                        raise OSError(errno.ENOSPC, "disk full")
+                    return real(task, decide)
+                with unittest.mock.patch.object(self.desk, "change", side_effect=full):
+                    self.failed_round(d)
+                    self.assertIs(d.procs.get(tid), proc, "ended process was forgotten before recording its exit")
+                    self.failed_round(d)
+                    self.assertIs(d.procs.get(tid), proc)
+                m = self.settle(d, tid)
+                self.assertEqual((m["exit"], m.get("timed_out", False)), (7, False))
+                self.assertNotIn(tid, d.procs)
+
+    def test_serve_keeps_looping_when_its_error_event_cannot_be_written(self):
+        import hansa.web as web
+        rounds, event = [], Desk.event
+
+        class Rounds:
+            def __init__(self, desk):
+                pass
+
+            def tick(self):
+                rounds.append(len(rounds))
+                if len(rounds) == 3:
+                    raise KeyboardInterrupt
+                raise OSError(errno.ENOSPC, "round write failed")
+
+        def full(desk, name, **fields):
+            if name == "server_error":
+                raise OSError(errno.ENOSPC, "event write failed")
+            return event(desk, name, **fields)
+        err = io.StringIO()
+        with unittest.mock.patch.object(web, "start_web", return_value=types.SimpleNamespace(server_address=("h", 1))), \
+                unittest.mock.patch.object(cli, "Dispatcher", Rounds), \
+                unittest.mock.patch.object(Desk, "event", full), \
+                unittest.mock.patch.object(cli, "pulse"), \
+                unittest.mock.patch.object(cli, "try_srt_at_start", return_value={}), \
+                unittest.mock.patch.object(cli.alert, "start_thread"), \
+                unittest.mock.patch.object(cli.signal, "signal"), \
+                unittest.mock.patch.object(cli.time, "sleep"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            main(["--desk", str(self.desk.root), "serve", "--port", "0"])
+        self.assertEqual(rounds, [0, 1, 2])
+        self.assertEqual(err.getvalue().count("hansa serve: [Errno 28] round write failed"), 2)
+        self.assertEqual(self.events("server_error"), [])
+
+    def serve_check_exit(self, d, *, merge=False, code=9):
+        """A short process that leaves the same durable exit file as a check's wrapper."""
+        from hansa import run
+        tid = self.desk.new_task("A finished check", lane="a")
+        raw = self.desk.raw_dir(tid)
+        exit_file = raw / ("merge-check.exit" if merge else "check.exit")
+        proc = subprocess.Popen([sys.executable, "-c", "from pathlib import Path; import sys; "
+                                 "Path(sys.argv[1]).write_text(sys.argv[2]); sys.exit(int(sys.argv[2]))",
+                                 str(exit_file), str(code)], start_new_session=True)
+        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+        proc.wait(timeout=10)
+        fields = {"pid": proc.pid, "pid_start": run.proc_start(proc.pid), "launch": f"fixture-{tid}",
+                  "started": time.time()}
+        if merge:
+            self.desk.update(tid, state="merging", merge_check={**fields, "phase": "running", "command": "fixture"})
+            d.merge_procs[tid] = proc
+        else:
+            self.desk.update(tid, state="running", phase="checking", lane="a", check_command="fixture", **fields)
+            d.procs[tid] = proc
+        return tid, proc, exit_file
+
+    def test_check_exits_survive_failed_publication_and_restart_without_a_second_check(self):
+        from hansa import run
+        for merge in (False, True):
+            for failure in ("publication", "end"):
+                with self.subTest(merge=merge, failure=failure):
+                    d = Dispatcher(self.desk)
+                    tid, proc, exit_file = self.serve_check_exit(d, merge=merge)
+                    name = "merge-check.log" if merge else "check.log"
+                    (exit_file.parent / name).write_text("the check's output\n")
+                    real = self.desk.change
+
+                    def full(task, decide):
+                        if task == tid:
+                            raise OSError(errno.ENOSPC, "disk full")
+                        return real(task, decide)
+                    patch = unittest.mock.patch("hansa.run.write_bytes", side_effect=OSError(errno.ENOSPC, "disk full")) \
+                        if failure == "publication" else unittest.mock.patch.object(self.desk, "change", side_effect=full)
+                    with patch:
+                        self.failed_round(d)
+                        self.assertTrue(exit_file.exists(), "exit file removed before recording the check's end")
+                        self.failed_round(Dispatcher(self.desk))  # another server, while writes still fail
+                        self.assertTrue(exit_file.exists())
+                    restarted = Dispatcher(self.desk)
+                    with unittest.mock.patch.object(run, "start_check", wraps=run.start_check) as check, \
+                            unittest.mock.patch.object(run, "start_merge_check", wraps=run.start_merge_check) as mc:
+                        restarted.tick()
+                        restarted.tick()
+                        self.assertEqual((check.call_count, mc.call_count), (0, 0))
+                    m = self.desk.meta(tid)
+                    result = m["merge_check_result"] if merge else m["check"]
+                    self.assertEqual((m["state"], result["exit"], result["ok"]), ("done", 9, False))
+                    self.assertFalse(exit_file.exists())
+
+    def test_an_end_just_before_the_limit_seen_just_after_is_never_timed_out(self):
+        for phase in ("worker", "verification", "check", "merge check"):
+            with self.subTest(phase=phase):
+                d = Dispatcher(self.desk)
+                if "check" in phase:
+                    tid, proc, exit_file = self.serve_check_exit(d, merge=phase == "merge check",
+                                                              code=9 if phase == "merge check" else 0)
+                else:
+                    tid, proc = self.serve_process(d, code=0, kind="verify" if phase == "verification" else "work")
+                # The process has ended just inside its limit. Serve's next observation is just outside it,
+                # with the end's write failing: the timeout step must still see that it already ended.
+                at = time.time()
+                m = self.desk.meta(tid)
+                if phase == "merge check":
+                    self.desk.update(tid, merge_check={**m["merge_check"], "started": at - 240 * 60 + 0.01})
+                else:
+                    self.desk.update(tid, started=at - 240 * 60 + 0.01)
+                with unittest.mock.patch("hansa.run.time.time", return_value=at + 0.02), \
+                        unittest.mock.patch.object(self.desk, "change", side_effect=OSError(errno.ENOSPC, "disk full")):
+                    self.failed_round(d)
+                d.tick()
+                m = self.desk.meta(tid)
+                self.assertFalse(m.get("timed_out"))
+                self.assertNotIn("ceiling", (m.get("check") or {}).get("note", ""))
+                self.assertFalse((m.get("merge_check") or {}).get("timed_out"))
+                if phase == "merge check":
+                    self.assertEqual(m["merge_check_result"]["exit"], 9)
+                    self.assertNotIn("ceiling", m["merge_check_result"]["note"])
+                if "check" not in phase:
+                    self.assertEqual(m["exit"], 0)
+
+    def test_a_worker_exit_lost_across_serve_restart_is_not_guessed(self):
+        d = Dispatcher(self.desk)
+        tid, proc = self.serve_process(d, code=7, overdue=True)
+        with unittest.mock.patch.object(self.desk, "change", side_effect=OSError(errno.ENOSPC, "disk full")):
+            self.failed_round(d)
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertIsNone(m["exit"])
+        self.assertFalse(m.get("timed_out"))
+        self.assertEqual(m["error"], "error: no output (exit None)")
+
+    def test_serve_round_write_failure_table(self):
+        from hansa import disk, release, run
+        steps = ("heartbeat", "finishing worker", "recovering", "check", "merge check", "time limits",
+                 "cancels", "tries", "releases", "starting new work")
+        s = self.desk.settings()
+        s["concurrency"] = 8
+        s["lanes"]["c"] = {**s["lanes"]["a"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for step in steps:
+            for sustained in (None, False, True):  # None: room on disk, including the base's record order
+                with self.subTest(step=step, sustained=sustained), contextlib.ExitStack() as patches:
+                    d = Dispatcher(self.desk)
+                    worker, p = self.serve_process(d, code=7)
+                    other_worker, _ = self.serve_process(d, code=8)
+                    recoveries = [self.desk.new_task("Recover a cancelled claim", lane="a")]
+                    for tid in recoveries:
+                        self.desk.update(tid, state="running", phase="starting", cancel=True, started=time.time())
+                    checks = [self.serve_check_exit(d, code=9)[0]]
+                    for tid in checks:  # exercise check recovery, rather than the worker-finishing loop
+                        del d.procs[tid]
+                        self.desk.update(tid, pid=None)
+                    merges = [self.serve_check_exit(d, merge=True, code=9)[0]]
+                    overdue, expired_proc = self.serve_process(d, overdue=True)
+                    cancelled, cancelled_proc = self.serve_process(d, cancel=True)
+                    for ln, code in (("a", 11), ("b", 12)):
+                        folder = self.desk.state_dir / "tries" / ln
+                        folder.mkdir(parents=True, exist_ok=True)
+                        # Same exit/seconds format as the try wrapper, from a real short command.
+                        sh(sys.executable, "-c", "from pathlib import Path; import subprocess, sys; "
+                           "p = subprocess.run([sys.executable, '-c', 'import sys; sys.exit(int(sys.argv[1]))', sys.argv[2]]); "
+                           "Path(sys.argv[1]).write_text(str(p.returncode) + ' 0')", str(folder / "check.exit"), str(code), cwd=self.tmp)
+                        run.write_try(self.desk, ln, {"phase": "running", "check": "fixture", "started": time.time(),
+                                                     "worktree": str(self.repo), "onto": sh("git", "rev-parse", "HEAD", cwd=self.repo)})
+                    release_dir = release.log_dir(self.desk)
+                    release_dir.mkdir(exist_ok=True)
+                    releases = []
+                    for rid, code in ((1, 13), (2, 14)):
+                        sh(sys.executable, "-c", "from pathlib import Path; import subprocess, sys; "
+                           "p = subprocess.run([sys.executable, '-c', 'import sys; sys.exit(int(sys.argv[1]))', sys.argv[2]]); "
+                           "Path(sys.argv[1]).write_text(str(p.returncode))", str(release_dir / f"{rid}.exit"), str(code), cwd=self.tmp)
+                        releases.append({"id": rid, "state": "running", "lane": "a", "repo": str(self.repo),
+                                         "started": time.time(), "launch": f"fixture-release-{rid}"})
+                    release._write(self.desk, releases)
+                    new = self.desk.new_task("Start once", lane="c")
+                    trace, attempted, starts = [], [], []
+
+                    def observe(label, fn):
+                        def observed(*args, **kwargs):
+                            trace.append(label)
+                            return fn(*args, **kwargs)
+                        return observed
+
+                    def ending(tid, code):
+                        attempted.append(("worker", tid))
+                        if tid == worker:
+                            trace.append("finishing worker")
+                        return ended(tid, code)
+
+                    def recovering(m):
+                        attempted.append(("recover", m["id"]))
+                        trace.append("recovering")
+                        return recover(m)
+
+                    def checking(m, settings):
+                        attempted.append(("check", m["id"]))
+                        trace.append("check")
+                        return check(m, settings)
+
+                    def stopping(pid, *args, **kwargs):
+                        if pid == expired_proc.pid:
+                            trace.append("time limits")
+                        if pid == cancelled_proc.pid:
+                            trace.append("cancels")
+                        return stop(pid, *args, **kwargs)
+
+                    def starting(desk, tid, ln, pname):
+                        trace.append("starting new work")
+                        # Fail the claim before a process starts: unrecorded starts are another task.
+                        desk.update(tid, state="running", phase="starting", provider=pname, started=time.time(),
+                                    launch=f"fixture-{tid}")
+                        proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(6)"], start_new_session=True)
+                        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+                        proc.wait(timeout=10)
+                        starts.append(tid)
+                        desk.update(tid, phase="", pid=proc.pid, pid_start=run.proc_start(proc.pid))
+                        return proc
+
+                    def merge_end(desk, tid):
+                        attempted.append(("merge", tid))
+                        return finish_merge(desk, tid)
+
+                    def try_end(desk, ln):
+                        attempted.append(("try", ln))
+                        return finish_try(desk, ln)
+
+                    def release_end(desk, rid, *args, **kwargs):
+                        attempted.append(("release", rid))
+                        return finish_release(desk, rid, *args, **kwargs)
+
+                    ended, recover, check, stop = d.ended, d.recover, d.check, run.stop
+                    finish_merge, finish_try, finish_release = run.finish_merge_check, run.finish_try, release.finish
+                    for obj, name, fn in ((d, "ended", ending), (d, "recover", recovering), (d, "check", checking),
+                                          (run, "stop", stopping), (run, "start", starting),
+                                          (run, "finish_merge_check", merge_end), (run, "finish_try", try_end),
+                                          (release, "finish", release_end),
+                                          (run, "beat", observe("heartbeat", run.beat)),
+                                          (d, "tries", observe("tries", d.tries)),
+                                          (release, "tick", observe("releases", release.tick)),
+                                          (d, "merge_checks", observe("merge check", d.merge_checks))):
+                        patches.enter_context(unittest.mock.patch.object(obj, name, side_effect=fn))
+                    patches.enter_context(unittest.mock.patch.object(d, "look", return_value=(None, None)))
+                    fired, available = [], [True] if sustained is None else []
+                    before_events = len(self.desk.events_path.read_text().splitlines())
+
+                    def refuse(selected=False):
+                        if not available and (selected and not fired or sustained and fired):
+                            fired.append(True)
+                            raise OSError(errno.ENOSPC, "disk full")
+
+                    def failing_write(fn):
+                        def write(path, data, *args, **kwargs):
+                            path = Path(path)
+                            selected = (step in ("heartbeat", "cancels") and path.name == "heartbeat" or
+                                        step == "finishing worker" and path == self.desk.tasks_dir / worker / "meta.json"
+                                        and isinstance(data, dict) and data.get("finished") is not None or
+                                        step == "recovering" and path == self.desk.tasks_dir / recoveries[0] / "meta.json"
+                                        and isinstance(data, dict) and data.get("state") == "cancelled" or
+                                        step == "check" and path == self.desk.tasks_dir / checks[0] / "meta.json"
+                                        and isinstance(data, dict) and data.get("check") is not None or
+                                        step == "time limits" and path == self.desk.tasks_dir / overdue / "meta.json"
+                                        and isinstance(data, dict) and data.get("timed_out") or
+                                        step == "tries" and path == run.try_file(self.desk, "a")
+                                        and isinstance(data, dict) and data.get("phase") == "done" or
+                                        step == "releases" and path == release.releases_file(self.desk)
+                                        and isinstance(data, list) and data[0].get("state") == "failed" or
+                                        step == "starting new work" and path == self.desk.tasks_dir / new / "meta.json"
+                                        and isinstance(data, dict) and data.get("phase") == "starting")
+                            refuse(selected)
+                            return fn(path, data, *args, **kwargs)
+                        return write
+
+                    event = self.desk.event
+
+                    def failing_event(name, **fields):
+                        refuse(step == "merge check" and name == "merge_checked" and fields.get("task") == merges[0])
+                        return event(name, **fields)
+                    with contextlib.ExitStack() as full:
+                        for obj in (sys.modules["hansa.desk"], run, release, disk):
+                            for name in ("write_json", "write_bytes", "write_text"):
+                                if hasattr(obj, name):
+                                    full.enter_context(unittest.mock.patch.object(obj, name, side_effect=failing_write(getattr(obj, name))))
+                        full.enter_context(unittest.mock.patch.object(self.desk, "event", side_effect=failing_event))
+                        self.failed_round(d)
+                        if sustained is None:
+                            self.assertFalse(fired)
+                            recorded = [json.loads(line)["event"] for line in
+                                        self.desk.events_path.read_text().splitlines()[before_events:]]
+                            self.assertEqual(recorded, ["task_finished", "task_finished", "task_checked", "lane_tried",
+                                                        "lane_tried", "release_ended", "release_ended", "merge_checked",
+                                                        "merge_check_ended"])
+                        else:
+                            self.assertTrue(fired, "the selected write was never attempted")
+                        # Actual base order, including releases before merge checks.
+                        expected = ["heartbeat", "finishing worker", "recovering", "check", "time limits", "cancels",
+                                    "tries", "releases", "merge check", "starting new work"]
+                        first = list(dict.fromkeys(trace))
+                        self.assertEqual(first, expected)
+                        self.assertIsNotNone(expired_proc.poll())
+                        self.assertIsNotNone(cancelled_proc.poll())
+                        for item in (("worker", other_worker), ("try", "b"), ("release", 2)):
+                            self.assertIn(item, attempted, "one failed run blocked the others in its step")
+                        self.failed_round(d)  # another round, while the disk may still be full
+                        available.append(True)
+                        for _ in range(4):
+                            d.tick()
+                    for tid, code in ((worker, 7), (other_worker, 8)):
+                        m = self.desk.meta(tid)
+                        self.assertEqual((m["exit"], m.get("timed_out", False)), (code, False))
+                    for tid in recoveries:
+                        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+                    for tids, key in ((checks, "check"), (merges, "merge_check_result")):
+                        for tid, code in zip(tids, (9, 10)):
+                            m = self.desk.meta(tid)
+                            self.assertEqual((m["state"], m[key]["exit"], m[key]["ok"]), ("done", code, False))
+                            self.assertNotIn("ceiling", m[key]["note"])
+                    m = self.desk.meta(overdue)
+                    self.assertEqual((m["state"], m["timed_out"], m["exit"]), ("failed", True, expired_proc.returncode))
+                    self.assertEqual(self.desk.meta(cancelled)["state"], "cancelled")
+                    for ln, code in (("a", 11), ("b", 12)):
+                        self.assertEqual(run.read_try(self.desk, ln)["steps"]["check"]["exit"], code)
+                    for rid, code in ((1, 13), (2, 14)):
+                        self.assertEqual(release.get(self.desk, rid)["exit"], code)
+                    if step == "starting new work" and sustained is False:
+                        self.assertEqual(starts, [])  # base behaviour: a failed claim ends as not started
+                        self.assertEqual(self.desk.meta(new)["state"], "failed")
+                    else:
+                        self.assertEqual(starts, [new])
+                        self.assertEqual(self.desk.meta(new)["exit"], 6)
+
+    @contextlib.contextmanager
+    def serve_full_disk(self):
+        from hansa import desk, disk, release, run
+        with contextlib.ExitStack() as full:
+            for obj in (desk, disk, release, run):
+                for name in ("write_json", "write_bytes", "write_text"):
+                    if hasattr(obj, name):
+                        full.enter_context(unittest.mock.patch.object(obj, name, side_effect=OSError(errno.ENOSPC, "disk full")))
+            full.enter_context(unittest.mock.patch.object(self.desk, "event", side_effect=OSError(errno.ENOSPC, "disk full")))
+            yield
+
+    def test_an_unrecordable_recovery_or_check_end_does_not_block_others_in_its_step(self):
+        for kind in ("recovery", "check", "merge check"):
+            with self.subTest(kind=kind):
+                d = Dispatcher(self.desk)
+                if kind == "recovery":
+                    ids = [self.desk.new_task("Recover", lane="a") for _ in range(2)]
+                    for tid in ids:
+                        self.desk.update(tid, state="running", phase="starting", cancel=True)
+                else:
+                    ids = [self.serve_check_exit(d, merge=kind == "merge check", code=code)[0] for code in (7, 8)]
+                    if kind == "check":
+                        for tid in ids:
+                            del d.procs[tid]
+                            self.desk.update(tid, pid=None)
+                real = self.desk.change
+
+                def full(tid, decide):
+                    if tid == ids[0]:
+                        raise OSError(errno.ENOSPC, "disk full")
+                    return real(tid, decide)
+                with unittest.mock.patch.object(self.desk, "change", side_effect=full), \
+                        unittest.mock.patch.object(d, "look", return_value=(None, None)):
+                    self.failed_round(d)
+                other = self.desk.meta(ids[1])
+                self.assertEqual(other["state"], "cancelled" if kind == "recovery" else "done")
+                if kind != "recovery":
+                    self.assertEqual(other["merge_check_result" if kind == "merge check" else "check"]["exit"], 8)
+                d.tick()
+                self.assertEqual(self.desk.meta(ids[0])["state"], "cancelled" if kind == "recovery" else "done")
+
+    def serve_other_run(self, d, kind, *, cancelled=False, overdue=True):
+        """A running merge check, try or release, with a real sleeper and its usual stored identity."""
+        from hansa import release, run
+        if kind == "merge check":
+            tid, proc = self.serve_process(d, overdue=overdue)
+            m = self.desk.meta(tid)
+            self.desk.update(tid, state="merging", merge_check={"phase": "running", "command": "fixture",
+                             **{k: m[k] for k in ("pid", "pid_start", "launch", "started")}, "cancel": cancelled})
+            del d.procs[tid]
+            d.merge_procs[tid] = proc
+            return tid, proc
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+        fields = {"pid": proc.pid, "pid_start": run.proc_start(proc.pid), "launch": f"fixture-{proc.pid}",
+                  "started": time.time() - (30000 if overdue else 0)}
+        if kind == "try":
+            run.write_try(self.desk, "a", {"phase": "running", "check": "fixture", "worktree": str(self.repo), **fields})
+            d.try_procs["a"] = proc
+            return "a", proc
+        release._write(self.desk, [{"id": 1, "state": "running", "lane": "a", "repo": str(self.repo),
+                                   "stop_asked": time.time() if cancelled else None, **fields}])
+        d.release_procs[1] = proc
+        return 1, proc
+
+    def test_a_full_disk_still_stops_every_kind_at_its_limit_and_records_it_later(self):
+        from hansa import release, run
+        for kind in ("worker", "verification", "check", "merge check", "try", "release"):
+            with self.subTest(kind=kind):
+                d = Dispatcher(self.desk)
+                if kind in ("worker", "verification", "check"):
+                    key, proc = self.serve_process(d, overdue=True, phase="checking" if kind == "check" else "",
+                                                   kind="verify" if kind == "verification" else "work")
+                else:
+                    key, proc = self.serve_other_run(d, kind)
+                with self.serve_full_disk():
+                    self.failed_round(d)
+                    self.assertIsNotNone(proc.poll(), "full disk prevented a time-limit stop")
+                    self.failed_round(d)
+                d.tick()
+                d.tick()
+                if kind == "try":
+                    result = run.read_try(self.desk, key)
+                    self.assertTrue(result["timed_out"])
+                    self.assertIn("ceiling", result["note"])
+                    self.assertIsNone(result["steps"]["check"]["exit"])  # no exit file: do not invent one
+                elif kind == "release":
+                    result = release.get(self.desk, key)
+                    self.assertTrue(result["timed_out"])
+                    self.assertIn("time limit", result["problem"])
+                    self.assertIsNone(result["exit"])
+                elif kind == "merge check":
+                    result = self.desk.meta(key)["merge_check_result"]
+                    self.assertIn("ceiling", result["note"])
+                    self.assertIsNone(result["exit"])
+                else:
+                    m = self.desk.meta(key)
+                    self.assertTrue(m["timed_out"])
+                    if kind == "check":
+                        self.assertIn("ceiling", m["check"]["note"])
+                        self.assertIsNone(m["check"]["exit"])
+                    else:
+                        self.assertEqual(m["exit"], proc.returncode)
+
+    def test_a_full_disk_still_stops_every_cancelled_kind_and_records_it_later(self):
+        from hansa import release
+        for kind in ("worker", "verification", "check", "merge check", "release"):
+            with self.subTest(kind=kind):
+                d = Dispatcher(self.desk)
+                if kind in ("worker", "verification", "check"):
+                    key, proc = self.serve_process(d, cancel=True, phase="checking" if kind == "check" else "",
+                                                   kind="verify" if kind == "verification" else "work")
+                else:
+                    key, proc = self.serve_other_run(d, kind, cancelled=True, overdue=False)
+                with self.serve_full_disk():
+                    self.failed_round(d)
+                    proc.wait(timeout=10)
+                    self.failed_round(d)
+                d.tick()
+                d.tick()
+                if kind == "release":
+                    result = release.get(self.desk, key)
+                    self.assertEqual(result["state"], "stopped")
+                    self.assertTrue(result.get("termed"))
+                else:
+                    m = self.desk.meta(key)
+                    self.assertEqual(m["state"], "done" if kind == "merge check" else "cancelled")
+                    self.assertFalse(m.get("timed_out"))
+
+    def test_an_event_failure_after_saving_an_end_does_not_overwrite_the_result_next_round(self):
+        from hansa import run
+        d = Dispatcher(self.desk)
+        tid, proc = self.serve_process(d, code=7)
+        # Also a try: its input directory is gone after the result is saved, so repeating finish would lose it.
+        folder = self.desk.state_dir / "tries" / "a"
+        folder.mkdir(parents=True)
+        (folder / "check.exit").write_text("9 0")
+        run.write_try(self.desk, "a", {"phase": "running", "check": "fixture", "worktree": str(self.repo)})
+        d.try_procs["a"] = proc
+        event = self.desk.event
+
+        def full(name, **fields):
+            if name in ("task_finished", "lane_tried"):
+                raise OSError(errno.ENOSPC, "event disk full")
+            return event(name, **fields)
+        with unittest.mock.patch.object(self.desk, "event", side_effect=full):
+            self.failed_round(d)
+        before = self.desk.meta(tid), run.read_try(self.desk, "a")
+        d.tick()
+        self.assertEqual((self.desk.meta(tid), run.read_try(self.desk, "a")), before)
+        self.assertEqual(before[0]["exit"], 7)
+        self.assertEqual(before[1]["steps"]["check"]["exit"], 9)
+
+    def test_a_verification_keeps_its_success_and_verdict_after_a_failed_end_write(self):
+        d = Dispatcher(self.desk)
+        tid, proc = self.serve_process(d, code=0, kind="verify")
+        write_json(self.desk.raw_dir(tid) / "run.json", {"subtype": "success", "result": "VERDICT: holds",
+                                                       "num_turns": 2, "session_id": "fixture"})
+        with self.serve_full_disk():
+            self.failed_round(d)
+            self.assertIs(d.procs.get(tid), proc)
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["exit"], m["verdict"], m["turns"]), ("done", 0, "holds", 2))
+        self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text(), "VERDICT: holds\n")
+
+    def test_a_release_cancel_still_kills_after_its_grace_when_no_stop_record_can_be_written(self):
+        from hansa import release, run
+        ready = self.tmp / "ready"
+        proc = subprocess.Popen([sys.executable, "-c", "import signal, sys, time; from pathlib import Path; "
+                                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); Path(sys.argv[1]).touch(); time.sleep(60)",
+                                 str(ready)], start_new_session=True)
+        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+        self.soon(ready.exists)
+        release._write(self.desk, [{"id": 1, "state": "running", "lane": "a", "repo": str(self.repo),
+                                   "pid": proc.pid, "pid_start": run.proc_start(proc.pid), "launch": "fixture",
+                                   "started": time.time(), "stop_asked": time.time()}])
+        d = Dispatcher(self.desk)
+        d.release_procs[1] = proc
+        with self.serve_full_disk(), unittest.mock.patch.object(release, "STOP_GRACE", 0), \
+                unittest.mock.patch.object(release, "_record_started", side_effect=OSError(errno.ENOSPC, "disk full")):
+            self.failed_round(d)
+            self.assertIsNone(proc.poll())  # TERM is ignored, but its unsaved time is kept
+            self.failed_round(d)
+            proc.wait(timeout=10)
+            self.failed_round(d)
+        d.tick()
+        r = release.get(self.desk, 1)
+        self.assertEqual(r["state"], "stopped")
+        self.assertTrue(r.get("termed"))
+        self.assertTrue(r.get("killed"))
+        self.assertIsNone(r["exit"])  # no exit file was written
+
+    def test_an_already_marked_try_or_release_is_stopped_again_if_still_running(self):
+        from hansa import release, run
+        for kind in ("try", "release"):
+            with self.subTest(kind=kind):
+                d = Dispatcher(self.desk)
+                key, proc = self.serve_other_run(d, kind)
+                if kind == "try":
+                    run.write_try(self.desk, key, {**run.read_try(self.desk, key), "timed_out": True})
+                else:
+                    release.change(self.desk, key, lambda x: {"timed_out": True, "limit_min": 240})
+                with self.serve_full_disk():
+                    self.failed_round(d)
+                    self.assertIsNotNone(proc.poll())
+                d.tick()
+
     def test_a_key_saved_later_is_removed_from_what_was_already_published(self):
         later = "sk-saved-later-0654"
         s = self.desk.settings()

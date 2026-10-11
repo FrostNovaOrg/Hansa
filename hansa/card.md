@@ -750,6 +750,15 @@ here; work that needs code changed or a browser goes to a worker.
   notes along the way: read them to see what went wrong, then split the task or
   make it clearer rather than re-running it unchanged. `hansa retry` passes the
   previous report on, and the latest verification's report whole, with its verdict.
+- A failed write (a full disk, for example) leaves `hansa serve` running through the rest of its round,
+  including the other runs in the step. Cancelled runs and those over their time limit still stop. If the error
+  event cannot be written either, the error goes to standard error. That server keeps an unsaved timeout stop
+  in memory and marks the run before recording its end once writes work again. A run already ended when the
+  limit is checked keeps its actual end. Serve keeps a worker's or verification's exit code in memory until
+  its end is recorded, and a check's or merge check's exit file on disk until then: a restart finds that check's
+  end without running it twice. Memory is lost on restart; an unsaved worker exit code remains unknown, as
+  before, and the new server does not guess a timeout for a process already ended. Free space so it can record
+  the ends it kept.
 - A key of the principal's never shows in reports, errors or the event log: hansa
   replaces it with [key of <provider>]. If a change itself holds a key, `hansa show`
   says so and hansa never merges it: redo the work with `hansa retry <id> --fresh`

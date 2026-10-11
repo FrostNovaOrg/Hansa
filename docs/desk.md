@@ -178,6 +178,12 @@ session or release. What already runs goes on, a running task's check and a resu
 It starts again by itself once every volume has the floor and 1 GB more free, so that it does not stop and start
 at every round around the line. A release asked meanwhile waits, approved, and goes once there is space.
 
+If a write fails anyway (a full disk, for example), `hansa serve` continues through the rest of the round in
+the usual order, including the other runs in that step. It still stops cancelled runs and those over their
+time limits. Its error event is best effort: when that cannot be written either, it prints the error to
+standard error and keeps serving. Free space so that it can record the ends it kept for a later round; see
+[Time limits](tasks.md#time-limits-and-work-left-running-in-the-background) for what survives a restart.
+
 The floor holds for each volume by its own size. A volume smaller than four times the floor has a quarter of its
 size as its floor: on a Linux server that mounts `/tmp` as a tmpfs (systemd's default size is half the memory), an
 8 GB machine has a 3.9 GB `/tmp`, which under the default floor of 10 GB holds back only under about 1 GB free,
