@@ -59,7 +59,7 @@ from . import without_session
 from .desk import WRITE_FILE, Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json, write_text
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   run_running, save_stopped, serve_step, recording_start, retry_start_failure,
-                  merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
+                  merge_check_lane, merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
 OPEN = ("waiting", "approved", "starting", "running")
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
@@ -1206,8 +1206,9 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
                 f"waits for release #{other['id']} of {what(other)} on the same repository")
     m = not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)
     if m:
-        return (f"等同一仓库上工作线 {m.get('lane')} 的 {m['id']} 合并验收结束" if zh else
-                f"waits for {m['id']}'s merge check on lane {m.get('lane')}, on the same repository")
+        lane = merge_check_lane(s, m)
+        return (f"等同一仓库上工作线 {lane} 的 {m['id']} 合并验收结束" if zh else
+                f"waits for {m['id']}'s merge check on lane {lane}, on the same repository")
     from .run import not_looking
     from . import disk
     low = disk.held(desk)
