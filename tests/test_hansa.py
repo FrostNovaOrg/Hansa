@@ -1587,13 +1587,18 @@ class SrtOutputTest(unittest.TestCase):
                 true.write_text("#!/bin/sh\nexec " + command + "\n")
                 true.chmod(0o755)
                 desk = types.SimpleNamespace(state_dir=folder / "state")
+                def probe(argv, **kwargs):
+                    if argv[-2:] == ["--", "true"]:
+                        # This test checks the relay's output; plain true fails the same way.
+                        return subprocess.CompletedProcess(argv, rc, "", "")
+                    return self.paused_run(argv, **kwargs)
                 with unittest.mock.patch.dict(os.environ, env), \
                         unittest.mock.patch.object(run, "base_env", return_value=env), \
-                        unittest.mock.patch.object(run.subprocess, "run", self.paused_run):
+                        unittest.mock.patch.object(run.subprocess, "run", probe):
                     if rc:
                         with self.assertRaises(run.SrtCannotRun) as failed:
                             run.try_srt(desk, "unused", str(folder), folder)
-                        self.assertIn("output relay and true", str(failed.exception))
+                        self.assertIn("could not start", str(failed.exception))
                     else:
                         self.assertEqual(run.try_srt(desk, "unused", str(folder), folder), str(self.srt))
                 rec = json.loads((desk.state_dir / "srt.json").read_text())
@@ -1829,12 +1834,111 @@ class SrtOutputTest(unittest.TestCase):
         for result in failures:
             with self.subTest(result=result), \
                     unittest.mock.patch.object(run.shutil, "which", return_value=str(self.srt)), \
-                    unittest.mock.patch.object(run.subprocess, "run", side_effect=[result]), \
+                    unittest.mock.patch.object(run.subprocess, "run", side_effect=[result, subprocess.CompletedProcess([], 0, "", "")]), \
                     self.assertRaises(run.SrtCannotRun) as failed:
                 run.try_srt(desk, "unused", str(self.tmp), self.tmp)
             for hint in ("output relay", "workers may not read", sys.executable, f"prefix {sys.prefix}",
                          str(Path(run.__file__).resolve().parent)):
                 self.assertIn(hint, str(failed.exception))
+
+
+class TrySrtTest(unittest.TestCase):
+    def setUp(self):
+        from hansa import run
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.desk = types.SimpleNamespace(state_dir=self.tmp / "state")
+        self.srt = str(self.tmp / "srt")
+        for patch in (unittest.mock.patch.object(run.shutil, "which", return_value=self.srt),
+                      unittest.mock.patch.object(run, "base_env", return_value={"PATH": "/usr/bin:/bin"})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_srt_cannot_start_names_srt_and_its_words_without_the_no_read_hint(self):
+        from hansa import run
+        results = [subprocess.CompletedProcess([], 2, "", "cannot read Python"),
+                   subprocess.CompletedProcess([], 127, "", "env: node: No such file or directory\n")]
+        with unittest.mock.patch.object(run.subprocess, "run", side_effect=results), \
+                self.assertRaises(run.SrtCannotRun) as failed:
+            run.try_srt(self.desk, "settings.json", str(self.tmp), self.tmp)
+        self.assertEqual(str(failed.exception),
+                         f"srt ({self.srt}) could not start with these sandbox settings: "
+                         "env: node: No such file or directory (exit 127)")
+        self.assertNotIn("workers may not read", str(failed.exception))
+        self.assertFalse(run.srt_record(self.desk)["ran"])
+
+    def test_plain_true_success_keeps_the_relay_message_even_with_startup_words(self):
+        from hansa import run
+        results = [subprocess.CompletedProcess([], 127, "", "env: node: No such file or directory"),
+                   subprocess.CompletedProcess([], 0, "", "")]
+        with unittest.mock.patch.object(run.subprocess, "run", side_effect=results), \
+                unittest.mock.patch.object(run.sys, "base_prefix", sys.prefix), \
+                self.assertRaises(run.SrtCannotRun) as failed:
+            run.try_srt(self.desk, "settings.json", str(self.tmp), self.tmp)
+        self.assertEqual(str(failed.exception),
+                         f"srt ({self.srt}) could not run hansa's output relay and true with these sandbox settings: "
+                         "env: node: No such file or directory (exit 127). "
+                         "Check whether an entry on 'workers may not read' hides the Python hansa runs with "
+                         f"({sys.executable}, prefix {sys.prefix}) or hansa's folder ({Path(run.__file__).resolve().parent}).")
+        self.assertFalse(run.srt_record(self.desk)["ran"])
+        self.assertIn("exit 127", run.srt_record(self.desk)["said"])
+
+    def test_relay_failure_names_both_virtual_environment_prefixes_but_no_duplicate(self):
+        from hansa import run
+        prefix = str(self.tmp / "venv")
+        base = str(self.tmp / "python")
+        for base_prefix in (base, prefix):
+            results = [subprocess.CompletedProcess([], 2, "", "cannot read Python"),
+                       subprocess.CompletedProcess([], 0, "", "")]
+            with self.subTest(base_prefix=base_prefix), \
+                    unittest.mock.patch.object(run.sys, "prefix", prefix), \
+                    unittest.mock.patch.object(run.sys, "base_prefix", base_prefix), \
+                    unittest.mock.patch.object(run.subprocess, "run", side_effect=results), \
+                    self.assertRaises(run.SrtCannotRun) as failed:
+                run.try_srt(self.desk, "settings.json", str(self.tmp), self.tmp)
+            message = str(failed.exception)
+            self.assertIn(f"prefix {prefix}", message)
+            self.assertEqual(message.count(prefix), 1)
+            if base_prefix != prefix:
+                self.assertIn(f"base prefix {base}", message)
+            else:
+                self.assertNotIn("base prefix", message)
+
+    def test_plain_true_is_tried_only_after_failure_with_the_same_srt_settings(self):
+        from hansa import run
+        for rc in (0, 2):
+            results = [subprocess.CompletedProcess([], rc, "", "relay refused"),
+                       subprocess.CompletedProcess([], 0, "", "")]
+            with self.subTest(exit=rc), unittest.mock.patch.object(run.subprocess, "run", side_effect=results) as probe:
+                if rc:
+                    with self.assertRaises(run.SrtCannotRun):
+                        run.try_srt(self.desk, "settings.json", str(self.tmp), self.tmp)
+                else:
+                    self.assertEqual(run.try_srt(self.desk, "settings.json", str(self.tmp), self.tmp), self.srt)
+            self.assertEqual(probe.call_count, 2 if rc else 1)
+            first = probe.call_args_list[0]
+            self.assertEqual(first.args[0], [self.srt, "--settings", "settings.json", "--", *run.protected(["true"])])
+            self.assertEqual(run.srt_record(self.desk)["ran"], rc == 0)
+            if rc:
+                second = probe.call_args_list[1]
+                self.assertEqual(second.args[0], [self.srt, "--settings", "settings.json", "--", "true"])
+                self.assertEqual(second.kwargs, first.kwargs)
+
+    def test_timeout_and_oserror_keep_their_diagnostics_on_either_try(self):
+        from hansa import run
+        failures = [(subprocess.TimeoutExpired("srt", 1), f"no answer in {run.SRT_TRY_SECONDS} s"),
+                    (OSError("cannot start Python"), "cannot start Python")]
+        for error, said in failures:
+            for first in (subprocess.CompletedProcess([], 2, "", "relay refused"), error):
+                with self.subTest(error=error, first=first), \
+                        unittest.mock.patch.object(run.subprocess, "run", side_effect=[first, error]) as probe, \
+                        self.assertRaises(run.SrtCannotRun) as failed:
+                    run.try_srt(self.desk, "settings.json", str(self.tmp), self.tmp)
+                self.assertEqual(probe.call_count, 2)
+                self.assertIn("could not start", str(failed.exception))
+                self.assertIn(said, str(failed.exception))
+                self.assertNotIn("workers may not read", str(failed.exception))
+                self.assertEqual(run.srt_record(self.desk)["said"], said)
 
 
 class DeskTest(unittest.TestCase):
@@ -7507,7 +7611,9 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         self.assertIsNone(m["check"]["ok"])  # not marked as failing its check
         self.assertIn("could not run: srt", m["check"]["note"])
+        self.assertIn("could not start", m["check"]["note"])
         self.assertIn("env: node: No such file or directory", m["check"]["note"])
+        self.assertNotIn("workers may not read", m["check"]["note"])
         self.assertFalse(ran.exists())  # nothing ran
         self.assertEqual(self.srt_calls(tries=True), [])
         self.assertIn("srt CANNOT RUN", st["srt_missing"])

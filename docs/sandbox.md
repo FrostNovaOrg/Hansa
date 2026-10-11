@@ -31,16 +31,18 @@ every worker is refused on saving, each with its reason: the home folder,
 the desk, a lane's repository, a folder on the `PATH`, the system's programs
 and libraries (`/usr/lib`, `/etc` and the like), hansa's own folder and its
 output relay's file, Homebrew's `Cellar`, `opt` and `Caskroom`, `~/.config`,
-`~/.local`, `~/.cache` (and `~/Library` on
-macOS), the temporary folder, the desk's worktrees folder or a lane's
-worktree, or a folder above any of them, and `/dev` or anything in it; a
-file or folder inside one of the others, such as one file in `~/.config` or
-one formula's folder in `Cellar`, may be listed. A name with one of
-`()[]{}*?\`, in the entry or where its link leads, cannot be written as a
-rule and is refused too. A list saved before, or a link changed since, that
-holds such an entry, or any other the page would refuse now, stops every
-run: hansa starts no worker, verifier, design session or coordinator, fails
-each task it would have started with the entry and the reason, and says it in
+`~/.local`, `~/.cache` (and `~/Library` on macOS), the temporary folder, the
+desk's worktrees folder or a lane's worktree, or a folder above any of them,
+and `/dev` or anything in it; a file or folder inside one of the others,
+such as one file in `~/.config` or one formula's folder in `Cellar`, may be
+listed. A name with one of `()[]{}*?\`, in the entry or where its link
+leads, cannot be written as a rule and is refused too. An entry on
+"workers may not read" that hides the Python hansa runs with, or hansa's
+folder, makes runs fail at the start check, and the message says which.
+A list saved before, or a link changed since, that holds such an entry,
+or any other the page would refuse now, stops every run: hansa starts no
+worker, verifier, design session or coordinator, fails each task it would
+have started with the entry and the reason, and says it in
 `hansa status` and at the top of the page, until the principal changes the
 entry on the page (Settings). Only an entry that has come to close a lane's
 repository, a worktree or a folder on the `PATH` is left out of runs

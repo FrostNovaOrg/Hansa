@@ -494,31 +494,42 @@ def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
     """Run `true` in srt with these settings, as a setup or check would run, and record what happened in the
     desk's state (srt_record). srt is found on hansa's own PATH and run with hansa's environment, never a
     lane's. Returns srt's path; raises SrtCannotRun when it is not there or does not run: srt is a node
-    script, so a PATH without node finds srt and still cannot start it."""
+    script, so a PATH without node finds srt and still cannot start it. After a relay failure, try plain
+    `true` to distinguish srt itself not starting from the relay not running inside the sandbox."""
     env = base_env()
     path = shutil.which("srt")
     rec = {"found": bool(path), "path": path or "", "ran": False, "said": "", "at": now()}
+    srt_started = False
     if path:
-        try:
-            r = subprocess.run([path, "--settings", str(settings_file), "--", *protected(["true"])], cwd=str(cwd),
-                               env={**env, "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
-            rec["ran"] = r.returncode == 0
-            said = " ".join((r.stdout + r.stderr).split())[-500:]
-            rec["said"] = "" if rec["ran"] else f"{said or 'nothing'} (exit {r.returncode})"
-        except subprocess.TimeoutExpired:
-            rec["said"] = f"no answer in {SRT_TRY_SECONDS} s"
-        except OSError as e:
-            rec["said"] = str(e)[:300]
+        for relay in (True, False):
+            command = protected(["true"]) if relay else ["true"]
+            try:
+                r = subprocess.run([path, "--settings", str(settings_file), "--", *command], cwd=str(cwd),
+                                   env={**env, "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
+                if r.returncode == 0:
+                    srt_started = True
+                    rec["ran"] = relay
+                    break
+                said = " ".join((r.stdout + r.stderr).split())[-500:]
+                rec["said"] = f"{said or 'nothing'} (exit {r.returncode})"
+            except subprocess.TimeoutExpired:
+                rec["said"] = f"no answer in {SRT_TRY_SECONDS} s"
+            except OSError as e:
+                rec["said"] = str(e)[:300]
     else:
         rec["said"] = SRT_MISSING
     desk.state_dir.mkdir(exist_ok=True)
     write_json(desk.state_dir / "srt.json", rec)
     if not rec["ran"]:
-        raise SrtCannotRun(rec["said"] if not path else
-                           f"srt ({path}) could not run hansa's output relay and true with these sandbox settings: {rec['said']}. "
+        if not path:
+            raise SrtCannotRun(rec["said"])
+        if not srt_started:
+            raise SrtCannotRun(f"srt ({path}) could not start with these sandbox settings: {rec['said']}")
+        prefix = f"prefix {sys.prefix}" + (f", base prefix {sys.base_prefix}" if sys.base_prefix != sys.prefix else "")
+        raise SrtCannotRun(f"srt ({path}) could not run hansa's output relay and true with these sandbox settings: {rec['said']}. "
                            f"Check whether an entry on 'workers may not read' hides the Python hansa runs with "
-                           f"({sys.executable}, prefix {sys.prefix}) or hansa's folder ({Path(__file__).resolve().parent}).")
+                           f"({sys.executable}, {prefix}) or hansa's folder ({Path(__file__).resolve().parent}).")
     return path
 
 
