@@ -1705,6 +1705,8 @@ class SrtOutputTest(unittest.TestCase):
             for place in ("relay", "check"):
                 for kind in ("idle", "writing"):
                     with self.subTest(system=system, place=place, child=kind):
+                        # Linux's leftover outlives any slow run by seconds; macOS waits for its own.
+                        life = 5 if system == "linux" else 1.5
                         folder = self.tmp / f"{system}-{place}-{kind}"
                         folder.mkdir()
                         script = folder / "child.py"
@@ -1715,10 +1717,10 @@ class SrtOutputTest(unittest.TestCase):
                             os.write(1, b"start\\n")
                             if os.fork() == 0:
                                 if {kind!r} == "idle":
-                                    time.sleep(1.5)
+                                    time.sleep({life})
                                     os.write(1, b"late\\n")
                                 else:
-                                    until = time.monotonic() + 1.5
+                                    until = time.monotonic() + {life}
                                     while {system!r} == "linux" or time.monotonic() < until:
                                         try:
                                             os.write(1, b"leftover\\n")
@@ -1740,7 +1742,7 @@ class SrtOutputTest(unittest.TestCase):
                         self.assertIn(b"err-tail", lines)
                         self.assertLess(lines.index(b"tail"), lines.index(b"err-tail"))
                         if system == "linux":
-                            self.assertLess(elapsed, 1.3, "a leftover held up Linux's end")
+                            self.assertLess(elapsed, 3.5, "a leftover held up Linux's end")
                             self.assertNotIn(b"late\n", out)
                         else:
                             self.assertGreater(elapsed, 1.4, "macOS lost the leftover's output")
