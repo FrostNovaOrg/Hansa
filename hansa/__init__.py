@@ -5,6 +5,7 @@ append-only event log. The CLI, the web page and the agents all read the
 same files, so nobody has to read this code to know what is going on.
 """
 
+import fnmatch
 import functools
 import os
 import subprocess
@@ -73,6 +74,9 @@ def build() -> str:
 
 
 SHIPPED = ("card.md", "ui.html", "no-signature")  # hansa's own files besides its Python sources and agents/*.md
+# The coordinator's mod (plugin.py): its manifest, hooks file and script, which the session loads, and its own tests,
+# which Claude Code's test kit runs only from inside the mod's folder (claude plugin test hansa/mod)
+MOD_SHIPPED = ("mod/.claude-plugin/plugin.json", "mod/hooks/hooks.json", "mod/hooks/*.js", "mod/tests/*.test.ts")
 
 
 def shipped(rel: Path) -> bool:
@@ -81,6 +85,8 @@ def shipped(rel: Path) -> bool:
         return False
     if len(rel.parts) == 1:
         return rel.suffix == ".py" or rel.name in SHIPPED
+    if rel.parts[0] == "mod":  # not what Claude Code writes there as it loads it (its types, a tsconfig.json)
+        return any(len(rel.parts) == x.count("/") + 1 and fnmatch.fnmatchcase(rel.as_posix(), x) for x in MOD_SHIPPED)
     return len(rel.parts) == 2 and rel.parts[0] == "agents" and rel.suffix == ".md"
 
 

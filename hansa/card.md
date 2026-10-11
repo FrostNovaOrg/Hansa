@@ -424,6 +424,7 @@ end your turn and wait. Each wakeup or poll is a turn that rereads the whole
 conversation, and costs that much even when it finds nothing to do.
 With `--clear-daily`, hansa clears your session once a day when it is idle, so
 keep what must survive in the desk (tasks, requests), not only in the conversation.
+hansa's mod compacts your session when it is idle, at the principal's thresholds (`hansa help inbox`).
 Your plan and findings go in files under the desk's `notes/`: that is where you
 keep what must survive a cleared session, and you write there without asking.
 Keep the file you reread each time you pick the work up short, since each

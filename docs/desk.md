@@ -150,6 +150,27 @@ them out again, with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`
 unless `--to` names another); `hansa notes` lists the files with their sizes and
 headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 
+### Compaction
+
+`hansa coordinator` loads hansa's mod, a Claude Code plugin, into the coordinator's session only (workers,
+verifications and design sessions never get it). The principal sets four values on the page, next to the
+coordinator's model and effort; the coordinator cannot change them:
+
+- **Compact when idle at** (default 400,000 tokens): once a turn has ended with an answer and the session is idle
+  (no turn running, and the last `Stop` listed no background tasks and no session crons), the mod compacts after 60
+  seconds with no new turn, while the whole context is still in the prompt cache.
+- **Compact after a long idle at** (default 200,000 tokens) and **a long idle is** (default 50 minutes): the same,
+  after that long. The prompt cache lasts an hour: compacting before it lapses costs little, and the next turn starts
+  from a short context instead of reading a long one uncached.
+- **Compact while working at** (default 550,000 tokens): Claude Code's own auto-compact, given as `--autocompact`.
+
+Token values take 100,000 to 1,000,000, the minutes 1 to 240. A new turn cancels a wait; after a compact (done,
+skipped or refused) the mod asks again only after a new turn. The first three apply from the session's next decision
+(when a turn or a wait ends), the fourth from its next start. The mod needs Claude Code 2.1.290 or later; with an
+older one, or when a step of preparing the mod fails, the session starts without the mod and without
+`--autocompact`, the start says why, and so do `hansa status` and the page. A session whose settings turn hooks off
+runs without the mod's rules, and hansa cannot see that; Claude Code's own auto-compact still applies to it.
+
 ## Merge checks
 
 For long merge checks and busy task lanes, add a merge lane with `hansa lane add m --like a`, give it its own caches through `write` and `env`, then set `hansa lane set m merge_lane true` (unset or false: ordinary). One per repository and base, it takes no work and uses its own worktree, sandbox, env, setup, merge command and limit, keeping the task lane free and its merge message and identity. The lane is chosen when the check starts; unmarking or removing it while queued restores the task lane. Merge checks still run in order, one at a time per repository and base, taking a concurrency slot before new work. With every slot busy, a merge check waits for the next task to end anywhere, and that task's lane waits about one merge check. Raising concurrency by one removes the wait if the machine can run a merge check beside the lanes' work.
