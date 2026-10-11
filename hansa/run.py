@@ -515,7 +515,8 @@ def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
     desk.state_dir.mkdir(exist_ok=True)
     write_json(desk.state_dir / "srt.json", rec)
     if not rec["ran"]:
-        raise SrtCannotRun(rec["said"] if not path else f"srt ({path}) could not start: {rec['said']}")
+        raise SrtCannotRun(rec["said"] if not path else
+                           f"srt ({path}) could not run hansa's output relay and true with these sandbox settings: {rec['said']}")
     return path
 
 
@@ -699,7 +700,7 @@ def _srt_true(path: str, settings: dict, tmp: str, cwd, argv=("/usr/bin/true",))
     f = Path(tmp) / "try-settings.json"
     write_json(f, settings)
     try:
-        r = subprocess.run([path, "--settings", str(f), "--", *protected(argv)], cwd=str(cwd),
+        r = subprocess.run([path, "--settings", str(f), "--", *argv], cwd=str(cwd),
                            env={**base_env(), "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp}, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, errors="replace", timeout=SRT_TRY_SECONDS)
     except subprocess.TimeoutExpired:

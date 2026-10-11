@@ -504,7 +504,7 @@ args = sys.argv[1:]
 cut = args.index("--")
 command = args[cut + 1:]
 if len(command) > 1 and command[1].endswith("/srt_output.py"):
-    args[cut + 1:] = command[2:]  # record the wrapped command; execute the relay below
+    args[cut + 1:] = command[3:]  # record the wrapped command; execute the relay below
 settings = json.load(open(args[args.index("--settings") + 1]))
 mode = os.fstat(1).st_mode
 with open(LOG, "a") as f:
@@ -1340,8 +1340,15 @@ class FailedWriteTest(unittest.TestCase):
                 p.communicate(timeout=10)
 
 
+# | Place | Several-MB burst, slow reader | Leftover child, Linux/macOS | Signal | Reader gone |
+# | Setup | script | shared relay tests | shared relay tests | shared relay tests |
+# | Check | script | relay + check on both stand-ins | relay + check | relay + check |
+# | Merge setup | start_merge_check | shared relay tests | shared relay tests | shared relay tests |
+# | Merge check | start_merge_check | shared relay tests | shared relay tests | shared relay tests |
+# | Try | script, all steps | shared relay tests | shared relay tests | shared relay tests |
+# | Preview | preview.main | shared relay tests | shared relay tests | shared relay tests |
 class SrtOutputTest(unittest.TestCase):
-    """Every srt launch, with non-blocking inherited output and a reader paused until a burst starts."""
+    """srt's output becomes non-blocking; Linux kills leftovers, macOS leaves output open."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1354,10 +1361,26 @@ class SrtOutputTest(unittest.TestCase):
         (self.tmp / "err").write_bytes(self.err)
         self.srt = self.bin / "srt"
         self.srt.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
-            import fcntl, os, sys
+            import fcntl, json, os, signal, subprocess, sys
             for fd in (1, 2):
                 fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
             command = sys.argv[sys.argv.index("--") + 1:]
+            if "--settings" in sys.argv and os.path.isfile(sys.argv[sys.argv.index("--settings") + 1]):
+                settings = json.load(open(sys.argv[sys.argv.index("--settings") + 1]))
+                for path in settings.get("filesystem", {}).get("denyRead", []):
+                    if len(command) > 1 and (command[1] == path or command[1].startswith(path.rstrip("/") + "/")):
+                        print("cannot read " + command[1] + ": Permission denied", file=sys.stderr)
+                        sys.exit(2)
+            if os.environ.get("SRT_SYSTEM") == "linux":
+                proc = subprocess.Popen(command, start_new_session=True)
+                if os.environ.get("SRT_GROUP"):
+                    open(os.environ["SRT_GROUP"], "w").write(str(proc.pid))
+                rc = proc.wait()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                sys.exit(rc if rc >= 0 else 128 - rc)
             os.execvp(command[0], command)
             '''))
         self.srt.chmod(0o755)
@@ -1420,9 +1443,9 @@ class SrtOutputTest(unittest.TestCase):
             stdout, stderr = stdout.decode(), stderr.decode()
         return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
-    def test_setup_check_merge_and_try_keep_bursts_and_exit_codes(self):
+    def test_setup_check_and_try_keep_bursts_and_exit_codes(self):
         from hansa import run
-        for place in ("setup", "merge-setup", "check", "merge-check", "try-setup", "try-check", "try-merge-check"):
+        for place in ("setup", "check", "try-setup", "try-check", "try-merge-check"):
             for mode in ("write", "cat"):
                 for rc in (0, 23):
                     with self.subTest(place=place, mode=mode, exit=rc):
@@ -1434,7 +1457,7 @@ class SrtOutputTest(unittest.TestCase):
                         command = self.command(folder, mode, rc)
                         log, exit_file = folder / "log", folder / "exit"
                         cwd = folder
-                        if place in ("setup", "merge-setup"):
+                        if place == "setup":
                             cwd = folder / "wt"
                             sh("git", "init", "-q", "--separate-git-dir", str(folder / "git"), str(cwd), cwd=folder)
                             source = run.SETUP_SCRIPT
@@ -1451,12 +1474,12 @@ class SrtOutputTest(unittest.TestCase):
                         script = folder / "script.sh"
                         script.write_text(source)
                         env = {**self.env, "OUTPUT_READY": str(folder / "ready")}
-                        with log.open("wb") if place in ("check", "merge-check") else open(os.devnull, "wb") as output:
+                        with log.open("wb") if place == "check" else open(os.devnull, "wb") as output:
                             result = subprocess.run(["/bin/sh", str(script), *args], cwd=cwd, env=env,
                                                     stdout=output, stderr=subprocess.PIPE, timeout=20)
                         self.assertEqual(log.read_bytes(), self.out + self.err)
                         self.report(folder)
-                        if place in ("setup", "merge-setup"):
+                        if place == "setup":
                             self.assertEqual(result.returncode, 41 if rc == 0 else 97)
                             self.assertEqual(Path(str(log) + ".done").exists(), rc == 0)
                             if rc:
@@ -1509,44 +1532,248 @@ class SrtOutputTest(unittest.TestCase):
                         unittest.mock.patch.object(preview.subprocess, "Popen", launch), self.assertRaises(Launched):
                     preview.main()
 
-    def test_startup_and_sandbox_probes_keep_bursts_and_exit_codes(self):
+    def test_startup_chain_keeps_bursts_and_reports_its_failure(self):
         from hansa import run
-        for place in ("startup", "sandbox", "git-open"):
-            for rc in (0, 23):
-                with self.subTest(place=place, exit=rc):
-                    folder = self.tmp / f"{place}-{rc}"
+        for rc in (0, 23):
+            with self.subTest(exit=rc):
+                folder = self.tmp / f"startup-{rc}"
+                folder.mkdir()
+                command = self.command(folder, "write", rc)
+                env = {**self.env, "OUTPUT_READY": str(folder / "ready")}
+                true = self.bin / "true"
+                true.write_text("#!/bin/sh\nexec " + command + "\n")
+                true.chmod(0o755)
+                desk = types.SimpleNamespace(state_dir=folder / "state")
+                with unittest.mock.patch.dict(os.environ, env), \
+                        unittest.mock.patch.object(run, "base_env", return_value=env), \
+                        unittest.mock.patch.object(run.subprocess, "run", self.paused_run):
+                    if rc:
+                        with self.assertRaises(run.SrtCannotRun) as failed:
+                            run.try_srt(desk, "unused", str(folder), folder)
+                        self.assertIn("output relay and true", str(failed.exception))
+                    else:
+                        self.assertEqual(run.try_srt(desk, "unused", str(folder), folder), str(self.srt))
+                rec = json.loads((desk.state_dir / "srt.json").read_text())
+                self.assertEqual(rec["ran"], rc == 0)
+                if rc:
+                    self.assertTrue(rec["said"].endswith("(exit 23)"))
+                self.report(folder)
+
+    def test_merge_setup_and_check_use_the_merge_call_site(self):
+        from hansa import run
+        for mode in ("write", "cat"):
+            for setup_rc, check_rc in ((0, 0), (0, 23), (23, None)):
+                with self.subTest(mode=mode, setup=setup_rc, check=check_rc):
+                    folder = self.tmp / f"merge-{mode}-{setup_rc}-{check_rc}"
                     folder.mkdir()
-                    command = self.command(folder, "write", rc)
+                    wt = folder / "wt"
+                    sh("git", "init", "-q", "--separate-git-dir", str(folder / "git"), str(wt), cwd=folder)
+                    lane = {"repo": str(wt), "setup": self.command(folder, mode, setup_rc),
+                            "merge_check": self.command(folder, mode, check_rc or 0)}
+                    meta = {"state": "merging", "lane": "a", "head": "a" * 40, "title": "burst",
+                            "merge_check": {"phase": "queued"}}
+                    desk = types.SimpleNamespace(raw_dir=lambda tid: folder, lock=contextlib.nullcontext,
+                                                 meta=lambda tid: meta, settings=lambda: {"lanes": {"a": lane}, "providers": {}},
+                                                 update=lambda tid, **kw: meta.update(kw), event=lambda *a, **kw: None,
+                                                 worktrees_dir=folder)
+                    # Exercise start_merge_check's own setup/check argv, logs and exit files;
+                    # only preparation of the already-clean worktree and sandbox is stood in.
+                    def sandbox(*args, **kwargs):
+                        name = args[2]
+                        tmp, own = folder / f"{name}-tmp", folder / f"{name}-own"
+                        tmp.mkdir()
+                        own.mkdir()
+                        return str(self.srt), "unused", str(tmp), str(own)
                     env = {**self.env, "OUTPUT_READY": str(folder / "ready")}
-                    with unittest.mock.patch.dict(os.environ, env), \
-                            unittest.mock.patch.object(run, "base_env", return_value=env), \
-                            unittest.mock.patch.object(run.subprocess, "run", self.paused_run):
-                        if place == "startup":
-                            true = self.bin / "true"
-                            true.write_text("#!/bin/sh\nexec " + command + "\n")
-                            true.chmod(0o755)
-                            desk = types.SimpleNamespace(state_dir=folder / "state")
-                            if rc:
-                                with self.assertRaises(run.SrtCannotRun):
-                                    run.try_srt(desk, "unused", str(folder), folder)
-                            else:
-                                self.assertEqual(run.try_srt(desk, "unused", str(folder), folder), str(self.srt))
-                            rec = json.loads((desk.state_dir / "srt.json").read_text())
-                            self.assertEqual(rec["ran"], rc == 0)
-                            if rc:
-                                self.assertTrue(rec["said"].endswith("(exit 23)"))
-                        elif place == "sandbox":
-                            ran, said, out = run._srt_true(str(self.srt), {}, str(folder), folder,
-                                                         ["/bin/sh", "-c", command])
-                            self.assertEqual(out.encode(), self.out)
-                            self.assertEqual(ran, rc == 0)
-                            self.assertEqual(said, "" if rc == 0 else f"{self.err[:300].decode()} (exit 23)")
-                        else:
-                            with unittest.mock.patch.object(run, "git_open_try", return_value=command):
-                                refused, written, said = run._srt_writes(str(self.srt), {}, str(folder), folder, [])
-                            self.assertEqual((refused, written), ("", ""))
-                            self.assertEqual(said, "" if rc == 0 else f"{self.err[:300].decode()} (exit 23)")
+                    with unittest.mock.patch.object(run, "branch_holds", return_value=""), \
+                            unittest.mock.patch.object(run, "ready_worktree"), \
+                            unittest.mock.patch.object(run, "git", return_value="a" * 40), \
+                            unittest.mock.patch.object(run, "wgit", return_value="b" * 40), \
+                            unittest.mock.patch.object(run, "merge_lane", return_value="a"), \
+                            unittest.mock.patch.object(run, "in_srt", sandbox), \
+                            unittest.mock.patch.object(run, "in_sandbox", side_effect=lambda d, ln, cmd: cmd), \
+                            unittest.mock.patch.object(run, "expected_git_line", return_value=(wt / ".git").read_text().strip()), \
+                            unittest.mock.patch.object(run, "run_mark", return_value="burst"), \
+                            unittest.mock.patch.object(run, "base_env", return_value=env):
+                        # The call site names the worktree after its lane.
+                        desk.worktrees_dir = folder / "worktrees"
+                        desk.worktrees_dir.mkdir()
+                        (desk.worktrees_dir / "a").symlink_to(wt, target_is_directory=True)
+                        proc = run.start_merge_check(desk, "task", "a", lane)
+                        with proc:
+                            proc.wait(timeout=20)
+                    self.assertEqual((folder / "merge-setup.log").read_bytes(), self.out + self.err)
                     self.report(folder)
+                    self.assertEqual((folder / "merge-check.exit").exists(), setup_rc == 0)
+                    if setup_rc == 0:
+                        self.assertEqual((folder / "merge-check.log").read_bytes(), self.out + self.err)
+                        self.assertEqual((folder / "merge-check.exit").read_text(), f"{check_rc}\n")
+                    else:
+                        self.assertEqual(proc.returncode, 97)
+                        self.assertIn("failed (exit 23)", (folder / "merge-check.err").read_text())
+                    self.assertFalse((folder / "setup-tmp").exists() or (folder / "setup-own").exists())
+                    if setup_rc == 0:
+                        self.assertFalse((folder / "check-tmp").exists() or (folder / "check-own").exists())
+
+    def edge_run(self, system, place, command, folder, reader_gone=False):
+        from hansa import run, srt_output
+        relay = [sys.executable, str(Path(srt_output.__file__).resolve()),
+                 "command" if system == "linux" else "eof"]
+        env = {**self.env, "SRT_SYSTEM": system, "SRT_GROUP": str(folder / "group"),
+               "OUTPUT_READY": str(folder / "ready")}
+        if place == "relay":
+            argv = [str(self.srt), "--", *relay, "/bin/sh", "-c", command]
+        else:
+            tmp, own = folder / "tmp", folder / "own"
+            tmp.mkdir()
+            own.mkdir()
+            source = run.CHECK_SCRIPT.replace(run.SRT_OUTPUT, shlex.join(relay))
+            script = folder / "check.sh"
+            script.write_text(source)
+            argv = ["/bin/sh", str(script), command, str(folder / "exit"), str(tmp), str(self.srt), "unused", str(own)]
+        started = time.monotonic()
+        with self.popen(argv, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE if reader_gone else subprocess.STDOUT, start_new_session=True) as proc:
+            try:
+                if reader_gone:
+                    self.assertEqual(proc.stdout.read(6), b"start\n")
+                    proc.stdout.close()
+                    proc.stdout = None
+                out, err = proc.communicate(timeout=4)
+            finally:
+                # Even a broken relay must leave no descendant behind after this test.
+                if proc.poll() is None:
+                    if (folder / "group").exists():
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(int((folder / "group").read_text()), signal.SIGKILL)
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate(timeout=3)
+        rc = proc.returncode if place == "relay" else int((folder / "exit").read_text())
+        return rc, out, err, time.monotonic() - started
+
+    def test_leftovers_follow_each_system_and_buffered_output_is_drained(self):
+        for system in ("linux", "macos"):
+            for place in ("relay", "check"):
+                for kind in ("idle", "writing"):
+                    with self.subTest(system=system, place=place, child=kind):
+                        folder = self.tmp / f"{system}-{place}-{kind}"
+                        folder.mkdir()
+                        script = folder / "child.py"
+                        script.write_text(textwrap.dedent(f'''\
+                            import os, sys, time
+                            from pathlib import Path
+                            Path({str(folder / 'ready')!r}).touch()
+                            os.write(1, b"start\\n")
+                            if os.fork() == 0:
+                                if {kind!r} == "idle":
+                                    time.sleep(1.5)
+                                    os.write(1, b"late\\n")
+                                else:
+                                    until = time.monotonic() + 1.5
+                                    while {system!r} == "linux" or time.monotonic() < until:
+                                        try:
+                                            os.write(1, b"leftover\\n")
+                                        except BrokenPipeError:
+                                            pass
+                                        time.sleep(.002)
+                                os._exit(0)
+                            if {kind!r} == "writing":
+                                time.sleep(.1)
+                            os.write(1, b"tail\\n")
+                            os.write(2, b"err-tail\\n")
+                            sys.exit(5)
+                            '''))
+                        rc, out, _, elapsed = self.edge_run(system, place, shlex.join([sys.executable, str(script)]), folder)
+                        self.assertEqual(rc, 5)
+                        self.assertIn(b"start\n", out)
+                        lines = out.splitlines()
+                        self.assertIn(b"tail", lines)
+                        self.assertIn(b"err-tail", lines)
+                        self.assertLess(lines.index(b"tail"), lines.index(b"err-tail"))
+                        if system == "linux":
+                            self.assertLess(elapsed, 1.3, "a leftover held up Linux's end")
+                            self.assertNotIn(b"late\n", out)
+                        else:
+                            self.assertGreater(elapsed, 1.4, "macOS lost the leftover's output")
+                            self.assertIn(b"late\n" if kind == "idle" else b"leftover\n", out)
+
+    def test_signals_keep_128_plus_signal_on_both_systems(self):
+        for system in ("linux", "macos"):
+            for place in ("relay", "check"):
+                with self.subTest(system=system, place=place):
+                    folder = self.tmp / f"signal-{system}-{place}"
+                    folder.mkdir()
+                    (folder / "ready").touch()
+                    rc, _, _, _ = self.edge_run(system, place, "kill -TERM $$", folder)
+                    self.assertEqual(rc, 143)
+
+    def test_linux_drains_a_fixed_snapshot_without_waiting_for_the_writer_to_close(self):
+        from hansa import srt_output
+        read, write = os.pipe()
+        self.addCleanup(os.close, write)  # keep a writer open after the command has ended
+        payload = b"buffered tail\n" * 200
+        os.write(write, payload)
+        stream = os.fdopen(read, "rb", buffering=0)
+        self.addCleanup(stream.close)
+        proc = types.SimpleNamespace(stdout=stream, wait=lambda: 5)
+        copied = bytearray()
+        real_select = srt_output.select.select
+
+        def ready(inputs, outputs, errors):
+            wake = [fd for fd in inputs if isinstance(fd, int)]
+            if wake:
+                self.assertTrue(real_select(wake, [], [], 1)[0])  # observe exit before reading
+            result = real_select(inputs, outputs, errors, 1)
+            self.assertTrue(result[0], "the drained snapshot still waited on a live writer")
+            return result
+
+        with unittest.mock.patch.object(srt_output.sys, "argv", ["relay", "command", "unused"]), \
+                unittest.mock.patch.object(srt_output.subprocess, "Popen", return_value=proc), \
+                unittest.mock.patch.object(srt_output.os, "fstat", return_value=types.SimpleNamespace(st_dev=1, st_ino=1)), \
+                unittest.mock.patch.object(srt_output.select, "select", ready), \
+                unittest.mock.patch.object(srt_output, "write_all", side_effect=lambda fd, data: copied.extend(data)):
+            self.assertEqual(srt_output.main(), 5)
+        self.assertEqual(copied, payload)
+
+    def test_closed_reader_closes_command_output_waits_and_keeps_its_exit(self):
+        for system in ("linux", "macos"):
+            for place in ("relay", "check"):
+                with self.subTest(system=system, place=place):
+                    folder = self.tmp / f"epipe-{system}-{place}"
+                    folder.mkdir()
+                    (folder / "ready").touch()
+                    command = ("printf 'start\\n'; yes; sleep .1; "
+                               f"echo finished > {shlex.quote(str(folder / 'finished'))}; exit 29")
+                    rc, _, err, _ = self.edge_run(system, place, command, folder, reader_gone=True)
+                    self.assertEqual(rc, 29)
+                    self.assertEqual((folder / "finished").read_text(), "finished\n")
+                    self.assertNotIn(b"Traceback", err)
+
+    def test_worker_probes_do_not_need_a_readable_relay_but_startup_does(self):
+        from hansa import run, srt_output
+        folder = self.tmp / "hidden-relay"
+        folder.mkdir()
+        sh("git", "init", "-q", str(folder), cwd=self.tmp)
+        settings = {"filesystem": {"denyRead": [str(Path(srt_output.__file__).resolve().parent)]}}
+        env = {**self.env, "OUTPUT_READY": str(folder / "ready")}
+        with unittest.mock.patch.object(run, "base_env", return_value=env), \
+                unittest.mock.patch.object(run.shutil, "which", return_value=str(self.srt)):
+            self.assertEqual(run._srt_true(str(self.srt), settings, str(folder), folder), (True, "", ""))
+            self.assertEqual(run._srt_writes(str(self.srt), settings, str(folder), folder, []), ("", "", ""))
+            box = {"filesystem": {"denyRead": settings["filesystem"]["denyRead"], "denyWrite": [], "allowWrite": [str(folder)]},
+                   "network": {"allowedDomains": [], "deniedDomains": []}}
+            with unittest.mock.patch.object(run, "SANDBOX_TRIES", {}), \
+                    unittest.mock.patch.object(run, "git_needs_open", return_value=[]), \
+                    unittest.mock.patch.object(run, "git_needs_kept", return_value=[]):
+                self.assertEqual(run.try_sandbox(box, folder), {"ok": True})
+            f = folder / "settings.json"
+            write_json(f, settings)
+            desk = types.SimpleNamespace(state_dir=folder / "state")
+            with self.assertRaises(run.SrtCannotRun) as failed:
+                run.try_srt(desk, f, str(folder), folder)
+            self.assertIn("output relay and true with these sandbox settings", str(failed.exception))
+            self.assertIn("Permission denied", str(failed.exception))
 
 
 class DeskTest(unittest.TestCase):
@@ -12767,6 +12994,74 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(str(keys), self.sandbox_of(argv)["filesystem"]["denyRead"])
         self.assertIn(str(self.desk.secrets_dir), self.sandbox_of(argv)["filesystem"]["denyRead"])
         self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=31))["ok"])
+
+    def test_deny_read_cannot_hide_the_relay_or_its_python_on_either_system_or_in_a_venv(self):
+        from hansa import desk as hdesk, run
+        code = str(Path(hdesk.__file__).resolve().parent)
+        _, said, stops = hdesk.deny_parts([code], self.desk.root, {"a": {"repo": code}})
+        self.assertEqual(stops, said, "a lane repository overlap must still stop runs")
+        self.assertIn("output relay", stops[0])
+        other_code = str(Path(code) / "card.md")  # hiding another file does not hide the relay
+        self.assertEqual(hdesk.deny_parts([other_code], self.desk.root), ([other_code], [], []))
+        for platform in ("linux", "darwin"):
+            for venv in (False, True):
+                with self.subTest(platform=platform, venv=venv):
+                    folder = self.tmp.resolve() / f"python-{platform}-{venv}"
+                    base = folder / ("Python.framework/Versions/3.11" if platform == "darwin" else "base")
+                    prefix = folder / "venv" if venv else base
+                    stdlib, modules = base / "lib/python3.11", prefix / "lib/python3.11/site-packages"
+                    for d in (prefix / "bin", stdlib / "lib-dynload", modules):
+                        d.mkdir(parents=True, exist_ok=True)
+                    executable = prefix / "bin/python3"
+                    executable.symlink_to(sys.executable)
+                    (prefix / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n")
+                    beside = folder / "private"
+                    beside.mkdir()
+                    link = folder / "library-link"
+                    link.symlink_to(stdlib, target_is_directory=True)
+                    paths = {"stdlib": str(stdlib), "platstdlib": str(stdlib),
+                             "purelib": str(modules), "platlib": str(modules)}
+                    config = {"LIBDIR": str(base / "lib"), "LDLIBRARY": "libpython3.11.so",
+                              "PYTHONFRAMEWORK": "Python" if platform == "darwin" else ""}
+                    user_site = folder / "user-site"
+                    with unittest.mock.patch.object(hdesk.sys, "platform", platform), \
+                            unittest.mock.patch.object(hdesk.sys, "executable", str(executable)), \
+                            unittest.mock.patch.object(hdesk.sys, "prefix", str(prefix)), \
+                            unittest.mock.patch.object(hdesk.sys, "exec_prefix", str(prefix)), \
+                            unittest.mock.patch.object(hdesk.sys, "base_prefix", str(base)), \
+                            unittest.mock.patch.object(hdesk.sys, "base_exec_prefix", str(base)), \
+                            unittest.mock.patch.object(hdesk.sys, "path", [str(stdlib), str(modules), str(base / "lib/python311.zip")]), \
+                            unittest.mock.patch.object(hdesk.sysconfig, "get_paths", return_value=paths), \
+                            unittest.mock.patch.object(hdesk.sysconfig, "get_config_var", side_effect=config.get), \
+                            unittest.mock.patch.object(hdesk.site, "getsitepackages", return_value=[str(modules)]), \
+                            unittest.mock.patch.object(hdesk.site, "getusersitepackages", return_value=str(user_site)), \
+                            unittest.mock.patch.dict(os.environ, {"PATH": f"{prefix / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
+                        bad = [code, str(Path(code) / "srt_output.py"), str(executable), str(prefix), str(base),
+                               str(stdlib), str(stdlib / "subprocess.py"), str(modules), str(link),
+                               str(base / "lib/python311.zip"), str(prefix / "pyvenv.cfg"),
+                               str(base / "lib/libpython3.11.so"), str(user_site)]
+                        if platform == "darwin":
+                            bad.append(str(base / "Python"))
+                        for path in bad:
+                            with self.subTest(path=path):
+                                good, said, stops = hdesk.deny_parts([path, str(beside)], self.desk.root)
+                                self.assertEqual(good, [str(beside)])
+                                self.assertEqual(stops, said, "a PATH overlap must still stop runs")
+                                self.assertIn("output relay", stops[0])
+                                refused = self.page_save(lambda s: s.update(workers_may_not_read=[path]))
+                                self.assertFalse(refused["ok"], refused)
+                                self.assertIn("output relay", " ".join(refused["problems"]))
+                        self.assertEqual(hdesk.deny_parts([str(beside)], self.desk.root), ([str(beside)], [], []))
+        # An old saved entry stops a real worker start with the refusal reason, before any setup or check.
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [code]
+        write_json(self.desk.settings_path, s)
+        self.assertIn("output relay", public_settings(self.desk)["no_read_stop"])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed")
+        self.assertIn("output relay", m["error"])
+        self.assertEqual(self.srt_calls(tries=True, sandbox=True), [])
 
     def test_what_workers_cannot_be_kept_from_reading_is_refused_on_saving_and_left_out_at_start(self):
         home, tools = Path(os.path.expanduser("~")), self.tmp.resolve() / "tools"

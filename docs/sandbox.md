@@ -29,7 +29,7 @@ and proxies a build may need; who else may not read them is under
 [The principal](who-changes-what.md#the-principal). An entry that would stop
 every worker is refused on saving, each with its reason: the home folder,
 the desk, a lane's repository, a folder on the `PATH`, the system's programs
-and libraries (`/usr/lib`, `/etc` and the like), Homebrew's `Cellar`, `opt`
+and libraries (`/usr/lib`, `/etc` and the like), hansa's output relay and its Python and libraries, Homebrew's `Cellar`, `opt`
 and `Caskroom`, `~/.config`, `~/.local`, `~/.cache` (and `~/Library` on
 macOS), the temporary folder, the desk's worktrees folder or a lane's
 worktree, or a folder above any of them, and `/dev` or anything in it; a
