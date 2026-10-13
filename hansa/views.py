@@ -1381,6 +1381,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *(["    runs leave the ignored ones out; the coordinator removes them with: "
                + allow_fix(name, ln.get("allow", []))] if any(map(refused_rule, ln.get("allow", []))) else []),
             *release.lane_lines(desk, name, ln),
+            f"  {len(set(release.lane_exceptions(s, name)) & set(s.get('release_forbidden') or []))} "
+            "forbidden entry/entries excepted on this lane (the principal's, on the page)",
             *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"
               for f, what in (("commit_message", "message of the commit of a task's work, and of the merge of the base"
                                                  " into a task's branch"),

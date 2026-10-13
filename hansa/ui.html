@@ -143,7 +143,10 @@ const T = ZH ? {
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令、它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，勾就不再算数）",
-  releaseForbidden:"不许发出去的字眼（每行一个词或短语，不分大小写；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
+  releaseForbidden:"不许发出去的字眼（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
+  releaseForbiddenExcept:"按 lane 豁免字眼（每行一项，字眼须与上面的写法完全相同；lane 用空格或逗号分隔；不影响邮箱规则）",
+  forbiddenEntry:"字眼", forbiddenLanes:"豁免的 lane", addForbiddenException:"添加豁免",
+  forbiddenEntryUnmatched:"不匹配任何项：此字眼不在禁止列表上", forbiddenLaneUnmatched:"不匹配任何项：此 lane 不在桌面上",
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
   f_release:"发布命令",
@@ -225,7 +228,10 @@ const T = ZH ? {
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command, the target it must follow or the way it runs (fixed), changes)",
-  releaseForbidden:"Words or phrases no release may send out (one per line, any case; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
+  releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
+  releaseForbiddenExcept:"Exceptions by lane (one entry per row, spelled exactly as above; lanes separated by spaces or commas; the mailbox rule still applies)",
+  forbiddenEntry:"Entry", forbiddenLanes:"Excepted lanes", addForbiddenException:"Add exception",
+  forbiddenEntryUnmatched:"matches nothing: this entry is not on the forbidden list", forbiddenLaneUnmatched:"matches nothing: this lane is not on the desk",
   releaseMailboxes:"Require reserved example domains or allowlisted mailboxes in added lines (checked at merges and releases; off by default)",
   releaseMailboxAllow:"Mailbox allowlist (one entry per line, ignoring case): a full address allows that address; @domain allows the domain and its subdomains",
   f_release:"release",
@@ -437,6 +443,19 @@ async function loadSettings(problems) {
   RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   renderSettings(problems && problems.length ? problems : r.problems);
 }
+function forbiddenExceptions() {
+  const rows = S.release_forbidden_except || [];
+  return h("div", {}, rows.map((row, i) => h("div", {class:"forbidden-exception"},
+    h("div", {class:"row"},
+      h("input", {value:row.entry, placeholder:T.forbiddenEntry, "data-exception-entry":i,
+        oninput:e => { row.entry = e.target.value; }, onchange:() => renderSettings()}),
+      h("input", {value:row.lanes.join(" "), placeholder:T.forbiddenLanes, "data-exception-lanes":i,
+        oninput:e => { row.lanes = e.target.value.split(/[\s,]+/).filter(Boolean); }, onchange:() => renderSettings()}),
+      h("button", {onclick:() => { rows.splice(i, 1); renderSettings(); }}, T.remove)),
+    !(S.release_forbidden || []).includes(row.entry) ? h("p", {class:"warn"}, `${row.entry}: ${T.forbiddenEntryUnmatched}`) : null,
+    row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`)))),
+    h("button", {onclick:() => { S.release_forbidden_except = [...rows, {entry:"", lanes:[]}]; renderSettings(); }}, T.addForbiddenException));
+}
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
@@ -581,8 +600,9 @@ function renderSettings(problems) {
         h("ul", {}, RELEASE_UNMATCHED.filter(u => !u.gone).map(u => h("li", {class:"bad"}, `${u.lane}${u.target ? ` · ${T.releaseTarget} ${u.target}` : ""}: ${(ZH && u.why_zh) || u.why}`))),
         h("button", {onclick: e => { S.releases_without_asking = (S.releases_without_asking || []).map(listedKey).map(([lane, target]) => ({lane, target}));
           e.target.disabled = true; }}, T.releaseTakeBack))] : []),
-      T.releaseForbidden, h("textarea", {placeholder:"internal-only", oninput: e => {
+      T.releaseForbidden, h("textarea", {placeholder:"internal-only", onchange:() => renderSettings(), oninput: e => {
         S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.release_forbidden || []).join("\n")),
+      T.releaseForbiddenExcept, forbiddenExceptions(),
       T.releaseMailboxes, bind(S, "release_mailboxes", "bool"),
       T.releaseMailboxAllow, h("textarea", {placeholder:"maintainer@example.com\n@project.example", oninput: e => {
         S.release_mailbox_allow = e.target.value.split("\n").filter(x => x.trim());
