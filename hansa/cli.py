@@ -1195,6 +1195,10 @@ def cmd_release(a):
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
     if r["state"] == "forbidden":
+        mailbox = release.mailbox_refusal(r["hits"])
+        if mailbox:
+            raise SystemExit(desk.redact(
+                f"hansa: {head}\nrefused: {mailbox}\nNothing waits for the principal and nothing runs"))
         raise SystemExit(desk.redact(
             f"hansa: {head}\nrefused: what goes out holds words the principal keeps from going out (the web page, "
             f"Settings), so nothing waits for the principal and nothing runs:\n{release.hits_text(r['hits'])}\n"

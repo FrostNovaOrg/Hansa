@@ -91,7 +91,7 @@ def mailbox_hits(line: str) -> list:
 
 def test_file(path: str) -> bool:
     """Paths where the principal's mailbox rule checks added lines."""
-    parts = path.split("/")
+    parts = path.casefold().split("/")
     return (bool(set(parts[:-1]) & {"test", "tests", "spec", "specs", "__tests__", "fixtures", "testdata"})
             or any(fnmatch.fnmatchcase(parts[-1], p) for p in ("test_*", "*_test.*", "*.test.*", "*.spec.*")))
 
@@ -359,7 +359,7 @@ def words_in(repo, rng: list, words: list, texts=(), test_mailboxes: bool = Fals
                 place = (sha, path, line, mailbox)
                 if place not in mailboxes_seen:
                     mailboxes_seen.add(place)
-                    hits.append({"word": mailbox, "commit": sha or "", "where": path,
+                    hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path,
                                  "line": line.strip()[:300]})
         if len(hits) >= MOST_HITS:
             patch.close()
@@ -393,6 +393,23 @@ def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
 
 def hits_text(hits: list) -> str:
     return "\n".join(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")" for h in hits)
+
+
+def mailbox_refusal(hits: list, tid: str = "") -> str:
+    """Mailbox-specific reason and remedy; empty for ordinary forbidden-word hits."""
+    if any(h["where"] == "mailbox rule self-check" for h in hits):
+        return ("the mailbox rule's matcher is broken, so hansa merges and releases nothing until it is fixed\n"
+                + hits_text(hits))
+    if not any(h.get("kind") == "mailbox" for h in hits):
+        return ""
+    reason = "a mailbox in a test file does not use a reserved example domain"
+    if any(h.get("kind") != "mailbox" for h in hits):
+        reason += "; the change also holds words the principal keeps from going out"
+    retry = (f'Replace it with an example address in hansa retry {tid} --fresh "..." '
+             f"(a retry that continues from {tid} keeps its commits)" if tid else
+             "Replace it with an example address in the outgoing history")
+    return (f"{reason}\n{hits_text(hits)}\n{retry}, or ask the principal (hansa ask). "
+            "More: hansa help forbidden-words")
 
 
 def title_hits(title: str, words: list) -> list:
@@ -1320,6 +1337,13 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         return f"作废：{r.get('void_zh') or r.get('void')}；什么都没运行" if zh else f"void: {r.get('void')}; nothing was run"
     if st == "forbidden":
         n = len(r.get("hits", []))
+        mailbox = mailbox_refusal(r.get("hits", []))
+        if mailbox:
+            if zh:
+                return ("被拒绝：邮箱规则的匹配器已损坏；修好之前 hansa 不合并也不发布" if
+                        any(h["where"] == "mailbox rule self-check" for h in r["hits"]) else
+                        f"被拒绝：测试文件里的邮箱未使用保留的示例域名（{n} 处）")
+            return "refused: " + mailbox.splitlines()[0]
         return (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
                 f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")
     return st or "?"

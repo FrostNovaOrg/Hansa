@@ -2708,7 +2708,10 @@ def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", l
 
 def words_text(tid: str, hits: list) -> str:
     """What hansa says when a task's merge holds forbidden words: the words, the places, and what to do."""
-    from .release import hits_text
+    from .release import hits_text, mailbox_refusal
+    mailbox = mailbox_refusal(hits, tid)
+    if mailbox:
+        return f"the change in {tid} is not merged: {mailbox}"
     return (f"the change in {tid} holds words the principal keeps from going out (release_forbidden), so it is not "
             f"merged: once on the base branch, its history would keep them\n{hits_text(hits)}\nTake them out with "
             f"hansa retry {tid} --fresh \"...\" (a retry that continues from {tid} keeps its commits; a word in the "

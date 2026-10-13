@@ -3205,6 +3205,10 @@ class DeskTest(unittest.TestCase):
         tip, head = self.git_out("rev-parse", "main"), self.desk.meta(tid)["head"]
         said = self.refused("merge", tid)
         self.assertIn(f"{head[:10]} test_mailboxes.py: {line}", said)
+        self.assertIn("a mailbox in a test file does not use a reserved example domain", said)
+        self.assertNotIn("holds words the principal keeps from going out", said)
+        self.assertIn(f'Replace it with an example address in hansa retry {tid} --fresh "..."', said)
+        self.assertIn("or ask the principal", said)
         for mailbox in ("a@unreserved.hansa", "b@elsewhere.hansa"):
             self.assertIn(f'("{mailbox}")', said)
         self.assertIn("Nothing was merged", said)
@@ -3235,6 +3239,10 @@ class DeskTest(unittest.TestCase):
             said = self.refused("merge", tid)
         self.assertIn("mailbox rule self-check", said)
         self.assertIn("the rule could not tell a real mailbox from an example one", said)
+        self.assertIn("the mailbox rule's matcher is broken", said)
+        self.assertIn("hansa merges and releases nothing until it is fixed", said)
+        self.assertNotIn("hansa retry", said)
+        self.assertNotIn("holds words the principal keeps from going out", said)
         self.assertIn("Nothing was merged", said)
         self.assertEqual(self.git_out("rev-parse", "main"), tip)
 
@@ -3255,6 +3263,27 @@ class DeskTest(unittest.TestCase):
         self.commit_in_repo(paths[0], "a@unreserved.hansa\nclean line\n")
         self.commit_in_repo(paths[1], "clean line\n")
         self.assertEqual(release.words_in(self.repo, [f"{before}..HEAD", "--"], [], test_mailboxes=True)[0], [])
+
+    def test_the_mailbox_scan_matches_test_paths_without_regard_to_case(self):
+        from hansa import release
+        paths = [f"src/{folder}/contacts.txt" for folder in
+                 ("Test", "Tests", "Spec", "Specs", "__Tests__", "Fixtures", "TestData")]
+        paths += ["Test_a.py", "A_Test.py", "A.Test.js", "A.Spec.js"]
+        for path in paths:
+            self.commit_in_repo(path, "a@unreserved.hansa\n")
+        self.commit_in_repo("Testing/contacts.txt", "a@unreserved.hansa\n")
+        hits, _ = release.words_in(self.repo, ["HEAD", "--"], [], test_mailboxes=True)
+        self.assertEqual({h["where"] for h in hits}, set(paths))
+
+    def test_explain_says_whether_the_principals_mailbox_rule_is_on(self):
+        for enabled in (False, True, False):
+            self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=enabled)),
+                             {"ok": True, "problems": []})
+            said = self.hansa("explain")
+            self.assertIn(f"The mailbox rule (release_test_mailboxes) is {'on' if enabled else 'off'}", said)
+            self.assertIn("reserved example domains at merges and releases", said)
+            self.assertIn("It is also the principal's, on the same page", said)
+            self.assertIn("word(s) the principal keeps from going out", said)
 
     def test_example_domain_lookalikes_and_mailbox_characters_are_checked(self):
         from hansa import release
@@ -18817,9 +18846,14 @@ class DeskTest(unittest.TestCase):
         self.commit_in_repo("fixtures/contacts.txt", "a@example.com\n")  # still in what goes out
         said = self.refused("release", "a")
         self.assertIn(f'{head[:10]} fixtures/contacts.txt: a@unreserved.hansa  ("a@unreserved.hansa")', said)
+        self.assertIn("a mailbox in a test file does not use a reserved example domain", said)
+        self.assertNotIn("holds words the principal keeps from going out", said)
+        self.assertIn("Replace it with an example address", said)
+        self.assertIn("or ask the principal", said)
+        self.assertIn("a mailbox in a test file does not use a reserved example domain", self.hansa("release"))
         r = release.get(self.desk, 1)
         self.assertEqual(r["state"], "forbidden")
-        self.assertEqual(r["hits"], [{"word": "a@unreserved.hansa", "commit": head,
+        self.assertEqual(r["hits"], [{"kind": "mailbox", "word": "a@unreserved.hansa", "commit": head,
                                       "where": "fixtures/contacts.txt", "line": "a@unreserved.hansa"}])
         self.assertIsNone(release.start(self.desk, 1))
         self.assertEqual(self.events("release_started"), [])
@@ -18844,6 +18878,12 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch("hansa.release.mailbox_hits", return_value=[]):
             said = self.refused("release", "a")
         self.assertIn("the rule could not tell a real mailbox from an example one", said)
+        self.assertIn("the mailbox rule's matcher is broken", said)
+        self.assertIn("hansa merges and releases nothing until it is fixed", said)
+        self.assertNotIn("hansa retry", said)
+        self.assertNotIn("Replace it", said)
+        self.assertNotIn("holds words the principal keeps from going out", said)
+        self.assertIn("the mailbox rule's matcher is broken", self.hansa("release"))
         self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
 
     def test_a_listed_lane_goes_out_without_asking_only_while_it_is_what_the_principal_listed(self):
