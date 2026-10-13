@@ -977,8 +977,13 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") != "limit" else
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
-        if a.get("run_start"):
-            out.append(f"  started from: {started_from(a['run_start'])}")
+        start = a.get("run_start")
+        if (not start and a.get("kind") in ("network", "limit") and m.get("base")
+                and m.get("kind") not in ("verify", "design")):
+            start = {"commit": m.get("start_from") or m["base"],
+                     "source": "earlier task's commit" if m.get("start_from") else "base"}
+        if start:
+            out.append(f"  started from: {started_from(start)}")
     if m["state"] == "queued" and m.get("restart"):
         out.append(f"next run starts from: {started_from(m['restart'])}")
     elif m["state"] != "queued" and m.get("run_start"):

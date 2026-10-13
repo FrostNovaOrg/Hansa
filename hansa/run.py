@@ -4182,6 +4182,48 @@ def read_detail(desk: Desk, tid: str, what: str, default, fn, *args):
         return default
 
 
+def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
+    """When a run is cut off by a dropped connection or the provider's limit, and hansa queues it again:
+    1. The run's own work is the commits from where it started (run_start) to its head. A run started
+       by an older hansa, with no run_start, counts from its start_from, else from its base.
+    2. Carry on from its head when that work is not empty, holds no key and no conflict markers,
+       and the run did not begin with an update's conflicts to settle.
+    3. Otherwise, if that run was itself carried on, the next run carries on from where that run
+       started: the earlier run's head, checked when that run ended. Record why the newest work
+       was not carried.
+    4. Otherwise, the next run starts as before this change, recording why: an ordinary task from
+       its base; a follow-up from start_from, with its --update merge and that update's note again.
+
+    A run began with an update's conflicts to settle when its preparation merged the base in and
+    left conflicts (update_conflicts not empty). Such a run is never carried on, whatever git left
+    in the files: a modify/delete, rename or binary conflict leaves no markers.
+    Verifications, design sessions and other stops keep their existing retry behavior.
+    """
+    run_start = meta.get("run_start") or {}
+    start = run_start.get("commit") or meta.get("start_from") or meta["base"]
+    head = fields.get("head")
+    work = fields if head else {}
+    if head and start != meta["base"]:
+        work = {"commits": int(wgit(desk, wt, "rev-list", "--count", f"{start}..{head}") or 0),
+                "leaked": keys_in_change(desk, wt, start, head),
+                "markers": markers_in_change(wt, start, head)}
+    reasons = []
+    if not head or not work.get("commits"):
+        reasons.append("the interrupted run left no commits")
+    if work.get("leaked"):
+        reasons.append("the interrupted run's commits hold a key")
+    if work.get("markers"):
+        reasons.append("the interrupted run's commits hold conflict markers")
+    if meta.get("update_conflicts") and not work.get("markers"):
+        reasons.append("the interrupted run began with an update's conflicts to settle")
+    if not reasons:
+        return {"commit": head, "source": "earlier run's commit", "why": ""}
+    if run_start.get("source") == "earlier run's commit":
+        return {"commit": start, "source": "earlier run's commit", "why": "; ".join(reasons)}
+    return {"commit": meta.get("start_from") or meta["base"],
+            "source": "earlier task's commit" if meta.get("start_from") else "base", "why": "; ".join(reasons)}
+
+
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
     d = desk.tasks_dir / tid
@@ -4245,7 +4287,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     changed = ""  # what the principal is told when the worktree's .git was changed: then the task fails
     recorded = False
-    run_work = {}  # what this run made, separate from a follow-up's earlier task commits
+    restart = None
     try:
         if wt is None:
             raise RuntimeError("the task never got a worktree")
@@ -4278,11 +4320,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields["markers"] = markers_in_change(wt, meta["base"], head)  # a conflict left unsettled
         if fields["markers"]:
             desk.event("conflict_markers_in_change", task=tid, files=sorted(fields["markers"]))
-        start = (meta.get("run_start") or {}).get("commit") or meta["base"]
-        run_work = fields if start == meta["base"] else {
-            "commits": int(wgit(desk, wt, "rev-list", "--count", f"{start}..{head}") or 0),
-            "leaked": keys_in_change(desk, wt, start, head),
-            "markers": markers_in_change(wt, start, head)}
+        restart = interrupted_restart(desk, wt, meta, fields)
         recorded = True  # the work is recorded: a ref changed now fails the task, which keeps it
         common = own_git_folder(desk, wt).resolve().parent.parent
         now_at, what = _ref_now(common, branch)
@@ -4296,6 +4334,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             fields.update(head="", commits=0, files=[], stat="")
     except (RuntimeError, KeyError, OSError) as e:
         fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
+        restart = None
 
     attempts = list(meta.get("attempts", []))
     if setup:
@@ -4379,19 +4418,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         again = {"resumed": None, "restart": None} if final == "queued" else {}
         if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
                 and meta.get("kind") not in ("verify", "design") and (kind == "quota" or net)):
-            # Continue only the recorded, safe work of this interrupted run; otherwise prepare the task as
-            # before, including a follow-up's start_from and --update, with the reason kept on its next run.
-            reasons = []
-            if not fields.get("head") or not run_work.get("commits"):
-                reasons.append("the interrupted run left no commits")
-            if run_work.get("leaked"):
-                reasons.append("the interrupted run's commits hold a key")
-            if run_work.get("markers"):
-                reasons.append("the interrupted run's commits hold conflict markers")
-            again["restart"] = {"commit": (meta.get("start_from") or meta["base"]) if reasons else fields["head"],
-                                "source": ("earlier task's commit" if meta.get("start_from") else "base")
-                                          if reasons else "earlier run's commit",
-                                "why": "; ".join(reasons)}
+            again["restart"] = restart or interrupted_restart(desk, wt, meta, fields)
         if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
             kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
                 "provider": meta.get("provider", ""), "at": now(), **run_numbers(meta, fields),

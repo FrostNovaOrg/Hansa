@@ -7795,6 +7795,180 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         return count
 
+    def test_automatic_retries_follow_the_interrupted_run_table(self):
+        # Each row of the rule's table gets one subtest. Unsafe alternatives and both causes run
+        # through the same row; chains use limits, since a second dropped connection ends the task.
+        table = (
+            (1, "ordinary", ("safe",), "head1"),
+            (2, "ordinary", ("none",), "base"),
+            (3, "ordinary", ("unsafe",), "base"),
+            (4, "ordinary", ("safe", "safe"), "head2"),
+            (5, "ordinary", ("safe", "none"), "head1"),
+            (6, "ordinary", ("safe", "unsafe"), "head1"),
+            (7, "ordinary", ("safe", "none", "none"), "head1"),
+            (8, "follow-up", ("safe",), "head1"),
+            (9, "follow-up", ("empty_or_unsafe",), "start_from"),
+            (10, "update-clean", ("safe",), "head1"),
+            (11, "update-clean", ("none",), "update"),
+            (12, "update-text", ("none",), "update"),
+            (13, "update-delete", ("none",), "update"),
+            (14, "old-ordinary", ("none",), "base"),
+            (15, "old-follow-up", ("none",), "start_from"),
+        )
+        for row, kind, steps, target in table:
+            with self.subTest(row=row):
+                alternatives = ("none", "key", "markers") if "empty_or_unsafe" in steps else \
+                    ("key", "markers") if "unsafe" in steps else ("safe",)
+                for alternative in alternatives:
+                    for cause in ("econnreset", "limit") if len(steps) == 1 else ("limit",):
+                        self.automatic_retry_table_row(row, kind, steps, target, alternative, cause)
+
+    def automatic_retry_table_row(self, row, kind, steps, target, alternative, cause):
+        from hansa import run
+        root = self.tmp / f"row-{row}-{alternative}-{cause}"
+        repo = root / "repo"
+        repo.mkdir(parents=True)
+        git = lambda *args: sh("git", *args, cwd=repo)
+        git_out = lambda *args: subprocess.run(["git", *args], cwd=repo, check=True,
+                                               capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        (repo / "README.md").write_text("base\n")
+
+        def commit(message):
+            git("add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", message)
+
+        commit("base")
+        desk = init_desk(root / "desk", str(repo), "a")
+        key = "sk-test-retry-table-0987"
+        desk.write_key("mimo", key)
+
+        def configure(**env):
+            settings = desk.settings()
+            settings["lanes"]["a"]["env"] = env
+            self.assertEqual(desk.save_settings(settings), [])
+
+        def worker(tid, exit_code, old=False):
+            proc = run.start(desk, tid, "a", "claude")
+            self.assertIsNotNone(proc)
+            self.addCleanup(proc.wait, timeout=20)
+            if old:
+                def forget_start(meta):
+                    meta.pop("run_start")
+                    return {}
+                desk.change(tid, forget_start)  # an in-flight run made by an older hansa
+            self.assertEqual(proc.wait(timeout=20), exit_code)
+            return run.finish(desk, tid, exit_code)
+
+        updating = kind.startswith("update-")
+        follow_up = "follow-up" in kind or updating
+        start_from = None
+        if follow_up:
+            configure(FAKE_HELLO="earlier.txt", **(
+                {"FAKE_WRITE_FILE": "README.md", "FAKE_WRITE": "earlier task"}
+                if kind in ("update-text", "update-delete") else {}))
+            parent = desk.new_task("Make the earlier change")
+            earlier = worker(parent, 0)
+            self.assertEqual(earlier["state"], "done", earlier)
+            start_from = earlier["head"]
+            if updating:
+                if kind == "update-text":
+                    (repo / "README.md").write_text("base moved\n")
+                elif kind == "update-delete":
+                    (repo / "README.md").unlink()
+                else:
+                    (repo / "base.txt").write_text("clean update\n")
+                commit("base moves")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--desk", str(desk.root), "retry", parent,
+                                       *(["--update"] if updating else []), "Carry on"]), 0)
+            tid = desk.meta(parent)["replaced_by"]
+            self.assertEqual(desk.meta(tid)["start_from"], start_from)
+        else:
+            tid = desk.new_task("Make the change")
+
+        seen, count = root / "starts.jsonl", root / "count"
+        heads, starts, reasons = [], [], []
+        for index, step in enumerate(steps, 1):
+            step = alternative if step in ("unsafe", "empty_or_unsafe") else step
+            partial = {"safe": f"safe work from run {index}\n", "key": key + "\n",
+                       "markers": "<<<<<<< ours\nfirst\n=======\nsecond\n>>>>>>> theirs\n"}
+            configure(FAKE_NET=f"{cause}:{len(steps)}:{count}", FAKE_NET_SEE=str(seen), **(
+                {"FAKE_NET_NO_COMMIT": "1"} if step == "none" else {"FAKE_NET_PARTIAL": partial[step]}))
+            queued = worker(tid, 1, old=kind.startswith("old-"))
+            self.assertEqual(queued["state"], "queued", queued)
+            heads.append(queued["head"])
+            starts.append(queued.get("run_start"))
+            reason = ("the interrupted run began with an update's conflicts to settle" if kind == "update-delete" else
+                      "the interrupted run's commits hold conflict markers" if kind == "update-text" else
+                      "the interrupted run left no commits" if step == "none" else
+                      "the interrupted run's commits hold a key" if step == "key" else
+                      "the interrupted run's commits hold conflict markers" if step == "markers" else "")
+            reasons.append(reason)
+            expected = heads[int(target[-1]) - 1] if index == len(steps) and target.startswith("head") else \
+                start_from if index == len(steps) and follow_up else \
+                queued["base"] if index == len(steps) else heads[0]
+            source = "earlier run's commit" if index < len(steps) or target.startswith("head") else \
+                "earlier task's commit" if follow_up else "base"
+            self.assertEqual((queued["restart"]["commit"], queued["restart"]["source"]), (expected, source))
+            self.assertIn(reason, queued["restart"]["why"])
+            shown = views.show_text(desk, tid)
+            self.assertIn(f"next run starts from: {source} {expected[:12]}", shown)
+            if kind.startswith("old-"):
+                original_source = "earlier task's commit" if follow_up else "base"
+                self.assertIn(f"  started from: {original_source} {(start_from or queued['base'])[:12]}", shown)
+            if reason:
+                self.assertIn(reason, shown)
+            if kind == "update-delete":
+                self.assertEqual(queued["update_conflicts"], ["README.md"])
+                self.assertEqual(queued["markers"], {})  # this conflict has no text markers
+            if kind == "update-text":
+                self.assertEqual(queued["update_conflicts"], ["README.md"])
+            desk.set_provider_state("claude", cool_until=0)
+
+        if target == "update":
+            # Restarting --update must take the current base and give the update note again.
+            (repo / "new-base.txt").write_text("base moved again\n")
+            commit("base moves again")
+        configure(FAKE_NET=f"{cause}:{len(steps)}:{count}", FAKE_NET_SEE=str(seen))
+        finished = worker(tid, 0)
+        self.assertEqual((finished["state"], count.read_text()), ("done", str(len(steps) + 1)), finished)
+        observations = list(map(json.loads, seen.read_text().splitlines()))
+        carrying = target.startswith("head")
+        last_start = finished["run_start"]
+        if carrying:
+            expected = heads[int(target[-1]) - 1]
+            self.assertEqual(observations[-1]["head"], expected)
+            self.assertEqual(observations[-1]["partial"], f"safe work from run {int(target[-1])}\n")
+        else:
+            self.assertIsNone(observations[-1]["partial"])
+        for index, observation in enumerate(observations):
+            carried = index > 0 and (index < len(steps) or carrying)
+            self.assertEqual("You carry on an interrupted run" in observation["system"], carried)
+            if carried:
+                self.assertIn("You carry on an interrupted run of this same task, from that run's commits "
+                              f"({observation['head'][:12]}).", observation["system"])
+            self.assertEqual("Before you started, hansa merged main" in observation["system"], updating and not carried)
+        if updating:
+            self.assertEqual("it merged without conflicts" in observations[0]["system"], kind == "update-clean")
+        if target == "update":
+            self.assertEqual(last_start["source"], "earlier task's commit")
+            self.assertEqual(git_out("show", f"{finished['head']}:new-base.txt"), "base moved again")
+            git("merge-base", "--is-ancestor", start_from, finished["head"])
+            git("merge-base", "--is-ancestor", git_out("rev-parse", "main"), finished["head"])
+        elif not carrying:
+            self.assertEqual(observations[-1]["head"], start_from or finished["base"])
+        self.assertIn(reasons[-1], last_start["why"])
+        shown = views.show_text(desk, tid)
+        for start in starts:
+            if start:
+                self.assertIn(f"  started from: {start['source']} {start['commit'][:12]}", shown)
+                if start["why"]:
+                    self.assertIn(start["why"], shown)
+        self.assertIn(f"run started from: {last_start['source']} {last_start['commit'][:12]}", shown)
+        for index, head in enumerate(heads, 1):
+            self.assertEqual(git_out("rev-parse", f"task/{tid}-try{index}"), head)
+
     def test_a_dropped_connection_is_tried_once_more_then_fails_plainly(self):
         from hansa import run
         for what, why in (("econnreset", "the connection to the provider failed (Connection dropped)"),

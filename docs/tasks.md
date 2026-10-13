@@ -44,8 +44,9 @@ worktree: never two at once. The first one's output is kept beside the second's
 
 ## Dropped connections and usage limits
 
-After a dropped connection or usage limit, hansa carries on that run's commits; with none, a key or
-conflict markers, it uses the base or the follow-up's start and update. `hansa show` says where and why.
+After a dropped connection or usage limit, hansa carries on new commits without keys or markers, unless
+the run began with update conflicts. Otherwise it keeps earlier carried work, or repeats the original
+start and update. `hansa show` says where and why.
 
 ### Retries after a dropped connection
 
