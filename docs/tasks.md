@@ -44,8 +44,8 @@ worktree: never two at once. The first one's output is kept beside the second's
 
 ## Dropped connections and usage limits
 
-A task re-queued after a dropped connection or a provider's usage limit continues from its last commit;
-with no commits, a key or conflict markers, it starts from the base (`hansa show` says where and why).
+After a dropped connection or usage limit, hansa carries on that run's commits; with none, a key or
+conflict markers, it uses the base or the follow-up's start and update. `hansa show` says where and why.
 
 ### Retries after a dropped connection
 

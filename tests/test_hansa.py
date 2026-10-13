@@ -249,6 +249,7 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
         head = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
         open(os.environ["FAKE_NET_SEE"], "a").write(json.dumps({
             "head": head, "partial": open("partial.txt").read() if os.path.exists("partial.txt") else None,
+            "hello": open("hello.txt").read() if os.path.exists("hello.txt") else None,
             "system": sys.argv[sys.argv.index("--append-system-prompt") + 1]}) + "\n")
     open(count, "w").write(str(n + 1))
     if n < int(times):
@@ -7883,6 +7884,138 @@ class DeskTest(unittest.TestCase):
 
     def test_an_automatic_rerun_starts_from_base_when_the_run_left_no_commits(self):
         self.automatic_restart_from_base("the interrupted run left no commits", FAKE_NET_NO_COMMIT="1")
+
+    def automatic_follow_up_restart(self, reason: str, **env):
+        for what in ("econnreset", "limit"):
+            with self.subTest(what):
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"] = {"FAKE_HELLO": "earlier.txt"}
+                self.assertEqual(self.desk.save_settings(s), [])
+                d = Dispatcher(self.desk)
+                parent = self.desk.new_task("Add earlier.txt")
+                earlier = self.settle(d, parent)
+                self.assertEqual(earlier["state"], "done", earlier)
+                seen = self.tmp / f"{what}-starts.jsonl"
+                count = self.net_lane(what, 1, FAKE_NET_SEE=str(seen), **env)
+                self.hansa("retry", parent, "carry on")
+                tid = self.desk.meta(parent)["replaced_by"]
+                if what == "limit":
+                    end = time.time() + 20
+                    while time.time() < end and not self.desk.meta(tid).get("attempts"):
+                        d.tick()
+                        time.sleep(0.1)
+                    self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                    self.assertIn(f"next run starts from: earlier task's commit {earlier['head'][:12]} ({reason})",
+                                  views.show_text(self.desk, tid))
+                    self.desk.set_provider_state("claude", cool_until=0)
+                m = self.settle(d, tid)
+                self.assertEqual((m["state"], count.read_text()), ("done", "2"), m)
+                first, second = map(json.loads, seen.read_text().splitlines())
+                self.assertEqual(m["start_from"], earlier["head"])
+                self.assertEqual((first["head"], second["head"]), (m["start_from"], m["start_from"]))
+                self.assertEqual(self.git_out("show", f"{m['head']}:earlier.txt"), f"hello from {parent}")
+                self.assertIsNone(second["partial"])
+                self.assertEqual(m["files"], ["earlier.txt", "hello.txt"])
+                self.assertNotIn("You carry on an interrupted run", second["system"])
+                shown = views.show_text(self.desk, tid)
+                self.assertIn(f"  started from: earlier task's commit {m['start_from'][:12]}", shown)
+                self.assertIn(f"run started from: earlier task's commit {m['start_from'][:12]} ({reason})", shown)
+                kept = self.git_out("rev-parse", f"task/{tid}-try1")
+                if env.get("FAKE_NET_NO_COMMIT"):
+                    self.assertEqual(kept, m["start_from"])
+                else:
+                    self.assertNotEqual(kept, m["start_from"])
+                    self.assertEqual(self.git_out("show", f"{kept}:partial.txt"), env["FAKE_NET_PARTIAL"].strip())
+
+    def test_an_automatic_follow_up_rerun_keeps_earlier_work_when_the_run_holds_a_key(self):
+        key = "sk-test-interrupted-follow-up-0987"
+        self.desk.write_key("mimo", key)
+        self.automatic_follow_up_restart("the interrupted run's commits hold a key", FAKE_NET_PARTIAL=key + "\n")
+
+    def test_an_automatic_follow_up_rerun_keeps_earlier_work_when_the_run_holds_conflict_markers(self):
+        self.automatic_follow_up_restart("the interrupted run's commits hold conflict markers",
+                                         FAKE_NET_PARTIAL="<<<<<<< ours\nfirst\n=======\nsecond\n>>>>>>> theirs\n")
+
+    def test_an_automatic_follow_up_rerun_does_not_carry_on_a_run_that_left_no_commits(self):
+        self.automatic_follow_up_restart("the interrupted run left no commits", FAKE_NET_NO_COMMIT="1")
+
+    def test_an_automatic_follow_up_rerun_repeats_an_unsettled_update_and_its_note(self):
+        from hansa import run
+        for what in ("econnreset", "limit"):
+            with self.subTest(what):
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"] = {}
+                self.assertEqual(self.desk.save_settings(s), [])
+                d = Dispatcher(self.desk)
+                t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
+                for tid in (t1, t2):
+                    self.assertEqual(self.settle(d, tid)["state"], "done")
+                self.hansa("merge", t1)
+                earlier = self.desk.meta(t2)["head"]
+                seen = self.tmp / f"{what}-starts.jsonl"
+                count = self.net_lane(what, 1, FAKE_NET_SEE=str(seen), FAKE_NET_NO_COMMIT="1")
+                self.hansa("retry", t2, "--update", "settle the greeting")
+                tid = self.desk.meta(t2)["replaced_by"]
+                reason = "the interrupted run's commits hold conflict markers"
+                proc = run.start(self.desk, tid, "a", "claude")
+                self.assertEqual(proc.wait(timeout=20), 1)
+                queued = run.finish(self.desk, tid, 1)
+                self.assertEqual(queued["state"], "queued", queued)
+                self.assertIn(reason, views.show_text(self.desk, tid))
+                added = f"base-{what}.txt"  # --update takes the current tip again, even if it moved between runs
+                (self.repo / added).write_text("the base moved\n")
+                sh("git", "add", added, cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base moves", cwd=self.repo)
+                if what == "limit":
+                    self.desk.set_provider_state("claude", cool_until=0)
+                m = self.settle(d, tid)
+                self.assertEqual((m["state"], count.read_text(), m["update_conflicts"]), ("done", "2", ["hello.txt"]), m)
+                first, second = map(json.loads, seen.read_text().splitlines())
+                self.assertEqual((first["head"], second["head"]), (earlier, earlier))
+                for start in (first, second):
+                    self.assertIn("<<<<<<<", start["hello"])
+                for old in (t1, t2):
+                    for start in (first, second):
+                        self.assertIn(f"hello from {old}", start["hello"])
+                    self.git_out("merge-base", "--is-ancestor", self.desk.meta(old)["head"], m["head"])
+                for start in (first, second):
+                    self.assertIn("conflicts in these files, which now hold git's conflict markers", start["system"])
+                    self.assertIn("hello.txt", start["system"])
+                self.assertNotIn("You carry on an interrupted run", second["system"])
+                self.assertEqual(m["base"], self.git_out("rev-parse", "main"))
+                self.assertEqual(self.git_out("show", f"{m['head']}:{added}"), "the base moved")
+                self.assertIn(f"run started from: earlier task's commit {earlier[:12]} ({reason})",
+                              views.show_text(self.desk, tid))
+                self.assertIn("<<<<<<<", self.git_out("show", f"task/{tid}-try1:hello.txt"))
+
+    def test_an_automatic_follow_up_rerun_checks_only_the_interrupted_runs_commits(self):
+        key = "sk-test-earlier-task-0987"
+        self.desk.write_key("mimo", key)
+        for what, text in (("key", key), ("markers", "<<<<<<< ours\nfirst\n=======\nsecond\n>>>>>>> theirs")):
+            with self.subTest(what):
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"] = {"FAKE_WRITE": text, "FAKE_WRITE_FILE": "earlier.txt"}
+                self.assertEqual(self.desk.save_settings(s), [])
+                d = Dispatcher(self.desk)
+                parent = self.desk.new_task("Add earlier.txt")
+                self.assertEqual(self.settle(d, parent)["state"], "done")
+                seen = self.tmp / f"{what}-starts.jsonl"
+                count = self.net_lane("econnreset", 1, FAKE_NET_SEE=str(seen))
+                if count.exists():
+                    count.unlink()  # each follow-up loses its connection on its first run
+                self.hansa("retry", parent, "carry on")
+                tid = self.desk.meta(parent)["replaced_by"]
+                m = self.settle(d, tid)
+                self.assertEqual((m["state"], count.read_text()), ("done", "2"), m)
+                first, second = map(json.loads, seen.read_text().splitlines())
+                kept = self.git_out("rev-parse", f"task/{tid}-try1")
+                self.assertEqual((first["head"], second["head"]), (m["start_from"], kept))
+                self.assertNotEqual(kept, m["start_from"])
+                self.assertEqual(second["partial"], f"half done for {tid}\n")
+                self.assertIn("You carry on an interrupted run", second["system"])
+                self.assertIn(f"run started from: earlier run's commit {kept[:12]}", views.show_text(self.desk, tid))
+                self.assertEqual(m["run_start"]["why"], "")
+                self.assertTrue(m["leaked"] if what == "key" else m["markers"])  # merge guards still cover the whole task
 
     def test_a_failed_run_that_only_quotes_a_timeout_or_overloaded_is_not_run_again(self):
         from hansa import run
