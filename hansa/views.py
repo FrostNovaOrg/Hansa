@@ -964,6 +964,11 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out += [f"write list: {x}" for x in m.get("write_left_out") or []]
     out += [f"env: {x}" for x in m.get("env_left_out") or []]
     out += [f"what workers may not read: {x}" for x in m.get("no_read_left_out") or []]
+
+    def started_from(start):
+        return (f"{start['source']} {start['commit'][:12]}"
+                + (f" ({start['why']})" if start.get("why") else ""))
+
     for a in m.get("attempts", []):
         on = a["provider"]  # with its model and effort when they were not those of the run above
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
@@ -972,6 +977,17 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") != "limit" else
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
+        start = a.get("run_start")
+        if (not start and a.get("kind") in ("network", "limit") and m.get("base")
+                and m.get("kind") not in ("verify", "design")):
+            start = {"commit": m.get("start_from") or m["base"],
+                     "source": "earlier task's commit" if m.get("start_from") else "base"}
+        if start:
+            out.append(f"  started from: {started_from(start)}")
+    if m["state"] == "queued" and m.get("restart"):
+        out.append(f"next run starts from: {started_from(m['restart'])}")
+    elif m["state"] != "queued" and m.get("run_start"):
+        out.append(f"run started from: {started_from(m['run_start'])}")
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
     report = report_of(desk, tid)
