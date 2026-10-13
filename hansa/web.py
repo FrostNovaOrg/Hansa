@@ -25,7 +25,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import alert, cost, disk, release, views
-from .desk import Desk, event_record, lane_warnings, public_settings, read_json
+from .desk import Desk, KeyScrubError, event_record, lane_warnings, public_settings, read_json
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
@@ -208,6 +208,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     refused = desk.close_ask(int(body["id"]), body.get("answer", ""), by="page")
                     return self._send(200, {"ok": False, "problems": [refused]} if refused else {"ok": True})
                 return self._send(404, {"error": "not found"})
+            except KeyScrubError as e:
+                return self._send(400, {"ok": False, "saved": True, "problems": [str(e)]})
             except (KeyError, ValueError, TypeError) as e:
                 return self._send(400, {"ok": False, "problems": [str(e)]})
 

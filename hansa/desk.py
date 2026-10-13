@@ -2308,6 +2308,10 @@ def is_git_rule(rule: str) -> bool:
     return any(w.strip("'\"").rsplit("/", 1)[-1].split(":", 1)[0] == "git" for w in (m.group(1).split() if m else []))
 
 
+class KeyScrubError(ValueError):
+    """The key was saved, but some published files still hold it."""
+
+
 class Desk:
     def __init__(self, root) -> None:
         self.root = Path(root).resolve()
@@ -2519,11 +2523,11 @@ class Desk:
             self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
             failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
+        self.ready_news()
         if failed:
             paths = ", ".join(str(f.relative_to(self.root)) for f in failed)
-            raise ValueError(self.redact(f"The key was saved, but these files still hold it: {paths}. "
-                                        "Fix them and save the key again to scrub them again."))
-        self.ready_news()
+            raise KeyScrubError(self.redact(f"The key was saved, but these files still hold it: {paths}. "
+                                           "Fix them and save the key again to scrub them again."))
 
     PUBLISHED = ("task.md", "note.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
                  "merge-setup.log", "merge-check.err")

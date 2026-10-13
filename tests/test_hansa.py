@@ -4647,6 +4647,30 @@ class DeskTest(unittest.TestCase):
                 self.desk.write_key("mimo", key)  # saving the same key retries the failed file
                 self.assertNotIn(key, failed.read_text())
 
+    def test_a_request_waiting_for_a_key_gets_ready_news_when_scrubbing_fails(self):
+        from hansa.desk import write_bytes
+        key = "sk-saved-later-0654"
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.add_ask("Please fill in mimo's key")
+        self.assertEqual(self.events("ask_ready"), [])
+        tid = self.desk.new_task("A saved output")
+        failed = self.desk.tasks_dir / tid / "note.md"
+        failed.write_text(key)
+
+        def writer(path, *args, **kwargs):
+            if path == failed:
+                raise OSError(errno.ENOSPC, "injected write failure")
+            return write_bytes(path, *args, **kwargs)
+
+        with unittest.mock.patch("hansa.desk.write_bytes", side_effect=writer), self.assertRaises(ValueError):
+            self.desk.write_key("mimo", key)
+        self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("mimo", [1])])
+        heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
+        self.assertEqual(len(heard), 1)
+        self.assertIn("mimo is ready now: done? Still open: request #1", heard[0]["line"])
+
     def test_the_key_save_reply_names_unscrubbed_files_without_the_key(self):
         from hansa import web
         from hansa.desk import write_bytes
@@ -4675,6 +4699,7 @@ class DeskTest(unittest.TestCase):
         code, reply = page._send.call_args.args
         self.assertEqual(code, 400)
         self.assertFalse(reply["ok"])
+        self.assertIs(reply.get("saved"), True)
         said = " ".join(reply["problems"])
         self.assertIn(str(failed.relative_to(self.desk.root)), said)
         self.assertIn("The key was saved", said)
