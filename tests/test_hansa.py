@@ -3712,12 +3712,18 @@ class DeskTest(unittest.TestCase):
             c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[kept])),
                           {"ok": True, "problems": []})
             before = c.desk.settings_path.read_bytes()
-            for entry in ("", " \t "):
-                with c.subTest(entry=entry):
-                    saved = c.page_save(lambda s: s.update(release_forbidden_except=[kept,
-                        {"entry": entry, "lanes": ["a"]}]))
+            blank = {"entry": "", "lanes": []}
+            rows = [[kept, {"entry": entry, "lanes": ["a"]}] for entry in ("", " \t ")]
+            rows += [[blank, {"entry": "", "lanes": ["a"]}],
+                     [kept, blank, {"entry": " ", "lanes": ["a"]}],
+                     [kept, {"entry": "", "lanes": ["a", "e"]}]]
+            for exceptions in rows:
+                with c.subTest(exceptions=exceptions):
+                    saved = c.page_save(lambda s: s.update(release_forbidden_except=exceptions))
                     c.assertFalse(saved["ok"])
-                    c.assertEqual(saved["problems"], ["release_forbidden_except row 2: its entry is empty"])
+                    lanes = ", ".join(exceptions[-1]["lanes"])
+                    c.assertEqual(saved["problems"],
+                                  [f"release_forbidden_except: the exception for lanes {lanes} has no entry"])
                     c.assertEqual(c.desk.settings_path.read_bytes(), before)
 
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),

@@ -629,10 +629,12 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                 p.append(f"release_forbidden entry {i}: {why}")
     exceptions = s.get("release_forbidden_except", [])
     if not forbidden_exceptions_ok(exceptions):
-        empty = [i for i, x in enumerate(exceptions if isinstance(exceptions, list) else [], 1)
-                 if isinstance(x, dict) and isinstance(x.get("entry"), str) and not x["entry"].strip()]
+        empty = [x for x in (exceptions if isinstance(exceptions, list) else [])
+                 if isinstance(x, dict) and isinstance(x.get("entry"), str) and not x["entry"].strip()
+                 and isinstance(x.get("lanes"), list) and all(isinstance(lane, str) for lane in x["lanes"])]
         if empty:
-            p.extend(f"release_forbidden_except row {i}: its entry is empty" for i in empty)
+            p.extend(f"release_forbidden_except: the exception for lanes {', '.join(x['lanes'])} has no entry"
+                     for x in empty)
         else:
             p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
                      "lanes (a list of lane names)")
