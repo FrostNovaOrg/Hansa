@@ -6263,15 +6263,17 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
                            capture_output=True, text=True, timeout=timeout)
         run = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
         ok = bool(run) and not run.get("is_error") and "ok" in (run.get("result") or "").lower()
-        # the model answered with a tool call and the one turn ran out: it is reachable all the same
-        stopped = (run.get("subtype"), run.get("stop_reason"), run.get("terminal_reason")) == \
+        kind, why = ("", "") if ok else unusable_reason(run, r.stderr)
+        # the model answered with a tool call and the one turn ran out: it is reachable all the same, unless
+        # hansa's own readings (an API error status, a usage limit, a refused key) found something first
+        stopped = not ok and not kind and not run.get("api_error_status") and \
+            (run.get("subtype"), run.get("stop_reason"), run.get("terminal_reason")) == \
             ("error_max_turns", "tool_use", "max_turns") and bool(run.get("modelUsage")) and not run.get("result")
         if ok or stopped:
             ok, detail = True, ", ".join(run.get("modelUsage") or {})
             detail += ": answered, but stopped at the turn limit" if stopped else ""
         else:
-            kind, why = unusable_reason(run, r.stderr)
-            said = re.search(r'"message"\s*:\s*"([^"]{1,120})"', f"{run.get('result') or ''} {r.stderr}")
+            said =re.search(r'"message"\s*:\s*"([^"]{1,120})"', f"{run.get('result') or ''} {r.stderr}")
             detail = (why or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200]) + \
                 (f": {said.group(1)}" if said and why else "")
     except subprocess.TimeoutExpired:

@@ -406,6 +406,11 @@ if "single word OK" in prompt and sys.argv[sys.argv.index("--model") + 1] == "to
                       "stop_reason": "tool_use", "terminal_reason": "max_turns",
                       "modelUsage": {"tool-first": {"inputTokens": 1, "outputTokens": 1}}}))
     sys.exit(1)
+if "single word OK" in prompt and sys.argv[sys.argv.index("--model") + 1] == "tool-first-429":  # the same, with a 429
+    print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 2,
+                      "stop_reason": "tool_use", "terminal_reason": "max_turns", "api_error_status": 429,
+                      "modelUsage": {"tool-first-429": {"inputTokens": 1, "outputTokens": 1}}}))
+    sys.exit(1)
 if "single word OK" in prompt and sys.argv[sys.argv.index("--model") + 1] == "api-error":  # fails after it answered
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "api_error_status": 500,
                       "stop_reason": "tool_use", "terminal_reason": "api_error", "result": "API Error: 500 Internal server error",
@@ -11186,6 +11191,13 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["detail"]), (True, "tool-first: answered, but stopped at the turn limit"))
         self.assertEqual(self.desk.provider_state()["mimo"]["check"]["detail"], r["detail"])
         self.assertEqual(self.hansa("ping", "mimo").strip(), "mimo: ok - tool-first: answered, but stopped at the turn limit")
+
+    def test_a_ping_stopped_at_the_turn_limit_with_a_429_is_not_ok_and_rests(self):
+        r = self.ping_on("tool-first-429")
+        self.assertEqual((r["ok"], r["detail"]), (False, "out of quota (HTTP 429)"))
+        st = self.desk.provider_state()["mimo"]
+        self.assertGreater(st["cool_until"], time.time())
+        self.assertEqual(st["reason"], "out of quota (HTTP 429)")
 
     def test_a_ping_with_an_api_error_is_not_ok(self):
         r = self.ping_on("api-error")
