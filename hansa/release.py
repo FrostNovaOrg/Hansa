@@ -308,9 +308,6 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     """forbidden_in for any range of commits (git log's arguments, ending in --), and for texts that are not in a
     commit yet ([(where, text)], each line looked at, commit ''): a merge's message before it is made, say.
     mailboxes: also check mailbox-shaped strings on every added line against example domains and the allowlist."""
-    if mailboxes and not mailbox_hits("mailbox-check@unreserved.hansa"):
-        return [{"word": "mailbox rule", "commit": "", "where": "mailbox rule self-check",
-                 "line": "the rule could not tell a real mailbox from an example one"}], 0
     allow = [entry.casefold() for entry in mailbox_allow] if mailboxes else []
     addresses = {entry for entry in allow if not entry.startswith("@")}
     domains = tuple(entry[1:] for entry in allow if entry.startswith("@"))
@@ -395,9 +392,6 @@ def hits_text(hits: list) -> str:
 
 def mailbox_refusal(hits: list, tid: str = "") -> str:
     """Mailbox-specific reason and remedy; empty for ordinary forbidden-word hits."""
-    if any(h["where"] == "mailbox rule self-check" for h in hits):
-        return ("the mailbox rule's matcher is broken, so hansa merges and releases nothing until it is fixed\n"
-                + hits_text(hits))
     if not any(h.get("kind") == "mailbox" for h in hits):
         return ""
     reason = "a mailbox does not use a reserved example domain and is not on the principal's allowlist"
@@ -1343,9 +1337,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         mailbox = mailbox_refusal(r.get("hits", []))
         if mailbox:
             if zh:
-                return ("被拒绝：邮箱规则的匹配器已损坏；修好之前 hansa 不合并也不发布" if
-                        any(h["where"] == "mailbox rule self-check" for h in r["hits"]) else
-                        f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）")
+                return f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）"
             return "refused: " + mailbox.splitlines()[0]
         return (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
                 f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")

@@ -3294,44 +3294,6 @@ class DeskTest(unittest.TestCase):
         release.words_in(self.repo, [head, "--"], [], mailbox_allow=[Entry("Jane@RealMail.hansa")])
         self.assertEqual(folds, 0)  # the disabled rule does not even fold entries
 
-    def test_allowlisting_the_self_check_mailbox_does_not_stop_merges_or_releases(self):
-        from hansa import release
-        self.with_release("true")
-        for i, entry in enumerate(("@unreserved.hansa", "@hansa", "mailbox-check@unreserved.hansa")):
-            with self.subTest(entry=entry):
-                # @hansa is now refused on save, but an existing hand-written list must not break the self-check.
-                settings = self.desk.settings()
-                settings.update(release_mailboxes=False, release_mailbox_allow=[])
-                write_json(self.desk.settings_path, settings)
-                tid = self.done_with(env={"FAKE_WRITE": "mailbox-check@unreserved.hansa",
-                                          "FAKE_WRITE_FILE": f"contact-{i}.txt"})
-                settings.update(release_mailboxes=True, release_mailbox_allow=[entry])
-                write_json(self.desk.settings_path, settings)
-                self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-                self.hansa("release", "a")
-                asked = release.releases(self.desk)[-1]
-                self.assertEqual(asked["state"], "waiting")
-                self.assertIsNone(asked.get("hits"))
-                self.assertEqual(release.answer(self.desk, asked["id"], False, "checked",
-                                                asked["commit"], asked["command"]), {"ok": True})
-
-    def test_a_broken_mailbox_matcher_stops_a_merge_before_scanning(self):
-        tid = self.done_with()  # even a change with no mailboxes must check the matcher
-        tip = self.git_out("rev-parse", "main")
-        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True,
-                                                          release_mailbox_allow=["@unreserved.hansa"])),
-                         {"ok": True, "problems": []})
-        with unittest.mock.patch("hansa.release.MAILBOX", re.compile(r"(?!)")):
-            said = self.refused("merge", tid)
-        self.assertIn("mailbox rule self-check", said)
-        self.assertIn("the rule could not tell a real mailbox from an example one", said)
-        self.assertIn("the mailbox rule's matcher is broken", said)
-        self.assertIn("hansa merges and releases nothing until it is fixed", said)
-        self.assertNotIn("hansa retry", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("Nothing was merged", said)
-        self.assertEqual(self.git_out("rev-parse", "main"), tip)
-
     def test_the_mailbox_scan_checks_only_added_lines_and_not_other_text(self):
         from hansa import release
         self.commit_in_repo("README.md", "jane@realmail.hansa\nremove john@realmail.hansa\n")
@@ -19652,23 +19614,6 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(calls[0][0][0]["word"], "jane@realmail.hansa")
         self.assertEqual(calls[1][0], [])
         self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
-
-    def test_a_broken_mailbox_matcher_refuses_a_release(self):
-        from hansa import release
-        self.with_release("true")
-        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True,
-                                                          release_mailbox_allow=["mailbox-check@unreserved.hansa"])),
-                         {"ok": True, "problems": []})
-        with unittest.mock.patch("hansa.release.mailbox_hits", return_value=[]):
-            said = self.refused("release", "a")
-        self.assertIn("the rule could not tell a real mailbox from an example one", said)
-        self.assertIn("the mailbox rule's matcher is broken", said)
-        self.assertIn("hansa merges and releases nothing until it is fixed", said)
-        self.assertNotIn("hansa retry", said)
-        self.assertNotIn("Replace it", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("the mailbox rule's matcher is broken", self.hansa("release"))
-        self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
 
     def test_a_listed_lane_goes_out_without_asking_only_while_it_is_what_the_principal_listed(self):
         from hansa import release

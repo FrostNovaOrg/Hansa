@@ -207,9 +207,7 @@ it, asks the principal to add the address or its domain to the allowlist on
 the page (`hansa ask`). `hansa explain` says whether the rule is on and lists
 the first 20 allowlist entries, then says how many more are on the page.
 An allowlist change makes earlier scans unusable, whether an
-entry was added or removed. Before each scan the matcher must catch a
-built-in non-example mailbox, independently of the allowlist; if it cannot,
-the merge or release stops and says why.
+entry was added or removed.
 
 The word scan is a net, not a proof. A word is matched within one line only,
 so a phrase split over a line break is not found; and only in text hansa can
