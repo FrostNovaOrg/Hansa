@@ -582,7 +582,10 @@ def status(desk: Desk) -> dict:
                     "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
-                    "waiting": waiting_reason(desk, s, m, busy, looks)} for m in queued],
+                    "waiting": waiting_reason(desk, s, m, busy, looks),
+                    # how its last run ended, when the system killed it and hansa queued it again (run.finish)
+                    "last_run": (m.get("error") or "") if (m.get("attempts") or [{}])[-1].get("kind") == "killed" else ""}
+                   for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": merge_check_lane(s, m),
                      **({"waiting_for": merge_lane_wait(desk, m, tasks)} if merge_check_lane(s, m) != m.get("lane") else {}),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
@@ -673,7 +676,8 @@ def status_text(st: dict) -> str:
                 for m in st["design"]]
     if st["queued"]:
         out.append("queued:")
-        out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
+        out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}"
+                + (f"\n      last run: {m['last_run']}" if m.get("last_run") else "") for m in st["queued"]]
     if st.get("merging"):
         out.append("merging (each merges by itself if its check passes on the base as it is now, or in its turn; "
                    + ("hansa tells this session when each ends):" if st.get("heard") else "hansa wait <id>):"))
@@ -974,7 +978,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") != "limit" else
+        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
+                   f"earlier run on {on}: {a['error']}" if a.get("kind") == "killed" else  # it used no try
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
         start = a.get("run_start")
