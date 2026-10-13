@@ -537,14 +537,17 @@ def forbidden_pattern(entry: str) -> tuple:
         return kinds
 
     try:
-        walk(parser.parse(entry[3:], re.IGNORECASE))
+        parsed = parser.parse(entry[3:], re.IGNORECASE)
+        try:
+            walk(parsed)
+        except ValueError as e:
+            return None, str(e)
         pattern = re.compile(entry[3:], re.IGNORECASE)
-    except (re.error, RecursionError, OverflowError) as e:
+        if pattern.search("") is not None:
+            return None, "the pattern matches the empty string"
+    except Exception as e:
+        # Python versions differ in the errors raised for invalid SRE code.
         return None, f"the pattern does not compile: {e}"
-    except ValueError as e:
-        return None, str(e)
-    if pattern.search("") is not None:
-        return None, "the pattern matches the empty string"
     return pattern, ""
 
 
@@ -626,8 +629,13 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                 p.append(f"release_forbidden entry {i}: {why}")
     exceptions = s.get("release_forbidden_except", [])
     if not forbidden_exceptions_ok(exceptions):
-        p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
-                 "lanes (a list of lane names)")
+        empty = [i for i, x in enumerate(exceptions if isinstance(exceptions, list) else [], 1)
+                 if isinstance(x, dict) and isinstance(x.get("entry"), str) and not x["entry"].strip()]
+        if empty:
+            p.extend(f"release_forbidden_except row {i}: its entry is empty" for i in empty)
+        else:
+            p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
+                     "lanes (a list of lane names)")
     al = s.get("alert", {"command": ""})
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):

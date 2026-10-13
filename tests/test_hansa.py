@@ -3607,13 +3607,127 @@ class DeskTest(unittest.TestCase):
                 c.assertEqual(save_from_page(c.desk, posted), {"ok": True, "problems": []})
                 c.assertEqual(c.desk.settings()["release_forbidden_except"], [kept])
 
+        def alpha_mailbox_hits(line, addresses, domains):
+            # The loop before the domain index: keep its answers even for legacy empty labels.
+            hits = []
+            for mailbox in release.MAILBOX.findall(line):
+                domain = mailbox.rsplit("@", 1)[1].casefold()
+                if (any(domain == d or domain.endswith("." + d) for d in ("example.com", "example.org", "example.net"))
+                        or domain.endswith((".invalid", ".test", ".example"))):
+                    continue
+                if mailbox.casefold() in addresses:
+                    continue
+                if any(domain == d or domain.endswith("." + d) for d in domains):
+                    continue
+                hits.append(mailbox)
+            return hits
+
+        def legacy_domain_answers(c):
+            entries = ["@realmail.hansa", "@.realmail.hansa", "@a..realmail.hansa", "@realmail.hansa.", "@"]
+            line = ("x@realmail.hansa x@sub.realmail.hansa x@a..realmail.hansa x@sub.a..realmail.hansa "
+                    "x@.realmail.hansa x@realmail.hansa. x@notrealmail.hansa x@realmail.hansa.evil.io "
+                    "X@REALMAIL.COM x@example.com x@sub.example.org x@domain.test")
+            for mask in range(1 << len(entries)):
+                allow = [entry for i, entry in enumerate(entries) if mask & (1 << i)]
+                for ordered in (allow, list(reversed(allow))):
+                    domains = [entry[1:] for entry in ordered]
+                    with c.subTest(allow=ordered):
+                        expected = alpha_mailbox_hits(line, set(), domains)
+                        c.assertEqual(release.mailbox_hits(line, domains=domains), expected)
+                        tree = release.mailbox_domains(domains)
+                        c.assertEqual(release.mailbox_hits(line, domains=tree), expected)
+                        c.assertEqual(release.mailbox_hits(line, addresses={"x@realmail.hansa"}, domains=tree),
+                                      alpha_mailbox_hits(line, {"x@realmail.hansa"}, domains))
+
+        def legacy_domains_merge_process(c):
+            allow = ["@realmail.hansa", "@.realmail.hansa"]
+            settings = c.desk.settings()
+            src = str(Path(__file__).resolve().parent.parent)
+            for seed, address in ((seed, address) for seed in range(4)
+                                  for address in ("x@realmail.hansa", "x@notrealmail.hansa")):
+                with c.subTest(seed=seed, address=address):
+                    write_json(c.desk.settings_path, settings)
+                    tid = finished(c, "a", address, f"mail-{seed}-{address.split('@')[1]}.txt")
+                    write_json(c.desk.settings_path, {**c.desk.settings(), "release_mailboxes": True,
+                                                     "release_mailbox_allow": allow})
+                    result = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(c.desk.root), "merge", tid],
+                                            cwd=c.tmp, env={**os.environ, "PYTHONPATH": src, "PYTHONHASHSEED": str(seed)},
+                                            capture_output=True, text=True, timeout=60)
+                    c.assertNotIn("Traceback", result.stdout + result.stderr)
+                    rejected = alpha_mailbox_hits(address, set(), [entry[1:] for entry in allow])
+                    c.assertEqual(result.returncode, 1 if rejected else 0, result.stdout + result.stderr)
+                    if rejected:
+                        c.assertIn(address, result.stderr)
+                        c.assertEqual(c.desk.meta(tid)["state"], "done")
+                    else:
+                        c.assertIn("merged into main", result.stdout)
+                        c.assertEqual(c.desk.meta(tid)["state"], "merged")
+
+        def pattern_python_errors(c):
+            from hansa import desk as desk_module
+            entry = "re:(?(1)5)4"
+            clean = finished(c, "a", "ordinary text", "clean.txt")
+            literal = finished(c, "a", entry, "literal.txt")
+            write_json(c.desk.settings_path, {**c.desk.settings(), "release_forbidden": [entry]})
+            try:
+                compiled = re.compile(entry[3:], re.IGNORECASE)
+                compiled.search("")
+            except Exception:
+                compiled = None
+            problems = public_settings(c.desk)["problems"]
+            c.assertEqual(release.title_hits("ordinary text", [entry]), [])
+            if compiled is None:
+                c.assertEqual(release.title_hits(entry.upper(), [entry]), [entry])
+                c.assertEqual(problems, ["release_forbidden entry 1: " + desk_module.forbidden_pattern(entry)[1]])
+                c.assertIn("the pattern does not compile", problems[0])
+                c.assertIn(entry, c.refused("merge", literal))
+            else:
+                c.assertEqual(release.title_hits(entry, [entry]), [entry] if compiled.search(entry) else [])
+                c.assertEqual(problems, [])
+            c.assertIn("merged into main", c.hansa("merge", clean))
+            # Exercise all three error boundaries even on versions that reject this example in the parser.
+            try:
+                from re import _parser as parser
+            except ImportError:
+                import sre_parse as parser
+            for stage in ("parse", "compile", "empty search"):
+                with c.subTest(stage=stage):
+                    error = RuntimeError("invalid SRE code")
+                    if stage == "parse":
+                        patch = unittest.mock.patch.object(parser, "parse", side_effect=error)
+                    elif stage == "compile":
+                        patch = unittest.mock.patch.object(re, "compile", side_effect=error)
+                    else:
+                        pattern = unittest.mock.Mock()
+                        pattern.search.side_effect = error
+                        patch = unittest.mock.patch.object(re, "compile", return_value=pattern)
+                    with patch:
+                        c.assertEqual(desk_module.forbidden_pattern(r"re:\d+"),
+                                      (None, "the pattern does not compile: invalid SRE code"))
+                        c.assertEqual(release.title_hits(r"re:\d+", [r"re:\d+"]), [r"re:\d+"])
+
+        def blank_exception_entry(c):
+            c.forbid("private-phrase")
+            kept = {"entry": "private-phrase", "lanes": ["a"]}
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[kept])),
+                          {"ok": True, "problems": []})
+            before = c.desk.settings_path.read_bytes()
+            for entry in ("", " \t "):
+                with c.subTest(entry=entry):
+                    saved = c.page_save(lambda s: s.update(release_forbidden_except=[kept,
+                        {"entry": entry, "lanes": ["a"]}]))
+                    c.assertFalse(saved["ok"])
+                    c.assertEqual(saved["problems"], ["release_forbidden_except row 2: its entry is empty"])
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
+
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
                  (11, changed_exceptions_rescan), (12, existing_words), (13, domain_comparisons),
                  (14, hide_migrates_mailboxes), (15, invalid_mailboxes), (16, unsafe_patterns), (17, safe_patterns),
                  (18, legacy_patterns), (19, legacy_unsafe_pattern), (20, malformed_exceptions),
-                 (21, long_mailbox_domains), (22, blank_exception_rows)]
+                 (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
+                 (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.

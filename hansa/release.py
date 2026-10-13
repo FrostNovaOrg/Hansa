@@ -75,6 +75,7 @@ SCRIPT = WRITE_FILE + '/bin/sh -c "$1"; write_file "$2" "$?"'
 HUNK = re.compile(r"^(@@+) ((?:-\d+(?:,\d+)? )+\+\d+(?:,\d+)?) @@")
 RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
 MAILBOX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_MAILBOX_DOMAIN_END = object()  # An empty label in legacy settings is still a label.
 
 
 def mailbox_domains(domains) -> dict:
@@ -84,7 +85,7 @@ def mailbox_domains(domains) -> dict:
         node = tree
         for label in reversed(domain.split(".")):
             node = node.setdefault(label, {})
-        node[""] = True
+        node[_MAILBOX_DOMAIN_END] = True
     return tree
 
 
@@ -102,9 +103,9 @@ def mailbox_hits(line: str, addresses=frozenset(), domains=frozenset()) -> list:
         node = tree
         for label in reversed(domain.split(".")):
             node = node.get(label, {})
-            if "" in node or not node:
+            if _MAILBOX_DOMAIN_END in node or not node:
                 break
-        if "" in node:
+        if _MAILBOX_DOMAIN_END in node:
             continue
         hits.append(mailbox)
     return hits
