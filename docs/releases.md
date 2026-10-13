@@ -177,6 +177,29 @@ one line, in text read as UTF-8), earlier:
   a merge check looks again at the merge commit it would land; either sends
   the task back for review with the places in its result.
 
+An entry starting with `re:` is a Python regular expression, matched with
+`re.IGNORECASE` within each line wherever a word is checked; a hit names the
+whole entry as written, including `re:`. For example, `re:第\s*\d+\s*笔`
+finds any number in that shape, and `re:\blane [a-k]\b` finds lane codes in
+any case. The page refuses to save a pattern that does not compile, exceeds
+200 characters including `re:`, or matches the empty string, saying why and
+saving nothing. Other entries stay literal, including regex characters such
+as the dot in `a.b`. These patterns catch shapes a finite word list cannot;
+the principal can remove an entry when that shape is safe to send out.
+
+The principal's `release_forbidden_except` on the same page lists exceptions
+under the forbidden entries, one row per entry with its lanes:
+`{"entry": "internal-only", "lanes": ["e", "f"]}`. The entry must be spelled
+exactly as on `release_forbidden`. On those lanes it is skipped in task and
+design titles, merges and merge checks (including checks run by a merge
+lane for that task), release targets' commands and releases. Every other
+entry and the mailbox rule still apply. An entry absent from the forbidden
+list, or a lane absent from the desk, is kept; the page says each matches
+nothing. Changing a lane's exceptions makes its earlier scans unusable.
+No command changes the exceptions; `hansa explain lane L` gives only their
+count. Exceptions let a repository use a word it needs while other lanes
+still refuse it; remove one when that repository no longer needs the word.
+
 With an empty list and the mailbox rule off nothing is looked for and nothing changes. The release's
 own word scan stays as it was, the last net: a word set after a merge, or a
 commit that came to the base branch another way, is still found there.
@@ -195,11 +218,13 @@ that address, ignoring case; `@domain` allows that domain and its subdomains,
 ignoring case (`@python.org` allows `a@python.org` and `a@mail.python.org`,
 not `a@notpython.org` or `a@python.org.evil.com`). Saving refuses empty entries,
 spaces, pattern characters (`*?[]`), `@` alone and entries in neither form.
+Empty domain labels and more than one `@` are refused.
 The domain must contain a dot and its last label must be at least two letters,
 as the matcher requires; `@com`, `@realmail` and `jane@realmail` are refused.
 Each entry may have at most 254 characters. Duplicates are refused ignoring
 case, naming both entry numbers. The page drops blank lines before saving;
 an empty entry sent by other means is refused.
+Strings that look like addresses and are not, such as `git@github.com` in a clone URL or `logo@2x.png`, go on the allowlist like an address.
 No command changes the rule or allowlist: on a refusal, which names each
 mailbox, commit, file and line (at most 20 hits), the coordinator replaces
 the address with an example one in a fresh retry, or, if the project needs

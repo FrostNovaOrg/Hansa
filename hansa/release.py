@@ -76,7 +76,7 @@ RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
 MAILBOX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
-def mailbox_hits(line: str, addresses=frozenset(), domains=()) -> list:
+def mailbox_hits(line: str, addresses=frozenset(), domains=frozenset()) -> list:
     """Mailbox-shaped strings outside reserved example domains and the principal's allowlist."""
     hits = []
     for mailbox in MAILBOX.findall(line):
@@ -84,10 +84,35 @@ def mailbox_hits(line: str, addresses=frozenset(), domains=()) -> list:
         if (any(domain == d or domain.endswith("." + d) for d in ("example.com", "example.org", "example.net"))
                 or domain.endswith((".invalid", ".test", ".example"))):
             continue
-        if mailbox.casefold() in addresses or any(domain == d or domain.endswith("." + d) for d in domains):
+        if mailbox.casefold() in addresses:
+            continue
+        parent = domain
+        while parent not in domains and "." in parent:
+            parent = parent.split(".", 1)[1]
+        if parent in domains:
             continue
         hits.append(mailbox)
     return hits
+
+
+def lane_exceptions(settings: dict, lane: str) -> list:
+    """Entries excepted on this task or release's lane, spelled exactly as on the principal's list."""
+    return [x["entry"] for x in settings.get("release_forbidden_except") or [] if lane in x["lanes"]]
+
+
+def lane_words(settings: dict, lane: str) -> list:
+    excepted = set(lane_exceptions(settings, lane))
+    return [w for w in settings.get("release_forbidden") or [] if w not in excepted]
+
+
+def word_matchers(words: list) -> list:
+    """Compile patterns once per scan; literals keep their casefolded substring matching."""
+    return [(w, re.compile(w[3:], re.IGNORECASE) if w.startswith("re:") else w.casefold())
+            for w in words or [] if isinstance(w, str) and w.strip()]
+
+
+def matches(matcher, line: str, folded: str) -> bool:
+    return bool(matcher.search(line)) if isinstance(matcher, re.Pattern) else matcher in folded
 
 
 def releases_file(desk: Desk) -> Path:
@@ -310,16 +335,15 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     mailboxes: also check mailbox-shaped strings on every added line against example domains and the allowlist."""
     allow = [entry.casefold() for entry in mailbox_allow] if mailboxes else []
     addresses = {entry for entry in allow if not entry.startswith("@")}
-    domains = tuple(entry[1:] for entry in allow if entry.startswith("@"))
-    words = [w for w in words if isinstance(w, str) and w.strip()]
-    folded = [(w, w.casefold()) for w in words]
+    domains = {entry[1:] for entry in allow if entry.startswith("@")}
+    matchers = word_matchers(words)
     hits, seen, checked = [], set(), 0
     mailboxes_seen = set()
 
     def look(sha, where, line):
         low = line.casefold()
-        for w, f in folded:
-            if f in low and (where, line) not in seen:
+        for w, matcher in matchers:
+            if matches(matcher, line, low) and (where, line) not in seen:
                 seen.add((where, line))
                 hits.append({"word": w, "commit": sha or "", "where": where, "line": line.strip()[:300]})
                 return
@@ -331,9 +355,9 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     for line in _git_lines(repo, "log", "--format=%x00%H%n%B", *rng):
         if line.startswith("\0"):
             sha, checked = line[1:].strip(), checked + 1
-        elif folded:
+        elif matchers:
             look(sha, "commit message", line)
-    if not folded and not mailboxes:
+    if not matchers and not mailboxes:
         return [], checked
     for line in _git_lines(repo, "log", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce", *rng):
         sha, *who = line.split("\x1f")
@@ -365,13 +389,14 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
 def command_hits(ln: dict, words: list, only: str | None = None) -> list:
     """The forbidden words in a lane's release targets' command lines (any case, within one line), each
     (target, word, line) once; only: that one target's ("" the unnamed one)."""
-    folded = [(w, w.casefold()) for w in words or [] if isinstance(w, str) and w.strip()]
+    matchers = word_matchers(words)
     out = []
     for target, t in sorted(lane_targets(ln).items()):
         if only is not None and target != only:
             continue
         for line in str(t.get("command") or "").splitlines():
-            w = next((w for w, f in folded if f in line.casefold()), None)
+            low = line.casefold()
+            w = next((w for w, matcher in matchers if matches(matcher, line, low)), None)
             if w:
                 out.append((target, w, line.strip()[:300]))
     return out
@@ -409,8 +434,9 @@ def mailbox_refusal(hits: list, tid: str = "") -> str:
 def title_hits(title: str, words: list) -> list:
     """The forbidden words in a task's title, which hansa puts in its commit message and its merge's: each
     word once, any case."""
-    low = (title or "").casefold()
-    return [w for w in dict.fromkeys(w for w in words or [] if isinstance(w, str) and w.strip()) if w.casefold() in low]
+    lines = (title or "").splitlines()
+    return list(dict.fromkeys(w for w, matcher in word_matchers(words)
+                              if any(matches(matcher, line, line.casefold()) for line in lines)))
 
 
 def named_files(command: str, files: list) -> list:
@@ -436,15 +462,16 @@ def _has_commit(repo, sha: str) -> bool:
 
 # -- asking ------------------------------------------------------------------------------------------------------
 def scan_key(repo, since: str, commit: str, words: list, command: str, mailboxes: bool = False,
-             mailbox_allow=()) -> str:
+             mailbox_allow=(), exceptions=()) -> str:
     """What a forbidden-word scan depends on, in one string: the commit, the starting point (the target's last
-    release and the repository's remote-tracking branches), the principal's words, mailbox rule, allowlist and command line. A scan
+    release and the repository's remote-tracking branches), the principal's entries, lane exceptions, mailbox
+    rule, allowlist and command line. A scan
     made with the same key finds the same."""
     remotes = _git_bytes(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes")
-    words = sorted(w.casefold() for w in words if isinstance(w, str) and w.strip())
+    words = sorted(w if w.startswith("re:") else w.casefold() for w in words if isinstance(w, str) and w.strip())
     # "identities": a scan from before authors and committers were read does not count for one that reads them
     parts = [repo_key(repo), commit, since, remotes, words, command, "identities",
-             mailboxes, sorted(entry.casefold() for entry in mailbox_allow)]
+             mailboxes, sorted(entry.casefold() for entry in mailbox_allow), sorted(set(exceptions))]
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -501,11 +528,12 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
         with desk.lock():
             s = desk.settings()
             a = _askable(desk, s, lane, target)
-            words = s.get("release_forbidden") or []
+            words = lane_words(s, lane)
             mailboxes = s.get("release_mailboxes", False)
             mailbox_allow = s.get("release_mailbox_allow") or []
             try:
-                key = scan_key(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow)
+                key = scan_key(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow,
+                               lane_exceptions(s, lane))
             except RuntimeError as e:
                 raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). "
                                  "Nothing was asked")
@@ -999,12 +1027,12 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
                 if why:
                     void(desk, rid, why[0], ("approved",), why[1])
                 return None
-            words = s.get("release_forbidden") or []
+            words = lane_words(s, r["lane"])
             mailboxes = s.get("release_mailboxes", False)
             mailbox_allow = s.get("release_mailbox_allow") or []
             try:
                 key = scan_key(r["repo"], r.get("since") or "", r["commit"], words, r["command"], mailboxes,
-                               mailbox_allow)
+                               mailbox_allow, lane_exceptions(s, r["lane"]))
             except RuntimeError as e:
                 void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
                      desk.redact(f"要发出去的提交读不出来（{e}）")[:400])

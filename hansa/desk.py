@@ -84,7 +84,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_mailboxes", "release_mailbox_allow",
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
                   "alert", "coordinator_compact")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
@@ -285,6 +285,7 @@ def default_settings() -> dict:
         # files they name, their messages or identities refuses the release; one in a task's title refuses hansa
         # add, and one in what a task's merge would bring in refuses the merge. The principal's, on the page.
         "release_forbidden": [],
+        "release_forbidden_except": [],
         # Every added line's mailboxes need example domains or the allowlist. The principal's, on the page.
         "release_mailboxes": False,
         "release_mailbox_allow": [],
@@ -480,6 +481,10 @@ def mailbox_allow_problem(entry) -> str:
         return "pattern characters (*?[]) are not allowed"
     if entry == "@":
         return "@ alone needs a domain"
+    if entry.count("@") != 1:
+        return "must contain exactly one @, in a full address or @domain"
+    if any(not label for label in entry.split("@", 1)[1].split(".")):
+        return "the domain must not contain an empty label"
     label = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
     domain = rf"{label}(?:\.{label})*"
     if not re.fullmatch(rf"(?:[A-Za-z0-9._%+-]+)?@{domain}", entry):
@@ -506,7 +511,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     mailbox_key = mailbox_key or original_key
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
-             "release_forbidden", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact"}
+             "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     by = s.get(HIDDEN_BY, {})
     if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
@@ -552,6 +557,28 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
         p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
                  "line, each up to 200 characters")
+    if isinstance(words, list):
+        for i, entry in enumerate(words, 1):
+            if not isinstance(entry, str) or not entry.startswith("re:"):
+                continue
+            if len(entry) > 200:
+                p.append(f"release_forbidden entry {i}: a pattern must be at most 200 characters, including re:")
+                continue
+            try:
+                pattern = re.compile(entry[3:], re.IGNORECASE)
+            except re.error as e:
+                p.append(f"release_forbidden entry {i}: the pattern does not compile: {e}")
+            else:
+                if pattern.search("") is not None:
+                    p.append(f"release_forbidden entry {i}: the pattern matches the empty string")
+    exceptions = s.get("release_forbidden_except", [])
+    if not isinstance(exceptions, list) or not all(
+            isinstance(x, dict) and set(x) == {"entry", "lanes"}
+            and isinstance(x["entry"], str) and x["entry"].strip() and not _has_control(x["entry"])
+            and isinstance(x["lanes"], list) and all(isinstance(lane, str) and NAME.fullmatch(lane)
+                                                    for lane in x["lanes"]) for x in exceptions):
+        p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
+                 "lanes (a list of lane names)")
     al = s.get("alert", {"command": ""})
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
@@ -2526,7 +2553,9 @@ class Desk:
                     added.append(entry)
             if added:  # not save_settings: every other setting stays as the disk has it, and the record is hansa's
                 saved = read_json(self.settings_path, {})
-                write_json(self.settings_path, {**(saved if isinstance(saved, dict) else {}),
+                saved = saved if isinstance(saved, dict) else {}
+                mailbox_settings(saved)
+                write_json(self.settings_path, {**saved,
                                                 "workers_may_not_read": listed, HIDDEN_BY: hidden})
         if added:
             self.event("settings_saved", by=by, changed=["workers_may_not_read", HIDDEN_BY])

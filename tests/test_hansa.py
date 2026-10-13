@@ -3180,6 +3180,276 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         return tid
 
+    def test_forbidden_patterns_and_lane_exceptions_cases(self):
+        from hansa import release
+        pattern = r"re:\blane [a-k]\b"
+        product = "Claude Code"
+
+        def except_e(c):
+            c.hansa("lane", "add", "e", "--like", "a")
+            c.forbid(product)
+            c.assertEqual(c.page_save(lambda s: s.update(
+                release_forbidden_except=[{"entry": product, "lanes": ["e"]}])), {"ok": True, "problems": []})
+
+        def finished(c, lane, line, path="notes.txt", **fields):
+            s = c.desk.settings()
+            s["lanes"][lane].update(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": path}, **fields)
+            c.assertEqual(c.desk.save_settings(s), [])
+            tid = c.desk.new_task("Add a note", lane=lane)
+            c.assertEqual(c.settle(Dispatcher(c.desk), tid)["state"], "done")
+            return tid
+
+        def added_shape(c):
+            entry = r"re:第\s*\d+\s*笔"
+            c.forbid(entry)
+            tid = finished(c, "a", "记录第 123 笔")
+            head = c.desk.meta(tid)["head"]
+            said = c.refused("merge", tid)
+            c.assertIn(f'{head[:10]} notes.txt: 记录第 123 笔  ("{entry}")', said)
+            c.assertIn("Nothing was merged", said)
+
+        def message_shape(c):
+            c.forbid(pattern)
+            tid = finished(c, "a", "clean", commit_message="Lane B: {title}")
+            c.assertIn("Lane B", c.refused("merge", tid))
+            c.assertIn(pattern, c.refused("merge", tid))
+            head = c.desk.meta(tid)["head"]
+            c.assertNotEqual(release.scan_key(c.repo, "", head, [r"re:\d"], "true"),
+                             release.scan_key(c.repo, "", head, [r"re:\D"], "true"))
+
+        def title_shape(c):
+            c.forbid(pattern)
+            said = c.refused("add", "Work", "--lane", "a", "--title", "For Lane B")
+            c.assertIn("--title holds", said)
+            # The title refusal uses JSON quoting, as literal-word refusals do.
+            c.assertIn(json.dumps(pattern), said)
+            c.assertIn("Nothing was queued", said)
+            c.assertEqual(c.desk.tasks(), [])
+
+        def command_shape(c):
+            c.forbid(pattern)
+            said = c.hansa("lane", "target", "a", "ship", "echo Lane B")
+            c.assertIn(f'Warning: lane a\'s release target ship holds "{pattern}"', said)
+            c.assertEqual(c.desk.settings()["lanes"]["a"]["targets"]["ship"]["command"], "echo Lane B")
+            said = c.refused("release", "a", "ship")
+            c.assertIn(pattern, said)
+            c.assertIn("release command: echo Lane B", said)
+
+        def invalid_patterns(c):
+            c.forbid("existing")
+            before = c.desk.settings_path.read_bytes()
+            for entry, why in (("re:(", "does not compile"), ("re:x*", "matches the empty string"),
+                               ("re:" + "x" * 201, "at most 200 characters")):
+                with c.subTest(entry=entry):
+                    saved = c.page_save(lambda s: s.update(release_forbidden=[entry], cool_minutes=7))
+                    c.assertFalse(saved["ok"])
+                    c.assertIn(why, " ".join(saved["problems"]))
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
+            c.forbid("re:" + "x" * 197)  # 200 characters including the prefix
+
+        def literal_metacharacters(c):
+            c.forbid("a.b")
+            tid = finished(c, "a", "axb")
+            c.assertIn("merged into main", c.hansa("merge", tid))
+            tid = finished(c, "a", "a.b")
+            c.assertIn('notes.txt: a.b  ("a.b")', c.refused("merge", tid))
+
+        def excepted_merges(c):
+            except_e(c)
+            e = finished(c, "e", product, "e.txt")
+            a = finished(c, "a", product, "a.txt")
+            c.assertIn("merged into main", c.hansa("merge", e))
+            c.assertIn(product, c.refused("merge", a))
+            c.assertEqual(c.desk.meta(a)["state"], "done")
+
+        def excepted_titles_commands_releases(c):
+            except_e(c)
+            c.assertIn("queued for lane e", c.hansa("add", "Work", "--lane", "e", "--title", product))
+            c.assertIn("Nothing was queued", c.refused("add", "Work", "--lane", "a", "--title", product))
+            with unittest.mock.patch.object(account, "LINUX", False):
+                c.assertIn("queued", c.hansa("design", "Work", "--lane", "e", "--title", product))
+                c.assertIn("Nothing was queued", c.refused("design", "Work", "--lane", "a", "--title", product))
+            command = "echo '" + product + "'"
+            c.assertNotIn("Warning", c.hansa("lane", "target", "e", "ship", command))
+            c.assertIn("Warning", c.hansa("lane", "target", "a", "ship", command))
+            c.commit_in_repo("subject.txt", product + "\n")
+            c.hansa("release", "e", "ship")
+            c.assertEqual(release.get(c.desk, 1)["state"], "waiting")
+            c.assertIn(product, c.refused("release", "a", "ship"))
+            c.assertIn("1 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "e"))
+            c.assertIn("0 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "a"))
+            c.forbid(product, "unprinted-phrase")
+            c.assertEqual(c.page_save(lambda s: s["release_forbidden_except"].append(
+                {"entry": "unprinted-phrase", "lanes": ["e"]})), {"ok": True, "problems": []})
+            c.assertNotIn("unprinted-phrase", c.hansa("explain", "lane", "e", "--all"))
+            c.assertIn("2 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "e"))
+            c.assertIn("Nothing was queued", c.refused("add", "unprinted-phrase", "--lane", "a"))
+            c.forbid(product, "still-forbidden")
+            c.assertIn("Nothing was queued", c.refused("add", "still-forbidden", "--lane", "e"))
+            # Excepting a word that looks like an address does not allow it through the mailbox rule.
+            c.forbid("jane@realmail.hansa")
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailboxes=True, release_forbidden_except=[
+                {"entry": "jane@realmail.hansa", "lanes": ["e"]}])), {"ok": True, "problems": []})
+            tid = finished(c, "e", "jane@realmail.hansa")
+            c.assertIn("a mailbox does not use a reserved example domain", c.refused("merge", tid))
+
+        def excepted_merge_lane(c):
+            except_e(c)
+            c.merge_lane_for_checks("test -f notes.txt")
+            tid = finished(c, "e", product, check="true")
+            c.hansa("merge", tid)
+            m = c.settle_merge(Dispatcher(c.desk), tid)
+            c.assertEqual(m["state"], "merged", m)
+            c.assertEqual(m["merge_check_result"]["lane"], "m")
+            # The merge lane's own exception must not cover a task on lane a.
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[
+                {"entry": product, "lanes": ["m"]}])), {"ok": True, "problems": []})
+            tid = finished(c, "a", product, "a.txt", check="true")
+            c.assertIn(product, c.refused("merge", tid))
+
+        def unmatched_exceptions(c):
+            c.forbid("private-phrase")
+            entries = [{"entry": "private-phrase", "lanes": ["z"]}, {"entry": "absent-entry", "lanes": ["a"]}]
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=entries)), {"ok": True, "problems": []})
+            c.hansa("concurrency", "2")
+            c.assertEqual(c.desk.settings()["release_forbidden_except"], entries)
+            settings = c.desk.settings()
+            settings["release_forbidden_except"] = []
+            c.assertIn("release_forbidden_except is the principal's", " ".join(c.desk.save_settings(settings)))
+            with contextlib.redirect_stderr(io.StringIO()):
+                c.refused("lane", "set", "a", "release_forbidden_except", "a")
+            c.assertNotIn("private-phrase", c.hansa("explain", "lane", "a", "--all"))
+            c.assertNotIn("absent-entry", c.hansa("explain", "lane", "a", "--all"))
+            if not shutil.which("node"):
+                c.skipTest("needs node to verify the page's exception rows")
+            harness = c.tmp / "page.js"
+            harness.write_text(c.PAGE_HARNESS)
+            page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+            for language in ("en", "zh"):
+                result = subprocess.run(["node", str(harness), str(page), "exceptions", language],
+                                        input=json.dumps({"/api/settings": public_settings(c.desk)}),
+                                        capture_output=True, text=True, timeout=60)
+                c.assertEqual(result.returncode, 0, result.stderr)
+                shown = json.loads(result.stdout)
+                c.assertEqual(shown["before"], entries)
+                c.assertEqual(shown["rows"], 2)
+                for entry in ("z", "absent-entry"):
+                    c.assertTrue(any(entry in w for w in shown["warnings"]), shown)
+                c.assertTrue(all(("matches nothing" if language == "en" else "不匹配任何项") in w
+                                 for w in shown["warnings"]))
+                c.assertEqual(shown["edited"], {"entry": "private-phrase", "lanes": ["a", "e"]})
+                c.assertEqual(shown["afterRemove"], [entries[1]])
+                c.assertEqual(shown["afterAdd"], [entries[1], {"entry": "", "lanes": []}])
+
+        def changed_exceptions_rescan(c):
+            c.forbid("nowhere")
+            c.with_release("true")
+            with unittest.mock.patch.object(release, "forbidden_in", wraps=release.forbidden_in) as scan:
+                c.hansa("release", "a")
+                r = release.get(c.desk, 1)
+                c.assertEqual(scan.call_count, 1)
+                c.assertEqual(release.answer(c.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+                c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[
+                    {"entry": "nowhere", "lanes": ["a"]}])), {"ok": True, "problems": []})
+                c.assertEqual(c.settle_release(Dispatcher(c.desk), 1)["state"], "done")
+                c.assertEqual(scan.call_count, 2)
+                c.assertNotEqual(release.get(c.desk, 1)["scanned"], r["scanned"])
+            head = c.git_out("rev-parse", "HEAD")
+            # Even an unmatched exception is part of the lane's settings, independent of effective words.
+            c.assertNotEqual(release.scan_key(c.repo, "", head, [], "true", exceptions=[]),
+                             release.scan_key(c.repo, "", head, [], "true", exceptions=["absent-entry"]))
+            c.assertNotEqual(release.scan_key(c.repo, "", head, [], "true", exceptions=["Falcon"]),
+                             release.scan_key(c.repo, "", head, [], "true", exceptions=["falcon"]))
+
+        def existing_words(c):
+            c.forbid("Falcon Plan")
+            c.assertEqual(release.title_hits("FALCON PLAN", ["Falcon Plan"]), ["Falcon Plan"])
+            c.assertEqual(release.title_hits("Falcon\nPlan", ["Falcon Plan"]), [])
+            before = c.git_out("rev-parse", "HEAD")
+            c.commit_in_repo("split.txt", "Falcon\nPlan\n")
+            (c.repo / "utf16.txt").write_bytes("Falcon Plan\n".encode("utf-16"))
+            sh("git", "add", "utf16.txt", cwd=c.repo)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Encoded", cwd=c.repo)
+            c.assertEqual(release.words_in(c.repo, [f"{before}..HEAD", "--"], ["Falcon Plan"])[0], [])
+            head = c.commit_in_repo("found.txt", "FALCON PLAN\n" * 30)
+            hits, _ = release.words_in(c.repo, [f"{before}..HEAD", "--"], ["Falcon Plan"])
+            c.assertTrue(hits)
+            c.assertTrue(all(h["commit"] == head and h["where"] == "found.txt" for h in hits))
+            c.assertLessEqual(len(hits), release.MOST_HITS)
+
+        def domain_comparisons(c):
+            comparisons, folds = 0, 0
+
+            class Entry(str):
+                def casefold(self):
+                    nonlocal folds
+                    folds += 1
+                    return Entry(super().casefold())
+
+                def __getitem__(self, key):
+                    return Entry(super().__getitem__(key))
+
+                def __eq__(self, other):
+                    nonlocal comparisons
+                    comparisons += 1
+                    return super().__eq__(other)
+
+                __hash__ = str.__hash__
+
+            allow = [Entry(f"@domain{i}.realmail.hansa") for i in range(500)]
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailboxes=True, release_mailbox_allow=allow)),
+                          {"ok": True, "problems": []})
+            before = c.git_out("rev-parse", "HEAD")
+            c.commit_in_repo("addresses.txt", "".join(f"person{i}@deep.mail.domain499.realmail.hansa\n" for i in range(20000)))
+            comparisons = folds = 0
+            hits, _ = release.words_in(c.repo, [f"{before}..HEAD", "--"], [], mailboxes=True, mailbox_allow=allow)
+            c.assertEqual(hits, [])
+            c.assertEqual(folds, 500)
+            c.assertGreater(comparisons, 0)
+            c.assertLessEqual(comparisons, 20000 * 5 + 500)
+            c.assertEqual(release.mailbox_hits("a@a.b.c a@b.c a@c.com", domains={"c", "com"}), [])
+            c.assertEqual(release.mailbox_hits("a@notrealmail.hansa a@realmail.hansa.evil.io", domains={"realmail.hansa"}),
+                          ["a@notrealmail.hansa", "a@realmail.hansa.evil.io"])
+
+        def hide_migrates_mailboxes(c):
+            for enabled in (True, False):
+                old = c.desk.settings()
+                del old["release_mailboxes"]
+                old["release_test_mailboxes"] = enabled
+                write_json(c.desk.settings_path, old)
+                c.hansa("hide", str(c.tmp / f"hidden-{enabled}"))
+                saved = json.loads(c.desk.settings_path.read_text())
+                c.assertIs(saved["release_mailboxes"], enabled)
+                c.assertNotIn("release_test_mailboxes", saved)
+
+        def invalid_mailboxes(c):
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailbox_allow=["@allowed.com"])),
+                          {"ok": True, "problems": []})
+            before = c.desk.settings_path.read_bytes()
+            for entry, why in (("@realmail..hansa", "empty label"), ("@.realmail.hansa", "empty label"),
+                               ("@realmail.hansa.", "empty label"), ("a@@b.com", "exactly one @"),
+                               ("jane@realmail.hansa@evil.io", "exactly one @")):
+                with c.subTest(entry=entry):
+                    saved = c.page_save(lambda s: s.update(release_mailbox_allow=[entry]))
+                    c.assertFalse(saved["ok"])
+                    c.assertIn(why, " ".join(saved["problems"]))
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
+
+        cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
+                 (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
+                 (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
+                 (11, changed_exceptions_rescan), (12, existing_words), (13, domain_comparisons),
+                 (14, hide_migrates_mailboxes), (15, invalid_mailboxes)]
+        for row, check in cases:
+            with self.subTest(row=row, case=check.__name__):
+                # No row inherits settings, repository history or task state from another row.
+                c = DeskTest(self._testMethodName)
+                try:
+                    c.setUp()
+                    check(c)
+                finally:
+                    c.doCleanups()
+
     def test_a_title_holding_a_forbidden_word_is_refused_at_add_and_the_text_is_not_looked_at(self):
         self.forbid("Falcon")
         said = self.refused("add", "Fix the badge", "--title", "Ship the FALCON badge")
@@ -21009,6 +21279,31 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
   console.log(JSON.stringify(nulls));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(() => {
+  if (ask === "exceptions") {
+    const read = () => JSON.parse(vm.runInContext("JSON.stringify(S.release_forbidden_except)", ctx));
+    const before = read(), warnings = [], rows = [];
+    let entry = null, lanes = null, remove = null, add = null;
+    walk(ids["#tab-settings"], el => {
+      if (el.className === "forbidden-exception") rows.push(el);
+      if (el.className === "warn" && (el.textContent.includes("matches nothing") || el.textContent.includes("不匹配任何项"))) warnings.push(el.textContent);
+      if (el.attrs["data-exception-entry"] === "0") entry = el;
+      if (el.attrs["data-exception-lanes"] === "0") lanes = el;
+      if (el.tag === "button" && (el.textContent === "Add exception" || el.textContent === "添加豁免")) add = el;
+    });
+    walk(rows[0], el => { if (el.tag === "button") remove = el; });
+    if (!entry || !lanes || !remove || !add) throw new Error("exception editor missing");
+    entry.value = "private-phrase"; entry.on.input({target:entry});
+    lanes.value = "a, e"; lanes.on.input({target:lanes});
+    const edited = read()[0];
+    remove.on.click(); const afterRemove = read();
+    // Find the new button: the previous render held the array from before removal.
+    walk(ids["#tab-settings"], el => {
+      if (el.tag === "button" && (el.textContent === "Add exception" || el.textContent === "添加豁免")) add = el;
+    });
+    add.on.click();
+    console.log(JSON.stringify({before, rows:rows.length, warnings, edited, afterRemove, afterAdd:read()}));
+    return;
+  }
   if (ask === "mailboxes") {
     let input = null, allow = null, ruleLabel = "", allowLabel = "";
     walk(ids["#tab-settings"], el => {
