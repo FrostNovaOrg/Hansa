@@ -1521,7 +1521,10 @@ def release_settings_line(s: dict) -> str:
             + (f" (lanes {', '.join(changed)} are on that list, but their repository, base branch or release command "
                "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
             + f"; {len(words)} word(s) the principal keeps from going out are checked at hansa add (a task's title), at each merge and before each release. Both lists are the "
-            "principal's, on the web page; you cannot set them (hansa ask). Do not push or deploy yourself.")
+            "principal's, on the web page; you cannot set them (hansa ask). "
+            f"The mailbox rule (release_test_mailboxes) is {'on' if s.get('release_test_mailboxes') else 'off'}: "
+            "when on, mailboxes in added test lines must use reserved example domains at merges and releases. "
+            "It is also the principal's, on the same page. Do not push or deploy yourself.")
 
 
 def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
