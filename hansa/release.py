@@ -56,7 +56,8 @@ import uuid
 from pathlib import Path
 
 from . import without_session
-from .desk import WRITE_FILE, Desk, lane_targets, listed_key, listed_mismatch, now, read_json, target_name, write_json, write_text
+from .desk import (WRITE_FILE, Desk, forbidden_exceptions_ok, forbidden_pattern, lane_targets, listed_key,
+                   listed_mismatch, now, read_json, target_name, write_json, write_text)
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   run_running, save_stopped, serve_step, recording_start, retry_start_failure,
                   merge_check_lane, merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
@@ -74,11 +75,24 @@ SCRIPT = WRITE_FILE + '/bin/sh -c "$1"; write_file "$2" "$?"'
 HUNK = re.compile(r"^(@@+) ((?:-\d+(?:,\d+)? )+\+\d+(?:,\d+)?) @@")
 RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
 MAILBOX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_MAILBOX_DOMAIN_END = object()  # An empty label in legacy settings is still a label.
+
+
+def mailbox_domains(domains) -> dict:
+    """Index suffixes once per scan, by labels from the domain's end."""
+    tree = {}
+    for domain in domains:
+        node = tree
+        for label in reversed(domain.split(".")):
+            node = node.setdefault(label, {})
+        node[_MAILBOX_DOMAIN_END] = True
+    return tree
 
 
 def mailbox_hits(line: str, addresses=frozenset(), domains=frozenset()) -> list:
     """Mailbox-shaped strings outside reserved example domains and the principal's allowlist."""
     hits = []
+    tree = domains if isinstance(domains, dict) else mailbox_domains(domains)
     for mailbox in MAILBOX.findall(line):
         domain = mailbox.rsplit("@", 1)[1].casefold()
         if (any(domain == d or domain.endswith("." + d) for d in ("example.com", "example.org", "example.net"))
@@ -86,10 +100,12 @@ def mailbox_hits(line: str, addresses=frozenset(), domains=frozenset()) -> list:
             continue
         if mailbox.casefold() in addresses:
             continue
-        parent = domain
-        while parent not in domains and "." in parent:
-            parent = parent.split(".", 1)[1]
-        if parent in domains:
+        node = tree
+        for label in reversed(domain.split(".")):
+            node = node.get(label, {})
+            if _MAILBOX_DOMAIN_END in node or not node:
+                break
+        if _MAILBOX_DOMAIN_END in node:
             continue
         hits.append(mailbox)
     return hits
@@ -97,7 +113,10 @@ def mailbox_hits(line: str, addresses=frozenset(), domains=frozenset()) -> list:
 
 def lane_exceptions(settings: dict, lane: str) -> list:
     """Entries excepted on this task or release's lane, spelled exactly as on the principal's list."""
-    return [x["entry"] for x in settings.get("release_forbidden_except") or [] if lane in x["lanes"]]
+    exceptions = settings.get("release_forbidden_except", [])
+    if not forbidden_exceptions_ok(exceptions):
+        return []
+    return [x["entry"] for x in exceptions if lane in x["lanes"]]
 
 
 def lane_words(settings: dict, lane: str) -> list:
@@ -107,8 +126,12 @@ def lane_words(settings: dict, lane: str) -> list:
 
 def word_matchers(words: list) -> list:
     """Compile patterns once per scan; literals keep their casefolded substring matching."""
-    return [(w, re.compile(w[3:], re.IGNORECASE) if w.startswith("re:") else w.casefold())
-            for w in words or [] if isinstance(w, str) and w.strip()]
+    matchers = []
+    for word in words or []:
+        if isinstance(word, str) and word.strip():
+            pattern = forbidden_pattern(word)[0] if word.startswith("re:") else None
+            matchers.append((word, pattern if pattern is not None else word.casefold()))
+    return matchers
 
 
 def matches(matcher, line: str, folded: str) -> bool:
@@ -335,7 +358,7 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     mailboxes: also check mailbox-shaped strings on every added line against example domains and the allowlist."""
     allow = [entry.casefold() for entry in mailbox_allow] if mailboxes else []
     addresses = {entry for entry in allow if not entry.startswith("@")}
-    domains = {entry[1:] for entry in allow if entry.startswith("@")}
+    domains = mailbox_domains({entry[1:] for entry in allow if entry.startswith("@")})
     matchers = word_matchers(words)
     hits, seen, checked = [], set(), 0
     mailboxes_seen = set()

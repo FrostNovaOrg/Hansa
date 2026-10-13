@@ -3470,6 +3470,9 @@ class DeskTest(unittest.TestCase):
                 def __getitem__(self, key):
                     return Entry(super().__getitem__(key))
 
+                def split(self, *args):
+                    return [Entry(part) for part in super().split(*args)]
+
                 def __eq__(self, other):
                     nonlocal comparisons
                     comparisons += 1
@@ -3515,12 +3518,303 @@ class DeskTest(unittest.TestCase):
                     c.assertFalse(saved["ok"])
                     c.assertIn(why, " ".join(saved["problems"]))
                     c.assertEqual(c.desk.settings_path.read_bytes(), before)
+            changelog = (Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
+            entry = next(line for line in changelog.splitlines() if "`re:` patterns" in line)
+            c.assertTrue(entry.startswith("- **"), entry)
+            c.assertNotIn("malformed allowlist entries are refused", changelog)
+
+        def unsafe_patterns(c):
+            c.forbid("existing")
+            before = c.desk.settings_path.read_bytes()
+            for entry, why in ((r"re:(a+)+$", "repeat"), (r"re:x(\w+\s?)*$", "repeat"),
+                               (r"re:(\w)\1", "backreferences"), (r"re:(a|aa)*b", "alternation"),
+                               (r"re:(?P<word>\w)(?P=word)", "backreferences"),
+                               (r"re:(ab){2,3}?c", "group"), (r"re:(ab){2,}c", "group"),
+                               (r"re:(ab){1,2}c", "group"), (r"re:(a+)+?b", "repeat"),
+                               (r"re:(?:(?=a+)a)*b", "repeat")):
+                with c.subTest(entry=entry):
+                    saved = c.page_save(lambda s: s.update(release_forbidden=[entry], cool_minutes=7))
+                    c.assertFalse(saved["ok"])
+                    c.assertIn(why, " ".join(saved["problems"]))
+                    c.assertIn("backtrack badly", " ".join(saved["problems"]))
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
+
+        def safe_patterns(c):
+            for entry in (r"re:第\s*\d+\s*笔", r"re:(\d+)", r"re:(ab)?c", r"re:\blane [a-k]\b",
+                          r"re:(ab){1}c", r"re:(a+)?b", r"re:[ab]{2,4}?c", r"re:x{2,}c"):
+                with c.subTest(entry=entry):
+                    c.forbid(entry)
+                    c.assertIsInstance(release.word_matchers([entry])[0][1], re.Pattern)
+
+        def legacy_patterns(c):
+            clean = finished(c, "a", "ordinary text", "clean.txt")
+            literal = finished(c, "a", "re:(", "literal.txt")
+            empty = finished(c, "a", "re:", "empty.txt")
+            entries = ["re:(", "re:"]
+            settings = c.desk.settings()
+            settings["release_forbidden"] = entries
+            write_json(c.desk.settings_path, settings)
+            for entry in entries:
+                c.assertEqual(release.title_hits("ordinary text", [entry]), [])
+                c.assertEqual(release.title_hits(entry.upper(), [entry]), [entry])
+                c.assertEqual(release.word_matchers([entry]), [(entry, entry.casefold())])
+            problems = public_settings(c.desk)["problems"]
+            c.assertEqual(len(problems), 2, problems)
+            c.assertIn("release_forbidden entry 1: the pattern does not compile", problems[0])
+            c.assertIn("release_forbidden entry 2: the pattern matches the empty string", problems[1])
+            before = c.desk.settings_path.read_bytes()
+            c.assertFalse(c.page_save(lambda s: s.update(cool_minutes=7))["ok"])
+            c.assertEqual(c.desk.settings_path.read_bytes(), before)
+            c.assertIn("merged into main", c.hansa("merge", clean))
+            c.assertIn('literal.txt: re:(  ("re:(")', c.refused("merge", literal))
+            c.assertIn('empty.txt: re:  ("re:")', c.refused("merge", empty))
+            # Release scans use the same literal fallback, even without a page save.
+            hits, _ = release.forbidden_in(c.repo, "", c.git_out("rev-parse", "main"), entries)
+            c.assertEqual(hits, [])
+
+        def legacy_unsafe_pattern(c):
+            entry = r"re:(a+)+$"
+            line = "a" * 40 + "!"
+            normal = finished(c, "a", line, "normal.txt")
+            settings = c.desk.settings()
+            write_json(c.desk.settings_path, {**settings, "release_forbidden": [entry]})
+            # Fail before searching a hostile line if unsafe patterns ever become executable again.
+            c.assertEqual(release.word_matchers([entry]), [(entry, entry.casefold())])
+            c.assertIn("backtrack badly", " ".join(public_settings(c.desk)["problems"]))
+            c.assertEqual(release.title_hits(line, [entry]), [])
+            c.assertEqual(release.title_hits(entry, [entry]), [entry])
+            c.assertIn("merged into main", c.hansa("merge", normal))
+            write_json(c.desk.settings_path, settings)
+            c.merge_lane_for_checks("test -f checked.txt")
+            checked = finished(c, "a", line, "checked.txt", check="true")
+            literal = finished(c, "a", entry, "literal.txt")
+            write_json(c.desk.settings_path, {**c.desk.settings(), "release_forbidden": [entry]})
+            c.hansa("merge", checked)
+            result = c.settle_merge(Dispatcher(c.desk), checked)
+            c.assertEqual(result["state"], "merged", result)
+            c.assertEqual(result["merge_check_result"]["lane"], "m")
+            c.assertIn('literal.txt: re:(a+)+$  ("re:(a+)+$")', c.refused("merge", literal))
+
+        def malformed_exceptions(c):
+            clean = finished(c, "a", "clean", "clean.txt")
+            literal = finished(c, "a", "private-phrase", "literal.txt")
+            c.forbid("private-phrase")
+            settings = c.desk.settings()
+            for value in ("bad", [42], [{"entry": "private-phrase", "lanes": ["a"]}, 42], [{}]):
+                with c.subTest(exceptions=value):
+                    settings["release_forbidden_except"] = value
+                    write_json(c.desk.settings_path, settings)
+                    public = public_settings(c.desk)
+                    c.assertTrue(any("release_forbidden_except" in p for p in public["problems"]), public)
+                    c.assertEqual(release.lane_exceptions(c.desk.settings(), "a"), [])
+                    c.assertEqual(release.lane_words(c.desk.settings(), "a"), ["private-phrase"])
+                    c.assertIn("private-phrase", c.refused("merge", literal))
+                    c.assertIn("Nothing was queued", c.refused("add", "private-phrase"))
+                    if shutil.which("node"):
+                        harness = c.tmp / "page.js"
+                        harness.write_text(c.PAGE_HARNESS)
+                        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+                        shown = subprocess.run(["node", str(harness), str(page), "settings-problems"],
+                                               input=json.dumps({"/api/settings": public}),
+                                               capture_output=True, text=True, timeout=60)
+                        c.assertEqual(shown.returncode, 0, shown.stderr)
+                        c.assertIn("release_forbidden_except", json.loads(shown.stdout))
+            c.assertIn("merged into main", c.hansa("merge", clean))
+
+        def long_mailbox_domains(c):
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailboxes=True,
+                                                        release_mailbox_allow=["@allowed.realmail.hansa"])),
+                          {"ok": True, "problems": []})
+            operations = 0
+
+            class Address(str):
+                def split(self, *args):
+                    nonlocal operations
+                    operations += len(self)
+                    return [Address(part) for part in super().split(*args)]
+
+                def rsplit(self, *args):
+                    nonlocal operations
+                    operations += len(self)
+                    return [Address(part) for part in super().rsplit(*args)]
+
+                def casefold(self):
+                    nonlocal operations
+                    operations += len(self)
+                    return Address(super().casefold())
+
+                def __hash__(self):
+                    nonlocal operations
+                    operations += len(self)
+                    return super().__hash__()
+
+            findall = release.MAILBOX.findall
+            work = []
+            for labels in (1000, 5000):
+                address = "person@" + ".".join(["a"] * labels) + ".realmail.hansa"
+                tid = finished(c, "a", address, f"address-{labels}.txt")
+                head = c.desk.meta(tid)["head"]
+                operations = 0
+                with unittest.mock.patch.object(release, "MAILBOX") as mailbox:
+                    mailbox.findall.side_effect = lambda line: [Address(x) for x in findall(line)]
+                    hits, _ = release.words_in(c.repo, [head, "^main", "--"], [], mailboxes=True,
+                                              mailbox_allow=["@allowed.realmail.hansa"])
+                c.assertEqual([hit["word"] for hit in hits], [address])
+                c.assertGreater(operations, len(address))
+                c.assertLessEqual(operations, 10 * len(address))
+                work.append(operations)
+                c.assertIn("a mailbox does not use a reserved example domain", c.refused("merge", tid))
+            c.assertLessEqual(work[1], 5 * work[0])
+
+        def blank_exception_rows(c):
+            c.forbid("private-phrase")
+            kept = {"entry": "private-phrase", "lanes": ["a"]}
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[
+                {"entry": "", "lanes": []}, kept, {"entry": " \t ", "lanes": []}])),
+                {"ok": True, "problems": []})
+            c.assertEqual(c.desk.settings()["release_forbidden_except"], [kept])
+            if not shutil.which("node"):
+                c.skipTest("needs node to click Add exception and Save")
+            harness = c.tmp / "page.js"
+            harness.write_text(c.PAGE_HARNESS)
+            page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+            for language in ("en", "zh"):
+                result = subprocess.run(["node", str(harness), str(page), "empty-exception", language],
+                                        input=json.dumps({"/api/settings": public_settings(c.desk)}),
+                                        capture_output=True, text=True, timeout=60)
+                c.assertEqual(result.returncode, 0, result.stderr)
+                posted = json.loads(result.stdout)
+                c.assertEqual(posted["settings"]["release_forbidden_except"], [kept, {"entry": "", "lanes": []}])
+                c.assertEqual(save_from_page(c.desk, posted), {"ok": True, "problems": []})
+                c.assertEqual(c.desk.settings()["release_forbidden_except"], [kept])
+
+        def alpha_mailbox_hits(line, addresses, domains):
+            # The loop before the domain index: keep its answers even for legacy empty labels.
+            hits = []
+            for mailbox in release.MAILBOX.findall(line):
+                domain = mailbox.rsplit("@", 1)[1].casefold()
+                if (any(domain == d or domain.endswith("." + d) for d in ("example.com", "example.org", "example.net"))
+                        or domain.endswith((".invalid", ".test", ".example"))):
+                    continue
+                if mailbox.casefold() in addresses:
+                    continue
+                if any(domain == d or domain.endswith("." + d) for d in domains):
+                    continue
+                hits.append(mailbox)
+            return hits
+
+        def legacy_domain_answers(c):
+            entries = ["@realmail.hansa", "@.realmail.hansa", "@a..realmail.hansa", "@realmail.hansa.", "@"]
+            line = ("x@realmail.hansa x@sub.realmail.hansa x@a..realmail.hansa x@sub.a..realmail.hansa "
+                    "x@.realmail.hansa x@realmail.hansa. x@notrealmail.hansa x@realmail.hansa.evil.io "
+                    "X@REALMAIL.COM x@example.com x@sub.example.org x@domain.test")
+            for mask in range(1 << len(entries)):
+                allow = [entry for i, entry in enumerate(entries) if mask & (1 << i)]
+                for ordered in (allow, list(reversed(allow))):
+                    domains = [entry[1:] for entry in ordered]
+                    with c.subTest(allow=ordered):
+                        expected = alpha_mailbox_hits(line, set(), domains)
+                        c.assertEqual(release.mailbox_hits(line, domains=domains), expected)
+                        tree = release.mailbox_domains(domains)
+                        c.assertEqual(release.mailbox_hits(line, domains=tree), expected)
+                        c.assertEqual(release.mailbox_hits(line, addresses={"x@realmail.hansa"}, domains=tree),
+                                      alpha_mailbox_hits(line, {"x@realmail.hansa"}, domains))
+
+        def legacy_domains_merge_process(c):
+            allow = ["@realmail.hansa", "@.realmail.hansa"]
+            settings = c.desk.settings()
+            src = str(Path(__file__).resolve().parent.parent)
+            for seed, address in ((seed, address) for seed in range(4)
+                                  for address in ("x@realmail.hansa", "x@notrealmail.hansa")):
+                with c.subTest(seed=seed, address=address):
+                    write_json(c.desk.settings_path, settings)
+                    tid = finished(c, "a", address, f"mail-{seed}-{address.split('@')[1]}.txt")
+                    write_json(c.desk.settings_path, {**c.desk.settings(), "release_mailboxes": True,
+                                                     "release_mailbox_allow": allow})
+                    result = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(c.desk.root), "merge", tid],
+                                            cwd=c.tmp, env={**os.environ, "PYTHONPATH": src, "PYTHONHASHSEED": str(seed)},
+                                            capture_output=True, text=True, timeout=60)
+                    c.assertNotIn("Traceback", result.stdout + result.stderr)
+                    rejected = alpha_mailbox_hits(address, set(), [entry[1:] for entry in allow])
+                    c.assertEqual(result.returncode, 1 if rejected else 0, result.stdout + result.stderr)
+                    if rejected:
+                        c.assertIn(address, result.stderr)
+                        c.assertEqual(c.desk.meta(tid)["state"], "done")
+                    else:
+                        c.assertIn("merged into main", result.stdout)
+                        c.assertEqual(c.desk.meta(tid)["state"], "merged")
+
+        def pattern_python_errors(c):
+            from hansa import desk as desk_module
+            entry = "re:(?(1)5)4"
+            clean = finished(c, "a", "ordinary text", "clean.txt")
+            literal = finished(c, "a", entry, "literal.txt")
+            write_json(c.desk.settings_path, {**c.desk.settings(), "release_forbidden": [entry]})
+            try:
+                compiled = re.compile(entry[3:], re.IGNORECASE)
+                compiled.search("")
+            except Exception:
+                compiled = None
+            problems = public_settings(c.desk)["problems"]
+            c.assertEqual(release.title_hits("ordinary text", [entry]), [])
+            if compiled is None:
+                c.assertEqual(release.title_hits(entry.upper(), [entry]), [entry])
+                c.assertEqual(problems, ["release_forbidden entry 1: " + desk_module.forbidden_pattern(entry)[1]])
+                c.assertIn("the pattern does not compile", problems[0])
+                c.assertIn(entry, c.refused("merge", literal))
+            else:
+                c.assertEqual(release.title_hits(entry, [entry]), [entry] if compiled.search(entry) else [])
+                c.assertEqual(problems, [])
+            c.assertIn("merged into main", c.hansa("merge", clean))
+            # Exercise all three error boundaries even on versions that reject this example in the parser.
+            try:
+                from re import _parser as parser
+            except ImportError:
+                import sre_parse as parser
+            for stage in ("parse", "compile", "empty search"):
+                with c.subTest(stage=stage):
+                    error = RuntimeError("invalid SRE code")
+                    if stage == "parse":
+                        patch = unittest.mock.patch.object(parser, "parse", side_effect=error)
+                    elif stage == "compile":
+                        patch = unittest.mock.patch.object(re, "compile", side_effect=error)
+                    else:
+                        pattern = unittest.mock.Mock()
+                        pattern.search.side_effect = error
+                        patch = unittest.mock.patch.object(re, "compile", return_value=pattern)
+                    with patch:
+                        c.assertEqual(desk_module.forbidden_pattern(r"re:\d+"),
+                                      (None, "the pattern does not compile: invalid SRE code"))
+                        c.assertEqual(release.title_hits(r"re:\d+", [r"re:\d+"]), [r"re:\d+"])
+
+        def blank_exception_entry(c):
+            c.forbid("private-phrase")
+            kept = {"entry": "private-phrase", "lanes": ["a"]}
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[kept])),
+                          {"ok": True, "problems": []})
+            before = c.desk.settings_path.read_bytes()
+            blank = {"entry": "", "lanes": []}
+            rows = [[kept, {"entry": entry, "lanes": ["a"]}] for entry in ("", " \t ")]
+            rows += [[blank, {"entry": "", "lanes": ["a"]}],
+                     [kept, blank, {"entry": " ", "lanes": ["a"]}],
+                     [kept, {"entry": "", "lanes": ["a", "e"]}]]
+            for exceptions in rows:
+                with c.subTest(exceptions=exceptions):
+                    saved = c.page_save(lambda s: s.update(release_forbidden_except=exceptions))
+                    c.assertFalse(saved["ok"])
+                    lanes = ", ".join(exceptions[-1]["lanes"])
+                    c.assertEqual(saved["problems"],
+                                  [f"release_forbidden_except: the exception for lanes {lanes} has no entry"])
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
 
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
                  (11, changed_exceptions_rescan), (12, existing_words), (13, domain_comparisons),
-                 (14, hide_migrates_mailboxes), (15, invalid_mailboxes)]
+                 (14, hide_migrates_mailboxes), (15, invalid_mailboxes), (16, unsafe_patterns), (17, safe_patterns),
+                 (18, legacy_patterns), (19, legacy_unsafe_pattern), (20, malformed_exceptions),
+                 (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
+                 (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.
@@ -21718,7 +22012,13 @@ const document = {createElement: t => new El(t), createTextNode: s => new Text(s
   hidden: false, activeElement: null, querySelectorAll: () => [],
   querySelector: s => ids[s] || (ids[s] = new El("div"))};
 const reply = path => given[Object.keys(given).find(p => path.startsWith(p))] ?? (path.startsWith("/api/events") ? [] : null);
-const fetch = async path => { const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r}; };
+let posted = null;
+const fetch = async (path, options) => {
+  if (options && options.method === "POST" && path === "/api/settings") {
+    posted = JSON.parse(options.body); return {status:200, json:async () => ({ok:true, problems:[]})};
+  }
+  const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r};
+};
 const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
   setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
 if (process.argv[4]) ctx.navigator.language = process.argv[4];
@@ -21732,7 +22032,24 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
   }
   console.log(JSON.stringify(nulls));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
-else vm.runInContext("loadSettings()", ctx).then(() => {
+else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "settings-problems") {
+    console.log(JSON.stringify(ids["#tab-settings"].textContent));
+    return;
+  }
+  if (ask === "empty-exception") {
+    let add = null, save = null;
+    const buttons = () => walk(ids["#tab-settings"], el => {
+      if (el.tag === "button" && (el.textContent === "Add exception" || el.textContent === "添加豁免")) add = el;
+      if (el.tag === "button" && el.className === "primary" && (el.textContent === "Save settings" || el.textContent === "保存设置")) save = el;
+    });
+    buttons();
+    if (!add || !save) throw new Error("exception or save button missing");
+    add.on.click(); buttons(); await save.on.click();
+    if (!posted) throw new Error("settings were not posted");
+    console.log(JSON.stringify(posted));
+    return;
+  }
   if (ask === "exceptions") {
     const read = () => JSON.parse(vm.runInContext("JSON.stringify(S.release_forbidden_except)", ctx));
     const before = read(), warnings = [], rows = [];

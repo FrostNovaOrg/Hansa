@@ -448,14 +448,15 @@ async function loadSettings(problems) {
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 function forbiddenExceptions() {
-  const rows = S.release_forbidden_except || [];
+  const rows = Array.isArray(S.release_forbidden_except) ? S.release_forbidden_except.filter(row =>
+    row && typeof row.entry === "string" && Array.isArray(row.lanes) && row.lanes.every(lane => typeof lane === "string")) : [];
   return h("div", {}, rows.map((row, i) => h("div", {class:"forbidden-exception"},
     h("div", {class:"row"},
       h("input", {value:row.entry, placeholder:T.forbiddenEntry, "data-exception-entry":i,
         oninput:e => { row.entry = e.target.value; }, onchange:() => renderSettings()}),
       h("input", {value:row.lanes.join(" "), placeholder:T.forbiddenLanes, "data-exception-lanes":i,
         oninput:e => { row.lanes = e.target.value.split(/[\s,]+/).filter(Boolean); }, onchange:() => renderSettings()}),
-      h("button", {onclick:() => { rows.splice(i, 1); renderSettings(); }}, T.remove)),
+      h("button", {onclick:() => { S.release_forbidden_except = rows.filter((_, j) => j !== i); renderSettings(); }}, T.remove)),
     !(S.release_forbidden || []).includes(row.entry) ? h("p", {class:"warn"}, `${row.entry}: ${T.forbiddenEntryUnmatched}`) : null,
     row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`)))),
     h("button", {onclick:() => { S.release_forbidden_except = [...rows, {entry:"", lanes:[]}]; renderSettings(); }}, T.addForbiddenException));
