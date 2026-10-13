@@ -259,22 +259,30 @@ one for a lane with release targets and none.
 A command can also name a file outside the lane's repository: hansa looks
 anywhere in the line, inside quotes too, for absolute paths, `~/`, `$HOME/`
 or `${HOME}/` paths, and relative paths with `..` that leave the repository,
-expanding HOME and following links. Existing regular text files (no NUL in
-the first 8 KB) are named when a target is set and recorded with their sha256
-on a release request and on the principal's tick; no worker can change them
-and no verification covers them, so move them into the repository and list
-them in `release_files`. A changed, removed or newly present file voids a
-waiting or approved request before the answer counts or the release starts,
-and a change since the tick was saved makes that tick stop counting; the
-page names the file, and taking changed entries back in records their new
+expanding HOME and following links. An output redirection's destination
+(`>`, `>>`, `>|`, `&>`, `&>>`, including a descriptor number such as `2>`)
+is a file the command writes, not one it runs, so it is not named or
+fingerprinted; an input redirection's file (`<`) is still looked into.
+Existing regular text files (no NUL in the first 8 KB) are named when a
+target is set and recorded with their sha256 on a release request and on
+the principal's tick; no worker can change them and no verification covers
+them, so move them into the repository and list them in `release_files`. A
+recorded fingerprint must still match: a file that changes, disappears or
+can no longer be fingerprinted (over 16 MB, unreadable or now binary) has
+changed. A file not recorded must still be
+absent: a new one counts even if it cannot be fingerprinted. Such a change
+voids a waiting or approved request before the answer counts or the release
+starts, and a change since the tick was saved makes that tick stop counting;
+the page names the file, and taking changed entries back in records their new
 fingerprints. An older tick that did not record an outside file stops
 counting too; one with no outside file keeps counting. Outside folders
 named as where the command runs are shown without a fingerprint; files over
-16 MB or unreadable are named as not fingerprinted and never void or untick
-anything. Devices, binaries, bare names found on PATH, variables other than
-HOME, and what a script runs in turn are not looked into. Fingerprints are
-taken only when a target is set, a release is asked or checked again, or a
-tick is saved or evaluated, never in an idle round with no release waiting
+16 MB or unreadable are named as not fingerprinted, and a file recorded
+without a fingerprint is not compared. Devices, binaries, bare names found
+on PATH, variables other than HOME, and what a script runs in turn are not
+looked into. Fingerprints are taken only when a target is set, a release is
+asked or checked again, or a tick is saved or evaluated, never in an idle
+round with no release waiting
 or approved. The page also notes an alert command's outside text files that
 are outside the desk's `secrets/`: the coordinator can change them and
 one-time release codes pass through them, so keep them under `secrets/`;

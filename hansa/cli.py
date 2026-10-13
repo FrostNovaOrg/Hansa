@@ -2313,8 +2313,8 @@ def _say_forbidden(desk: Desk, name: str, ln: dict, only: str | None = None) -> 
                          + "\n".join("  " + x for x in release.outside.lines(found))
                          + "\nNo worker can change them, and no verification covers them. A change to a "
                          "fingerprinted outside file voids a waiting release and unticks the target on the "
-                         "principal's list of releases without asking. Folders have no fingerprint; files that "
-                         "cannot be fingerprinted do not void or untick anything. Better: move the files into "
+                         "principal's list of releases without asking. Folders have no fingerprint; files recorded "
+                         "without a fingerprint do not void or untick anything. Better: move the files into "
                          "the repository and list them in release_files. " + see_more("release-files")))
 
 

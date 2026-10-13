@@ -22081,7 +22081,9 @@ class DeskTest(unittest.TestCase):
                  (4, "folder only"), (5, "record and show request"), (6, "change before answer"),
                  (7, "change before start"), (8, "removed file"), (9, "tick and take back in"),
                  (10, "old tick with file"), (11, "old tick without file"), (12, "cannot fingerprint"),
-                 (13, "explain and target list"), (14, "alert setting"), (15, "idle reads no file")]
+                 (13, "explain and target list"), (14, "alert setting"), (15, "idle reads no file"),
+                 (16, "output redirections"), (17, "input redirection"),
+                 (18, "recorded fingerprint becomes unavailable"), (19, "new unfingerprintable file")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22159,6 +22161,35 @@ class DeskTest(unittest.TestCase):
                                 c.assertIn(path, page(c, "settings-problems", "zh"))
                             else:
                                 c.assertNotIn("coordinator can change it", text)
+                    elif row == 16:
+                        log = ops / "deploy.log"
+                        log.write_text("before\n")
+                        for redirect in (">", ">>", ">|", "&>", "&>>", "2>", "2>>", "2>|"):
+                            for cmd in (f"./deploy.sh {redirect} ~/ops/deploy.log 2>&1",
+                                        f"bash -c './deploy.sh {redirect}\"~/ops/deploy.log\" 2>&1'"):
+                                told = c.hansa("lane", "target", "a", "prod", cmd)
+                                c.assertNotIn("outside file:", told)
+                                r = release.ask(c.desk, "a", target="prod")
+                                tick(c)
+                                c.assertEqual(r["outside"], [])
+                                log.write_text(log.read_text() + "after\n")
+                                c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                                c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                                release.void(c.desk, r["id"], "end this fixture", ("approved",))
+                        for literal in ("'>'", '\">>\"', r"\>"):
+                            warning(c, f"./deploy.sh {literal} ~/ops/deploy.sh", script)
+                    elif row == 17:
+                        script.rename(ops / "input.txt")
+                        script = ops / "input.txt"
+                        path = str(script.resolve())
+                        warning(c, "cat < ~/ops/input.txt", script)
+                        r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual(r["outside"], [{"path": path, "sha256": digest}])
+                        script.write_text("changed input\n")
+                        answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                        c.assertFalse(answer["ok"])
+                        c.assertIn(path, answer["void"])
                     else:
                         c.with_targets(prod=command)
                         if row == 5:
@@ -22249,15 +22280,11 @@ class DeskTest(unittest.TestCase):
                                 script.unlink()
                                 c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
                                 c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
-                                release.void(c.desk, r["id"], "end this fixture", ("waiting", "approved"))
-                            # Becoming unreadable is also exempt when the earlier snapshot had a fingerprint.
-                            script.write_text("true\n")
-                            tick(c)
-                            r = release.ask(c.desk, "a", target="prod")
-                            c.assertIn("sha256", r["outside"][0])
-                            with unittest.mock.patch.object(Path, "open", unreadable):
+                                # A file recorded without a fingerprint remains exempt if it becomes readable.
+                                script.write_text("true\n")
                                 c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
                                 c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                release.void(c.desk, r["id"], "end this fixture", ("waiting", "approved"))
                         elif row == 15:
                             tick(c)
                             release._write(c.desk, [{"id": 1, "lane": "a", "state": "done", "repo": str(c.repo)}])
@@ -22265,6 +22292,39 @@ class DeskTest(unittest.TestCase):
                             with unittest.mock.patch.object(outside, "inspect", side_effect=AssertionError("idle fingerprint")):
                                 d.tick()
                                 d.tick()
+                        elif row in (18, 19):
+                            real_open = Path.open
+
+                            def unreadable(p, *args, **kwargs):
+                                if p.resolve() == script.resolve():
+                                    raise PermissionError("unreadable fixture")
+                                return real_open(p, *args, **kwargs)
+
+                            kinds = ("over 16 MB", "unreadable", "binary") if row == 18 else ("over 16 MB", "unreadable")
+                            for kind in kinds:
+                                with c.subTest(kind=kind):
+                                    script.write_text("true\n")
+                                    if row == 19:
+                                        script.unlink()
+                                    c.assertTrue(c.page_save(lambda s: s.update(releases_without_asking=[]))["ok"])
+                                    r = release.ask(c.desk, "a", target="prod")
+                                    tick(c)
+                                    recorded = [{"path": path, "sha256": hashlib.sha256(b"true\n").hexdigest()}] if row == 18 else []
+                                    c.assertEqual(r["outside"], recorded)
+                                    c.assertEqual(c.desk.settings()["releases_without_asking"][0].get("outside", []), recorded)
+                                    script.write_bytes(b"x" * (outside.MAX_BYTES + 1) if kind == "over 16 MB" else
+                                                       b"now\0binary" if kind == "binary" else b"true\n")
+                                    patch = unittest.mock.patch.object(Path, "open", unreadable) if kind == "unreadable" else contextlib.nullcontext()
+                                    with patch:
+                                        c.assertFalse(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                        [mismatch] = public_settings(c.desk)["release_unmatched"]
+                                        c.assertIn(path, mismatch["why"])
+                                        c.assertIn(path, page(c, "settings-problems"))
+                                        c.assertIn(path, views.status(c.desk)["releases"][0]["moved"])
+                                        answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                                        c.assertFalse(answer["ok"])
+                                        c.assertIn(path, answer["void"])
+                                        c.assertEqual(release.get(c.desk, r["id"])["state"], "void")
                 finally:
                     c.doCleanups()
 

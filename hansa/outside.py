@@ -23,10 +23,26 @@ def _paths(command: str):
             lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
             lex.whitespace_split = True
             lex.commenters = ""
-            words = list(lex)
+            words = []
+            while True:
+                # Keep the spelling too: a quoted or escaped '>' is an argument, not a redirection.
+                # shlex reads one character ahead and holds it in _pushback_chars.
+                start = lex.instream.tell() - len(lex._pushback_chars)
+                word = lex.get_token()
+                if word is None:
+                    break
+                end = lex.instream.tell() - len(lex._pushback_chars)
+                words.append((word, line[start:end].strip()))
         except ValueError:
-            words = line.split()
-        for word in words:
+            words = [(word, word) for word in line.split()]
+        output = False
+        for word, spelling in words:
+            if output:
+                output = False
+                continue
+            if spelling in (">", ">>", ">|", "&>", "&>>", ">&"):
+                output = True
+                continue
             # Options and remote arguments can hold a path after '=' or ':'. No variable but HOME is read.
             values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else re.split(r"[=:]", word)
             for value in values:
@@ -94,13 +110,11 @@ def inspect(command: str, repository, fingerprint: bool = True, directory=None) 
 
 
 def changed(before: list, after: list) -> str:
-    """The first changed, gone or new fingerprinted file; unfingerprintable files never invalidate anything."""
+    """Compare against the recording: hashes must match, new files invalidate, unhashed recordings are exempt."""
     old, new = ({x["path"]: x for x in rows} for rows in (before, after))
     for path in dict.fromkeys([*old, *new]):
         a, b = old.get(path), new.get(path)
-        if (a is not None and not a.get("sha256")) or (b is not None and not b.get("sha256")):
-            continue
-        if (a or {}).get("sha256") != (b or {}).get("sha256"):
+        if a is None or (a.get("sha256") and a["sha256"] != (b or {}).get("sha256")):
             return path
     return ""
 
