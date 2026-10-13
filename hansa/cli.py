@@ -364,7 +364,11 @@ def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str)
     characters, as new_task makes it; the rest of the text is never committed and not looked at."""
     given = desk.redact(title or "")
     title = given or (desk.redact(text.strip()).splitlines() or [""])[0][:80]
-    found = release.title_hits(title, release.lane_words(s, lane))
+    hits = release.title_hits(title, release.lane_words(s, lane), detailed=True)
+    if any(h.get("kind") == "pattern_limit" for h in hits):
+        raise SystemExit(desk.redact(
+            f"hansa: the title could not be checked:\n{release.hits_text(hits)}\nNothing was queued"))
+    found = [h["word"] for h in hits]
     if found:
         where = "--title" if given else "the title (the first line of the text, as no --title was given)"
         raise SystemExit(desk.redact(

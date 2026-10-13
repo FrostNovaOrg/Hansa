@@ -3807,6 +3807,185 @@ class DeskTest(unittest.TestCase):
                                   [f"release_forbidden_except: the exception for lanes {lanes} has no entry"])
                     c.assertEqual(c.desk.settings_path.read_bytes(), before)
 
+        @contextlib.contextmanager
+        def small_pattern_limits():
+            with unittest.mock.patch.object(release, "PATTERN_LINE_LIMIT", 0.2), \
+                    unittest.mock.patch.object(release, "PATTERN_SCAN_LIMIT", 1.0):
+                yield
+
+        def assert_pattern_limit(c, said, entry, path):
+            c.assertIn(entry, said)
+            c.assertIn(path, said)
+            c.assertIn("over 0.2 s", said)
+            c.assertIn("the line was not checked", said)
+            c.assertIn("Shorten or split the line", said)
+            c.assertIn("ask the principal to change the pattern", said)
+
+        def pattern_line_merge(c):
+            entry = r"re:\d+\d+\d+x"
+            c.forbid(entry)
+            tid = finished(c, "a", "7" * 2000)
+            tip = c.git_out("rev-parse", "main")
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            with small_pattern_limits():
+                start = time.monotonic()
+                said = c.refused("merge", tid)
+                c.assertLess(time.monotonic() - start, 1.2)
+            assert_pattern_limit(c, said, entry, "notes.txt")
+            c.assertEqual(c.git_out("rev-parse", "main"), tip)
+            c.assertEqual(c.desk.meta(tid)["state"], "done")
+            c.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+            c.assertEqual(signal.getitimer(signal.ITIMER_REAL), timer)
+            # The release uses the same limits and records the incomplete check as a hit.
+            c.commit_in_repo("release.txt", "7" * 2000)
+            c.with_release("true")
+            with small_pattern_limits():
+                said = c.refused("release", "a")
+            assert_pattern_limit(c, said, entry, "release.txt")
+            # Put the long line in the command, which is read even before outgoing commits.
+            with small_pattern_limits():
+                warning = c.hansa("lane", "target", "a", "default", "7" * 1000)
+                assert_pattern_limit(c, warning, entry, "release target default")
+                start = time.monotonic()
+                said = c.refused("release", "a")
+                c.assertLess(time.monotonic() - start, 1.2)
+            assert_pattern_limit(c, said, entry, "release command")
+            c.assertEqual(release.get(c.desk, 1)["state"], "forbidden")
+            with small_pattern_limits():
+                said = c.refused("add", "Work", "--lane", "a", "--title", "7" * 2000)
+            assert_pattern_limit(c, said, entry, "title")
+            c.assertIn("Nothing was queued", said)
+
+        def pattern_line_merge_lane(c):
+            entry = r"re:\d+\d+\d+x"
+            c.merge_lane_for_checks("true")
+            tid = finished(c, "a", "7" * 2000, check="true")
+            tip = c.move_main()
+            c.assertIn("is not merged yet", c.hansa("merge", tid))
+            c.forbid(entry)  # The setting arrives after the CLI scan, before the lane lands the merge.
+            original_lock, spans, depth = c.desk.lock, [], [0]
+
+            @contextlib.contextmanager
+            def timed_lock():
+                with original_lock():
+                    outer = depth[0] == 0
+                    start = time.monotonic()
+                    depth[0] += 1
+                    try:
+                        yield
+                    finally:
+                        depth[0] -= 1
+                        if outer:
+                            spans.append(time.monotonic() - start)
+
+            with small_pattern_limits(), unittest.mock.patch.object(c.desk, "lock", timed_lock):
+                m = c.settle_merge(Dispatcher(c.desk), tid)
+            c.assertEqual(m["state"], "done", m)
+            c.assertEqual(m["merge_check_result"]["lane"], "m")
+            c.assertLess(max(spans), 1.2)
+            assert_pattern_limit(c, m["merge_check_result"]["note"], entry, "notes.txt")
+            c.assertEqual(c.git_out("rev-parse", "main"), tip)
+
+        def pattern_scan_total(c):
+            entry = r"re:slow-\d+x"
+            tid = finished(c, "a", "\n".join(f"slow-{i}" for i in range(100)), "many.txt")
+            c.forbid(entry)
+            real_matches, searched, clock = release.matches, [], [0.0]
+
+            def slow_matches(matcher, line, folded):
+                if line.startswith("slow-"):
+                    # Model consistent search latency without tying this row to CPU speed or scheduling.
+                    searched.append(line)
+                    clock[0] += 0.19  # Each line is just under the 0.2 s line limit.
+                return real_matches(matcher, line, folded)
+
+            scan_clock = types.SimpleNamespace(monotonic=lambda: clock[0])
+            with small_pattern_limits(), unittest.mock.patch.object(release, "matches", slow_matches), \
+                    unittest.mock.patch.object(release, "time", scan_clock):
+                start = time.monotonic()
+                said = c.refused("merge", tid)
+                c.assertLess(time.monotonic() - start, 2.0)
+            c.assertIn(entry, said)
+            c.assertIn("many.txt: " + searched[-1], said)
+            c.assertIn("over 1 s in this scan, so the rest was not checked", said)
+            c.assertNotIn("the line was not checked", said)
+            c.assertGreater(len(searched), 1)
+            c.assertLess(len(searched), 100)
+            c.assertEqual(c.desk.meta(tid)["state"], "done")
+
+        def pattern_scan_thread(c):
+            entry = r"re:\d+\d+\d+x"
+            got, errors = {}, []
+
+            def scan():
+                try:
+                    got["change"] = release.words_in(c.repo, ["HEAD", "--"], [entry],
+                                                     [("message", "7" * 2000)])[0]
+                    got["title"] = release.title_hits("7" * 2000, [entry], detailed=True)
+                    got["command"] = release.command_hits({"targets": {"": {"command": "7" * 2000}}}, [entry])
+                except BaseException as e:
+                    errors.append(e)
+
+            with unittest.mock.patch.object(release, "matches", side_effect=AssertionError("pattern was run")):
+                worker = threading.Thread(target=scan)
+                worker.start()
+                worker.join(2)
+            c.assertFalse(worker.is_alive())
+            c.assertEqual(errors, [])
+            for key, where in (("change", "message"), ("title", "title")):
+                c.assertEqual(got[key][0]["word"], entry)
+                c.assertEqual(got[key][0]["where"], where)
+                c.assertIn("off the main thread", got[key][0]["reason"])
+                c.assertIn("patterns were not run", got[key][0]["reason"])
+            c.assertIn(entry, got["command"][0])
+            c.assertIn("off the main thread", got["command"][0][2])
+
+        def pattern_scan_restores_signal(c):
+            entry = r"re:第\s*\d+\s*笔"
+            tid = finished(c, "a", "ordinary change")
+            c.forbid(entry)
+            old_handler, old_timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+
+            def previous_alarm(*_):
+                c.fail("the previous timer fired during a scan")
+
+            def restored():
+                c.assertIs(signal.getsignal(signal.SIGALRM), previous_alarm)
+                remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+                c.assertAlmostEqual(remaining, 100, delta=0.2)
+                c.assertEqual(interval, 0.7)
+
+            try:
+                signal.signal(signal.SIGALRM, previous_alarm)
+                signal.setitimer(signal.ITIMER_REAL, 100, 0.7)
+                with small_pattern_limits():
+                    git_lines = release._git_lines
+
+                    def idle_alarm(*args):
+                        # The alarm must do nothing between searches, even while git output is read.
+                        signal.raise_signal(signal.SIGALRM)
+                        yield from git_lines(*args)
+
+                    with unittest.mock.patch.object(release, "_git_lines", idle_alarm):
+                        c.assertIn("merged into main", c.hansa("merge", tid))
+                    restored()
+                    c.assertEqual(release.title_hits("记录第 123 笔", [entry]), [entry])
+                    restored()
+                    c.assertEqual(release.command_hits({"targets": {"": {"command": "记录第 123 笔"}}}, [entry]),
+                                  [("", entry, "记录第 123 笔")])
+                    restored()
+                    hits = release.title_hits("7" * 2000, [r"re:\d+\d+\d+x"], detailed=True)
+                    c.assertEqual(hits[0]["kind"], "pattern_limit")
+                    restored()
+                    with unittest.mock.patch.object(release, "matches", side_effect=RuntimeError("scan failed")):
+                        with c.assertRaisesRegex(RuntimeError, "scan failed"):
+                            release.forbidden_in(c.repo, "", c.git_out("rev-parse", "main"), [entry])
+                    restored()
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old_handler)
+                signal.setitimer(signal.ITIMER_REAL, *old_timer)
+
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
@@ -3814,7 +3993,9 @@ class DeskTest(unittest.TestCase):
                  (14, hide_migrates_mailboxes), (15, invalid_mailboxes), (16, unsafe_patterns), (17, safe_patterns),
                  (18, legacy_patterns), (19, legacy_unsafe_pattern), (20, malformed_exceptions),
                  (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
-                 (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry)]
+                 (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry),
+                 (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
+                 (30, pattern_scan_thread), (31, pattern_scan_restores_signal)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.

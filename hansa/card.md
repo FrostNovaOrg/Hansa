@@ -183,6 +183,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   of the command, or ask the principal. The same words refuse a title at `hansa add` and a task at
   `hansa merge`. More: `hansa help forbidden-words`.
   Entries may be `re:PATTERN` Python patterns; the principal can except entries by lane on the page; `hansa explain lane L` gives only the count, and the mailbox rule still applies.
+  A pattern scan that exceeds 2 seconds on one line or 60 seconds in all refuses the change: shorten or split the line, or ask the principal to change the pattern.
 - It waits for the principal's yes on the page, unless they ticked that target to go out without
   asking. While the desk is paused only a release they said yes to runs.
 - They answer on the page, or in the conversation with the one-time code their alert carries (6
