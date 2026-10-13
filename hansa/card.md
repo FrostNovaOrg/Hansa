@@ -43,6 +43,9 @@ a gap in hansa, not in you: say so with `hansa ask`.
    commits the changes on the branch, as one commit named after the task (a verification's scratch
    changes are set aside, never committed). If the task changed something and the lane has a check,
    hansa runs it on the branch itself, so the result does not depend on what the worker says.
+   A protected-path change through git's index fails the run (a design session's end too) and stops
+   `hansa lane remove --keep`; nothing is committed. The principal changes these paths outside a task.
+   More: `hansa help workers-sandbox`.
    More: `hansa help time-limits`.
 4. hansa tells your session when a task finishes or fails (Hearing from hansa).
 5. You review and merge, or send it back with `hansa retry` and what to change: earlier notes are

@@ -79,6 +79,16 @@ verifier or a design session read the card or `notes/`.
 
 What each run may write in git's folders, and what hansa checks before it runs git in a worktree itself.
 
+hansa never commits a worker's change to the repository's top-level `.gitconfig`, `.gitmodules`,
+`.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.ripgreprc`, `.mcp.json`, or to `.vscode`,
+`.idea` and `.claude` and anything under them (whole path segments, without regard to case). The sandbox
+protects these paths on disk: an index change would bypass it and could make commands run when someone
+later opens the project. Such a change fails a worker run or a design session's end, and stops
+`hansa lane remove --keep`; nothing is committed and the work stays staged. Empty sandbox placeholders
+absent from the branch's tip are left out first; content and mode matching the base merged by
+`retry --update` may be committed. To change a protected path, the principal does it outside a task.
+This check must stay while workers can write git's index and these paths can control commands.
+
 ### What each run may write there
 
 Claude Code opens a worktree's whole shared git folder for writing, and on

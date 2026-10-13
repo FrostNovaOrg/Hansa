@@ -2333,6 +2333,13 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
               f"{'the lane and ' if known else ''}the worktree: hansa lane remove {name} --keep. To drop it: "
               f"hansa lane remove {name} --discard. Nothing was changed")
     ln = dict(lanes[name]) if known else None  # its identity, for the commit --keep makes after it is gone
+    if a.keep:
+        from .run import SandboxPathChanged, stage_work, wgit
+        for wt, st in held.items():
+            try:
+                stage_work(desk, wt, wgit(desk, wt, "rev-parse", "HEAD"))
+            except SandboxPathChanged as e:
+                raise SystemExit(f"hansa: lane {name} was not removed: {e}") from None
     if known:
         del new["lanes"][name]
         _save(desk, new)

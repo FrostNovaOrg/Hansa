@@ -2462,28 +2462,200 @@ class DeskTest(unittest.TestCase):
     def test_hansas_commit_leaves_out_the_claude_folder_a_sandbox_left(self):
         from hansa import run
         s = self.desk.settings()
-        s["lanes"]["a"]["env"] = {"FAKE_SANDBOX_LEFT": "1", "FAKE_WRITE": "worker's own", "FAKE_WRITE_FILE": ".claude/notes.md"}
+        s["lanes"]["a"]["env"] = {"FAKE_SANDBOX_LEFT": "1", "FAKE_WRITE": "worker's own", "FAKE_WRITE_FILE": "notes.md"}
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual((m["state"], m["files"]), ("done", [".claude/notes.md", "hello.txt"]), m)  # what has content
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt", "notes.md"]), m)
         wt = Path(m["worktree"])
         self.assertTrue((wt / ".claude" / ".cc-writes").exists())  # left where it was, uncommitted
         self.assertTrue((wt / ".bashrc").exists())
         run.commit_work(self.desk, wt, "nothing but placeholders", f"task/{m['id']}")  # with only those there, nothing to commit
         self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), m["head"])
-        (wt / ".gitconfig").write_text("[user]\n")  # one with content, or deeper down, is someone's work
+        (wt / ".gitconfig").write_text("[user]\n")
+        with self.assertRaisesRegex(run.SandboxPathChanged, r"\.gitconfig"):
+            run.commit_work(self.desk, wt, "protected", f"task/{m['id']}")
+        self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), m["head"])
+        (wt / ".gitconfig").write_text("")
         (wt / "sub").mkdir()
         (wt / "sub" / ".bashrc").write_text("")
         run.commit_work(self.desk, wt, "a real one", f"task/{m['id']}")
         self.assertEqual(sorted(self.git_out("show", "--name-only", "--format=", "HEAD", cwd=wt).split()),
-                         [".gitconfig", "sub/.bashrc"])
+                         ["sub/.bashrc"])
         for text in (run.PROTOCOL, run.VERIFY_PROTOCOL):  # workers are told of those under .claude/, and to leave them
             flat = " ".join(text.split())
             self.assertIn(".claude/", flat)
             self.assertIn("hansa never commits them", flat)
             for name in run.SANDBOX_PLACEHOLDERS:  # git in the sandbox does not list these (LINUX_PRELUDE)
                 self.assertNotIn(name, flat)
+
+    # Protected-index regression cases (the numbers match the requested table):
+    # | # | Case | Test below |
+    # | 1 | cacheinfo .claude/settings.json, absent on disk, skip-worktree | protected_blobs |
+    # | 2 | .mcp.json, .vscode/settings.json, .Claude/Settings.json | protected_blobs |
+    # | 3 | tracked, newly ignored .gitmodules removed from index | protected_deletions |
+    # | 4 | newly ignored .claude/agents/x.md renamed through index | protected_deletions |
+    # | 5 | retry --update carries the base's protected change | retry_update below |
+    # | 6 | lane remove --keep holds a staged .idea/x.xml | lane_remove below |
+    # | 7 | ordinary add/change/delete/rename and .vscodex | ordinary_work |
+    # | 8 | worker-staged empty .bashrc and .claude/settings.json | staged_placeholders |
+
+    def protected_worktree(self, kind="task"):
+        from hansa import run
+        tid = self.desk.new_task("Work on ordinary files", kind=kind, lane="a")
+        lane = self.desk.settings()["lanes"]["a"]
+        wt = Path(self.design_worktree(tid)) if kind == "design" else run.prepare(
+            self.desk, "a", lane, self.desk.meta(tid))[0]
+        base = self.git_out("rev-parse", "HEAD", cwd=wt)
+        self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt),
+                         session_id="sid-x", branch=f"task/{tid}", base=base)
+        write_json(self.desk.raw_dir(tid) / "run.json", {"subtype": "success", "result": "Work finished."})
+        return tid, wt, base
+
+    def stage_protected_blob(self, wt, path, mode="100644"):
+        blob = self.git_out("rev-parse", "HEAD:README.md", cwd=wt)
+        sh("git", "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}", cwd=wt)
+        sh("git", "update-index", "--skip-worktree", "--", path, cwd=wt)
+        self.assertFalse(os.path.lexists(wt / path))
+        return blob
+
+    def assert_protected_finish(self, tid, wt, base, paths):
+        from hansa import run
+        (wt / "ordinary.txt").write_text("work must remain uncommitted\n")
+        before = self.git_out("rev-list", "--all", cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertEqual(m["error"],
+                         f"refusing to commit changes to protected paths: {', '.join(sorted(paths))}; the workers' "
+                         "sandbox does not let them write these paths, so the changes can only have come through "
+                         "git's index; nothing was committed; the work is left staged")
+        self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), base)
+        self.assertEqual(self.git_out("rev-list", "--all", cwd=wt), before)
+        self.assertIn("ordinary.txt", self.git_out("diff", "--cached", "--name-only", cwd=wt))
+        self.assertEqual((m["head"], m["commits"], m["files"]), ("", 0, []))
+
+    def test_hansas_commit_refuses_protected_blobs_in_the_index(self):
+        from hansa import run
+        paths = [".claude/settings.json", ".mcp.json", ".vscode/settings.json", ".Claude/Settings.json"]
+        # Both worker runs and design sessions' end use the rule. Test all roots and link types too.
+        paths += [p for p in run.SANDBOX_PROTECTED_PATHS if p not in paths]
+        for kind in ("task", "design"):
+            for path in paths:
+                with self.subTest(kind=kind, path=path):
+                    tid, wt, base = self.protected_worktree(kind)
+                    blob = self.stage_protected_blob(wt, path)
+                    self.assert_protected_finish(tid, wt, base, [path])
+                    self.assertEqual(self.git_out("rev-parse", f":{path}", cwd=wt), blob)
+
+    def test_hansas_commit_refuses_protected_deletions_and_renames_in_the_index(self):
+        for path, rename in ((".gitmodules", False), (".claude/agents/x.md", True)):
+            with self.subTest(path=path):
+                # The principal adds a tracked file to the base outside a task.
+                target = self.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("tracked content\n")
+                sh("git", "add", "--", path, cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal", cwd=self.repo)
+                tid, wt, base = self.protected_worktree()
+                (wt / ".gitignore").write_text(path + "\n")
+                blob = self.git_out("rev-parse", f"HEAD:{path}", cwd=wt)
+                sh("git", "rm", "--cached", "--", path, cwd=wt)
+                if rename:
+                    sh("git", "update-index", "--add", "--cacheinfo", f"100644,{blob},docs/x.md", cwd=wt)
+                    sh("git", "update-index", "--skip-worktree", "--", "docs/x.md", cwd=wt)
+                    self.assertIn("R100", self.git_out("diff", "--cached", "--name-status", "-M", cwd=wt))
+                self.assert_protected_finish(tid, wt, base, [path])
+                self.assertTrue((wt / path).is_file())
+                self.assertIn(path, self.git_out("diff", "--cached", "--name-only", "--no-renames", cwd=wt))
+
+    def test_hansas_commit_keeps_ordinary_work_outside_protected_paths(self):
+        from hansa import run
+        for name in ("changed.txt", "deleted.txt", "before.txt"):
+            (self.repo / name).write_text(name + "\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ordinary base", cwd=self.repo)
+        tid, wt, base = self.protected_worktree()
+        (wt / "changed.txt").write_text("changed\n")
+        (wt / "deleted.txt").unlink()
+        (wt / "before.txt").rename(wt / "after.txt")
+        for name in ("added.txt", ".vscodex", ".claudex", "sub/.mcp.json"):
+            (wt / name).parent.mkdir(parents=True, exist_ok=True)
+            (wt / name).write_text("ordinary\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "done", m)
+        self.assertNotEqual(m["head"], base)
+        self.assertEqual(set(m["files"]), {"changed.txt", "deleted.txt", "after.txt", "added.txt",
+                                          ".vscodex", ".claudex", "sub/.mcp.json"})
+        self.assertIn("R100", self.git_out("diff", "--name-status", "-M", base, m["head"], cwd=wt))
+
+    def test_hansas_commit_leaves_out_worker_staged_placeholders(self):
+        from hansa import run
+        tid, wt, base = self.protected_worktree()
+        paths = (".bashrc", ".claude/settings.json", ".Claude/Agents/empty.md")
+        for path in paths:
+            (wt / path).parent.mkdir(parents=True, exist_ok=True)
+            (wt / path).write_text("")
+        (wt / "ordinary.txt").write_text("work\n")
+        sh("git", "add", "-A", cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual((m["state"], m["files"]), ("done", ["ordinary.txt"]), m)
+        self.assertNotEqual(m["head"], base)
+        for path in paths:
+            self.assertTrue((wt / path).is_file())
+            self.assertNotIn(path, self.git_out("ls-files", cwd=wt))
+
+    def test_hansas_commit_names_every_protected_path_and_refuses_link_types(self):
+        tid, wt, base = self.protected_worktree("design")
+        paths = [".idea/" + "x" * 180 + ".xml", ".vscode/" + "y" * 180 + ".json", ".claude"]
+        for path in paths:
+            self.stage_protected_blob(wt, path, "120000" if path == ".claude" else "100644")
+        self.assert_protected_finish(tid, wt, base, paths)  # full list, even beyond 300 characters
+
+    def test_hansas_commit_refuses_tracked_protected_changes_and_folder_to_link(self):
+        path = ".claude/agents/x.md"
+        target = self.repo / path
+        target.parent.mkdir(parents=True)
+        target.write_text("tracked\n")
+        sh("git", "add", "--", path, cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal agent", cwd=self.repo)
+        tid, wt, base = self.protected_worktree()
+        (wt / path).write_text("")  # tracked empty files are changes, not sandbox placeholders
+        self.assert_protected_finish(tid, wt, base, [path])
+        tid, wt, base = self.protected_worktree()
+        (wt / ".gitignore").write_text(path + "\n")
+        sh("git", "rm", "--cached", "--", path, cwd=wt)
+        blob = self.git_out("rev-parse", "HEAD:README.md", cwd=wt)
+        sh("git", "update-index", "--add", "--cacheinfo", f"120000,{blob},.claude", cwd=wt)
+        sh("git", "update-index", "--skip-worktree", "--", ".claude", cwd=wt)
+        self.assert_protected_finish(tid, wt, base, [".claude", path])
+
+    def test_hansas_commit_accepts_only_the_merged_bases_content_and_mode(self):
+        from hansa import run
+        for name, mode, same_blob in (("same", "100644", True), ("mode", "100755", True),
+                                      ("content", "100644", False)):
+            with self.subTest(name=name):
+                tid, wt, old = self.protected_worktree()
+                path = f".claude/{name}.json"
+                target = self.repo / path
+                target.parent.mkdir(exist_ok=True)
+                target.write_text("demo\n")  # README's blob is already in the repository
+                sh("git", "add", "--", path, cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base settings", cwd=self.repo)
+                base = self.git_out("rev-parse", "main")
+                blob = self.stage_protected_blob(wt, path, mode)
+                if not same_blob:
+                    # A different existing blob, without writing the protected file on disk.
+                    (wt / "other.txt").write_text("different\n")
+                    blob = self.git_out("hash-object", "-w", "other.txt", cwd=wt)
+                    sh("git", "update-index", "--cacheinfo", f"{mode},{blob},{path}", cwd=wt)
+                    sh("git", "update-index", "--skip-worktree", "--", path, cwd=wt)
+                if mode == "100644" and same_blob:
+                    head = run.commit_work(self.desk, wt, "merged base", f"task/{tid}", [base])
+                    self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", head).split()[1:], [old, base])
+                else:
+                    with self.assertRaisesRegex(run.SandboxPathChanged, re.escape(path)):
+                        run.commit_work(self.desk, wt, "changed base", f"task/{tid}", [base])
+                    self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), old)
 
     def test_workers_are_told_git_stash_is_refused_and_background_work_ends_in_its_command(self):
         from hansa import run
@@ -7159,6 +7331,22 @@ class DeskTest(unittest.TestCase):
         shown = subprocess.run(["git", "show", f"{branch}~1:loose.txt"], cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(shown.stdout, "loose\n")
 
+    def test_lane_remove_keep_refuses_protected_index_changes(self):
+        wt = self.run_on("a")
+        base = self.git_out("rev-parse", "HEAD", cwd=wt)
+        self.stage_protected_blob(wt, ".idea/x.xml")
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "remove", "a", "--keep")
+        self.assertIn("lane a was not removed", str(e.exception.code))
+        self.assertIn(".idea/x.xml", str(e.exception.code))
+        self.assertIn("the workers' sandbox does not let them write", str(e.exception.code))
+        self.assertIn("a", self.desk.settings()["lanes"])
+        self.assertTrue(wt.is_dir())
+        self.assertIn(str(wt.resolve()), self.worktrees())
+        self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), base)
+        self.assertEqual(self.git_out("branch", "--list", "hansa-kept/*"), "")
+        self.assertIn(".idea/x.xml", self.git_out("diff", "--cached", "--name-only", cwd=wt))
+
     def test_lane_remove_clears_the_worktree_of_a_lane_already_gone(self):
         self.hansa("lane", "add", "b", "--like", "a")
         wt = self.run_on("b")
@@ -7675,11 +7863,19 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(retry.call_args[0][0].note)
 
     def test_retry_update_leaves_the_conflict_to_the_worker_and_then_merges_cleanly(self):
+        settings = self.repo / ".claude/settings.json"
+        settings.parent.mkdir()
+        settings.write_text('{"principal": "before"}\n')
+        sh("git", "add", ".claude/settings.json", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal settings", cwd=self.repo)
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
         for t in (t1, t2):
             self.settle(d, t)
         self.hansa("merge", t1)
+        settings.write_text('{"principal": "after"}\n')
+        sh("git", "add", ".claude/settings.json", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal updates settings", cwd=self.repo)
         seen, argv = self.tmp / "seen.txt", self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SEE": str(seen), "FAKE_SHOW_ARGV": str(argv)}
@@ -7699,6 +7895,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("hello.txt", prompt)
         self.assertEqual(m["base"], self.git_out("rev-parse", "main"))
         self.assertEqual(len(self.git_out("rev-list", "--parents", "-n", "1", m["head"]).split()), 3)  # the merge
+        self.assertEqual(self.git_out("show", f"{m['head']}:.claude/settings.json"), '{"principal": "after"}')
         self.assertIn(f"{t3} merged into main", self.hansa("merge", t3))
         self.assertEqual((self.repo / "hello.txt").read_text(), f"hello from {t3}\n")
 

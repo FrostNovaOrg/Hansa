@@ -358,6 +358,10 @@ CLASS_MAX = 15
 # .claude/.cc-writes there is an empty folder, which git does not list. sandbox_leftovers keeps them all out.
 SANDBOX_PLACEHOLDERS = (".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
                         ".ripgreprc", ".mcp.json", ".vscode", ".idea")
+# sandbox-runtime's fixed protected files and folders, plus all of .claude: Claude Code protects settings,
+# commands, agents, skills and hooks there, and its exact list changes between versions. Match from the
+# repository's top, without regard to case and by whole path segments, when committing the index.
+SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
 # A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified. Design sessions keep them.
 INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
                      "AskUserQuestion", "Monitor"]
@@ -2151,6 +2155,44 @@ def sandbox_leftovers(desk: Desk, wt: Path) -> list:
                  and (wt / f).stat().st_size == 0)]
 
 
+class SandboxPathChanged(RuntimeError):
+    """The index changes a path the worker's sandbox protects on disk."""
+
+
+def sandbox_protected(path: str) -> bool:
+    return path.split("/", 1)[0].lower() in SANDBOX_PROTECTED_PATHS
+
+
+def stage_work(desk: Desk, wt: Path, old: str, merged=()) -> list:
+    """Stage work, leave out placeholders and refuse protected changes before any commit or lane removal."""
+    left = sandbox_leftovers(desk, wt)  # untracked until the add
+    wgit(desk, wt, "add", "-A")
+    # A worker's git add may already have staged the sandbox's empty placeholders. Inspect the index,
+    # not the disk: skip-worktree can hide an entry whose blob was put there with update-index.
+    held = set(wgit(desk, wt, "ls-tree", "-r", "--name-only", "-z", old).split("\0"))
+    for entry in wgit(desk, wt, "ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        info, path = entry.split("\t", 1)
+        mode, blob, stage = info.split()
+        if sandbox_protected(path) and path not in held and stage == "0" and mode in ("100644", "100755") \
+                and wgit(desk, wt, "cat-file", "-s", blob) == "0":
+            left.append(path)
+    if left:
+        wgit(desk, wt, "update-index", "--force-remove", "--", *dict.fromkeys(left))
+    paths = [p for p in wgit(desk, wt, "diff", "--cached", "--name-only", "--no-renames", "-z", old).split("\0") if p]
+    refused = {p for p in paths if sandbox_protected(p)}
+    for base in merged:  # content AND mode (including absence) equal to the merged base came from it
+        different = set(wgit(desk, wt, "diff", "--cached", "--name-only", "--no-renames", "-z", base).split("\0"))
+        refused.intersection_update(different)
+    if refused:
+        raise SandboxPathChanged(
+            f"refusing to commit changes to protected paths: {', '.join(sorted(refused))}; the workers' sandbox "
+            "does not let them write these paths, so the changes can only have come through git's index; "
+            "nothing was committed; the work is left staged")
+    return paths
+
+
 def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=(), ident=None) -> str:
     """Commit everything changed in the worktree but what a sandbox left there on `branch`, the one hansa made for
     the run; nothing when that is all and nothing is `merged`. The commit is made from the index with the branch's
@@ -2163,11 +2205,8 @@ def commit_work(desk: Desk, wt: Path, message: str, branch: str, merged=(), iden
     commit the branch then holds: the new one, or the tip when nothing was committed (finish records it). ident:
     the author and committer (identity_env of the lane)."""
     old = check_branch_ref(desk, wt, branch)
-    left = sandbox_leftovers(desk, wt)  # untracked until the add
-    wgit(desk, wt, "add", "-A")
-    if left:
-        wgit(desk, wt, "rm", "-q", "--cached", "--", *left)
-    if not wgit(desk, wt, "diff", "--cached", "--name-only") and not merged:
+    paths = stage_work(desk, wt, old, merged)
+    if not paths and not merged:
         return old
     ref = f"refs/heads/{branch}"
     new = wgit(desk, wt, "commit-tree", wgit(desk, wt, "write-tree"), "-p", old,
@@ -4349,6 +4388,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             raise GitFolderChanged(wt, common / "refs" / "heads" / branch,
                                    f"changed after hansa committed: it {what or 'now holds ' + now_at}, not {head}, "
                                    f"the task's work, which is kept: the ref is put back to it", head, aside=True)
+    except SandboxPathChanged as e:
+        changed = str(e)  # full path list, including for a design session's end
+        fields.update(head="", commits=0, files=[], stat="")
+        restart = None
     except GitFileChanged as e:
         changed = git_file_changed(desk, tid, e)
         if not recorded:
