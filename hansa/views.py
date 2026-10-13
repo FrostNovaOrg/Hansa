@@ -810,29 +810,6 @@ def report_of(desk: Desk, tid: str) -> str:
     return f.read_text(encoding="utf-8").strip() if f.exists() else ""
 
 
-def report_lines(report: str, full: bool, whole: str, indent: str = "  ") -> list:
-    """A report's lines for hansa show, indented: unless full, cut at REPORT_LINES lines or REPORT_CHARS characters,
-    saying what was left out and the command that gives it whole."""
-    lines = report.splitlines()
-    shown, size, cut = [], 0, 0
-    for x in lines if full else lines[:REPORT_LINES]:
-        if not full and size + len(x) + 1 > REPORT_CHARS:
-            if not shown or len(x) > REPORT_CHARS:  # a line longer than the limit is cut there, not given whole
-                keep = max(REPORT_CHARS - size, 0)
-                shown.append(x[:keep])
-                cut = len(x) - keep
-            break
-        size += len(x) + 1
-        shown.append(x)
-    out = [indent + x for x in shown]
-    more = len(lines) - len(shown)
-    if cut or more:
-        out.append(indent + "... " + (f"{cut} more characters of this line" if cut else "")
-                   + (" and " if cut and more else "") + (f"{more} more line{'s' if more > 1 else ''}" if more else "")
-                   + f"; the whole report: {whole}")
-    return out
-
-
 def read_text(f: Path) -> str:
     """A file's text, '' when it is not there."""
     try:
@@ -1007,14 +984,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
         out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
-                   f"earlier run on {on}: {a['error']}" if a.get("kind") == "killed" else  # it used no try
+                   f"earlier run on {on}: {a['error']}; what it reported, if anything, is not kept"
+                   if a.get("kind") == "killed" else  # it used no try
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
         if a.get("turns_unknown_after_resume"):  # run.finish: the system killed the run hansa resumed
             out.append("  its turns after hansa resumed it are unknown: the system killed it before it said")
-        if a.get("report"):  # what a run the system killed had written: the next run's report does not replace it
-            out += ["  its report, from its session record:",
-                    *report_lines(a["report"], full, f"hansa show {tid} --full", "    ")]
         start = a.get("run_start")
         if (not start and a.get("kind") in ("network", "limit") and m.get("base")
                 and m.get("kind") not in ("verify", "design")):
@@ -1030,7 +1005,23 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(limit_wait(desk, m))
     report = report_of(desk, tid)
     if report:
-        out += ["report:"] + report_lines(report, full, f"hansa show {tid} --report")
+        lines = report.splitlines()
+        shown, size, cut = [], 0, 0
+        for x in lines if full else lines[:REPORT_LINES]:
+            if not full and size + len(x) + 1 > REPORT_CHARS:
+                if not shown or len(x) > REPORT_CHARS:  # a line longer than the limit is cut there, not given whole
+                    keep = max(REPORT_CHARS - size, 0)
+                    shown.append(x[:keep])
+                    cut = len(x) - keep
+                break
+            size += len(x) + 1
+            shown.append(x)
+        out += ["report:"] + ["  " + x for x in shown]
+        more = len(lines) - len(shown)
+        if cut or more:
+            out.append("  ... " + (f"{cut} more characters of this line" if cut else "")
+                       + (" and " if cut and more else "") + (f"{more} more line{'s' if more > 1 else ''}" if more else "")
+                       + f"; the whole report: hansa show {tid} --report")
     if background_note(m):
         out.append(background_note(m))
     if m.get("replaced_by"):

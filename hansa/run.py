@@ -4288,6 +4288,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     denied = run.get("permission_denials") or []
     reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
                           meta.get("session_id", "")) if p and denied else {}
+    write_text(d / "result.md", report + ("\n" if report else ""))
     fields = {"finished": now(), "exit": returncode, "pid": None,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
@@ -4430,8 +4431,6 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             attempts[-1]["turns_unknown_after_resume"] = True
         if meta.get("kind") == "verify":  # a killed run gives no verdict, whatever its record said before the kill
             fields["verdict"] = ""
-        if state == "queued" and report:  # its report (report_after_notices) goes with its attempt, as its numbers
-            attempts[-1]["report"], report = report, ""  # do: the task's own report is the next run's
     elif run.get("is_error") or run.get("subtype") not in ("success", None) or not run:
         state = "failed"
         lines = (result or err).strip().splitlines()
@@ -4440,7 +4439,6 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                  f"{lines[-1][:200] if lines else f'no output (exit {returncode})'}")
     else:
         state, error = "done", ""
-    write_text(d / "result.md", report + ("\n" if report else ""))  # once it is known whose report it is (killed)
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
 
     def decide(now_meta):

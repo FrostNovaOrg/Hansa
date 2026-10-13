@@ -8380,20 +8380,28 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         once = "killed by the system (exit {}); queued again once, without using a try"
         memory = "the machine may be short of memory, so fewer runs at once may help (hansa concurrency)"
+        lost = "what it reported, if anything, is not kept"
         twice = "killed by the system twice (exit -9, then exit -9), with no word from the {}: " + memory + ". Next: {}"
 
         def hansa_on(desk, *args):
             with contextlib.redirect_stdout(io.StringIO()):
                 main(["--desk", str(desk.root), *args])
 
-        def carries_on(n, wrapped):
+        def carries_on(n, wrapped, setup=False):
             desk, repo, root = self.kill_desk(n)
+            if setup:  # the lane's setup runs, and finishes, before each run's worker starts
+                s = desk.settings()
+                s["lanes"]["a"]["setup"] = f"echo set up >>{shlex.quote(str(root / 'set-up'))}"
+                self.assertEqual(desk.save_settings(s), [])
             tid, seen, code = desk.new_task("Add hello.txt"), root / "starts.jsonl", 137 if wrapped else -9
             (rc, queued), (rc2, m) = self.kill_runs(desk, tid, {
                 "FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_SEE": str(seen),
                 **({"FAKE_KILL_WRAPPED": "1"} if wrapped else {})})
             self.assertEqual((rc, queued["state"], queued["error"]), (code, "queued", once.format(code)), queued)
             self.assertEqual([(a["kind"], a["exit"]) for a in queued["attempts"]], [("killed", code)])
+            if setup:
+                self.assertTrue(queued["setup_ran"])
+                self.assertEqual((root / "set-up").read_text(), "set up\n" * 2)  # before the killed run, and the next
             self.assertEqual(run.tries_used(queued["attempts"]), 0)
             self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")  # at once: nothing rests
             half = f"half of a file, run 1 of {tid}"
@@ -8496,6 +8504,16 @@ class DeskTest(unittest.TestCase):
             self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "failed", "error: no output (exit -9)", []))
             self.assertFalse((root / "count").exists())  # the worker never started
 
+        def setup_unfinished(n):
+            desk, repo, root = self.kill_desk(n)
+            s = desk.settings()
+            s["lanes"]["a"]["setup"] = "true"
+            self.assertEqual(desk.save_settings(s), [])
+            tid = desk.new_task("Add hello.txt")
+            unfinished = lambda t: (desk.state_dir / "runs" / t / "setup.log.done").unlink()  # its finish not marked
+            [(rc, m)] = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1:{root / 'count'}"}, mark=unfinished, most=1)
+            self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "failed", "error: no output (exit -9)", []))
+
         def design_killed(n):
             desk, repo, root = self.kill_desk(n)
             did = desk.new_task("Make the badge bigger", kind="design", lane="a")
@@ -8566,15 +8584,15 @@ class DeskTest(unittest.TestCase):
             self.kill_runs(desk, tid, env, most=1)
             st = views.status(desk)
             self.assertEqual(st["queued"][0]["last_run"], once.format(-9))
-            self.assertIn(f"earlier run on claude: {once.format(-9)}", views.show_text(desk, tid))
+            self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}", views.show_text(desk, tid))
             self.assertIn(f"  {tid} lane a: Add hello.txt\n      waiting: ", views.status_text(st))
             self.assertIn(f"\n      last run: {once.format(-9)}", views.status_text(st))
             self.kill_runs(desk, tid, env, most=1)
             failure = twice.format("worker", f"hansa retry {tid}")
             text = views.show_text(desk, tid)
             self.assertIn(f"error: {failure}", text)
-            self.assertIn(f"earlier run on claude: {once.format(-9)}\n", text)
-            self.assertIn("earlier run on claude: killed by the system (exit -9)\n", text)
+            self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}\n", text)
+            self.assertIn(f"earlier run on claude: killed by the system (exit -9); {lost}\n", text)
             self.assertIn(f"  {tid} a: {failure}", views.status_text(views.status(desk)))
 
         quota, auth = "API Error: 429 rate_limit_error", "API Error: 401 authentication_error · Invalid API key"
@@ -8601,25 +8619,6 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual(m["error"], twice.format("worker", f"hansa retry {tid}"))
                 self.assertEqual([a["kind"] for a in m["attempts"]], ["killed", "killed"])
                 self.assertEqual(((root / "count").read_text(), provider_problem(desk, desk.settings(), "claude")), ("2", ""))
-
-        def report_kept(n):
-            desk, repo, root = self.kill_desk(n)
-            desk.write_key("mimo", "sk-test-0123456789")
-            tid, env = desk.new_task("Add hello.txt"), {"FAKE_KILL": f"KILL:1:{root / 'count'}",
-                                                        "FAKE_KILL_LATE": "Key: sk-test-0123456789"}
-            [(_, queued)] = self.kill_runs(desk, tid, env, most=1)
-            kept = ("Report: wrote half of the file.\n\n(Written after that, when a background notice came in:)\n\n"
-                    "Correction: the other half is still to write. Key: [key of mimo]")
-            self.assertEqual((queued["state"], queued["attempts"][0]["report"]), ("queued", kept), queued)
-            self.assertEqual(views.report_of(desk, tid), "")  # the task's own report is the next run's
-            [(_, m)] = self.kill_runs(desk, tid, env)
-            self.assertEqual((m["state"], m["attempts"][0]["report"]), ("done", kept), m)
-            text = views.show_text(desk, tid)
-            self.assertIn(f"earlier run on claude: {once.format(-9)}\n  its report, from its session record:\n"
-                          "    Report: wrote half of the file.\n", text)
-            self.assertIn("    Correction: the other half is still to write. Key: [key of mimo]\n", text)
-            self.assertIn("report:\n  Added hello.txt. Checked it exists.", text)
-            self.assertNotIn("sk-test-0123456789", text)
 
         def no_last_run(n, held):
             desk, repo, root = self.kill_desk(n)
@@ -8653,7 +8652,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual((a["kind"], a["turns"], a.get("turns_unknown_after_resume")), ("killed", 5, True), a)
             self.assertEqual({k: (u["in"], u["out"]) for k, u in a["usage"].items()}, {"mimo-x": (300 + 10, 60 + 5)})
             self.assertEqual([r["turns"] for r in cost.task_runs(m)], [5])
-            self.assertIn(f"earlier run on claude: {once.format(-9)}\n  its turns after hansa resumed it are unknown: "
+            self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}\n  its turns after hansa resumed it are unknown: "
                           "the system killed it before it said", views.show_text(desk, tid))
 
         def verdict_not_taken(n):
@@ -8665,12 +8664,12 @@ class DeskTest(unittest.TestCase):
             [(rc, queued)] = self.kill_runs(desk, vid, {"FAKE_KILL": f"KILL:1:{root / 'count'}",
                                                         "FAKE_KILL_LATE": "Checked it.\nVERDICT: holds"}, most=1)
             self.assertEqual((rc, queued["state"], queued["verdict"]), (-9, "queued", ""), queued)
-            self.assertIn("VERDICT: holds", queued["attempts"][0]["report"])
+            self.assertIn("VERDICT: holds", views.report_of(desk, vid))  # read from its record, but not its verdict
             self.assertEqual(views.verification(desk, desk.meta(parent))["verdict"], "")
 
         cancel = lambda desk, tid: hansa_on(desk, "cancel", tid)
         table = (
-            (1, "worker killed (-9), no result, setup done, no marks, first time", lambda: carries_on(1, False)),
+            (1, "worker killed (-9), no result, setup done, no marks, first time", lambda: carries_on(1, False, True)),
             (2, "the same with exit 137", lambda: carries_on(2, True)),
             (3, "killed with nothing written", lambda: from_base(3)),
             (4, "killed a second time in the same task", lambda: killed_twice(4)),
@@ -8702,12 +8701,12 @@ class DeskTest(unittest.TestCase):
             (22, "killed, stderr holding API Error: 429", lambda: stderr_says(22, quota)),
             (23, "killed, stderr holding an authentication error", lambda: stderr_says(23, auth)),
             (24, "a second kill whose stderr holds a 429 or an authentication text", lambda: twice_with_stderr(24)),
-            (25, "killed, its session record holding a report and a later correction", lambda: report_kept(25)),
             (26, "killed, then held for a sandbox failure", lambda: no_last_run(26, True)),
             (27, "killed, then queued again for a provider's limit", lambda: no_last_run(27, False)),
             (28, "a resumed run whose first process recorded 5 turns, then killed", lambda: resumed_then_killed(28)),
             # not in the rule's table: a verification's killed run, whose kept report gives a verdict, gives none
             (29, "a verification killed after its record gave a verdict", lambda: verdict_not_taken(29)),
+            (30, "the same kill as row 1, its setup not finished", lambda: setup_unfinished(30)),
         )
         for n, case, check in table:
             with self.subTest(row=n, case=case):
