@@ -85,7 +85,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "alert", "coordinator_compact")
+                  "alert", "coordinator_compact", "coordinator_alert")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -245,6 +245,17 @@ REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31
 COMPACT_DEFAULTS = {"idle_at": 400_000, "long_idle_at": 200_000, "long_idle_min": 50, "working_at": 550_000}
 COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "long_idle_at": (100_000, 1_000_000), "long_idle_min": (1, 240),
                 "working_at": (100_000, 1_000_000)}
+# The principal's `coordinator` alert (hansa/alert.py): the minutes before it goes out, 0 for off, up to
+# COORDINATOR_ALERT_MOST, for each case: no session hears from hansa while something it would post waits; the
+# coordinator's session waits on its window (a permission dialog or a question) with something posted to it; a task
+# posted to it waits for review while it is idle
+COORDINATOR_ALERT = {"no_session_min": 10, "window_min": 10, "review_min": 120}
+COORDINATOR_ALERT_MOST = 1440
+COORDINATOR_ALERT_WHAT = {"no_session_min": "the minutes before an alert that no session hears from hansa",
+                          "window_min": "the minutes before an alert that the coordinator's session waits on its "
+                                        "window",
+                          "review_min": "the minutes before an alert that a task waits for review while the "
+                                        "coordinator's session is idle"}
 
 
 def default_settings() -> dict:
@@ -258,6 +269,9 @@ def default_settings() -> dict:
         "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
         # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
         "coordinator_compact": dict(COMPACT_DEFAULTS),
+        # When the principal is alerted that the coordinator's session cannot be reached (COORDINATOR_ALERT). The
+        # principal's, on the page
+        "coordinator_alert": dict(COORDINATOR_ALERT),
         # Design sessions, which the principal works in directly (`hansa design`). Blank provider
         # or model: the coordinator's.
         "design": {"provider": "", "model": "", "effort": ""},
@@ -306,6 +320,13 @@ def compact_settings(s: dict) -> dict:
     each one missing or out of range taken as its default."""
     cc = s.get("coordinator_compact") if isinstance(s.get("coordinator_compact"), dict) else {}
     return {k: cc[k] if _is_int(cc.get(k), *COMPACT_MOST[k]) else v for k, v in COMPACT_DEFAULTS.items()}
+
+
+def coordinator_alert_settings(s: dict) -> dict:
+    """The minutes of each case of the `coordinator` alert (COORDINATOR_ALERT), 0 for off: the settings', each one
+    missing or out of range taken as its default."""
+    ca = s.get("coordinator_alert") if isinstance(s.get("coordinator_alert"), dict) else {}
+    return {k: ca[k] if _is_int(ca.get(k), 0, COORDINATOR_ALERT_MOST) else v for k, v in COORDINATOR_ALERT.items()}
 
 
 def default_lane(repo: str, base: str = "main", providers: list | None = None) -> dict:
@@ -574,7 +595,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     mailbox_key = mailbox_key or original_key
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
-             "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact"}
+             "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact",
+             "coordinator_alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     by = s.get(HIDDEN_BY, {})
     if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
@@ -648,6 +670,13 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         p.append("coordinator_compact: compact when idle at, compact after a long idle at and compact while working "
                  "at must be whole numbers of tokens from 100,000 to 1,000,000, and a long idle is a whole number of "
                  "minutes from 1 to 240")
+    ca = s.get("coordinator_alert", {})
+    if not isinstance(ca, dict) or set(ca) - set(COORDINATOR_ALERT):
+        p.append("coordinator_alert must hold " + ", ".join(COORDINATOR_ALERT) + ", each a whole number of minutes")
+    else:
+        p += [f"coordinator_alert: {COORDINATOR_ALERT_WHAT[k]} ({k}) must be a whole number from 0 (off) to "
+              f"{COORDINATOR_ALERT_MOST}, not {json.dumps(v)}" for k, v in ca.items()
+              if not _is_int(v, 0, COORDINATOR_ALERT_MOST)]
     if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
         p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):

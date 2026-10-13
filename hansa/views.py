@@ -504,6 +504,14 @@ def page_of(desk: Desk, server: dict) -> dict:
             "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists()}
 
 
+def killed_last(m: dict) -> dict:
+    """{"last_run": how its last run ended} for a queued task while it waits because the system killed that run and
+    hansa queued it again (run.finish); {} otherwise. Its error is then the kill's: holding it (run.hold) or
+    queuing it again for another cause since gives it another."""
+    a = (m.get("attempts") or [{}])[-1]
+    return {"last_run": m["error"]} if a.get("kind") == "killed" and a.get("error") == m.get("error") else {}
+
+
 def status(desk: Desk) -> dict:
     s = desk.settings()
     tasks = desk.tasks()
@@ -538,6 +546,7 @@ def status(desk: Desk) -> dict:
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
+        "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
         "mod_line": plugin.status_line(mod) if mod else "",
@@ -582,7 +591,7 @@ def status(desk: Desk) -> dict:
                     "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
-                    "waiting": waiting_reason(desk, s, m, busy, looks)} for m in queued],
+                    "waiting": waiting_reason(desk, s, m, busy, looks), **killed_last(m)} for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": merge_check_lane(s, m),
                      **({"waiting_for": merge_lane_wait(desk, m, tasks)} if merge_check_lane(s, m) != m.get("lane") else {}),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
@@ -638,6 +647,7 @@ def status_text(st: dict) -> str:
     out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
+    out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
         if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
@@ -673,7 +683,8 @@ def status_text(st: dict) -> str:
                 for m in st["design"]]
     if st["queued"]:
         out.append("queued:")
-        out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
+        out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}"
+                + (f"\n      last run: {m['last_run']}" if m.get("last_run") else "") for m in st["queued"]]
     if st.get("merging"):
         out.append("merging (each merges by itself if its check passes on the base as it is now, or in its turn; "
                    + ("hansa tells this session when each ends):" if st.get("heard") else "hansa wait <id>):"))
@@ -974,9 +985,13 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") != "limit" else
+        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
+                   f"earlier run on {on}: {a['error']}; what it reported, if anything, is not kept"
+                   if a.get("kind") == "killed" else  # it used no try
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
+        if a.get("turns_unknown_after_resume"):  # run.finish: the system killed the run hansa resumed
+            out.append("  its turns after hansa resumed it are unknown: the system killed it before it said")
         start = a.get("run_start")
         if (not start and a.get("kind") in ("network", "limit") and m.get("base")
                 and m.get("kind") not in ("verify", "design")):

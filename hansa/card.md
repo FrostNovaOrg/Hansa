@@ -195,7 +195,9 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 - If the base branch or the command changed since the principal saw it, the release is void and says
   why: ask again. You are told when they answer and when it ends; `hansa release` lists them.
 - The principal may have alerts (their own command, which hansa runs);
-  the coordinator does not send them. More: `hansa help alerts`.
+  the coordinator does not send them. One kind, `coordinator`, tells the principal that your session
+  has not heard from hansa, waits on a dialog, or leaves a finished task waiting for review; when
+  they mention it, run `hansa status`. More: `hansa help alerts`.
 
 ## Hearing from hansa
 hansa posts to your session when something needs you: a task, verification, design session, merge

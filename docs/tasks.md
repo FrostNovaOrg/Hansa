@@ -48,6 +48,12 @@ After a dropped connection or usage limit, hansa carries on new commits without 
 the run began with update conflicts. Otherwise it keeps earlier carried work, or repeats the original
 start and update. `hansa show` says where and why.
 
+A worker or verification the system killed (SIGKILL: exit -9, or 137 through a wrapper) after the lane's
+setup, before it wrote its result, is queued again once the same way, without using a try, whatever its
+stderr says of the provider. `hansa status` gives the kill as its last run while it waits; what the killed run
+reported, if anything, is not kept: the next run's report replaces it. A second kill in the task fails it: the
+machine may be short of memory, so fewer runs at once may help (`hansa concurrency`).
+
 ### Retries after a dropped connection
 
 A run that ended on a dropped connection is tried once more by itself. hansa
