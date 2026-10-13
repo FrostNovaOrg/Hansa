@@ -49,8 +49,10 @@ the run began with update conflicts. Otherwise it keeps earlier carried work, or
 start and update. `hansa show` says where and why.
 
 A worker or verification the system killed (SIGKILL: exit -9, or 137 through a wrapper) after the lane's
-setup, before it wrote its result, is queued again once the same way, without using a try. A second kill in
-the task fails it: the machine may be short of memory, so fewer runs at once may help (`hansa concurrency`).
+setup, before it wrote its result, is queued again once the same way, without using a try, whatever its
+stderr says of the provider; a report in its session record stays with that run in `hansa show`, and
+`hansa status` gives the kill as its last run while it waits. A second kill in the task fails it: the machine
+may be short of memory, so fewer runs at once may help (`hansa concurrency`).
 
 ### Retries after a dropped connection
 

@@ -4252,7 +4252,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
     # killed by the system once the lane's setup had finished, before the worker wrote its result; hansa's own stops
-    # (a changed .git file, cancel, sandbox_failed, timed_out) and design sessions keep their branches, which come first
+    # (a changed .git file, cancel, sandbox_failed, timed_out) and design sessions keep their branches, which come first.
+    # Then the kill, before its stderr is read for the provider's quota, key, login or refusal (unusable_reason)
     killed = not run and set_up and returncode in KILLED_EXITS
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
     setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
@@ -4358,7 +4359,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     attempts = list(meta.get("attempts", []))
     if setup:
         fields["setup_exit"] = int(setup.group(1))
-    kind, why = ("", "") if meta.get("cancel") or setup or changed else unusable_reason(run, err)
+    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else unusable_reason(run, err)
     # a report written before the connection went is the worker's finished work: that run ends as it did
     net = "" if kind or late else network_reason(run, err)
     if changed:
@@ -4425,6 +4426,14 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             f"so fewer runs at once may help (hansa concurrency). Next: {retry}")
         attempts.append({"provider": meta["provider"], "at": now(), "kind": "killed", "exit": returncode,
                          "error": error if state == "queued" else how})
+        if resumed.get("turns") and not isinstance(fields["turns"], int):  # its first process's turns are known; its
+            fields["turns"] = resumed["turns"]  # killed continuation's own are not, and are not guessed
+            attempts[-1]["turns_unknown_after_resume"] = True
+        if meta.get("kind") == "verify":  # a killed run gives no verdict, whatever its record said before the kill
+            fields["verdict"] = ""
+        if state == "queued" and report:  # its report (report_after_notices) goes with its attempt, as its numbers
+            attempts[-1]["report"] = report  # do: the task's own report is the next run's
+            write_text(d / "result.md", "")
     elif run.get("is_error") or run.get("subtype") not in ("success", None) or not run:
         state = "failed"
         lines = (result or err).strip().splitlines()

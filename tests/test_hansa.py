@@ -170,7 +170,9 @@ def killed():
     # FAKE_KILL "KILL|TERM:runs:count file": the runs numbered in runs (1,2: the first two) write half a file, then
     # end by that signal. FAKE_KILL_SEE: where each run started and what it was told; FAKE_KILL_NO_WRITE: nothing
     # written; FAKE_KILL_USAGE: a reply with its tokens in the session record first; FAKE_KILL_RESULT: its result
-    # written first; FAKE_KILL_WRAPPED: killed in a child, whose end it passes on as a shell or hansa/preview.py does
+    # written first; FAKE_KILL_WRAPPED: killed in a child, whose end it passes on as a shell or hansa/preview.py does;
+    # FAKE_KILL_ERR: these words on its stderr first; FAKE_KILL_LATE: its session record holds a report, then a
+    # correction ending in these words, in a turn a background notice opened
     if not os.environ.get("FAKE_KILL"):
         return
     import signal
@@ -194,6 +196,21 @@ def killed():
         with open(rec, "a") as f:
             f.write(json.dumps({"type": "assistant", "message": {"id": "k" + str(n), "model": "mimo-x", "content": [
                 {"type": "text", "text": "Working on it."}], "usage": {"input_tokens": 70 * n, "output_tokens": 7}}}) + "\n")
+    if os.environ.get("FAKE_KILL_LATE"):
+        rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+        os.makedirs(os.path.dirname(rec), exist_ok=True)
+        say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "model": "mimo-x", "content": [
+            {"type": "text", "text": t}]}}
+        rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": "Do it"}},
+                say("k1", "Report: wrote half of the file."),
+                {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
+                    "role": "user", "content": "<task-notification> <task-id>bk1</task-id> timed out"}},
+                say("k2", "Correction: the other half is still to write. " + os.environ["FAKE_KILL_LATE"])]
+        with open(rec, "a") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+    if os.environ.get("FAKE_KILL_ERR"):
+        sys.stderr.write(os.environ["FAKE_KILL_ERR"] + "\n")
+        sys.stderr.flush()
     if os.environ.get("FAKE_KILL_RESULT"):
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
                           "result": "Wrote partial.txt; done."}), flush=True)
@@ -231,6 +248,13 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
         sys.exit(1)
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
     counted = {"usage": {"input_tokens": 10, "output_tokens": 5}} if os.environ.get("FAKE_RECORD_USAGE") else {}
+    gone = os.environ.get("FAKE_RESUME_KILL")  # a file: the first resumed run replies once, then the system kills it
+    if gone and not os.path.exists(gone):
+        import signal
+        open(gone, "w").write("killed\n")
+        with open(rec, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"id": "rk", "model": "mimo-x", "content": [], **counted}}) + "\n")
+        os.kill(os.getpid(), signal.SIGKILL)
     limit = os.environ.get("FAKE_RESUME_LIMIT")  # a file: the first resumed run ends on the provider's usage limit
     if limit and not os.path.exists(limit):
         open(limit, "w").write("limit\n")
@@ -8556,6 +8580,97 @@ class DeskTest(unittest.TestCase):
             self.assertIn("earlier run on claude: killed by the system (exit -9)\n", text)
             self.assertIn(f"  {tid} a: {failure}", views.status_text(views.status(desk)))
 
+        quota, auth = "API Error: 429 rate_limit_error", "API Error: 401 authentication_error · Invalid API key"
+
+        def stderr_says(n, text):  # a kill comes before what its stderr says of the provider
+            desk, repo, root = self.kill_desk(n)
+            tid, env = desk.new_task("Add hello.txt"), {"FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_ERR": text}
+            [(rc, queued)] = self.kill_runs(desk, tid, env, most=1)
+            self.assertIn(text, (desk.tasks_dir / tid / "run.err").read_text())
+            self.assertEqual((rc, queued["state"], queued["error"]), (-9, "queued", once.format(-9)), queued)
+            self.assertEqual([a["kind"] for a in queued["attempts"]], ["killed"])
+            self.assertEqual(run.tries_used(queued["attempts"]), 0)
+            self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")  # neither rested nor blocked
+            [(_, m)] = self.kill_runs(desk, tid, env)
+            self.assertEqual(m["state"], "done", m)
+
+        def twice_with_stderr(n):
+            for i, text in enumerate((quota, auth)):
+                desk, repo, root = self.kill_desk(f"{n}-{i}")
+                tid = desk.new_task("Add hello.txt")
+                ends = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1,2:{root / 'count'}", "FAKE_KILL_ERR": text})
+                self.assertEqual([(rc, m["state"]) for rc, m in ends], [(-9, "queued"), (-9, "failed")])
+                m = ends[-1][1]
+                self.assertEqual(m["error"], twice.format("worker", f"hansa retry {tid}"))
+                self.assertEqual([a["kind"] for a in m["attempts"]], ["killed", "killed"])
+                self.assertEqual(((root / "count").read_text(), provider_problem(desk, desk.settings(), "claude")), ("2", ""))
+
+        def report_kept(n):
+            desk, repo, root = self.kill_desk(n)
+            desk.write_key("mimo", "sk-test-0123456789")
+            tid, env = desk.new_task("Add hello.txt"), {"FAKE_KILL": f"KILL:1:{root / 'count'}",
+                                                        "FAKE_KILL_LATE": "Key: sk-test-0123456789"}
+            [(_, queued)] = self.kill_runs(desk, tid, env, most=1)
+            kept = ("Report: wrote half of the file.\n\n(Written after that, when a background notice came in:)\n\n"
+                    "Correction: the other half is still to write. Key: [key of mimo]")
+            self.assertEqual((queued["state"], queued["attempts"][0]["report"]), ("queued", kept), queued)
+            self.assertEqual(views.report_of(desk, tid), "")  # the task's own report is the next run's
+            [(_, m)] = self.kill_runs(desk, tid, env)
+            self.assertEqual((m["state"], m["attempts"][0]["report"]), ("done", kept), m)
+            text = views.show_text(desk, tid)
+            self.assertIn(f"earlier run on claude: {once.format(-9)}\n  its report, from its session record:\n"
+                          "    Report: wrote half of the file.\n", text)
+            self.assertIn("    Correction: the other half is still to write. Key: [key of mimo]\n", text)
+            self.assertIn("report:\n  Added hello.txt. Checked it exists.", text)
+            self.assertNotIn("sk-test-0123456789", text)
+
+        def no_last_run(n, held):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            self.assertNotIn("last_run", views.status(desk)["queued"][0])  # never run: no key at all
+            env = {"FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_NET": f"quota:{0 if held else 1}:{root / 'net'}"}
+            self.kill_runs(desk, tid, env, most=1)
+            self.assertEqual(views.status(desk)["queued"][0]["last_run"], once.format(-9))  # waiting because of the kill
+            sandbox = (lambda t: desk.update(t, sandbox_failed="sandbox_apply: Invalid argument")) if held else None
+            [(_, m)] = self.kill_runs(desk, tid, env, mark=sandbox, most=1)
+            self.assertEqual((m["state"], bool(m.get("held")), m["attempts"][-1]["kind"]),
+                             ("queued", held, "killed" if held else "limit"), m)
+            st = views.status(desk)
+            self.assertNotIn("last_run", st["queued"][0])
+            self.assertNotIn("last run:", views.status_text(st))
+
+        def resumed_then_killed(n):
+            desk, repo, root = self.kill_desk(n)
+            s = desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RECORD_USAGE": "1",
+                                      "FAKE_RESUME_KILL": str(root / "resume-killed")}
+            self.assertEqual(desk.save_settings(s), [])
+            tid = desk.new_task("Fix the badge")
+            self.assertEqual(run.start(desk, tid, "a", "claude").wait(timeout=20), 0)
+            again = run.resume(desk, tid)  # its first process said 5 turns, and left work running in the background
+            self.assertIsNotNone(again)
+            rc = again.wait(timeout=20)
+            m = run.finish(desk, tid, rc)
+            self.assertEqual((rc, m["state"], m["error"]), (-9, "queued", once.format(-9)), m)
+            [a] = m["attempts"]
+            self.assertEqual((a["kind"], a["turns"], a.get("turns_unknown_after_resume")), ("killed", 5, True), a)
+            self.assertEqual({k: (u["in"], u["out"]) for k, u in a["usage"].items()}, {"mimo-x": (300 + 10, 60 + 5)})
+            self.assertEqual([r["turns"] for r in cost.task_runs(m)], [5])
+            self.assertIn(f"earlier run on claude: {once.format(-9)}\n  its turns after hansa resumed it are unknown: "
+                          "the system killed it before it said", views.show_text(desk, tid))
+
+        def verdict_not_taken(n):
+            desk, repo, root = self.kill_desk(n)
+            parent = desk.new_task("Add hello.txt")
+            self.assertEqual(self.kill_runs(desk, parent, {})[0][1]["state"], "done")
+            hansa_on(desk, "verify", parent, "the file's contents")
+            vid = desk.meta(parent)["verify"]
+            [(rc, queued)] = self.kill_runs(desk, vid, {"FAKE_KILL": f"KILL:1:{root / 'count'}",
+                                                        "FAKE_KILL_LATE": "Checked it.\nVERDICT: holds"}, most=1)
+            self.assertEqual((rc, queued["state"], queued["verdict"]), (-9, "queued", ""), queued)
+            self.assertIn("VERDICT: holds", queued["attempts"][0]["report"])
+            self.assertEqual(views.verification(desk, desk.meta(parent))["verdict"], "")
+
         cancel = lambda desk, tid: hansa_on(desk, "cancel", tid)
         table = (
             (1, "worker killed (-9), no result, setup done, no marks, first time", lambda: carries_on(1, False)),
@@ -8587,6 +8702,15 @@ class DeskTest(unittest.TestCase):
                 21, "failed", lambda e: self.assertIn("the worktree's .git file was changed: it now points to", e),
                 mark=lambda desk, tid: (Path(desk.meta(tid)["worktree"]) / ".git").write_text(
                     f"gitdir: {desk.root.parent / 'elsewhere'}\n"))),
+            (22, "killed, stderr holding API Error: 429", lambda: stderr_says(22, quota)),
+            (23, "killed, stderr holding an authentication error", lambda: stderr_says(23, auth)),
+            (24, "a second kill whose stderr holds a 429 or an authentication text", lambda: twice_with_stderr(24)),
+            (25, "killed, its session record holding a report and a later correction", lambda: report_kept(25)),
+            (26, "killed, then held for a sandbox failure", lambda: no_last_run(26, True)),
+            (27, "killed, then queued again for a provider's limit", lambda: no_last_run(27, False)),
+            (28, "a resumed run whose first process recorded 5 turns, then killed", lambda: resumed_then_killed(28)),
+            # not in the rule's table: a verification's killed run, whose kept report gives a verdict, gives none
+            (29, "a verification killed after its record gave a verdict", lambda: verdict_not_taken(29)),
         )
         for n, case, check in table:
             with self.subTest(row=n, case=case):
