@@ -183,7 +183,10 @@ whole entry as written, including `re:`. For example, `re:第\s*\d+\s*笔`
 finds any number in that shape, and `re:\blane [a-k]\b` finds lane codes in
 any case. The page refuses to save a pattern that does not compile, exceeds
 200 characters including `re:`, or matches the empty string, saying why and
-saving nothing. Other entries stay literal, including regex characters such
+saving nothing. It also refuses backreferences and repeats of two or more
+whose body contains a group, alternation or another repeat, because they can
+backtrack badly and stall the desk.
+Other entries stay literal, including regex characters such
 as the dot in `a.b`. These patterns catch shapes a finite word list cannot;
 the principal can remove an entry when that shape is safe to send out.
 

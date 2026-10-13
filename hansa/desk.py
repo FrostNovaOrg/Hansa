@@ -497,6 +497,66 @@ def mailbox_allow_problem(entry) -> str:
     return ""
 
 
+def forbidden_pattern(entry: str) -> tuple:
+    """A safe compiled pattern and no problem, or no pattern and why the page must refuse it.
+
+    Scans use refused patterns as literals so settings saved before patterns existed keep working.
+    """
+    if len(entry) > 200:
+        return None, "a pattern must be at most 200 characters, including re:"
+    try:
+        from re import _parser as parser
+    except ImportError:  # Python before 3.11
+        import sre_parse as parser
+
+    def walk(nodes):
+        kinds = set()
+        for op, arg in nodes:
+            name = str(op)
+            kinds.add(name)
+            if name == "SUBPATTERN":
+                kinds.update(walk(arg[-1]))
+            elif name == "BRANCH":
+                for branch in arg[1]:
+                    kinds.update(walk(branch))
+            elif name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
+                body = walk(arg[2])
+                if arg[1] >= 2 and body & {"SUBPATTERN", "BRANCH", "MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
+                    raise ValueError("a repeat of two or more must not contain a group, alternation or another "
+                                     "repeat: it can backtrack badly")
+                kinds.update(body)
+            elif name in ("ASSERT", "ASSERT_NOT"):
+                kinds.update(walk(arg[1]))
+            elif name == "ATOMIC_GROUP":
+                kinds.update(walk(arg))
+            elif name == "GROUPREF_EXISTS":
+                kinds.update(walk(arg[1]))
+                kinds.update(walk(arg[2] or []))
+            elif name == "GROUPREF":
+                raise ValueError("backreferences are not allowed: they can backtrack badly")
+        return kinds
+
+    try:
+        walk(parser.parse(entry[3:], re.IGNORECASE))
+        pattern = re.compile(entry[3:], re.IGNORECASE)
+    except (re.error, RecursionError, OverflowError) as e:
+        return None, f"the pattern does not compile: {e}"
+    except ValueError as e:
+        return None, str(e)
+    if pattern.search("") is not None:
+        return None, "the pattern matches the empty string"
+    return pattern, ""
+
+
+def forbidden_exceptions_ok(exceptions) -> bool:
+    """Malformed settings disable all lane exceptions; the page names the key for repair."""
+    return isinstance(exceptions, list) and all(
+        isinstance(x, dict) and set(x) == {"entry", "lanes"}
+        and isinstance(x["entry"], str) and x["entry"].strip() and not _has_control(x["entry"])
+        and isinstance(x["lanes"], list) and all(isinstance(lane, str) and NAME.fullmatch(lane)
+                                                for lane in x["lanes"]) for x in exceptions)
+
+
 def validate(s: dict, root=None, page: bool = False, before: dict | None = None, mailbox_key: str = "") -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
@@ -561,22 +621,11 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         for i, entry in enumerate(words, 1):
             if not isinstance(entry, str) or not entry.startswith("re:"):
                 continue
-            if len(entry) > 200:
-                p.append(f"release_forbidden entry {i}: a pattern must be at most 200 characters, including re:")
-                continue
-            try:
-                pattern = re.compile(entry[3:], re.IGNORECASE)
-            except re.error as e:
-                p.append(f"release_forbidden entry {i}: the pattern does not compile: {e}")
-            else:
-                if pattern.search("") is not None:
-                    p.append(f"release_forbidden entry {i}: the pattern matches the empty string")
+            _, why = forbidden_pattern(entry)
+            if why:
+                p.append(f"release_forbidden entry {i}: {why}")
     exceptions = s.get("release_forbidden_except", [])
-    if not isinstance(exceptions, list) or not all(
-            isinstance(x, dict) and set(x) == {"entry", "lanes"}
-            and isinstance(x["entry"], str) and x["entry"].strip() and not _has_control(x["entry"])
-            and isinstance(x["lanes"], list) and all(isinstance(lane, str) and NAME.fullmatch(lane)
-                                                    for lane in x["lanes"]) for x in exceptions):
+    if not forbidden_exceptions_ok(exceptions):
         p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
                  "lanes (a list of lane names)")
     al = s.get("alert", {"command": ""})
@@ -2467,6 +2516,10 @@ class Desk:
             if isinstance(new, dict):
                 new = copy.deepcopy(new)
                 mailbox_key = mailbox_settings(new)
+                if by == "page" and isinstance(new.get("release_forbidden_except"), list):
+                    new["release_forbidden_except"] = [x for x in new["release_forbidden_except"]
+                        if not (isinstance(x, dict) and set(x) == {"entry", "lanes"}
+                                and isinstance(x["entry"], str) and not x["entry"].strip() and x["lanes"] == [])]
                 # A page or command loaded the normalized spelling of an invalid value still in the file.
                 if not isinstance(new.get("release_mailboxes", False), bool):
                     saved = read_json(self.settings_path, {})
