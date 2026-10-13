@@ -4427,8 +4427,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             f"so fewer runs at once may help (hansa concurrency). Next: {retry}")
         attempts.append({"provider": meta["provider"], "at": now(), "kind": "killed", "exit": returncode,
                          "error": error if state == "queued" else how})
-        if resumed.get("turns") and not isinstance(fields["turns"], int):  # its first process's turns are known; its
-            fields["turns"] = resumed["turns"]  # killed continuation's own are not, and are not guessed
+        if isinstance(resumed.get("turns"), int) and not isinstance(fields["turns"], int):  # its first process's
+            fields["turns"] = resumed["turns"]  # turns are known, even 0; its killed continuation's own are not
             attempts[-1]["turns_unknown_after_resume"] = True
         if meta.get("kind") == "verify":  # a killed run gives no verdict, whatever its record said before the kill
             fields["verdict"] = ""

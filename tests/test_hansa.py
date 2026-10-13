@@ -433,8 +433,8 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
         print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 9,
                           "session_id": sid}))
         sys.exit(1)
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 5, "session_id": sid,
-                      "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "num_turns": int(os.environ.get("FAKE_TURNS", "5")), "session_id": sid, "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
                       **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
     sys.exit(0)
 if os.environ.get("FAKE_SANDBOX_START"):  # "first", "after-ok": a Bash call whose sandbox could not start
@@ -8981,23 +8981,23 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("last_run", st["queued"][0])
             self.assertNotIn("last run:", views.status_text(st))
 
-        def resumed_then_killed(n):
+        def resumed_then_killed(n, turns=5):
             desk, repo, root = self.kill_desk(n)
             s = desk.settings()
-            s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RECORD_USAGE": "1",
+            s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RECORD_USAGE": "1", "FAKE_TURNS": str(turns),
                                       "FAKE_RESUME_KILL": str(root / "resume-killed")}
             self.assertEqual(desk.save_settings(s), [])
             tid = desk.new_task("Fix the badge")
             self.assertEqual(run.start(desk, tid, "a", "claude").wait(timeout=20), 0)
-            again = run.resume(desk, tid)  # its first process said 5 turns, and left work running in the background
+            again = run.resume(desk, tid)  # its first process said its turns, and left work running in the background
             self.assertIsNotNone(again)
             rc = again.wait(timeout=20)
             m = run.finish(desk, tid, rc)
             self.assertEqual((rc, m["state"], m["error"]), (-9, "queued", once.format(-9)), m)
             [a] = m["attempts"]
-            self.assertEqual((a["kind"], a["turns"], a.get("turns_unknown_after_resume")), ("killed", 5, True), a)
+            self.assertEqual((a["kind"], a["turns"], a.get("turns_unknown_after_resume")), ("killed", turns, True), a)
             self.assertEqual({k: (u["in"], u["out"]) for k, u in a["usage"].items()}, {"mimo-x": (300 + 10, 60 + 5)})
-            self.assertEqual([r["turns"] for r in cost.task_runs(m)], [5])
+            self.assertEqual([r["turns"] for r in cost.task_runs(m)], [turns])
             self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}\n  its turns after hansa resumed it are unknown: "
                           "the system killed it before it said", views.show_text(desk, tid))
 
@@ -9053,6 +9053,7 @@ class DeskTest(unittest.TestCase):
             # not in the rule's table: a verification's killed run, whose kept report gives a verdict, gives none
             (29, "a verification killed after its record gave a verdict", lambda: verdict_not_taken(29)),
             (30, "the same kill as row 1, its setup not finished", lambda: setup_unfinished(30)),
+            (31, "the same as row 28, its first process recorded 0 turns", lambda: resumed_then_killed(31, 0)),
         )
         for n, case, check in table:
             with self.subTest(row=n, case=case):
