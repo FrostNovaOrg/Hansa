@@ -67,7 +67,7 @@ directly, on its own branch, and it comes back like a finished task.
 | Term | What it is |
 |---|---|
 | **Principal** | The person the desk works for. On the web page they set providers, keys, models and prices, answer the agents' requests, and approve or refuse releases (a release can also be answered in the conversation, with the one-time code the principal's alert carries). |
-| **Coordinator** | An interactive Claude Code session in the desk (`hansa coordinator`). It plans, queues, reviews and merges work through `hansa`, and sets up the lanes. It runs outside the sandbox, so it can install what a lane needs; Claude Code asks the principal before each command not already allowed. Its whole interface is [`hansa/card.md`](hansa/card.md). |
+| **Coordinator** | An interactive Claude Code session in the desk (`hansa coordinator`). It plans, queues, reviews and merges work through `hansa`, and sets up the lanes. It runs outside the sandbox, so it can install what a lane needs; Claude Code asks the principal before each command not already allowed. Its interface is [`hansa/card.md`](hansa/card.md), and `hansa help` for the rest. |
 | **Helpers** | Three subagents in the coordinator's session: `scout` (looks something up) and `reviewer` (reads a high-stakes change) only read; `operator` does one hands-on job on the machine, such as installing software. |
 | **Worker** | One `claude -p` run per task, or per verification (`hansa verify`). It may run any command, inside Claude Code's sandbox: its commands write only in its worktree and the folders its lane allows, and reach only its lane's hosts. It never commits. |
 | **Desk** | One folder that holds a team's settings, keys, tasks and an append-only event log. The command line, the web page and the agents all read the same files. |
@@ -202,7 +202,7 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
   `secrets/`; reading or editing the files directly in the Claude Code folder it runs from (its login among
   them) and its `sessions/`; and editing code in the lanes' repositories, so code changes go through workers
   and each gets a branch, the lane's check and a merge. They also deny pushing and publishing from its own
-  shell (`git push`, `npm publish`, `mvn deploy` and more; the full list is in the card), in their plain
+  shell (`git push`, `npm publish`, `mvn deploy` and more; the full list is in [Who changes what](docs/who-changes-what.md#the-coordinator)), in their plain
   forms only: run another way (`bash -c "git push"`, a script), such a command is not caught, and only
   Claude Code's own asking puts it before the principal. More: [Who changes what](docs/who-changes-what.md).
 - **Nothing goes out without the principal.** hansa merges into a lane's base branch and stops there. A
@@ -280,12 +280,12 @@ More: [The desk: files, keys and notes](docs/desk.md).
 
 ## Documentation
 
-Nobody reads hansa's code to use it. If the card or a command's output is not enough, fix the card or the
-output.
+Nobody reads hansa's code to use it. If the card, a `hansa help` topic or a command's output is not enough,
+fix that.
 
 | Document | What is in it |
 |---|---|
-| [`hansa/card.md`](hansa/card.md) | The coordinator's whole interface: how work moves, every command, what it may change. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
+| [`hansa/card.md`](hansa/card.md) | What the coordinator needs on every turn: how work moves, every command, what it may change; `hansa help <topic>` prints the rest from `docs/`. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
 | [Workers and the sandbox](docs/sandbox.md) | What workers, verifiers and design sessions may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
 | [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits, browser tasks and the preview |

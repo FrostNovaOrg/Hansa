@@ -6612,15 +6612,12 @@ class DeskTest(unittest.TestCase):
         m = self.desk.settings()["lanes"]["m"]
         self.assertEqual(m, {**a, "providers": ["mimo"]})
         self.assertEqual((m["preview"], m["note"]), ("make serve", "the C++ lane"))
-        card = (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
-        row = next(x for x in card.splitlines() if x.startswith("| `hansa lane add L --like"))
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         said = " ".join(helped.getvalue().split())
         for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
                       "preview_wait_s", "commit_message", "merge_message", "identity", "release targets",
-                      "note"):  # all it copies, said
-            self.assertIn(field, row)
+                      "note"):  # all it copies, said in its help (the card points there)
             self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
                                                                                  "brief.md").read_text())
@@ -12185,6 +12182,10 @@ class DeskTest(unittest.TestCase):
         files_topic = cli.topic_text("desk-files")
         self.assertIn("### Where a desk's files are", files_topic)
         self.assertIn("### Where a desk's files grow", files_topic)
+        merging = cli.topic_text("merge-check")  # the rounds of a task sent back, which the card points to
+        self.assertIn("### Sending a task back", merging)
+        self.assertIn("says which round it is", " ".join(merging.split()))
+        self.assertNotIn("## What work costs", merging)
         # no topic can be taken for something else
         names = commands | lane_subs | targets | {"card", "topics"}
         for t in cli.TOPICS:
