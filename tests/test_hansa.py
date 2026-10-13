@@ -22770,7 +22770,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         f = Path(os.environ["FAKE_AGENTS_LOG"])
         return len(f.read_text().splitlines()) if f.exists() else 0
 
-    def ended(self, title) -> str:
+    def coordinator_task_ended(self, title) -> str:
         """A task that ended done and waits for review, as hansa serve leaves it and records it."""
         tid = self.desk.new_task(title, lane="a")
         self.desk.update(tid, state="done", finished=time.time())
@@ -22843,8 +22843,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             out = self.coordinator_desk(1)
             t = time.time()
             alert.unheard_check(self.desk, t)  # hansa serve's first look: what ends from now on counts
-            self.ended("Add a")
-            self.ended("Add b")
+            self.coordinator_task_ended("Add a")
+            self.coordinator_task_ended("Add b")
             a = self.events("task_finished")[0]["ts"]  # when the oldest ended
             alert.unheard_check(self.desk, a + 9 * 60)
             self.assertEqual(self.coordinator_alerts(), [])
@@ -22856,7 +22856,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.assertIn("no session hears from hansa, so the coordinator's session cannot be reached: 2 thing(s) wait "
                           "for it, the oldest for 20 min (t0001 done: Add a", self.status_at(a + 20 * 60))
             for later in (11, 30, 600):  # none more while still no session hears, whatever else ends
-                self.ended(f"Add more at {later}")
+                self.coordinator_task_ended(f"Add more at {later}")
                 alert.unheard_check(self.desk, a + later * 60)
             self.assertEqual(len(self.coordinator_alerts()), 1)
             self.assertEqual(alert.send_due(self.desk, gather=0)["ok"], True)
@@ -22872,7 +22872,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             me = {"key": notify.key_of(sess), "session": sess, "uid": os.getuid(), "name": "desk-87"}
             t = time.time()
             alert.unheard_check(self.desk, t)
-            self.ended("Add a")
+            self.coordinator_task_ended("Add a")
             alert.unheard_check(self.desk, t + 11 * 60)
             self.assertEqual(len(self.coordinator_alerts()), 1)
             notify.handle(self.desk, {"op": "start", "me": me})  # a follower runs: the case begins anew
@@ -22880,7 +22880,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             notify.handle(self.desk, {"op": "end", "me": me, "done": notify.log_end(self.desk)})
             p.kill()
             p.wait()
-            self.ended("Add b")
+            self.coordinator_task_ended("Add b")
             b = self.events("task_finished")[-1]["ts"]
             alert.unheard_check(self.desk, b + 9 * 60)  # what ended before the follower ran was told: b only
             self.assertEqual(len(self.coordinator_alerts()), 1)
@@ -22897,8 +22897,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.hearing(p)
             t = time.time()
             alert.unheard_check(self.desk, t)
-            self.ended("Add a")
-            self.ended("Add b")
+            self.coordinator_task_ended("Add a")
+            self.coordinator_task_ended("Add b")
             for later in (11, 60, 600):
                 alert.unheard_check(self.desk, t + later * 60)
             self.assertEqual(self.coordinator_alerts(), [])
@@ -22910,9 +22910,9 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.agents_say({"4242": "waiting"})
             t = time.time()
             alert.unheard_check(self.desk, t)
-            self.ended("Add a")
+            self.coordinator_task_ended("Add a")
             alert.unheard_check(self.desk, t + 60 * 60)
-            self.follow_on_a_clock(5, at={0.5: lambda: self.ended("Add b")})
+            self.follow_on_a_clock(5, at={0.5: lambda: self.coordinator_task_ended("Add b")})
             self.assertEqual((alert.queued(self.desk), alert.send_due(self.desk, gather=0)), ([], None))
             self.assertFalse(out.exists())
             self.assertEqual(self.looked_up(), 0)  # with nothing to alert with, a follower looks nothing up
@@ -22923,7 +22923,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.coordinator_desk(5, window_min=2, review_min=0)
             self.agents_say({"4242": "waiting"})
             shown = []
-            log = self.follow_on_a_clock(9, at={0.5: lambda: self.ended("Add a"), 4: lambda: self.ended("Add b"),
+            log = self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a"), 4: lambda: self.coordinator_task_ended("Add b"),
                                                7: lambda: shown.append(self.hansa_out("status"))})[0]
             alerts = self.coordinator_alerts()
             self.assertEqual(len(alerts), 1, (alerts, log))
@@ -22939,7 +22939,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.coordinator_desk(6, window_min=2, review_min=0)
             for said in ("busy", "idle", "shell", "thinking"):
                 self.agents_say({"4242": said})
-                self.follow_on_a_clock(6, at={0.5: lambda: self.ended(f"Add {said}")})
+                self.follow_on_a_clock(6, at={0.5: lambda: self.coordinator_task_ended(f"Add {said}")})
             self.assertEqual(self.coordinator_alerts(), [])
             self.assertGreaterEqual(self.looked_up(), 4 * 4)  # it looked, and saw no window waiting
 
@@ -22949,7 +22949,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             logs = []
             for said in ("exit 3", "garbage, not JSON"):
                 self.agents_say(said)
-                logs.append(self.follow_on_a_clock(6, at={0.5: lambda: self.ended("Add a")})[0])
+                logs.append(self.follow_on_a_clock(6, at={0.5: lambda: self.coordinator_task_ended("Add a")})[0])
             self.assertEqual(self.coordinator_alerts(), [])
             self.assertIn("could not look up the session's status for the principal's coordinator alert: claude agents "
                           "--json ended with 3: the sessions cannot be listed", logs[0])
@@ -22961,7 +22961,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.coordinator_desk(8, window_min=0, review_min=3)
             self.agents_say({"4242": "idle"})
             shown = []
-            self.follow_on_a_clock(9, at={0.5: lambda: self.ended("Add a"),
+            self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a"),
                                           8: lambda: shown.append(self.hansa_out("status"))})
             self.assertEqual(self.coordinator_alerts(), [
                 "the coordinator's session pid 4242 (desk-4242) is idle while t0001 has waited for review for 3 min "
@@ -22975,7 +22975,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.coordinator_desk(9, window_min=0, review_min=3)
             self.agents_say({"4242": "busy"})
             before = []
-            self.follow_on_a_clock(10, at={0.5: lambda: self.ended("Add a"),
+            self.follow_on_a_clock(10, at={0.5: lambda: self.coordinator_task_ended("Add a"),
                                            6.9: lambda: before.append(list(self.coordinator_alerts())),
                                            7: lambda: self.agents_say({"4242": "idle"})})
             self.assertEqual(before, [[]])
@@ -22991,7 +22991,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             def done_with():
                 self.desk.update(tids[0], state="merged", merged=time.time())
                 self.desk.update(tids[1], state="cancelled", error="closed without merging")
-            self.follow_on_a_clock(8, at={0.5: lambda: tids.extend([self.ended("Add a"), self.ended("Add b")]),
+            self.follow_on_a_clock(8, at={0.5: lambda: tids.extend([self.coordinator_task_ended("Add a"), self.coordinator_task_ended("Add b")]),
                                           2: done_with})
             self.assertEqual((self.coordinator_alerts(), self.looked_up()), ([], 0))
 
@@ -23000,7 +23000,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             self.coordinator_desk(11, no_session_min=0)
             t = time.time()
             alert.unheard_check(self.desk, t)
-            self.ended("Add a")
+            self.coordinator_task_ended("Add a")
             alert.unheard_check(self.desk, t + 2 * 86400)
             self.assertNotIn("no session hears from hansa", self.status_at(t + 2 * 86400))
             for off, said in (({"window_min": 0, "review_min": 3}, "waiting"),
@@ -23008,7 +23008,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
                 self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(off)),
                                  {"ok": True, "problems": []})
                 self.agents_say({"4242": said})
-                self.follow_on_a_clock(8, at={0.5: lambda: self.ended(f"Add {said}")})
+                self.follow_on_a_clock(8, at={0.5: lambda: self.coordinator_task_ended(f"Add {said}")})
             self.assertEqual(self.coordinator_alerts(), [])
 
         def row12():
@@ -23038,10 +23038,10 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             """a follower restarted on new code after a case-2 alert, the stretch still going: no second alert"""
             self.coordinator_desk(13, window_min=2, review_min=0)
             self.agents_say({"4242": "waiting"})
-            _, end, carried = self.follow_on_a_clock(9, at={0.5: lambda: self.ended("Add a")}, restart_at=4)
+            _, end, carried = self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a")}, restart_at=4)
             self.assertEqual(len(self.coordinator_alerts()), 1)
             self.assertTrue(carried and carried["watch"]["told"], carried)
-            log = self.follow_on_a_clock(8, at={1: lambda: self.ended("Add b"), 4: lambda: self.ended("Add c")},
+            log = self.follow_on_a_clock(8, at={1: lambda: self.coordinator_task_ended("Add b"), 4: lambda: self.coordinator_task_ended("Add c")},
                                          start=end, resume=carried)[0]
             self.assertIn("restarted on hansa's new code", log)
             self.assertEqual(len(self.coordinator_alerts()), 1)
