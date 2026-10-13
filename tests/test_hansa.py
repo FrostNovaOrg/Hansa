@@ -9138,7 +9138,8 @@ class DeskTest(unittest.TestCase):
                     namer.thread.join()
                 clock[0] += 1
         self.assertEqual([b - a for a, b in zip(looked, looked[1:])][:8],
-                         [16, 31, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each
+                         [60, 60, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each; the
+        # quick ones (15 s, 30 s) wait out the minute since the last lookup: at most one a minute, counting every run
         self.assertEqual(looked[0], 1005)
         n = len(looked)
         namer.look = lambda: looked.append(clock[0]) or "desk-87"
@@ -22734,7 +22735,7 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
 
     class Named:
         """A follower's own name lookups, left out: it keeps the name it was started with and those the Watch hears."""
-        def __init__(self, pid, name=""):
+        def __init__(self, pid, name="", **_):
             self.name = name
 
         def tick(self):
@@ -22787,31 +22788,50 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: t)):
             return self.hansa_out("status")
 
-    def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0) -> tuple:
+    def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0, namer=False,
+                          also=()) -> tuple:
         """Run a follower of the stand-in session WATCHED (named desk-4242) in this process, on a clock the test moves
         `step` seconds each turn of its loop, from `start` (default: now) for `minutes`. at: {minute: callable}, each
         called as that minute comes (what the stand-in claude says, a task that ends, a look at hansa status). Each
         lookup it starts ends before its next turn. restart_at: the minute hansa's code changes on disk, after which it
-        runs itself again on it; resume: what one that did carried, to start from. Returns (what it printed: its log,
-        the clock at its end, what it carried over a restart or None)."""
+        runs itself again on it; resume: what one that did carried, to start from. namer: with its own name lookups
+        (else it keeps its name). also: the pids of more stand-in sessions (named desk-PID), each with a follower that
+        runs alongside, turn by turn on the same clock. Returns (what they printed: their log, the clock at the end,
+        what the first carried over a restart or None)."""
         from hansa import alert
         t0 = float(int(time.time())) if start is None else start  # whole seconds: each turn's time is exact
-        clock, todo, carried = [t0], sorted((at or {}).items()), None
+        clock, todo, carried, broke = [t0], sorted((at or {}).items()), [None], []
         fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0])
 
-        def gone(sess):  # each turn of its loop starts here
+        def turn():  # every follower is at the start of its loop's turn: the lookups they started end, the clock moves
             for th in threading.enumerate():
                 if th.name == "hansa-look":
                     th.join(30)
             clock[0] += step
-            m = (clock[0] - t0) / 60
-            while todo and todo[0][0] <= m:
+            while todo and todo[0][0] <= (clock[0] - t0) / 60:
                 todo.pop(0)[1]()
-            return m >= minutes
+        sessions = [(dict(self.WATCHED), "desk-4242")] + [({"pid": p, "start": ""}, f"desk-{p}") for p in also]
+        together = threading.Barrier(len(sessions), action=turn)
+
+        def gone(sess):  # each turn of its loop starts here
+            together.wait(60)
+            return (clock[0] - t0) / 60 >= minutes
 
         def restart(state):
             raise self.Restarted(state)
-        log, sess = io.StringIO(), dict(self.WATCHED)
+
+        def run(i, sess, name):
+            try:
+                notify.follow(self.desk, notify.key_of(sess), sess,
+                              str(self.tmp / f"inbox-{self.desk.root.name}{f'-{i}' if i else ''}.sock"), "nonce",
+                              name=name)
+            except self.Restarted as e:
+                if not i:
+                    carried[0] = e.args[0]
+            except BaseException as e:  # noqa: BLE001 - raised again below, in the test's own thread
+                broke.append(e)
+                together.abort()
+        log = io.StringIO()
         with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(alert, "time", fake), \
                 unittest.mock.patch.object(notify, "now", lambda: clock[0]), \
                 unittest.mock.patch.object(notify, "gone", gone), \
@@ -22819,16 +22839,21 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
                                            and clock[0] - t0 >= restart_at * 60 else "old"), \
                 unittest.mock.patch.object(notify, "CODE_SETTLE", 0), \
                 unittest.mock.patch.object(notify, "_restart", restart), \
-                unittest.mock.patch.object(notify, "Namer", self.Named), \
+                unittest.mock.patch.object(notify, "Namer", notify.Namer if namer else self.Named), \
+                unittest.mock.patch.object(notify.signal, "signal", lambda *_: None) if also else \
+                contextlib.nullcontext(), \
                 unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_POLL": "0", "HANSA_NOTIFY_GATHER": "0", **(
                     {"HANSA_NOTIFY_RESUME": json.dumps(resume)} if resume else {})}), \
                 contextlib.redirect_stdout(log):
-            try:
-                notify.follow(self.desk, notify.key_of(sess), sess, str(self.tmp / f"inbox-{self.desk.root.name}.sock"),
-                              "nonce", name="desk-4242")
-            except self.Restarted as e:
-                carried = e.args[0]
-        return log.getvalue(), clock[0], carried
+            threads = [threading.Thread(target=run, args=(i, *x)) for i, x in enumerate(sessions) if i]
+            for th in threads:
+                th.start()
+            run(0, *sessions[0])
+            for th in threads:
+                th.join(600)
+        if broke:
+            raise broke[0]
+        return log.getvalue(), clock[0], carried[0]
 
     def test_the_principal_is_alerted_when_the_coordinators_session_cannot_be_reached(self):
         """The `coordinator` alert, one row per rule; each row runs in a desk of its own."""
@@ -23058,8 +23083,68 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
             d.tick()
             self.assertEqual((self.looked_up(), self.coordinator_alerts()), (0, []), log)
 
+        def row15():
+            """a follower starts named, with something waiting and status waiting: no two runs of claude agents --json
+            within 60 s, counting the name lookup (also while the Watch's runs fail, so that none names the session)"""
+            self.coordinator_desk(15, window_min=1, review_min=0)
+            self.agents_say({"4242": "waiting"})
+            ran, real = [], notify.agents_rows
+
+            def rows(timeout=15):
+                ran.append(notify.time.time())
+                return real(timeout)
+            with unittest.mock.patch.object(notify, "agents_rows", rows):
+                log = self.follow_on_a_clock(8, at={0.1: lambda: self.coordinator_task_ended("Add a"),
+                                                     1.5: lambda: self.agents_say("exit 3")}, namer=True)[0]
+            gaps = [b - a for a, b in zip(ran, ran[1:])]
+            self.assertTrue(ran and min(gaps) >= 60, (ran, log))
+            self.assertGreaterEqual(len(ran), 6)  # the Watch looks once a minute, and its runs name the session too
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+
+        def row16():
+            """a task that records no session waits N3 minutes; two live followers, both sessions idle: one alert in
+            all"""
+            self.coordinator_desk(16, window_min=0, review_min=3)
+            self.agents_say({"4242": "idle", "4343": "idle"})
+            log = self.follow_on_a_clock(8, at={0.5: lambda: self.coordinator_task_ended("Add a")}, also=[4343])[0]
+            self.assertEqual(len(self.coordinator_alerts()), 1, (self.coordinator_alerts(), log))
+            self.assertIn("is idle while t0001 has waited for review for 3 min", self.coordinator_alerts()[0])
+            self.assertIn("the principal's coordinator alert (review) went already: another follower alerted of this "
+                          "task", log)
+            self.assertEqual((len(posted()), len(self.posts(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
+
+        def row17():
+            """after a case-1 alert, a follower starts and ends within 5 s, between two looks; then something waits N1
+            minutes with none listening: a second alert"""
+            from hansa import desk as desk_module
+            self.coordinator_desk(17)
+            p, _ = self.session()
+            sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+            me = {"key": notify.key_of(sess), "session": sess, "uid": os.getuid(), "name": "desk-87"}
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.coordinator_task_ended("Add a")
+            alert.unheard_check(self.desk, t + 11 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            with unittest.mock.patch.object(notify, "now", lambda: t + 11 * 60 + 2):  # after one look, before the next
+                notify.handle(self.desk, {"op": "start", "me": me})
+            with unittest.mock.patch.object(notify, "now", lambda: t + 11 * 60 + 6):
+                notify.handle(self.desk, {"op": "end", "me": me, "done": notify.log_end(self.desk)})
+            p.kill()
+            p.wait()
+            with unittest.mock.patch.object(desk_module, "now", lambda: t + 12 * 60):
+                self.coordinator_task_ended("Add b")
+            alert.unheard_check(self.desk, t + 11 * 60 + 10)
+            alert.unheard_check(self.desk, t + 21 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            alert.unheard_check(self.desk, t + 22 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 2)
+            self.assertIn("· 1 thing(s) wait for the coordinator, the oldest for 10 min: t0002 done: Add b",
+                          self.coordinator_alerts()[1])
+
         from hansa.desk import COORDINATOR_ALERT_WHAT
-        rows = [row1, row2, row3, row4, row5, row6, row7, row8, row9, row10, row11, row12, row13, row14]
+        rows = [row1, row2, row3, row4, row5, row6, row7, row8, row9, row10, row11, row12, row13, row14, row15, row16,
+                row17]
         for n, row in enumerate(rows, 1):
             with self.subTest(row=n, rule=row.__doc__):
                 row()
@@ -23306,7 +23391,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
                     unittest.mock.patch.object(notify, "_deliver", deliver), \
                     unittest.mock.patch.object(notify, "_say", lambda *a: None), \
                     unittest.mock.patch.object(notify, "gone", lambda sess: not feeds and restarts), \
-                    unittest.mock.patch.object(notify, "Namer", lambda *a: type("N", (), {"tick": lambda self: ""})()), \
+                    unittest.mock.patch.object(notify, "Namer",
+                                               lambda *a, **k: type("N", (), {"tick": lambda self: ""})()), \
                     unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_GATHER": gather, "HANSA_NOTIFY_POLL": "0"}):
                 try:
                     notify.follow(self.desk, "k1", {"pid": os.getpid()}, "sock", "nonce")

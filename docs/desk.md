@@ -117,8 +117,8 @@ coordinator (the session ended, or notifications were turned off), when the sess
 a question with something posted to it, and when a task posted to it waits for review while the session is idle.
 The minutes before each are the principal's, on the page, and `hansa status` shows a line while one of them holds,
 such as `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`. For the last two a
-session's follower runs `claude agents --json` at most once a minute, and only while something posted to it could
-still go unanswered.
+session's follower runs `claude agents --json` only while something posted to it could still go unanswered, and at
+most once a minute counting every run, its lookup of the session's name included (one run gives both).
 
 ### The daily clear
 

@@ -473,7 +473,8 @@ def handle(desk: Desk, req: dict) -> dict:
         return out
     if op == "alert":  # a case of the principal's coordinator alert the follower found (Watch): queued here
         from .alert import from_follower
-        return {"queued": from_follower(desk, {**old, **me}, req)}
+        said = from_follower(desk, {**old, **me}, req)
+        return {"queued": said == "queued", "told": said == "told"}
     if op == "end":
         _write_record(desk, key, {**old, **me, "pos": int(req.get("done") or old.get("pos") or 0), "seen": now(),
                                   "ended": now()})
@@ -570,14 +571,28 @@ def session_name(pid: int, timeout: float = 15) -> str:
 NAME_FIRST, NAME_MOST, NAME_LIMIT = 15.0, 300.0, 10.0  # seconds: the first wait, the longest, one lookup's limit
 
 
+class Lookups:
+    """When `claude agents --json` last ran for a follower, by any of its lookups. One run gives both the session's
+    name and its status, so the name lookup (Namer) and the Watch's share this clock: together they run it at most
+    once every LOOK_EVERY seconds."""
+
+    def __init__(self, at: float = 0.0):
+        self.at = at
+
+    def due(self, t: float) -> bool:
+        return t - self.at >= LOOK_EVERY
+
+
 class Namer:
     """The follower's lookups of its session's name (only the follower looks it up; status and notify show what
     it recorded). A lookup runs in a thread of its own, with a time limit, so posting never waits for it. While
     the name is missing it looks again after NAME_FIRST seconds, then waits twice as long each time, up to
-    NAME_MOST; once named, every NAME_MOST (Claude Code may rename it). look: the lookup, for tests."""
+    NAME_MOST; once named, every NAME_MOST (Claude Code may rename it). Each waits too until LOOK_EVERY seconds have
+    passed since any lookup of the follower's began (clock: the Watch's, shared). look: the lookup, for tests."""
 
-    def __init__(self, pid: int, name: str = "", first: float = 5.0, look=None):
+    def __init__(self, pid: int, name: str = "", first: float = 5.0, look=None, clock=None):
         self.name, self.look = name, look or (lambda: session_name(pid, NAME_LIMIT))
+        self.clock = clock or Lookups()
         self.wait, self.next, self.thread, self.found = NAME_FIRST, time.time() + first, None, ""
 
     def _run(self) -> None:
@@ -595,23 +610,26 @@ class Namer:
             self.next = time.time() + (NAME_MOST if self.name else self.wait)
             if not self.found:
                 self.wait = min(self.wait * 2, NAME_MOST)
-        if not self.thread and time.time() >= self.next:
-            self.found, self.thread = "", threading.Thread(target=self._run, daemon=True)
+        t = time.time()
+        if not self.thread and t >= self.next and self.clock.due(t):
+            self.clock.at = t
+            self.found, self.thread = "", threading.Thread(target=self._run, name="hansa-look", daemon=True)
             self.thread.start()
         return self.name
 
     def heard(self, name: str) -> None:
-        """The name a lookup of the Watch's found ('' for none): taken, and this one's own next lookup put off, so
-        that while the Watch looks, once a minute, this one runs none of its own."""
+        """The name a lookup of the Watch's found ('' for none): taken, and this one's own next lookup put off as
+        after one of its own that found it."""
         if name:
             self.name, self.wait = name, NAME_FIRST
-        self.next = max(self.next, time.time() + (NAME_MOST if self.name else LOOK_EVERY))
+            self.next = max(self.next, time.time() + NAME_MOST)
 
 
 class Watch:
     """The follower's part of the principal's `coordinator` alert (alert.py: its second and third cases). It looks its
     session's status up in `claude agents --json`, in a thread of its own so that posting never waits for it, at most
-    once every LOOK_EVERY seconds, and only while one of them could hold: something waits to be posted, or was posted
+    once every LOOK_EVERY seconds counting the name lookup's (clock, shared with Namer), and only while one of them
+    could hold: something waits to be posted, or was posted
     in the last `window` minutes (and the minute after, for the lookup that sees them go by), or the session was last
     seen waiting on its window with something posted to it; or a task posted to it has waited `review` minutes for
     review, not yet alerted. minutes: {window, review} as the desk gives them (alert.session_minutes; 0: off).
@@ -632,14 +650,18 @@ class Watch:
         def num(k):
             return float(w[k]) if isinstance(w.get(k), (int, float)) else 0.0
         self.look = look or (lambda: session_row(pid, NAME_LIMIT))
-        self.first, self.last, self.told, self.seen, self.looked = (num(k) for k in ("first", "last", "told", "seen",
-                                                                                     "looked"))
+        self.first, self.last, self.told, self.seen = (num(k) for k in ("first", "last", "told", "seen"))
+        self.clock = Lookups(num("looked"))
         self.count, self.last_count = int(num("count")), int(num("last_count"))
         self.oldest, self.last_line, self.status = (str(w.get(k) or "") for k in ("oldest", "last_line", "status"))
         given = w.get("reviews") if isinstance(w.get("reviews"), dict) else {}
         self.reviews = {k: dict(v) for k, v in given.items() if isinstance(v, dict)
                         and isinstance(v.get("posted"), (int, float))}  # task: {posted, told}
         self.thread, self.got = None, None
+
+    @property
+    def looked(self) -> float:
+        return self.clock.at
 
     def state(self) -> dict:
         return {k: getattr(self, k) for k in self.KEEP}
@@ -681,8 +703,8 @@ class Watch:
                 if heard:
                     heard(str((row or {}).get("name") or "")[:80])
                 out = self.saw(at, str((row or {}).get("status") or ""), window, review)
-        if not self.thread and t - self.looked >= LOOK_EVERY and self.wants(t, pending, window, review):
-            self.looked = t
+        if not self.thread and self.clock.due(t) and self.wants(t, pending, window, review):
+            self.clock.at = t
             self.thread = threading.Thread(target=self._run, args=(t,), name="hansa-look", daemon=True)
             self.thread.start()
         return out
@@ -828,7 +850,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             except Exception as e:  # noqa: BLE001 - the next follower may then say it again
                 _say(f"could not record that what was missed is told: {e}")
         pending, reviewing, first, last, errors = [], [], 0.0, 0.0, 0
-        namer = Namer(sess["pid"], me["name"])
+        namer = Namer(sess["pid"], me["name"], clock=watch.clock)
         mark, changed = code_mark(), 0.0
         while True:
             if gone(sess):
@@ -881,9 +903,10 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 pending, reviewing, first, done, srt_done = [], [], 0.0, pos, told_srt
             for case, fields in watch.tick(time.time(), bool(pending), minutes, heard=lambda n: namer.heard(n)):
                 try:
-                    queued = ask({"op": "alert", "me": me, "case": case, **fields}).get("queued")
-                    _say(f"the principal's coordinator alert ({case}) " + ("is queued" if queued else
-                                                                           "was not queued: no alert command is set"))
+                    r = ask({"op": "alert", "me": me, "case": case, **fields})
+                    _say(f"the principal's coordinator alert ({case}) " + (
+                        "is queued" if r.get("queued") else "went already: another follower alerted of this task"
+                        if r.get("told") else "was not queued: no alert command is set"))
                 except Exception as e:  # noqa: BLE001 - told is told: no retry, as for any alert
                     _say(f"could not queue the principal's coordinator alert ({case}): {e}")
             me["coordinator"] = watch.holds(time.time(), minutes)

@@ -265,17 +265,20 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
 
 - **No session listens** (10 minutes by default): something hansa would post to the coordinator has waited that long
   in the event log, and no session hears from hansa (its session ended, or notifications were turned off).
-  `hansa serve` sends it once, and again only after a session has heard from hansa since and the case begins anew.
+  `hansa serve` sends it once, and again only after a follower has run since, live when it looks or started and
+  ended between two of its looks, and the case begins anew.
   A session that starts hearing still first gets what was missed, as before.
 - **The session waits on its window** (10 minutes): `claude agents --json` lists the session as `waiting` (a
   permission dialog or a question is open) that long after something was posted to it. Once per stretch of waiting.
   Only `waiting` counts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing, and a
   lookup that fails is written in the follower's log.
 - **Posted work sits untouched** (120 minutes): a task hansa posted to the session has waited that long for review
-  (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task; hansa does not post
-  it again.
+  (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
+  however many followers watch it (a task that records no session goes to each); its next round may alert again.
+  hansa does not post it again.
 
-The session's follower looks the last two up, at most once a minute, and only while one could hold: something was
+The session's follower looks the last two up, at most once a minute counting its lookup of the session's name (one
+run of `claude agents --json` serves both), and only while one could hold: something was
 posted in the minutes of the second case or waits to be posted, or a task it posted has waited the minutes of the
 third. It looks nothing up in an idle round with nothing waiting, nor while no alert command is set, and what it has
 alerted stays alerted when it restarts on new code. `hansa status` shows a line while a case holds, such as

@@ -432,17 +432,22 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
     """hansa serve's look at the first case of the `coordinator` alert: something a follower would post (notify._item)
     has waited no_session_min in the event log, and the desk has no live follower. What waits since a follower last
     posted is kept in unheard_file ({pos, waits: {what: {at, line}}, told}); told: when it was alerted. A live
-    follower, or the case turned off, clears it: the case begins anew. Returns the record as it is now."""
+    follower, or the case turned off, clears it: the case begins anew. So does a follower the register shows started
+    after the alert, live or not (one may start and end between two looks): what waits is then read again from where
+    it got to. Returns the record as it is now."""
     from . import notify
     from .desk import coordinator_alert_settings
     t = time.time() if t is None else t
     s = desk.settings()
     mins = coordinator_alert_settings(s)["no_session_min"]
-    rec, end = _unheard(desk), notify.log_end(desk)
-    if not mins or not isinstance(rec.get("pos"), int) or notify.live_records(desk):
+    rec = stored = _unheard(desk)
+    end, recs = notify.log_end(desk), notify.records(desk)
+    if not mins or not isinstance(rec.get("pos"), int) or any(notify.is_live(r) for r in recs):
         new = {"pos": end}  # a session hears from hansa (or this is the first look): nothing waits unheard
     else:
-        posted = [r["pos"] for r in notify.records(desk) if isinstance(r.get("pos"), int)]  # where a follower got to
+        if _at(rec.get("told")) and any(_at(r.get("since")) and r["since"] > rec["told"] for r in recs):
+            rec = {"pos": rec["pos"]}  # a follower ran since the alert: the case begins anew
+        posted = [r["pos"] for r in recs if isinstance(r.get("pos"), int)]  # where a follower got to
         pos = min(max([rec["pos"], *posted]), end)
         waits = dict(rec["waits"]) if isinstance(rec.get("waits"), dict) else {}
         while pos < end:
@@ -461,7 +466,7 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
         if items and "told" not in new and t - items[0]["at"] >= mins * 60 and command(s) \
                 and add(desk, "coordinator", unheard_text(desk, items, t)):
             new["told"] = t
-    if new != rec:
+    if new != stored:
         desk.state_dir.mkdir(exist_ok=True)
         write_json(unheard_file(desk), new)
     return new
@@ -492,9 +497,16 @@ def session_minutes(s: dict) -> dict:
     return {"window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0}
 
 
-def from_follower(desk: Desk, me: dict, req: dict) -> bool:
+def reviews_file(desk: Desk) -> Path:
+    return desk.state_dir / "coordinator-review.json"
+
+
+def from_follower(desk: Desk, me: dict, req: dict) -> str:
     """A follower's case of the `coordinator` alert (notify.Watch), queued in words: the session (its pid, and its name
-    when known), the case, and what waits. False when nothing was queued."""
+    when known), the case, and what waits. The third case goes once per task's round across the desk, however many
+    followers watch it (a task that records no session is every follower's): reviews_file keeps {task: its round's
+    finished} for those alerted that still wait for review. Returns "queued", "told" (another follower's alert went
+    for it), or "" when nothing was queued."""
     from . import notify
     sess = me.get("session") if isinstance(me.get("session"), dict) else {}
     who = notify.who(sess.get("pid"), str(me.get("name") or "")[:80])
@@ -509,15 +521,32 @@ def from_follower(desk: Desk, me: dict, req: dict) -> bool:
     elif req.get("case") == "review" and notify.TASK_ID.match(str(req.get("task") or "")):
         tid = req["task"]
         try:
-            title = desk.meta(tid).get("title", "")
+            m = desk.meta(tid)
         except SystemExit:
-            return False
+            return ""
+        title = m.get("title", "")
         posted = req["posted"] if _at(req.get("posted")) else t
         text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
                 f"min since hansa posted it there: {title} · hansa does not post it again")
+        with desk.lock():
+            try:
+                told = read_json(reviews_file(desk), {})
+            except ValueError:  # not UTF-8: a hand edit; hansa writes it whole
+                told = {}
+            told = {k: v for k, v in (told.items() if isinstance(told, dict) else ())
+                    if notify.waits_review(desk, k)}  # merged, closed or queued again: forgotten
+            round_ = m.get("finished")
+            if tid in told and told[tid] == round_:
+                return "told"
+            queued = add(desk, "coordinator", text)
+            if queued:
+                told[tid] = round_
+            desk.state_dir.mkdir(exist_ok=True)
+            write_json(reviews_file(desk), told)
+        return "queued" if queued else ""
     else:
-        return False
-    return add(desk, "coordinator", text)
+        return ""
+    return "queued" if add(desk, "coordinator", text) else ""
 
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
