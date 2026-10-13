@@ -213,6 +213,10 @@ on branch task/{tid}, which was made for this task.
   line. To see a file as it was before your changes: `git show HEAD:path`.
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
+- In tests you write: wait for the thing itself (a file, a line, a state), not a fixed few seconds,
+  and give any time limit seconds of room; check what the code does and the words that matter,
+  not whole sentences; skip a test the sandbox cannot run (one that binds a local port, say) with
+  the reason in the skip, rather than leave it failing or delete it.
 {long}- End with a short report: what you changed, how you checked it, and anything left undone.
   Stop or wait for any background work you started before you write it: your last message
   is taken as your report.
@@ -259,10 +263,11 @@ VERIFY_TASK = """Find out, by running things, whether task {id} does what it ask
 
 1. Run first.
    - If the change adds or changes tests: undo the code part of the change (keep the tests) and
-     run those tests. Then put the code back. Each defect the task names needs a test that fails
-     with the code undone; one that still passes does not test the change. A test the task asks
-     for to cover behaviour that already worked (coverage) may pass either way: judge it on
-     whether it tests what its name says.
+     run those tests. Also undo each part the task asks for, in turn, run the tests again, and name
+     each part no test fails without. Then put the code back. Each defect the task names needs a
+     test that fails with the code undone; one that still passes does not test the change. A test
+     the task asks for to cover behaviour that already worked (coverage) may pass either way:
+     judge it on whether it tests what its name says.
    - Run what the task is about the way a user or caller would meet it.
    - Try the edge cases you can think of: empty or missing values, data or settings left from
      before the change, errors, other languages.
@@ -271,7 +276,8 @@ VERIFY_TASK = """Find out, by running things, whether task {id} does what it ask
 
 Report what you ran and what happened (the command and the lines that matter); then, for each
 thing the task asked, whether it holds, does not hold or is unsure, with that evidence; then
-anything the change does that the task did not ask for. End with exactly one of these lines:
+anything the change does that the task did not ask for and each part no test watches. End with
+exactly one of these lines:
 VERDICT: holds
 VERDICT: does not hold
 VERDICT: unsure
