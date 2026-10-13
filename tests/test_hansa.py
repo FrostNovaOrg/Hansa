@@ -160,6 +160,24 @@ exec(BG_SHAPES)
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, shlex, subprocess, sys, time
+if sys.argv[1:3] == ["agents", "--json"]:  # the live sessions. FAKE_AGENTS: a file the test writes, {pid: status} for
+    # sessions listed with that status, or what to print as it is; "exit N" ends so. FAKE_AGENTS_LOG: a line per call
+    if os.environ.get("FAKE_AGENTS_LOG"):
+        open(os.environ["FAKE_AGENTS_LOG"], "a").write("agents --json\n")
+    given = os.environ.get("FAKE_AGENTS", "")
+    said = open(given).read() if given and os.path.exists(given) else "{}"
+    if said.startswith("exit "):
+        sys.stderr.write("the sessions cannot be listed\n")
+        sys.exit(int(said.split()[1]))
+    try:
+        listed = json.loads(said)
+    except ValueError:
+        listed = None
+    if isinstance(listed, dict):
+        said = json.dumps([{"pid": int(p), "name": f"desk-{p}", "kind": "interactive", "status": s}
+                           for p, s in listed.items()])
+    sys.stdout.write(said)
+    sys.exit(0)
 if os.environ.get("CLAUDE_ENV_FILE"):  # the lane's env: the real one runs the file in front of each Bash command
     seen = subprocess.run(["/bin/sh", "-c", '. "$1" && exec "$2" -c "import json, os; print(json.dumps(dict(os.environ)))"',
                            "sh", os.environ["CLAUDE_ENV_FILE"], sys.executable], capture_output=True, text=True, check=True)
@@ -9898,7 +9916,8 @@ class DeskTest(unittest.TestCase):
                     namer.thread.join()
                 clock[0] += 1
         self.assertEqual([b - a for a, b in zip(looked, looked[1:])][:8],
-                         [16, 31, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each
+                         [60, 60, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each; the
+        # quick ones (15 s, 30 s) wait out the minute since the last lookup: at most one a minute, counting every run
         self.assertEqual(looked[0], 1005)
         n = len(looked)
         namer.look = lambda: looked.append(clock[0]) or "desk-87"
@@ -23724,6 +23743,430 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertIn("(timed out after 0.5 s)", status)
         self.assertNotIn(f"after {alert.TIMEOUT} s", status)
 
+    # -- the coordinator alert: what hansa posts cannot reach the coordinator's session (alert.py, notify.Watch) ------
+    WATCHED = {"pid": 4242, "start": ""}  # the stand-in session the followers of these rows post to
+
+    class Restarted(Exception):
+        """A follower ran itself again on new code; args[0]: what it carried over."""
+
+    class Named:
+        """A follower's own name lookups, left out: it keeps the name it was started with and those the Watch hears."""
+        def __init__(self, pid, name="", **_):
+            self.name = name
+
+        def tick(self):
+            return self.name
+
+        def heard(self, name):
+            self.name = name or self.name
+
+    def coordinator_desk(self, n, command=True, **minutes) -> Path:
+        """Row n's own desk, which becomes self.desk: the stand-in alert command set on the page (unless command is
+        False), and the coordinator alert's minutes as given. The stand-in claude lists the sessions FAKE_AGENTS names,
+        and FAKE_AGENTS_LOG gets a line each time it runs. Returns where the alert command writes what it is given."""
+        self.desk = init_desk(self.tmp / f"desk-{n}", str(self.repo), "a")
+        out = self.tmp / f"alerts-{n}.jsonl"
+        if command:
+            script = self.tmp / "alert.py"
+            script.write_text(self.ALERT_FAKE)
+            cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {shlex.quote(str(out))}"
+            self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+        if minutes:
+            self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(minutes)),
+                             {"ok": True, "problems": []})
+        os.environ.update(FAKE_AGENTS=str(self.tmp / f"agents-{n}.json"),
+                          FAKE_AGENTS_LOG=str(self.tmp / f"agents-{n}.log"))
+        return out
+
+    def agents_say(self, said) -> None:
+        """What the stand-in `claude agents --json` answers from now on: {pid: status}, or text printed as it is."""
+        Path(os.environ["FAKE_AGENTS"]).write_text(said if isinstance(said, str) else json.dumps(said))
+
+    def looked_up(self) -> int:
+        """How many times `claude agents --json` ran for this row."""
+        f = Path(os.environ["FAKE_AGENTS_LOG"])
+        return len(f.read_text().splitlines()) if f.exists() else 0
+
+    def coordinator_task_ended(self, title) -> str:
+        """A task that ended done and waits for review, as hansa serve leaves it and records it."""
+        tid = self.desk.new_task(title, lane="a")
+        self.desk.update(tid, state="done", finished=time.time())
+        self.desk.event("task_finished", task=tid, state="done")
+        return tid
+
+    def coordinator_alerts(self) -> list:
+        from hansa import alert
+        return [x["text"] for x in alert.queued(self.desk) if x["kind"] == "coordinator"]
+
+    def status_at(self, t) -> str:
+        """hansa status, as it reads at time t."""
+        from hansa import alert
+        with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: t)):
+            return self.hansa_out("status")
+
+    def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0, namer=False,
+                          also=()) -> tuple:
+        """Run a follower of the stand-in session WATCHED (named desk-4242) in this process, on a clock the test moves
+        `step` seconds each turn of its loop, from `start` (default: now) for `minutes`. at: {minute: callable}, each
+        called as that minute comes (what the stand-in claude says, a task that ends, a look at hansa status). Each
+        lookup it starts ends before its next turn. restart_at: the minute hansa's code changes on disk, after which it
+        runs itself again on it; resume: what one that did carried, to start from. namer: with its own name lookups
+        (else it keeps its name). also: the pids of more stand-in sessions (named desk-PID), each with a follower that
+        runs alongside, turn by turn on the same clock. Returns (what they printed: their log, the clock at the end,
+        what the first carried over a restart or None)."""
+        from hansa import alert
+        t0 = float(int(time.time())) if start is None else start  # whole seconds: each turn's time is exact
+        clock, todo, carried, broke = [t0], sorted((at or {}).items()), [None], []
+        fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0])
+
+        def turn():  # every follower is at the start of its loop's turn: the lookups they started end, the clock moves
+            for th in threading.enumerate():
+                if th.name == "hansa-look":
+                    th.join(30)
+            clock[0] += step
+            while todo and todo[0][0] <= (clock[0] - t0) / 60:
+                todo.pop(0)[1]()
+        sessions = [(dict(self.WATCHED), "desk-4242")] + [({"pid": p, "start": ""}, f"desk-{p}") for p in also]
+        together = threading.Barrier(len(sessions), action=turn)
+
+        def gone(sess):  # each turn of its loop starts here
+            together.wait(60)
+            return (clock[0] - t0) / 60 >= minutes
+
+        def restart(state):
+            raise self.Restarted(state)
+
+        def run(i, sess, name):
+            try:
+                notify.follow(self.desk, notify.key_of(sess), sess,
+                              str(self.tmp / f"inbox-{self.desk.root.name}{f'-{i}' if i else ''}.sock"), "nonce",
+                              name=name)
+            except self.Restarted as e:
+                if not i:
+                    carried[0] = e.args[0]
+            except BaseException as e:  # noqa: BLE001 - raised again below, in the test's own thread
+                broke.append(e)
+                together.abort()
+        log = io.StringIO()
+        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(alert, "time", fake), \
+                unittest.mock.patch.object(notify, "now", lambda: clock[0]), \
+                unittest.mock.patch.object(notify, "gone", gone), \
+                unittest.mock.patch.object(notify, "code_mark", lambda: "new" if restart_at is not None
+                                           and clock[0] - t0 >= restart_at * 60 else "old"), \
+                unittest.mock.patch.object(notify, "CODE_SETTLE", 0), \
+                unittest.mock.patch.object(notify, "_restart", restart), \
+                unittest.mock.patch.object(notify, "Namer", notify.Namer if namer else self.Named), \
+                unittest.mock.patch.object(notify.signal, "signal", lambda *_: None) if also else \
+                contextlib.nullcontext(), \
+                unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_POLL": "0", "HANSA_NOTIFY_GATHER": "0", **(
+                    {"HANSA_NOTIFY_RESUME": json.dumps(resume)} if resume else {})}), \
+                contextlib.redirect_stdout(log):
+            threads = [threading.Thread(target=run, args=(i, *x)) for i, x in enumerate(sessions) if i]
+            for th in threads:
+                th.start()
+            run(0, *sessions[0])
+            for th in threads:
+                th.join(600)
+        if broke:
+            raise broke[0]
+        return log.getvalue(), clock[0], carried[0]
+
+    def test_the_principal_is_alerted_when_the_coordinators_session_cannot_be_reached(self):
+        """The `coordinator` alert, one row per rule; each row runs in a desk of its own."""
+        from hansa import alert
+
+        def posted():
+            return self.posts(str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
+        waits = "the coordinator's session pid 4242 (desk-4242) has waited on its window"
+
+        def row1():
+            """no live follower; a task ended N1 minutes ago: one alert naming the count and the oldest"""
+            out = self.coordinator_desk(1)
+            t = time.time()
+            alert.unheard_check(self.desk, t)  # hansa serve's first look: what ends from now on counts
+            self.coordinator_task_ended("Add a")
+            self.coordinator_task_ended("Add b")
+            a = self.events("task_finished")[0]["ts"]  # when the oldest ended
+            alert.unheard_check(self.desk, a + 9 * 60)
+            self.assertEqual(self.coordinator_alerts(), [])
+            alert.unheard_check(self.desk, a + 10 * 60)
+            [text] = self.coordinator_alerts()
+            self.assertIn("the coordinator's session cannot be reached: no session hears from hansa (none has on this "
+                          "desk yet) · 2 thing(s) wait for the coordinator, the oldest for 10 min: t0001 done: Add a",
+                          text)
+            self.assertIn("no session hears from hansa, so the coordinator's session cannot be reached: 2 thing(s) wait "
+                          "for it, the oldest for 20 min (t0001 done: Add a", self.status_at(a + 20 * 60))
+            for later in (11, 30, 600):  # none more while still no session hears, whatever else ends
+                self.coordinator_task_ended(f"Add more at {later}")
+                alert.unheard_check(self.desk, a + later * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            self.assertEqual(alert.send_due(self.desk, gather=0)["ok"], True)
+            [sent] = self.alerted(out)
+            self.assertEqual(sent["kind"], "coordinator")
+            self.assertTrue(sent["text"].startswith("[hansa] desk desk-1: the coordinator's session cannot be reached"))
+
+        def row2():
+            """then a follower runs and ends, and another task ends and waits N1 minutes: a second alert"""
+            self.coordinator_desk(2)
+            p, _ = self.session()
+            sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+            me = {"key": notify.key_of(sess), "session": sess, "uid": os.getuid(), "name": "desk-87"}
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.coordinator_task_ended("Add a")
+            alert.unheard_check(self.desk, t + 11 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            notify.handle(self.desk, {"op": "start", "me": me})  # a follower runs: the case begins anew
+            alert.unheard_check(self.desk, t + 12 * 60)
+            notify.handle(self.desk, {"op": "end", "me": me, "done": notify.log_end(self.desk)})
+            p.kill()
+            p.wait()
+            self.coordinator_task_ended("Add b")
+            b = self.events("task_finished")[-1]["ts"]
+            alert.unheard_check(self.desk, b + 9 * 60)  # what ended before the follower ran was told: b only
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            alert.unheard_check(self.desk, b + 10 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 2)
+            self.assertIn(f"(the last was session pid {p.pid} (desk-87), until ", self.coordinator_alerts()[1])
+            self.assertIn(": its session ended) · 1 thing(s) wait for the coordinator, the oldest for 10 min: t0002 done: "
+                          "Add b", self.coordinator_alerts()[1])
+
+        def row3():
+            """a live follower, the same events: no alert of the first case"""
+            self.coordinator_desk(3)
+            p, _ = self.session()
+            self.hearing(p)
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.coordinator_task_ended("Add a")
+            self.coordinator_task_ended("Add b")
+            for later in (11, 60, 600):
+                alert.unheard_check(self.desk, t + later * 60)
+            self.assertEqual(self.coordinator_alerts(), [])
+            self.assertNotIn("no session hears from hansa", self.status_at(t + 60 * 60))
+
+        def row4():
+            """no alert command set: nothing runs, as for other kinds"""
+            out = self.coordinator_desk(4, command=False)
+            self.agents_say({"4242": "waiting"})
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.coordinator_task_ended("Add a")
+            alert.unheard_check(self.desk, t + 60 * 60)
+            self.follow_on_a_clock(5, at={0.5: lambda: self.coordinator_task_ended("Add b")})
+            self.assertEqual((alert.queued(self.desk), alert.send_due(self.desk, gather=0)), ([], None))
+            self.assertFalse(out.exists())
+            self.assertEqual(self.looked_up(), 0)  # with nothing to alert with, a follower looks nothing up
+            self.assertEqual(len(posted()), 1)  # the session is still posted to
+
+        def row5():
+            """status waiting for N2 minutes after a post: one alert; none more in that stretch"""
+            self.coordinator_desk(5, window_min=2, review_min=0)
+            self.agents_say({"4242": "waiting"})
+            shown = []
+            log = self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a"), 4: lambda: self.coordinator_task_ended("Add b"),
+                                               7: lambda: shown.append(self.hansa_out("status"))})[0]
+            alerts = self.coordinator_alerts()
+            self.assertEqual(len(alerts), 1, (alerts, log))
+            self.assertIn(f"{waits} (a permission dialog or a question) for 2 min, so it cannot act on what hansa "
+                          "posted to it: 1 thing(s) since ", alerts[0])
+            self.assertIn(", the oldest: t0001 done: Add a (no changes) · answer it in that session", alerts[0])
+            self.assertIn(f"{waits} for 6 min (a permission dialog or a question)", shown[0])
+            self.assertEqual(len(posted()), 2)
+            self.assertTrue(3 <= self.looked_up() <= 9, self.looked_up())  # at most once a minute, from the first post
+
+        def row6():
+            """status busy, idle, shell or a word hansa does not know, for as long: none"""
+            self.coordinator_desk(6, window_min=2, review_min=0)
+            for said in ("busy", "idle", "shell", "thinking"):
+                self.agents_say({"4242": said})
+                self.follow_on_a_clock(6, at={0.5: lambda: self.coordinator_task_ended(f"Add {said}")})
+            self.assertEqual(self.coordinator_alerts(), [])
+            self.assertGreaterEqual(self.looked_up(), 4 * 4)  # it looked, and saw no window waiting
+
+        def row7():
+            """claude agents --json fails or prints garbage: none, and the follower's log says so"""
+            self.coordinator_desk(7, window_min=2, review_min=3)
+            logs = []
+            for said in ("exit 3", "garbage, not JSON"):
+                self.agents_say(said)
+                logs.append(self.follow_on_a_clock(6, at={0.5: lambda: self.coordinator_task_ended("Add a")})[0])
+            self.assertEqual(self.coordinator_alerts(), [])
+            self.assertIn("could not look up the session's status for the principal's coordinator alert: claude agents "
+                          "--json ended with 3: the sessions cannot be listed", logs[0])
+            self.assertIn("could not look up the session's status for the principal's coordinator alert: claude agents "
+                          "--json printed what is not JSON: 'garbage, not JSON'", logs[1])
+
+        def row8():
+            """a task waits for review N3 minutes, the session idle at a check after that: one alert for it"""
+            self.coordinator_desk(8, window_min=0, review_min=3)
+            self.agents_say({"4242": "idle"})
+            shown = []
+            self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a"),
+                                          8: lambda: shown.append(self.hansa_out("status"))})
+            self.assertEqual(self.coordinator_alerts(), [
+                "the coordinator's session pid 4242 (desk-4242) is idle while t0001 has waited for review for 3 min "
+                "since hansa posted it there: Add a · hansa does not post it again"])
+            self.assertEqual(len(posted()), 1)  # hansa does not post it again
+            self.assertIn("waiting for review while the coordinator's session pid 4242 (desk-4242) is idle: t0001 for 7 "
+                          "min", shown[0])
+
+        def row9():
+            """the same, the session busy at each check: none until a check finds it idle"""
+            self.coordinator_desk(9, window_min=0, review_min=3)
+            self.agents_say({"4242": "busy"})
+            before = []
+            self.follow_on_a_clock(10, at={0.5: lambda: self.coordinator_task_ended("Add a"),
+                                           6.9: lambda: before.append(list(self.coordinator_alerts())),
+                                           7: lambda: self.agents_say({"4242": "idle"})})
+            self.assertEqual(before, [[]])
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            self.assertIn("is idle while t0001 has waited for review for 7 min", self.coordinator_alerts()[0])
+
+        def row10():
+            """the task merged or closed before N3: none, and nothing looked up for it"""
+            self.coordinator_desk(10, window_min=0, review_min=3)
+            self.agents_say({"4242": "idle"})
+            tids = []
+
+            def done_with():
+                self.desk.update(tids[0], state="merged", merged=time.time())
+                self.desk.update(tids[1], state="cancelled", error="closed without merging")
+            self.follow_on_a_clock(8, at={0.5: lambda: tids.extend([self.coordinator_task_ended("Add a"), self.coordinator_task_ended("Add b")]),
+                                          2: done_with})
+            self.assertEqual((self.coordinator_alerts(), self.looked_up()), ([], 0))
+
+        def row11():
+            """N1, N2 or N3 set to 0 on the page: that case never alerts"""
+            self.coordinator_desk(11, no_session_min=0)
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.coordinator_task_ended("Add a")
+            alert.unheard_check(self.desk, t + 2 * 86400)
+            self.assertNotIn("no session hears from hansa", self.status_at(t + 2 * 86400))
+            for off, said in (({"window_min": 0, "review_min": 3}, "waiting"),
+                              ({"window_min": 2, "review_min": 0}, "idle")):
+                self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(off)),
+                                 {"ok": True, "problems": []})
+                self.agents_say({"4242": said})
+                self.follow_on_a_clock(8, at={0.5: lambda: self.coordinator_task_ended(f"Add {said}")})
+            self.assertEqual(self.coordinator_alerts(), [])
+
+        def row12():
+            """the page saves -1, 1441 or 2.5: refused, saying why"""
+            self.coordinator_desk(12)
+            self.assertEqual(self.desk.settings()["coordinator_alert"],
+                             {"no_session_min": 10, "window_min": 10, "review_min": 120})
+            for k in ("no_session_min", "window_min", "review_min"):
+                for bad in (-1, 1441, 2.5):
+                    said = self.page_save(lambda s: s["coordinator_alert"].update({k: bad}))
+                    self.assertFalse(said["ok"], (k, bad))
+                    self.assertEqual([x for x in said["problems"] if x.startswith("coordinator_alert: ")], [
+                        f"coordinator_alert: {COORDINATOR_ALERT_WHAT[k]} ({k}) must be a whole number from 0 (off) to "
+                        f"1440, not {json.dumps(bad)}"])
+            edges = {"no_session_min": 0, "window_min": 1440, "review_min": 1}
+            self.assertEqual(self.page_save(lambda s: s.update(coordinator_alert=edges)), {"ok": True, "problems": []})
+            s = self.desk.settings()
+            s["coordinator_alert"] = {"no_session_min": 5, "window_min": 5, "review_min": 5}
+            self.assertEqual(self.desk.save_settings(s, by="coordinator"), [
+                "coordinator_alert is the principal's, set only on the web page (Settings); ask with hansa ask"])
+            self.assertEqual(self.desk.settings()["coordinator_alert"], edges)
+            ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+            for k in ("no_session_min", "window_min", "review_min"):
+                self.assertIn(f'bind(S.coordinator_alert, "{k}", "number")', ui)
+
+        def row13():
+            """a follower restarted on new code after a case-2 alert, the stretch still going: no second alert"""
+            self.coordinator_desk(13, window_min=2, review_min=0)
+            self.agents_say({"4242": "waiting"})
+            _, end, carried = self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a")}, restart_at=4)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            self.assertTrue(carried and carried["watch"]["told"], carried)
+            log = self.follow_on_a_clock(8, at={1: lambda: self.coordinator_task_ended("Add b"), 4: lambda: self.coordinator_task_ended("Add c")},
+                                         start=end, resume=carried)[0]
+            self.assertIn("restarted on hansa's new code", log)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            self.assertEqual(len(posted()), 3)
+
+        def row14():
+            """an idle round with nothing waiting: no claude agents run (and the idle-round test unchanged)"""
+            self.coordinator_desk(14, window_min=2, review_min=3)
+            self.agents_say({"4242": "waiting"})
+            d = Dispatcher(self.desk)
+            d.tick()
+            alert.unheard_check(self.desk)
+            log = self.follow_on_a_clock(10, at={5: d.tick, 6: lambda: alert.unheard_check(self.desk)})[0]
+            d.tick()
+            self.assertEqual((self.looked_up(), self.coordinator_alerts()), (0, []), log)
+
+        def row15():
+            """a follower starts named, with something waiting and status waiting: no two runs of claude agents --json
+            within 60 s, counting the name lookup (also while the Watch's runs fail, so that none names the session)"""
+            self.coordinator_desk(15, window_min=1, review_min=0)
+            self.agents_say({"4242": "waiting"})
+            ran, real = [], notify.agents_rows
+
+            def rows(timeout=15):
+                ran.append(notify.time.time())
+                return real(timeout)
+            with unittest.mock.patch.object(notify, "agents_rows", rows):
+                log = self.follow_on_a_clock(8, at={0.1: lambda: self.coordinator_task_ended("Add a"),
+                                                     1.5: lambda: self.agents_say("exit 3")}, namer=True)[0]
+            gaps = [b - a for a, b in zip(ran, ran[1:])]
+            self.assertTrue(ran and min(gaps) >= 60, (ran, log))
+            self.assertGreaterEqual(len(ran), 6)  # the Watch looks once a minute, and its runs name the session too
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+
+        def row16():
+            """a task that records no session waits N3 minutes; two live followers, both sessions idle: one alert in
+            all"""
+            self.coordinator_desk(16, window_min=0, review_min=3)
+            self.agents_say({"4242": "idle", "4343": "idle"})
+            log = self.follow_on_a_clock(8, at={0.5: lambda: self.coordinator_task_ended("Add a")}, also=[4343])[0]
+            self.assertEqual(len(self.coordinator_alerts()), 1, (self.coordinator_alerts(), log))
+            self.assertIn("is idle while t0001 has waited for review for 3 min", self.coordinator_alerts()[0])
+            self.assertIn("the principal's coordinator alert (review) went already: another follower alerted of this "
+                          "task", log)
+            self.assertEqual((len(posted()), len(self.posts(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
+
+        def row17():
+            """after a case-1 alert, a follower starts and ends within 5 s, between two looks; then something waits N1
+            minutes with none listening: a second alert"""
+            from hansa import desk as desk_module
+            self.coordinator_desk(17)
+            p, _ = self.session()
+            sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+            me = {"key": notify.key_of(sess), "session": sess, "uid": os.getuid(), "name": "desk-87"}
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.coordinator_task_ended("Add a")
+            alert.unheard_check(self.desk, t + 11 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            with unittest.mock.patch.object(notify, "now", lambda: t + 11 * 60 + 2):  # after one look, before the next
+                notify.handle(self.desk, {"op": "start", "me": me})
+            with unittest.mock.patch.object(notify, "now", lambda: t + 11 * 60 + 6):
+                notify.handle(self.desk, {"op": "end", "me": me, "done": notify.log_end(self.desk)})
+            p.kill()
+            p.wait()
+            with unittest.mock.patch.object(desk_module, "now", lambda: t + 12 * 60):
+                self.coordinator_task_ended("Add b")
+            alert.unheard_check(self.desk, t + 11 * 60 + 10)
+            alert.unheard_check(self.desk, t + 21 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+            alert.unheard_check(self.desk, t + 22 * 60)
+            self.assertEqual(len(self.coordinator_alerts()), 2)
+            self.assertIn("· 1 thing(s) wait for the coordinator, the oldest for 10 min: t0002 done: Add b",
+                          self.coordinator_alerts()[1])
+
+        from hansa.desk import COORDINATOR_ALERT_WHAT
+        rows = [row1, row2, row3, row4, row5, row6, row7, row8, row9, row10, row11, row12, row13, row14, row15, row16,
+                row17]
+        for n, row in enumerate(rows, 1):
+            with self.subTest(row=n, rule=row.__doc__):
+                row()
+        self.assertIn("coordinator", alert.KINDS)
+        self.assertIn("`coordinator`", self.hansa_out("help", "alerts"))
+
     # -- small fixes from earlier verifications --
 
     def page_post(self, path: str, body: dict) -> dict:
@@ -23964,7 +24407,8 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
                     unittest.mock.patch.object(notify, "_deliver", deliver), \
                     unittest.mock.patch.object(notify, "_say", lambda *a: None), \
                     unittest.mock.patch.object(notify, "gone", lambda sess: not feeds and restarts), \
-                    unittest.mock.patch.object(notify, "Namer", lambda *a: type("N", (), {"tick": lambda self: ""})()), \
+                    unittest.mock.patch.object(notify, "Namer",
+                                               lambda *a, **k: type("N", (), {"tick": lambda self: ""})()), \
                     unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_GATHER": gather, "HANSA_NOTIFY_POLL": "0"}):
                 try:
                     notify.follow(self.desk, "k1", {"pid": os.getpid()}, "sock", "nonce")

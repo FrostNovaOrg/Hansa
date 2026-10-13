@@ -263,14 +263,16 @@ for the principal's yes (also when a ticked target's tick no longer holds and
 its release goes back to waiting), when a release ends (done, failed, void or
 forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), when a
 lane's runs cannot start because their sandbox cannot (once for each lane and reason), when free space goes under the
-floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), and when
-its own rounds have stopped for 15 minutes; not for ordinary task events,
+floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), when
+its own rounds have stopped for 15 minutes, and when what hansa posts to the coordinator's session cannot reach it
+(below); not for ordinary task events,
 which go to the coordinator. It runs as the desk's account, outside the
 sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
 coordinator, workers, verifiers and design sessions; removed when the command ends, and what a stopped or killed
 `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
-`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `test`; comma-separated when several go out together)
+`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `test`; comma-separated when several go
+out together)
 and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
 characters; a release's text names its lane and target. A phone shows the
 first hundred characters or so, so the alert for a release that waits with a
@@ -295,3 +297,30 @@ code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept); there is no retry: the next alert tries again. The page
 has a button that sends a test alert; no coordinator command sends one.
 `hansa explain` says whether a command is set and what it is.
+
+The `coordinator` alert says that what hansa posts to the coordinator's session (see [hearing from
+hansa](desk.md#hearing-from-hansa)) cannot reach it. Its text names the desk, the session (its pid, and its name
+when known), the case, and what waits: how many things and the oldest, or the task. It has three cases, each after
+the minutes the principal sets on the page (Settings, Alerts: whole minutes from 0 to 1440, 0 turns that case off; no
+`hansa` command sets them):
+
+- **No session listens** (10 minutes by default): something hansa would post to the coordinator has waited that long
+  in the event log, and no session hears from hansa (its session ended, or notifications were turned off).
+  `hansa serve` sends it once, and again only after a follower has run since, live when it looks or started and
+  ended between two of its looks, and the case begins anew.
+  A session that starts hearing still first gets what was missed, as before.
+- **The session waits on its window** (10 minutes): `claude agents --json` lists the session as `waiting` (a
+  permission dialog or a question is open) that long after something was posted to it. Once per stretch of waiting.
+  Only `waiting` counts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing, and a
+  lookup that fails is written in the follower's log.
+- **Posted work sits untouched** (120 minutes): a task hansa posted to the session has waited that long for review
+  (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
+  however many followers watch it (a task that records no session goes to each); its next round may alert again.
+  hansa does not post it again.
+
+The session's follower looks the last two up, at most once a minute counting its lookup of the session's name (one
+run of `claude agents --json` serves both), and only while one could hold: something was
+posted in the minutes of the second case or waits to be posted, or a task it posted has waited the minutes of the
+third. It looks nothing up in an idle round with nothing waiting, nor while no alert command is set, and what it has
+alerted stays alerted when it restarts on new code. `hansa status` shows a line while a case holds, such as
+`the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`.

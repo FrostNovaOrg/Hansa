@@ -546,6 +546,7 @@ def status(desk: Desk) -> dict:
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
         "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
+        "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
         "mod_line": plugin.status_line(mod) if mod else "",
@@ -646,6 +647,7 @@ def status_text(st: dict) -> str:
     out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
+    out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
         if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
