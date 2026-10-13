@@ -3262,7 +3262,7 @@ class DeskTest(unittest.TestCase):
         return tid
 
     def test_forbidden_patterns_and_lane_exceptions_cases(self):
-        from hansa import release
+        from hansa import release, run
         pattern = r"re:\blane [a-k]\b"
         product = "Claude Code"
 
@@ -3832,6 +3832,7 @@ class DeskTest(unittest.TestCase):
                 said = c.refused("merge", tid)
                 c.assertLess(time.monotonic() - start, 1.2)
             assert_pattern_limit(c, said, entry, "notes.txt")
+            c.assertNotIn("holds words the principal keeps from going out", said)
             c.assertEqual(c.git_out("rev-parse", "main"), tip)
             c.assertEqual(c.desk.meta(tid)["state"], "done")
             c.assertEqual(signal.getsignal(signal.SIGALRM), handler)
@@ -3842,6 +3843,7 @@ class DeskTest(unittest.TestCase):
             with small_pattern_limits():
                 said = c.refused("release", "a")
             assert_pattern_limit(c, said, entry, "release.txt")
+            c.assertNotIn("holds words the principal keeps from going out", said)
             # Put the long line in the command, which is read even before outgoing commits.
             with small_pattern_limits():
                 warning = c.hansa("lane", "target", "a", "default", "7" * 1000)
@@ -3891,6 +3893,14 @@ class DeskTest(unittest.TestCase):
             tid = finished(c, "a", "\n".join(f"slow-{i}" for i in range(100)), "many.txt")
             c.forbid(entry)
             real_matches, searched, clock = release.matches, [], [0.0]
+            real_check, limits = release.PatternScan._check, []
+
+            def record_limit(scan):
+                try:
+                    return real_check(scan)
+                except release.PatternLimit as e:
+                    limits.append(e.hit)
+                    raise
 
             def slow_matches(matcher, line, folded):
                 if line.startswith("slow-"):
@@ -3901,13 +3911,15 @@ class DeskTest(unittest.TestCase):
 
             scan_clock = types.SimpleNamespace(monotonic=lambda: clock[0])
             with small_pattern_limits(), unittest.mock.patch.object(release, "matches", slow_matches), \
-                    unittest.mock.patch.object(release, "time", scan_clock):
+                    unittest.mock.patch.object(release, "time", scan_clock), \
+                    unittest.mock.patch.object(release.PatternScan, "_check", record_limit):
                 start = time.monotonic()
                 said = c.refused("merge", tid)
                 c.assertLess(time.monotonic() - start, 2.0)
             c.assertIn(entry, said)
             c.assertIn("many.txt: " + searched[-1], said)
             c.assertIn("over 1 s in this scan, so the rest was not checked", said)
+            c.assertEqual([h["code"] for h in limits], ["scan"])
             c.assertNotIn("the line was not checked", said)
             c.assertGreater(len(searched), 1)
             c.assertLess(len(searched), 100)
@@ -3935,6 +3947,7 @@ class DeskTest(unittest.TestCase):
             for key, where in (("change", "message"), ("title", "title")):
                 c.assertEqual(got[key][0]["word"], entry)
                 c.assertEqual(got[key][0]["where"], where)
+                c.assertEqual(got[key][0]["code"], "thread")
                 c.assertIn("off the main thread", got[key][0]["reason"])
                 c.assertIn("patterns were not run", got[key][0]["reason"])
             c.assertIn(entry, got["command"][0])
@@ -4013,7 +4026,7 @@ class DeskTest(unittest.TestCase):
             c.assertGreater(clock[0], 1.0)
             c.assertLess(len(searched) * 0.001, 1.0)
 
-        def pattern_window_merge(c):
+        def pattern_long_merge(c):
             entry = r"re:\w+@\w+"
             c.forbid(entry)
             tid = finished(c, "a", "a" * 100000)
@@ -4022,73 +4035,133 @@ class DeskTest(unittest.TestCase):
                 start = time.monotonic()
                 said = c.refused("merge", tid)
                 elapsed = time.monotonic() - start
-            c.assertLess(elapsed, 0.6)
-            assert_pattern_limit(c, said, entry, "notes.txt")
+            c.assertLess(elapsed, 0.4)
+            c.assertIn(entry, said)
+            c.assertIn("notes.txt", said)
+            c.assertIn("longer than 10,000 characters, so patterns could not check it", said)
+            c.assertIn("Shorten or split the line", said)
             c.assertEqual(c.git_out("rev-parse", "main"), tip)
 
-        def pattern_window_cut(c):
-            # The spaces stop at the first window's cut, not at the real end of the line.
-            line = "a" * 3970 + " " * 30 + "a" * 10000
-            for entry, text in ((r"re:\s+$", line), (r"re:\s+(?![\sa])", line),
-                                (r"re:a{30}\b", "x" * 3970 + "a" * 30 + "b" * 10000)):
-                with c.subTest(entry=entry), small_pattern_limits():
-                    hits, _ = release.words_in(c.repo, ["HEAD", "^HEAD", "--"], [entry], [("message", text)])
-                    c.assertEqual(hits, [])
-            # Rejecting a cut match must continue within the same window, from its start + 1.
-            line = "a" * 100 + "y" + "a" * 13900
-            entry = r"re:^.{1,4000}$|y"
-            with small_pattern_limits():
-                c.assertEqual(release.title_hits(line, [entry]), [entry])
+        def pattern_length_boundary(c):
+            entry, literal = r"re:never-\d+x", "Falcon"
+            lines = ["a" * (length - len(literal)) + literal for length in (10000, 10001)]
+            c.forbid(entry)
+            real_matches, searched = release.matches, []
 
-        def pattern_window_overlap(c):
-            entry = r"re:x.{0,50}y"
-            line = "a" * 3980 + "x" + "a" * 40 + "y" + "a" * 10000
-            with small_pattern_limits():
-                hits, _ = release.words_in(c.repo, ["HEAD", "--"], [entry], [("message", line)])
-            c.assertEqual([(h["word"], h["where"]) for h in hits], [(entry, "message")])
-            # pos/endpos preserve the real preceding character: slices would invent these hits.
-            for entry in (r"re:^x", r"re:\bx", r"re:(?<!a)x"):
+            def record(matcher, line, folded):
+                if isinstance(matcher, re.Pattern):
+                    searched.append(line)
+                return real_matches(matcher, line, folded)
+
+            with small_pattern_limits(), unittest.mock.patch.object(release, "matches", record):
+                tid = finished(c, "a", lines[0], "boundary.txt")
+                c.assertIn("merged into main", c.hansa("merge", tid))
+                c.assertIn(lines[0], searched)
+                tid = finished(c, "a", lines[1], "boundary.txt")
+                said = c.refused("merge", tid)
+                c.assertIn("longer than 10,000", said)
+                c.assertNotIn(lines[1], searched)
+                # Literal checks reach the end of both lines, regardless of entry order.
+                for words in ([entry, literal], [literal, entry], [literal]):
+                    for line in lines:
+                        hits, _ = release.words_in(c.repo, ["HEAD", "^HEAD", "--"], words, [("message", line)])
+                        c.assertIn(literal, [h["word"] for h in hits if h.get("kind") != "pattern_limit"])
+                        limits = [h for h in hits if h.get("kind") == "pattern_limit"]
+                        c.assertEqual([h["code"] for h in limits], ["long"] if len(line) > 10000 and entry in words else [])
+            # The same cap applies before title and command patterns, including a seen title entry.
+            c.assertEqual(release.title_hits("never-1x\n" + lines[1], [entry], detailed=True)[-1]["code"], "long")
+            c.assertIn("longer than 10,000", release.command_hits(
+                {"targets": {"": {"command": lines[1]}}}, [entry])[0][2])
+
+        def pattern_plain_search(c):
+            cases = [(r"re:x.{0,1500}\b", "a" * 2600 + "x a" + "a" * 3000, True),
+                     (r"re:a.{0,2000}$|ab", "c" * 2500 + "ab" + "c" * 3000, True),
+                     (r"re:a(?!.{0,5}b)", "c" * 3997 + "a" + "cc" + "b" + "c" * 3000, False),
+                     (r"re:a(?!\w*b)", "c" * 3990 + "a" + "c" * 20 + "b" + "c" * 3000, False)]
+            for entry, line, expected in cases:
                 with c.subTest(entry=entry), small_pattern_limits():
-                    c.assertEqual(release.title_hits("a" * 3000 + "x" + "a" * 10000, [entry]), [])
-            entry = r"re:(?<=a)x"
-            with small_pattern_limits():
-                c.assertEqual(release.title_hits("a" * 3000 + "x" + "a" * 10000, [entry]), [entry])
+                    matcher = release.word_matchers([entry])[0][1]
+                    c.assertLess(len(line), 10000)
+                    c.assertEqual(bool(matcher.search(line)), expected)
+                    c.assertEqual(release.matches(matcher, line, line.casefold()), expected)
+                    c.assertEqual(release.title_hits(line, [entry]), [entry] if expected else [])
 
         def pattern_limit_principal(c):
-            entry = r"re:\d+\d+\d+x"
-            c.forbid(entry)
-            c.commit_in_repo("unchecked.txt", "7" * 2000)
+            entry, literal = r"re:\d+\d+\d+x", "Falcon"
+            c.forbid(entry, literal)
+            c.commit_in_repo("unchecked.txt", "Falcon\n" + "7" * 2000)
             c.with_release("true")
             with small_pattern_limits():
-                c.refused("release", "a")
+                coordinator = c.refused("release", "a")
+
+            def grouped(text, zh=False, code="line", where="unchecked.txt"):
+                ordinary = "查到的禁发字眼:" if zh else "Words found that must not go out:"
+                limit = "这一行无法检查:" if zh else "The line could not be checked:"
+                c.assertEqual(text.count(ordinary), 1)
+                c.assertEqual(text.count(limit), 1)
+                words, limits = text.split(ordinary, 1)[1].split(limit, 1)
+                c.assertIn(literal, words)
+                c.assertNotIn(entry, words)
+                c.assertIn(entry, limits)
+                c.assertIn(where, limits)
+                reasons = {"line": ("over 0.2 s here, so the line was not checked", "这里耗时超过 0.2 秒，因此这一行未检查"),
+                           "scan": ("over 1 s in this scan, so the rest was not checked", "总耗时超过 1 秒，因此剩余内容未检查"),
+                           "long": ("longer than 10,000 characters, so patterns could not check it", "超过 10,000 字符，因此正则无法检查它"),
+                           "thread": ("off the main thread, so the line was not checked", "不在主线程上，正则未运行，因此这一行未检查")}
+                c.assertIn(reasons[code][int(zh)], limits)
+                if zh:
+                    c.assertNotIn("so the line was not checked", limits)
+
+            grouped(coordinator)
             said = c.hansa("status")
-            c.assertIn("the line could not be checked", said)
+            c.assertIn("The line could not be checked", said)
             c.assertNotIn("what goes out holds words", said)
             assert_pattern_limit(c, said, entry, "unchecked.txt")
             r = release.get(c.desk, 1)
+            c.assertEqual(r["hits"][-1]["code"], "line")
+            grouped(run.words_text("t0001", r["hits"]))
+            with small_pattern_limits():
+                grouped(c.refused("add", "Work", "--lane", "a", "--title", "Falcon\n" + "7" * 2000), where="title")
+            said = c.refused("add", "Work", "--lane", "a", "--title", literal)
+            c.assertIn("Words found that must not go out:", said)
+            c.assertNotIn("The line could not be checked:", said)
             for zh in (False, True):
-                text = release.state_text(c.desk, r, zh=zh)
-                c.assertIn("这一行无法检查" if zh else "the line could not be checked", text)
-                assert_pattern_limit(c, text, entry, "unchecked.txt")
+                grouped(release.state_text(c.desk, r, zh=zh), zh)
+                for limit_only in (False, True):
+                    single = {**r, "hits": [h for h in r["hits"] if (h.get("kind") == "pattern_limit") == limit_only]}
+                    text = release.state_text(c.desk, single, zh=zh)
+                    c.assertIn(("这一行无法检查:" if zh else "The line could not be checked:") if limit_only else
+                               ("查到的禁发字眼:" if zh else "Words found that must not go out:"), text)
+                    c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if limit_only else
+                                  ("这一行无法检查:" if zh else "The line could not be checked:"), text)
             if not shutil.which("node"):
                 c.skipTest("needs node to render the release's hits")
             st = json.loads(c.hansa("status", "--json"))
-            # Test the page's hit list independently of the already formatted state_text.
-            for row in st["releases"]:
-                row["what"] = row["what_zh"] = ""
+            # The page shows the state summary once, and renders its own groups and translations.
             harness = c.tmp / "page.js"
             harness.write_text(c.PAGE_HARNESS)
             page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-            for language in ("en", "zh"):
-                result = subprocess.run(["node", str(harness), str(page), "release-hits", language],
-                                        input=json.dumps({"/api/status": st}),
-                                        capture_output=True, text=True, timeout=60)
-                c.assertEqual(result.returncode, 0, result.stderr)
-                text = json.loads(result.stdout)
-                c.assertIn("这一行无法检查" if language == "zh" else "The line could not be checked", text)
-                c.assertIn(entry, text)
-                c.assertIn("unchecked.txt", text)
-                c.assertIn("over 0.2 s here, so the line was not checked", text)
+            for code, reason, seconds in (("line", r["hits"][-1]["reason"], 0.2),
+                                          ("scan", "the patterns took over 1 s in this scan, so the rest was not checked", 1),
+                                          ("long", "the line is longer than 10,000 characters, so patterns could not check it", None),
+                                          ("thread", "patterns were not run: this scan is off the main thread, so the line was not checked", None)):
+                hits = [r["hits"][0], {**r["hits"][-1], "code": code, "reason": reason, "seconds": seconds}]
+                st["releases"][0]["hits"] = hits
+                for language in ("en", "zh"):
+                    zh = language == "zh"
+                    grouped(release.state_text(c.desk, {**r, "hits": hits}, zh=zh), zh, code)
+                    for selected in (hits, hits[:1], hits[1:]):
+                        st["releases"][0]["hits"] = selected
+                        result = subprocess.run(["node", str(harness), str(page), "release-hits", language],
+                                                input=json.dumps({"/api/status": st}),
+                                                capture_output=True, text=True, timeout=60)
+                        c.assertEqual(result.returncode, 0, result.stderr)
+                        text = json.loads(result.stdout)
+                        if len(selected) == 2:
+                            grouped(text, zh, code)
+                        else:
+                            c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if selected == hits[1:] else
+                                          ("这一行无法检查:" if zh else "The line could not be checked:"), text)
 
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
@@ -4100,7 +4173,7 @@ class DeskTest(unittest.TestCase):
                  (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry),
                  (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
                  (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading),
-                 (33, pattern_window_merge), (34, pattern_window_cut), (35, pattern_window_overlap),
+                 (33, pattern_long_merge), (34, pattern_length_boundary), (35, pattern_plain_search),
                  (36, pattern_limit_principal)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):

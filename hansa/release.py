@@ -71,6 +71,7 @@ SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the ti
 PATTERN_LINE_LIMIT = 2.0  # seconds on one line, across its patterns; not a setting
 PATTERN_SCAN_LIMIT = 60.0  # seconds matching patterns in one scan; end a stall, not pace ordinary releases
 PATTERN_TIMER_INTERVAL = 0.25
+PATTERN_LINE_LENGTH = 10000  # bound re loops that do not check signals on Python 3.9
 _UNRUN_PATTERN = object()
 TAIL = 15
 STOP_GRACE = 30  # seconds between the TERM a stopped release's command gets and the KILL to what still runs
@@ -143,23 +144,7 @@ def word_matchers(words: list) -> list:
 def matches(matcher, line: str, folded: str) -> bool:
     if not isinstance(matcher, re.Pattern):
         return matcher in folded
-    if len(line) <= 4000:
-        return bool(matcher.search(line))
-    # Some re loops on Python 3.9 never check signals. Bound each call so the alarm can run
-    # between windows; the overlap preserves real matches of up to 1000 characters.
-    for start in range(0, len(line), 3000):
-        end = min(start + 4000, len(line))
-        pos = start
-        while pos <= end:
-            found = matcher.search(line, pos, end)
-            if found is None:
-                break
-            if found.end() != end or end == len(line):
-                return True
-            # The cut can invent a match through $, a boundary or a lookahead. Search past
-            # this match's start, keeping the real line for ^, boundaries and lookbehind.
-            pos = found.start() + 1
-    return False
+    return bool(matcher.search(line))
 
 
 class PatternLimit(Exception):
@@ -171,7 +156,6 @@ class PatternLimit(Exception):
 class PatternScan:
     """Only a running search may raise from SIGALRM; git reads and desk writes are never interrupted.
 
-    Windows bound re loops that do not check signals; backtracking searches check them internally.
     Keep the timer for the whole scan and restore its caller's signal state on every exit.
     Off the main thread, refuse without running patterns.
     """
@@ -199,8 +183,16 @@ class PatternScan:
             signal.signal(signal.SIGALRM, self.handler)
             signal.setitimer(signal.ITIMER_REAL, *self.timer)
 
-    def line(self):
+    def line(self, line, sha="", where=""):
         self.line_started = time.monotonic()
+        self.too_long = len(line) > PATTERN_LINE_LENGTH
+        if self.too_long:
+            word = next((w for w, m in self.matchers if isinstance(m, re.Pattern) or m is _UNRUN_PATTERN), None)
+            if word:
+                self.hits.append({"word": word, "commit": sha or "", "where": where,
+                                  "line": line.strip()[:300], "kind": "pattern_limit", "code": "long",
+                                  "reason": f"the line is longer than {PATTERN_LINE_LENGTH:,} characters, "
+                                            "so patterns could not check it"})
 
     def _alarm(self, *_):
         if self.running:
@@ -209,18 +201,24 @@ class PatternScan:
     def _check(self):
         elapsed = time.monotonic()
         if not self.main_thread:
+            code, seconds = "thread", None
             reason = "patterns were not run: this scan is off the main thread, so the line was not checked"
         elif self.matching_time + (elapsed - self.search_started) >= PATTERN_SCAN_LIMIT:
+            code, seconds = "scan", PATTERN_SCAN_LIMIT
             reason = f"the patterns took over {PATTERN_SCAN_LIMIT:g} s in this scan, so the rest was not checked"
         elif elapsed - self.line_started >= PATTERN_LINE_LIMIT:
+            code, seconds = "line", PATTERN_LINE_LIMIT
             reason = f"the pattern took over {PATTERN_LINE_LIMIT:g} s here, so the line was not checked"
         else:
             return
-        raise PatternLimit({**self.place, "kind": "pattern_limit", "reason": reason})
+        raise PatternLimit({**self.place, "kind": "pattern_limit", "code": code,
+                            "seconds": seconds, "reason": reason})
 
     def search(self, word, matcher, line, folded, sha="", where=""):
         if not isinstance(matcher, re.Pattern) and matcher is not _UNRUN_PATTERN:
             return matches(matcher, line, folded)
+        if self.too_long:
+            return False
         self.place = {"word": word, "commit": sha or "", "where": where, "line": line.strip()[:300]}
         self.search_started = time.monotonic()
         try:
@@ -468,7 +466,7 @@ def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
     mailboxes_seen = set()
 
     def look(sha, where, line):
-        scan.line()
+        scan.line(line, sha, where)
         low = line.casefold()
         for w, matcher in matchers:
             if scan.search(w, matcher, line, low, sha, where) and (where, line) not in seen:
@@ -527,12 +525,15 @@ def command_hits(ln: dict, words: list, only: str | None = None) -> list:
                 if only is not None and target != only:
                     continue
                 for line in str(t.get("command") or "").splitlines():
-                    scan.line()
+                    before = len(scan.hits)
+                    scan.line(line, where="release command")
                     low = line.casefold()
                     w = next((w for w, matcher in scan.matchers
                               if scan.search(w, matcher, line, low, where="release command")), None)
                     if w:
                         out.append((target, w, line.strip()[:300]))
+                    for hit in scan.hits[before:]:
+                        out.append((target, hit["word"], hit["line"] + "; " + pattern_limit_text(hit)))
         except PatternLimit as e:
             out.append((target, e.hit["word"], e.hit["line"] + "; " + pattern_limit_text(e.hit)))
     return out
@@ -547,12 +548,26 @@ def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
           "command, or ask the principal about the word")
 
 
-def hits_text(hits: list) -> str:
-    return "\n".join(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")"
-                     + ("; " + pattern_limit_text(h) if h.get("kind") == "pattern_limit" else "") for h in hits)
+def hits_text(hits: list, zh: bool = False) -> str:
+    out = []
+    for limit, heading in ((False, "查到的禁发字眼" if zh else "Words found that must not go out"),
+                           (True, "这一行无法检查" if zh else "The line could not be checked")):
+        group = [h for h in hits if (h.get("kind") == "pattern_limit") == limit]
+        if group:
+            out.append(heading + ":")
+            out.extend(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")"
+                       + ("; " + pattern_limit_text(h, zh) if limit else "") for h in group)
+    return "\n".join(out)
 
 
-def pattern_limit_text(hit):
+def pattern_limit_text(hit, zh: bool = False):
+    if zh:
+        seconds = hit.get("seconds") or (PATTERN_SCAN_LIMIT if hit.get("code") == "scan" else PATTERN_LINE_LIMIT)
+        reason = {"long": "这一行超过 10,000 字符，因此正则无法检查它",
+                  "line": f"正则在这里耗时超过 {seconds:g} 秒，因此这一行未检查",
+                  "scan": f"本次检查中正则的总耗时超过 {seconds:g} 秒，因此剩余内容未检查",
+                  "thread": "本次检查不在主线程上，正则未运行，因此这一行未检查"}.get(hit.get("code"), hit["reason"])
+        return reason + "。请缩短或拆分这一行，或请负责人修改正则（hansa ask）"
     return (hit["reason"] + ". Shorten or split the line, or ask the principal to change the pattern (hansa ask)")
 
 
@@ -561,7 +576,7 @@ def mailbox_refusal(hits: list, tid: str = "") -> str:
     if not any(h.get("kind") == "mailbox" for h in hits):
         return ""
     reason = "a mailbox does not use a reserved example domain and is not on the principal's allowlist"
-    if any(h.get("kind") != "mailbox" for h in hits):
+    if any(h.get("kind") not in ("mailbox", "pattern_limit") for h in hits):
         reason += "; the change also holds words the principal keeps from going out"
     retry = (f'Replace it with an example address in hansa retry {tid} --fresh "..." '
              f"(a retry that continues from {tid} keeps its commits)" if tid else
@@ -575,11 +590,12 @@ def mailbox_refusal(hits: list, tid: str = "") -> str:
 def title_hits(title: str, words: list, detailed: bool = False) -> list:
     """The forbidden words in a task's title, which hansa puts in its commit message and its merge's: each
     word once, any case."""
-    hits, seen = [], set()
+    seen = set()
     with PatternScan(words) as scan:
+        hits = scan.hits
         try:
             for line in (title or "").splitlines():
-                scan.line()
+                scan.line(line, where="title")
                 low = line.casefold()
                 for w, matcher in scan.matchers:
                     if w not in seen and scan.search(w, matcher, line, low, where="title"):
@@ -1514,15 +1530,16 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     if st == "forbidden":
         n = len(r.get("hits", []))
         if any(h.get("kind") == "pattern_limit" for h in r.get("hits", [])):
-            return (("被拒绝：这一行无法检查" if zh else "refused: the line could not be checked")
-                    + "\n" + hits_text(r["hits"]))
+            return ("被拒绝：" if zh else "refused:") + "\n" + hits_text(r["hits"], zh)
         mailbox = mailbox_refusal(r.get("hits", []))
         if mailbox:
             if zh:
-                return f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）"
-            return "refused: " + mailbox.splitlines()[0]
-        return (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
-                f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")
+                return (f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）\n"
+                        + hits_text(r["hits"], zh))
+            return "refused: " + mailbox.splitlines()[0] + "\n" + hits_text(r["hits"])
+        summary = (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
+                   f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")
+        return summary + "\n" + hits_text(r["hits"], zh)
     return st or "?"
 
 
@@ -1572,8 +1589,6 @@ def list_text(desk: Desk) -> str:
             out.append(f"      {checked_text(r)}")
             if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
                 out += [f"      | {x}" for x in r["tail"][-5:]]
-            if r.get("state") == "forbidden":
-                out += ["    " + x for x in hits_text(r.get("hits", [])).splitlines()]
     out.append("the whole output of a release: .hansa/releases/<id>.log (the principal's; hansa release shows its last lines)")
     return "\n".join(out)
 

@@ -415,6 +415,22 @@ function releaseStop(r) {
     h("button", {title:T.releaseStopNote, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
       .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
 }
+function patternLimitReason(x) {
+  if (!ZH) return x.reason;
+  const seconds = x.seconds || (x.code === "scan" ? 60 : 2);
+  return ({long:"这一行超过 10,000 字符，因此正则无法检查它",
+    line:`正则在这里耗时超过 ${seconds} 秒，因此这一行未检查`,
+    scan:`本次检查中正则的总耗时超过 ${seconds} 秒，因此剩余内容未检查`,
+    thread:"本次检查不在主线程上，正则未运行，因此这一行未检查"})[x.code] || x.reason;
+}
+function releaseHits(hits) {
+  return [false, true].map(limit => {
+    const group = (hits || []).filter(x => (x.kind === "pattern_limit") === limit);
+    return group.length ? h("div", {class:"mono"}, (limit ? T.releaseUnchecked : T.releaseHits) + ":",
+      group.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line} ("${x.word}")`,
+        limit ? `; ${patternLimitReason(x)}` : null))) : null;
+  });
+}
 function releasesSection(rel) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
   if (!rel.length) return null;
@@ -422,11 +438,9 @@ function releasesSection(rel) {
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
       "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
-        (ZH && r.what_zh) || r.what, r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
-        (r.hits || []).length ? h("div", {class:"mono"},
-          (r.hits.some(x => x.kind === "pattern_limit") ? T.releaseUnchecked : T.releaseHits) + ":",
-          r.hits.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line}`,
-            x.kind === "pattern_limit" ? ` ("${x.word}"); ${x.reason}` : null))) : null,
+        r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
+        r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
+        releaseHits(r.hits),
         (r.tail || []).length && ["failed", "stopped"].includes(r.state) ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null,
         releaseStop(r))]))] : null);
 }
