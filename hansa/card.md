@@ -182,6 +182,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   or the outgoing commits, refuses it with the places found: take them out of the history (a task) or
   of the command, or ask the principal. The same words refuse a title at `hansa add` and a task at
   `hansa merge`. More: `hansa help forbidden-words`.
+  Entries may be `re:PATTERN` Python patterns; the principal can except entries by lane on the page; `hansa explain lane L` gives only the count, and the mailbox rule still applies.
 - It waits for the principal's yes on the page, unless they ticked that target to go out without
   asking. While the desk is paused only a release they said yes to runs.
 - They answer on the page, or in the conversation with the one-time code their alert carries (6

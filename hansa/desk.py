@@ -72,6 +72,7 @@ MAX_READ = 20
 RULE_BREAKERS = "()[]{}*?\\"
 MAX_DENY = 50
 MAX_WORDS = 200  # the words no release may send out (release_forbidden)
+MAX_MAILBOX_ALLOW = 500
 # The project's own rules, the coordinator's and the principal's to keep: the card imports it (@notes/PROJECT.md),
 # so Claude Code loads it with the card at every start, after /clear and after compaction. hansa makes it once, at
 # hansa init, and rewrites it only when asked (hansa notes archive). A missing one loads nothing and stops nothing.
@@ -83,7 +84,8 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_test_mailboxes", "alert", "coordinator_compact")
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
+                  "alert", "coordinator_compact")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -283,8 +285,10 @@ def default_settings() -> dict:
         # files they name, their messages or identities refuses the release; one in a task's title refuses hansa
         # add, and one in what a task's merge would bring in refuses the merge. The principal's, on the page.
         "release_forbidden": [],
-        # Require reserved example domains for mailboxes in added test lines. The principal's, on the page.
-        "release_test_mailboxes": False,
+        "release_forbidden_except": [],
+        # Every added line's mailboxes need example domains or the allowlist. The principal's, on the page.
+        "release_mailboxes": False,
+        "release_mailbox_allow": [],
         # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
         # it. The principal's, on the page; empty: no alerts.
         "alert": {"command": ""},
@@ -454,17 +458,60 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def validate(s: dict, root=None, page: bool = False, before: dict | None = None) -> list:
+def mailbox_settings(s: dict) -> str:
+    """Read the old spelling, returning its effective key for validation; save only the new spelling."""
+    key = ("release_test_mailboxes" if "release_test_mailboxes" in s and "release_mailboxes" not in s
+           else "release_mailboxes")
+    if "release_test_mailboxes" in s:
+        s.setdefault("release_mailboxes", s.pop("release_test_mailboxes"))
+    return key
+
+
+def mailbox_allow_problem(entry) -> str:
+    """Why an allowlist entry is not a full address or @domain; empty when it is valid."""
+    if not isinstance(entry, str):
+        return "must be a full address or @domain"
+    if not entry:
+        return "an empty entry is not allowed"
+    if len(entry) > 254:
+        return "must be at most 254 characters"
+    if any(c.isspace() for c in entry):
+        return "spaces or other whitespace are not allowed"
+    if any(c in entry for c in "*?[]"):
+        return "pattern characters (*?[]) are not allowed"
+    if entry == "@":
+        return "@ alone needs a domain"
+    if entry.count("@") != 1:
+        return "must contain exactly one @, in a full address or @domain"
+    if any(not label for label in entry.split("@", 1)[1].split(".")):
+        return "the domain must not contain an empty label"
+    label = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    domain = rf"{label}(?:\.{label})*"
+    if not re.fullmatch(rf"(?:[A-Za-z0-9._%+-]+)?@{domain}", entry):
+        return "must be a full address or @domain"
+    domain = entry.rsplit("@", 1)[1]
+    if "." not in domain:
+        return "the domain must contain a dot"
+    if not re.fullmatch(r"[A-Za-z]{2,}", domain.rsplit(".", 1)[-1]):
+        return "the domain's last label must be at least two letters"
+    return ""
+
+
+def validate(s: dict, root=None, page: bool = False, before: dict | None = None, mailbox_key: str = "") -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
     rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings).
-    before: saved settings, to name the existing merge lane when refusing a second one."""
+    before: saved settings, to name the existing merge lane when refusing a second one.
+    mailbox_key: the spelling before normalization, for a bad boolean's error."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
+    s = dict(s)
+    original_key = mailbox_settings(s)
+    mailbox_key = mailbox_key or original_key
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
-             "release_forbidden", "release_test_mailboxes", "alert", "coordinator_compact"}
+             "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     by = s.get(HIDDEN_BY, {})
     if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
@@ -489,12 +536,49 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
         p.append("the releases without asking must be a list of lanes and their release targets, each a lane name "
                  "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)")
     words = s.get("release_forbidden", [])
-    if not isinstance(s.get("release_test_mailboxes", False), bool):
-        p.append("release_test_mailboxes must be true or false")
+    if not isinstance(s.get("release_mailboxes", False), bool):
+        p.append(f"{mailbox_key} must be true or false")
+    mailbox_allow = s.get("release_mailbox_allow", [])
+    if not isinstance(mailbox_allow, list) or len(mailbox_allow) > MAX_MAILBOX_ALLOW:
+        p.append(f"release_mailbox_allow must be a list of at most {MAX_MAILBOX_ALLOW} entries, one per line")
+    else:
+        seen = {}
+        for i, entry in enumerate(mailbox_allow, 1):
+            why = mailbox_allow_problem(entry)
+            if why:
+                p.append(f"release_mailbox_allow entry {i}: {why}")
+            else:
+                folded = entry.casefold()
+                if folded in seen:
+                    p.append(f"release_mailbox_allow entry {i} repeats entry {seen[folded]}")
+                else:
+                    seen[folded] = i
     if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
         p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
                  "line, each up to 200 characters")
+    if isinstance(words, list):
+        for i, entry in enumerate(words, 1):
+            if not isinstance(entry, str) or not entry.startswith("re:"):
+                continue
+            if len(entry) > 200:
+                p.append(f"release_forbidden entry {i}: a pattern must be at most 200 characters, including re:")
+                continue
+            try:
+                pattern = re.compile(entry[3:], re.IGNORECASE)
+            except re.error as e:
+                p.append(f"release_forbidden entry {i}: the pattern does not compile: {e}")
+            else:
+                if pattern.search("") is not None:
+                    p.append(f"release_forbidden entry {i}: the pattern matches the empty string")
+    exceptions = s.get("release_forbidden_except", [])
+    if not isinstance(exceptions, list) or not all(
+            isinstance(x, dict) and set(x) == {"entry", "lanes"}
+            and isinstance(x["entry"], str) and x["entry"].strip() and not _has_control(x["entry"])
+            and isinstance(x["lanes"], list) and all(isinstance(lane, str) and NAME.fullmatch(lane)
+                                                    for lane in x["lanes"]) for x in exceptions):
+        p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
+                 "lanes (a list of lane names)")
     al = s.get("alert", {"command": ""})
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
@@ -2355,6 +2439,7 @@ class Desk:
         s = default_settings()
         loaded = read_json(self.settings_path, {})
         if isinstance(loaded, dict):
+            mailbox_settings(loaded)
             s.update(loaded)
         migrate_releases(s)
         for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
@@ -2378,8 +2463,17 @@ class Desk:
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
             old = self.settings()
+            mailbox_key = ""
             if isinstance(new, dict):
                 new = copy.deepcopy(new)
+                mailbox_key = mailbox_settings(new)
+                # A page or command loaded the normalized spelling of an invalid value still in the file.
+                if not isinstance(new.get("release_mailboxes", False), bool):
+                    saved = read_json(self.settings_path, {})
+                    if (isinstance(saved, dict) and "release_mailboxes" not in saved and "release_test_mailboxes" in saved
+                            and type(new["release_mailboxes"]) is type(saved["release_test_mailboxes"])
+                            and new["release_mailboxes"] == saved.get("release_test_mailboxes")):
+                        mailbox_key = "release_test_mailboxes"
                 migrate_releases(new)
             first = page_list_problems(new, old, self.root) if by == "page" and isinstance(new, dict) else []
             if first:
@@ -2412,7 +2506,8 @@ class Desk:
                     new[HIDDEN_BY] = hidden
             # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
             page = by == "page" and new.get("lanes") == old.get("lanes")
-            problems = (validate(new, self.root, page=page, before=old) + self.keys_in_release(old, new)
+            problems = (validate(new, self.root, page=page, before=old, mailbox_key=mailbox_key)
+                        + self.keys_in_release(old, new)
                         + self.keys_in_alert(old, new) + answer_names(old, new))
             lanes = new.get("lanes")
             for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
@@ -2458,7 +2553,9 @@ class Desk:
                     added.append(entry)
             if added:  # not save_settings: every other setting stays as the disk has it, and the record is hansa's
                 saved = read_json(self.settings_path, {})
-                write_json(self.settings_path, {**(saved if isinstance(saved, dict) else {}),
+                saved = saved if isinstance(saved, dict) else {}
+                mailbox_settings(saved)
+                write_json(self.settings_path, {**saved,
                                                 "workers_may_not_read": listed, HIDDEN_BY: hidden})
         if added:
             self.event("settings_saved", by=by, changed=["workers_may_not_read", HIDDEN_BY])
@@ -2795,6 +2892,11 @@ def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
+    mailbox_key = ""
+    if not isinstance(s.get("release_mailboxes", False), bool):
+        saved = read_json(desk.settings_path, {})
+        if isinstance(saved, dict):
+            mailbox_key = mailbox_settings(saved)
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
     # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
     kept, not_kept, stops = no_read_parts_shown(s, desk.root)
@@ -2809,6 +2911,6 @@ def public_settings(desk: Desk) -> dict:
                   "was": str(x.get("command", x.get("release", ""))) if isinstance(x, dict) else ""}
                  for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why
                  for lane, target in [listed_key(x)]]
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}
