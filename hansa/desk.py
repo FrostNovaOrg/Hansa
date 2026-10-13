@@ -83,7 +83,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 # rereads it. 8 KB is some 2,000 tokens, about the 200 lines Claude Code itself advises a memory file to stay under
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
-PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "alert", "coordinator_compact")
+PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_test_mailboxes", "alert", "coordinator_compact")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -283,6 +283,8 @@ def default_settings() -> dict:
         # files they name, their messages or identities refuses the release; one in a task's title refuses hansa
         # add, and one in what a task's merge would bring in refuses the merge. The principal's, on the page.
         "release_forbidden": [],
+        # Require reserved example domains for mailboxes in added test lines. The principal's, on the page.
+        "release_test_mailboxes": False,
         # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
         # it. The principal's, on the page; empty: no alerts.
         "alert": {"command": ""},
@@ -462,7 +464,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
         return ["settings must be an object"]
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
-             "release_forbidden", "alert", "coordinator_compact"}
+             "release_forbidden", "release_test_mailboxes", "alert", "coordinator_compact"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     by = s.get(HIDDEN_BY, {})
     if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
@@ -487,6 +489,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
         p.append("the releases without asking must be a list of lanes and their release targets, each a lane name "
                  "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)")
     words = s.get("release_forbidden", [])
+    if not isinstance(s.get("release_test_mailboxes", False), bool):
+        p.append("release_test_mailboxes must be true or false")
     if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
         p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
