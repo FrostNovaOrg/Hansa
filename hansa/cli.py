@@ -1601,6 +1601,7 @@ def _clear_daily(rest: list) -> tuple:
             out.append(x)
         i += 1
     if clear is not None:  # given, even empty: a window, or refused
+        clear = clear.strip()  # " 04-09" is 04-09
         try:
             plugin.parse_window(clear)
         except ValueError as e:

@@ -10302,8 +10302,9 @@ class DeskTest(unittest.TestCase):
             argv, env, said = self.start_with_mod(version=version)
             self.assertFalse({"--plugin-dir", "--autocompact"} & set(argv))
             self.assertNotIn("HANSA_MOD_SETTINGS", env)
-            self.assertIn(f"hansa did not load the coordinator's mod, because {says} (claude update). More: hansa help "
-                          "inbox", said)
+            update = " (claude update)" if version else ""  # only a version known to be too old is one to update
+            self.assertIn(f"hansa did not load the coordinator's mod, because {says}{update}. More: hansa help inbox",
+                          said)
             self.assertIn(f"hansa did not pass --autocompact, because {says}.", said)
             rec = self.mod_record()
             self.assertEqual((rec["loaded"], rec["autocompact_options"]), (False, []))
@@ -10505,6 +10506,26 @@ class DeskTest(unittest.TestCase):
         (self.desk.mod_dir / "start.json").unlink()
         self.assertIn(self.MOD_UNKNOWN, views.status(self.desk)["mod_line"])
 
+    def test_hansa_status_escapes_the_reason_a_start_did_not_load_the_mod(self):
+        # an escape sequence in the reason, in a record left there or in what root gives the account to record, does
+        # not reach the terminal: written out, as in the --autocompact options next to it
+        self.start_with_mod("--clear-daily", "04-09")
+        rec = {**self.mod_record(), "loaded": False, "why": "red \x1b[31mhere"}
+        (self.desk.mod_dir / "start.json").write_text(json.dumps(rec))
+        self.assertIn("because red \\x1b[31mhere; --autocompact", self.mod_line())
+        self.assertIn("no daily clear 04-09, because hansa did not load the coordinator's mod (red \\x1b[31mhere).",
+                      self.status_lines())
+        self.assertNotIn("\x1b", views.status_text(views.status(self.desk)))
+        plugin.record_start(self.desk, rec, root=True)
+        self.assertEqual(self.mod_record()["why"], "red \\x1b[31mhere")
+
+    def test_hansa_status_escapes_control_characters_in_the_autocompact_options(self):
+        self.start_with_mod()
+        rec = {**self.mod_record(), "autocompact_options": ["--autocompact", "\x1b[31m550000", "--autocompact=1\n2"]}
+        (self.desk.mod_dir / "start.json").write_text(json.dumps(rec))
+        self.assertIn("command line: --autocompact '\\x1b[31m550000' '--autocompact=1\\n2'.", self.mod_line())
+        self.assertNotIn("\x1b", views.status_text(views.status(self.desk)))
+
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_the_page_says_only_what_hansa_did_at_the_coordinators_start(self):
         from hansa import web
@@ -10522,8 +10543,15 @@ class DeskTest(unittest.TestCase):
                 ("caller", "--autocompact options of its command line: --autocompact 550000 --autocompact=700000.",
                  "命令行里的 --autocompact 选项：--autocompact 550000 --autocompact=700000", "muted"),
                 ("unrecorded", self.MOD_UNKNOWN, "hansa 是否加载了协调席的 mod：不知道；命令行里的 --autocompact 选项：不知道",
-                 "warn")):
-            if version == "unrecorded":
+                 "warn"),
+                ("no reason", "hansa did not load the coordinator's mod, because of what is not known; --autocompact "
+                 "options of its command line: --autocompact 550000",
+                 "hansa 没有加载协调席的 mod，因为：不知道；命令行里的 --autocompact 选项：--autocompact 550000", "warn")):
+            if version == "no reason":
+                self.start_with_mod()
+                (self.desk.mod_dir / "start.json").write_text(
+                    json.dumps({**self.mod_record(), "loaded": False, "why": None}))
+            elif version == "unrecorded":
                 (self.desk.mod_dir / "start.json").unlink()
             elif version == "caller":
                 self.start_with_mod("--autocompact=700000")
@@ -10575,13 +10603,18 @@ class DeskTest(unittest.TestCase):
         for bad in ("9am", 5, None, "04-04"):
             plugin.record_start(self.desk, {**self.mod_record(), "clear_daily": bad}, root=True)
             self.assertIsNone(self.mod_record()["clear_daily"], bad)
-        # given empty, or with spaces around it: refused as a window that is not one, before anything starts
-        for given in (["--clear-daily="], ["--clear-daily", ""], ["--clear-daily", " 04-09"], ["--clear-daily=04-09 "]):
+        # given empty: refused as a window that is not one, before anything starts
+        for given in (["--clear-daily="], ["--clear-daily", ""], ["--clear-daily", " "]):
             with self.assertRaises(SystemExit) as e:
                 self.start_with_mod(*given)
-            window = given[-1].partition("=")[2] if "=" in given[-1] else given[-1]
             self.assertEqual(e.exception.code, "hansa: --clear-daily takes a window of hours in local time, such as "
-                                               f"04-09; not {window!r}")
+                                               "04-09; not ''")
+        # with spaces around it: the window without them, as handed over, recorded and said
+        for given in (["--clear-daily", " 04-09"], ["--clear-daily=04-09 "]):
+            argv, env, said = self.start_with_mod(*given)
+            self.assertEqual((env["HANSA_MOD_CLEAR_DAILY"], self.mod_record()["clear_daily"]), ("04-09", "04-09"), given)
+            self.start_with_mod(*given, version="2.1.200")
+            self.assertIn("hansa: hansa did not hand over the daily clear 04-09, because", self.mod_said)
 
     def cleared_hook(self) -> str:
         """The coordinator's SessionStart hook after a /clear, run here: what it printed."""
