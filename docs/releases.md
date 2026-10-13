@@ -256,6 +256,30 @@ verify ID`), naming the files; `--despite-check` does not let it through,
 nor does anything else. `hansa explain lane L` shows the list, and advises
 one for a lane with release targets and none.
 
+A command can also name a file outside the lane's repository: hansa looks
+anywhere in the line, inside quotes too, for absolute paths, `~/`, `$HOME/`
+or `${HOME}/` paths, and relative paths with `..` that leave the repository,
+expanding HOME and following links. Existing regular text files (no NUL in
+the first 8 KB) are named when a target is set and recorded with their sha256
+on a release request and on the principal's tick; no worker can change them
+and no verification covers them, so move them into the repository and list
+them in `release_files`. A changed, removed or newly present file voids a
+waiting or approved request before the answer counts or the release starts,
+and a change since the tick was saved makes that tick stop counting; the
+page names the file, and taking changed entries back in records their new
+fingerprints. An older tick that did not record an outside file stops
+counting too; one with no outside file keeps counting. Outside folders
+named as where the command runs are shown without a fingerprint; files over
+16 MB or unreadable are named as not fingerprinted and never void or untick
+anything. Devices, binaries, bare names found on PATH, variables other than
+HOME, and what a script runs in turn are not looked into. Fingerprints are
+taken only when a target is set, a release is asked or checked again, or a
+tick is saved or evaluated, never in an idle round with no release waiting
+or approved. The page also notes an alert command's outside text files that
+are outside the desk's `secrets/`: the coordinator can change them and
+one-time release codes pass through them, so keep them under `secrets/`;
+saving is still allowed.
+
 ## Alerts
 
 Alerts reach the principal away from the page. The principal may set one

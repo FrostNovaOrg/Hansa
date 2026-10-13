@@ -56,7 +56,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import without_session
+from . import outside, without_session
 from .desk import (WRITE_FILE, Desk, forbidden_exceptions_ok, forbidden_pattern, lane_targets, listed_key,
                    listed_mismatch, now, read_json, target_name, write_json, write_text)
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
@@ -736,6 +736,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
     listed = lane_listed(s, lane, target)
     r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
          "repo": repo_key(a["repo"]), "base": a["base"], "commit": a["commit"], "command": command,
+         **outside.inspect(command, a["repo"]),
          **({"fixed": True} if a["fixed"] else {}), "note": desk.redact(note.strip()), "asked": now(),
          "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
          "count": len(commits), "checked": checked, "scanned": key, "commits": commits[:MOST_COMMITS],
@@ -758,12 +759,13 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
 # -- the principal's answer ----------------------------------------------------------------------------------------
 def stale(desk: Desk, s: dict, r: dict, zh: bool = False) -> str:
     """Why a release is no longer what the principal saw (the lane or its target gone, the target's command or
-    the lane's base branch changed, the base branch moved); '' when it still is. zh: in Chinese, for the page."""
+    the lane's base branch changed, the base branch moved, an outside file changed); '' when it still is.
+    zh: in Chinese, for the page."""
     return stale_both(desk, s, r)[zh]
 
 
 def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
-    """stale in English and in Chinese, from one look (one git rev-parse): (English, Chinese)."""
+    """stale in English and Chinese, from one look at the outside files and base branch: (English, Chinese)."""
     ln = s["lanes"].get(r.get("lane"))
     if not ln:
         return f"lane {r.get('lane')} is no longer on the desk", f"工作线 {r.get('lane')} 已不在桌面上"
@@ -782,6 +784,10 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"lane {r['lane']}'s repository or base branch changed since it was asked",
                 f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了")
+    path = outside.changed(r.get("outside", []), outside.inspect(r.get("command") or "", ln["repo"])["outside"])
+    if path:
+        return (f"outside file {path} changed since the release was asked",
+                f"仓库外的文件 {path} 在请求发布之后变了")
     try:
         tip = git("rev-parse", "--verify", f"refs/heads/{r['base']}^{{commit}}", cwd=r["repo"])
     except (RuntimeError, OSError) as e:
@@ -830,9 +836,9 @@ def _answered(desk: Desk, r: dict, yes: bool, reason: str, by: str, channel: str
         desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=False,
                    reason=reason, **how)
         return {"ok": True}
-    why = stale(desk, desk.settings(), r)
+    why, why_zh = stale_both(desk, desk.settings(), r)
     if why:
-        void(desk, rid, why, ("waiting",), stale(desk, desk.settings(), r, zh=True))
+        void(desk, rid, why, ("waiting",), why_zh)
         return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}. Nothing was run; the "
                                                        "coordinator is told, and asks again"]}
     change(desk, rid, lambda x: {"state": "approved", **said, **({"reason": reason} if reason else {})})
@@ -956,9 +962,9 @@ def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: 
             change(desk, rid, lambda x: spent(x, f"older than {CODE_LIFE // 3600} hours"))
             return {"ok": False, "problems": [f"the code of release #{rid} has lapsed (it is older than "
                                               f"{CODE_LIFE // 3600} hours): approval is on the page"]}
-        why = stale(desk, s, r)
+        why, why_zh = stale_both(desk, s, r)
         if why:  # no longer what the principal was alerted of
-            void(desk, rid, why, ("waiting",), stale(desk, s, r, zh=True))
+            void(desk, rid, why, ("waiting",), why_zh)
             return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}; its code has lapsed. "
                                                            "Nothing was run; ask again"]}
         if not hmac.compare_digest(c["hash"], _code_hash(desk, rid, plain_code(code))):
@@ -1590,6 +1596,7 @@ def list_text(desk: Desk) -> str:
             out.append("  " + line(desk, r, s))
             out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
             out.append(f"      {checked_text(r)}")
+            out += ["      " + x for x in outside.lines(r)]
             if r.get("state") == "forbidden":
                 out += [f"      {x}" for x in hits_text(r.get("hits", [])).splitlines()]
             if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
@@ -1629,6 +1636,8 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
                 + (": the principal lets it go out without asking" if lane_listed(s, name, target)
                    else unlisted(s, name, target)) + ")",
                 f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
+        out += ["    " + x for x in outside.lines(outside.inspect(t.get("command") or "", ln["repo"],
+                                                                 fingerprint=False))]
     return out + listed
 
 
@@ -1653,7 +1662,8 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
                                      "answered",
                                      "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
                                      "named", "hits", "ended", "without_asking", "since_release", "fixed",
-                                     "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel")}
+                                     "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel",
+                                     "outside", "outside_folders")}
         c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash
         row["code_sent"] = c.get("sent") if code_live(r) else None
         waits = r.get("state") == "waiting"

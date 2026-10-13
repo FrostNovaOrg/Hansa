@@ -139,6 +139,7 @@ const T = ZH ? {
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼", releaseUnchecked:"这一行无法检查",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
+  releaseOutside:"仓库外的文件", releaseOutsideFolder:"命令运行所在的仓库外文件夹（不记录指纹）", outsideUnhashed:"未记录指纹",
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
@@ -153,6 +154,7 @@ const T = ZH ? {
   alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调者会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在桌面 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调者能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
+  alertOutside:"这个文件在桌面的 secrets/ 外，协调者可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
   alertNoSession:"没有会话在听 hansa 多少分钟后提醒", alertWindow:"协调者会话停在窗口上多少分钟后提醒", alertReview:"任务等审、协调者会话空闲多少分钟后提醒",
   alertCoordinatorNote:"种类 coordinator：hansa 发给协调者会话的消息到不了它时提醒你：没有会话在听 hansa、要发的东西等了这么久（hansa serve 提醒一次，有会话再听过之后才会再提醒）；会话停在权限对话框或问题上，发给它的东西没人理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有提醒命令时一种也不提醒。协调者不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
@@ -226,6 +228,7 @@ const T = ZH ? {
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out", releaseUnchecked:"The line could not be checked",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
+  releaseOutside:"outside file", releaseOutsideFolder:"outside folder the command runs in (no fingerprint)", outsideUnhashed:"not fingerprinted",
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
@@ -240,6 +243,7 @@ const T = ZH ? {
   alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
+  alertOutside:"This file is outside the desk's secrets/: the coordinator can change it, and one-time release codes pass through it; keep it under secrets/.",
   alertNoSession:"Alert when no session has heard from hansa for (minutes)", alertWindow:"Alert when the coordinator's session has waited on its window for (minutes)", alertReview:"Alert when a task has waited for review, its session idle, for (minutes)",
   alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert command, none goes out. The coordinator cannot change them",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
@@ -398,6 +402,7 @@ function releaseBlock(r) {
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
     h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs),
+    releaseOutside(r),
     r.moved ? h("div", {class:"bad"}, T.releaseMoved + ((ZH && r.moved_zh) || r.moved)) : null,
     r.code ? h("div", {class:"muted"}, (ZH && r.code_zh) || r.code) : null,
     h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
@@ -407,6 +412,11 @@ function releaseBlock(r) {
       ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))),
     h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", onclick: () => answer(true)}, T.releaseYes),
       reason, h("button", {onclick: () => answer(false)}, T.releaseNo)));
+}
+function releaseOutside(r) {
+  return h("div", {class:"mono"}, (r.outside || []).map(f => h("div", {class:"warn"}, `${T.releaseOutside}: ${f.path}`,
+    f.sha256 ? ` · sha256 ${f.sha256}` : f.why ? ` · ${T.outsideUnhashed}: ${(ZH && f.why_zh) || f.why}` : "")),
+    (r.outside_folders || []).map(p => h("div", {class:"warn"}, `${T.releaseOutsideFolder}: ${p}`)));
 }
 function releaseStop(r) {
   if (!["approved", "starting", "running"].includes(r.state) || r.stop_asked) return null;
@@ -436,7 +446,7 @@ function releasesSection(rel) {
   if (!rel.length) return null;
   return section(T.releases, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
-      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs)),
+      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
         r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
         r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
@@ -455,13 +465,14 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [];
+let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 /* the entries of what workers may not read that the coordinator added with hansa hide, as hansa recorded them */
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
 async function loadSettings(problems) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
+  ALERT_OUTSIDE = r.alert_outside || [];
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 function forbiddenExceptions() {
@@ -524,7 +535,8 @@ function alertSection() {
   S.coordinator_alert = S.coordinator_alert || {};
   return section(T.alerts, h("div", {class:"grid"},
     T.alertCmd, h("div", {}, bind(S.alert, "command"), S.alert.at ? h("div", {class:"muted"}, T.alertSavedAt(when(S.alert.at))) : null,
-      h("div", {class:"muted"}, T.alertKeep), h("div", {class:"row"}, test, said)),
+      h("div", {class:"muted"}, T.alertKeep), ALERT_OUTSIDE.map(f => h("div", {class:"warn"}, `${f.path}: ${T.alertOutside}`)),
+      h("div", {class:"row"}, test, said)),
     T.alertNoSession, bind(S.coordinator_alert, "no_session_min", "number"),
     T.alertWindow, bind(S.coordinator_alert, "window_min", "number"),
     T.alertReview, h("div", {}, bind(S.coordinator_alert, "review_min", "number"), h("div", {class:"muted"}, T.alertCoordinatorNote))));

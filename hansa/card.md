@@ -192,7 +192,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   pass `K7P 3QX` as `K7P3QX`: that is not guessing. A yes with a word too many is refused, and
   nothing is counted. After 3 wrong codes only the page answers. Without an alert command the page
   alone answers.
-- If the base branch or the command changed since the principal saw it, the release is void and says
+- If the base branch, the command, or a file the command runs outside the repository changed since the principal saw it, the release is void and says
   why: ask again. You are told when they answer and when it ends; `hansa release` lists them.
 - The principal may have alerts (their own command, which hansa runs);
   the coordinator does not send them. One kind, `coordinator`, tells the principal that your session
