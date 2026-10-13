@@ -4086,6 +4086,23 @@ class DeskTest(unittest.TestCase):
                     c.assertEqual(release.matches(matcher, line, line.casefold()), expected)
                     c.assertEqual(release.title_hits(line, [entry]), [entry] if expected else [])
 
+        def count_summary(c, r, zh=False):
+            hits = r["hits"]
+            limits = sum(h.get("kind") == "pattern_limit" for h in hits)
+            ordinary = len(hits) - limits
+            parts = []
+            if ordinary:
+                parts.append(f"要发出去的内容里有你不许发出去的字眼（{ordinary} 处）" if zh else
+                             f"what goes out holds words the principal keeps from going out ({ordinary} place(s))")
+            if limits:
+                parts.append(f"{limits} 行无法用正则检查" if zh else
+                             f"{limits} line(s) could not be checked against the patterns")
+            text = release.state_text(c.desk, r, zh=zh)
+            c.assertEqual(text, ("被拒绝：" if zh else "refused: ") + ("；" if zh else "; ").join(parts))
+            for hit in hits:
+                for field in ("line", "word", "where"):
+                    c.assertNotIn(hit[field], text)
+
         def pattern_limit_principal(c):
             entry, literal = r"re:\d+\d+\d+x", "Falcon"
             c.forbid(entry, literal)
@@ -4114,8 +4131,10 @@ class DeskTest(unittest.TestCase):
 
             grouped(coordinator)
             said = c.hansa("status")
-            c.assertIn("The line could not be checked", said)
-            c.assertNotIn("what goes out holds words", said)
+            c.assertIn("1 place(s)", said)
+            c.assertIn("1 line(s) could not be checked against the patterns", said)
+            said = c.hansa("release")
+            grouped(said)
             assert_pattern_limit(c, said, entry, "unchecked.txt")
             r = release.get(c.desk, 1)
             c.assertEqual(r["hits"][-1]["code"], "line")
@@ -4126,14 +4145,10 @@ class DeskTest(unittest.TestCase):
             c.assertIn("Words found that must not go out:", said)
             c.assertNotIn("The line could not be checked:", said)
             for zh in (False, True):
-                grouped(release.state_text(c.desk, r, zh=zh), zh)
+                count_summary(c, r, zh)
                 for limit_only in (False, True):
                     single = {**r, "hits": [h for h in r["hits"] if (h.get("kind") == "pattern_limit") == limit_only]}
-                    text = release.state_text(c.desk, single, zh=zh)
-                    c.assertIn(("这一行无法检查:" if zh else "The line could not be checked:") if limit_only else
-                               ("查到的禁发字眼:" if zh else "Words found that must not go out:"), text)
-                    c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if limit_only else
-                                  ("这一行无法检查:" if zh else "The line could not be checked:"), text)
+                    count_summary(c, single, zh)
             if not shutil.which("node"):
                 c.skipTest("needs node to render the release's hits")
             st = json.loads(c.hansa("status", "--json"))
@@ -4149,7 +4164,7 @@ class DeskTest(unittest.TestCase):
                 st["releases"][0]["hits"] = hits
                 for language in ("en", "zh"):
                     zh = language == "zh"
-                    grouped(release.state_text(c.desk, {**r, "hits": hits}, zh=zh), zh, code)
+                    count_summary(c, {**r, "hits": hits}, zh)
                     for selected in (hits, hits[:1], hits[1:]):
                         st["releases"][0]["hits"] = selected
                         result = subprocess.run(["node", str(harness), str(page), "release-hits", language],
@@ -4163,6 +4178,33 @@ class DeskTest(unittest.TestCase):
                             c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if selected == hits[1:] else
                                           ("这一行无法检查:" if zh else "The line could not be checked:"), text)
 
+        def pattern_limit_alert(c):
+            from hansa import alert
+            entry, literal = r"re:\d+\d+\d+x", "Falcon"
+            ordinary_line, limit_line = "private Falcon note", "7" * 2000
+            c.forbid(entry, literal)
+            c.commit_in_repo("unchecked.txt", ordinary_line + "\n" + limit_line)
+            c.with_release("true")
+            out = c.alert_fake()
+            with small_pattern_limits():
+                coordinator = c.refused("release", "a")
+            r = release.get(c.desk, 1)
+            c.assertEqual([h.get("kind") for h in r["hits"]], [None, "pattern_limit"])
+            c.assertTrue(alert.send_due(c.desk, gather=0)["ok"])
+            [sent] = c.alerted(out)
+            c.assertEqual(sent["kind"], "release_ended")
+            c.assertIn("what goes out holds words the principal keeps from going out (1 place(s))", sent["text"])
+            c.assertIn("1 line(s) could not be checked against the patterns", sent["text"])
+            for private in (ordinary_line, limit_line[:300], literal, entry, "unchecked.txt"):
+                c.assertNotIn(private, sent["text"])
+            for zh in (False, True):
+                count_summary(c, r, zh)
+            for text in (coordinator, c.hansa("release")):
+                for detail in (ordinary_line, limit_line[:300], literal, entry, "unchecked.txt",
+                               "Words found that must not go out:", "The line could not be checked:",
+                               "over 0.2 s here, so the line was not checked", "Shorten or split the line"):
+                    c.assertIn(detail, text)
+
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
@@ -4174,7 +4216,7 @@ class DeskTest(unittest.TestCase):
                  (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
                  (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading),
                  (33, pattern_long_merge), (34, pattern_length_boundary), (35, pattern_plain_search),
-                 (36, pattern_limit_principal)]
+                 (36, pattern_limit_principal), (37, pattern_limit_alert)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.

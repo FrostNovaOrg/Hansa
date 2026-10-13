@@ -1528,18 +1528,21 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     if st == "void":
         return f"作废：{r.get('void_zh') or r.get('void')}；什么都没运行" if zh else f"void: {r.get('void')}; nothing was run"
     if st == "forbidden":
-        n = len(r.get("hits", []))
-        if any(h.get("kind") == "pattern_limit" for h in r.get("hits", [])):
-            return ("被拒绝：" if zh else "refused:") + "\n" + hits_text(r["hits"], zh)
-        mailbox = mailbox_refusal(r.get("hits", []))
-        if mailbox:
-            if zh:
-                return (f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）\n"
-                        + hits_text(r["hits"], zh))
-            return "refused: " + mailbox.splitlines()[0] + "\n" + hits_text(r["hits"])
-        summary = (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
-                   f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")
-        return summary + "\n" + hits_text(r["hits"], zh)
+        # This summary also goes out in alerts: keep the hits themselves on the machine.
+        hits = r.get("hits", [])
+        limits = sum(h.get("kind") == "pattern_limit" for h in hits)
+        ordinary = [h for h in hits if h.get("kind") != "pattern_limit"]
+        parts = []
+        if ordinary or not limits:
+            mailbox = mailbox_refusal(ordinary)
+            parts.append((f"邮箱未使用保留的示例域名，也不在允许名单中（{len(ordinary)} 处）" if zh else
+                          mailbox.splitlines()[0]) if mailbox else
+                         (f"要发出去的内容里有你不许发出去的字眼（{len(ordinary)} 处）" if zh else
+                          f"what goes out holds words the principal keeps from going out ({len(ordinary)} place(s))"))
+        if limits:
+            parts.append(f"{limits} 行无法用正则检查" if zh else
+                         f"{limits} line(s) could not be checked against the patterns")
+        return ("被拒绝：" if zh else "refused: ") + ("；" if zh else "; ").join(parts)
     return st or "?"
 
 
@@ -1587,6 +1590,8 @@ def list_text(desk: Desk) -> str:
             out.append("  " + line(desk, r, s))
             out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
             out.append(f"      {checked_text(r)}")
+            if r.get("state") == "forbidden":
+                out += [f"      {x}" for x in hits_text(r.get("hits", [])).splitlines()]
             if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
                 out += [f"      | {x}" for x in r["tail"][-5:]]
     out.append("the whole output of a release: .hansa/releases/<id>.log (the principal's; hansa release shows its last lines)")
