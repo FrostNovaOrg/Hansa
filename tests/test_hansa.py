@@ -10472,16 +10472,18 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("coordinator's session started", views.status_text(views.status(self.desk)))
         self.assertNotIn("compaction", views.status_text(views.status(self.desk)))
         self.start_with_mod()
-        started = time.strftime("%m-%d %H:%M", time.localtime(self.mod_record()["at"]))
+        started = time.strftime("%m-%d %H:%M", time.localtime(self.mod_record()["start"]))
         lines = views.status_text(views.status(self.desk)).splitlines()
         self.assertIn(f"coordinator's session started {started}: {self.MOD_LOADED} More: hansa help inbox", lines)
         self.assertIn(self.MOD_WORDS, lines)  # the desk's settings, which the mod reads
         self.start_with_mod(version="2.1.200")
+        started = time.strftime("%m-%d %H:%M", time.localtime(self.mod_record()["start"]))
         self.assertIn(f"coordinator's session started {started}: hansa did not load the coordinator's mod, because "
                       "Claude Code 2.1.200 is older than 2.1.290; --autocompact options of its command line: none. More: "
                       "hansa help inbox", views.status_text(views.status(self.desk)))
         # hansa reads none of the mod's files: what the mod could leave beside its copy changes nothing said
         self.start_with_mod()
+        started = time.strftime("%m-%d %H:%M", time.localtime(self.mod_record()["start"]))
         before = views.status(self.desk)["mod_line"]
         for name in ("heartbeat.json", "alerted.json", "settings.json"):
             (self.desk.mod_dir / name).write_text(json.dumps({"at": time.time(), "launch": "x", "idle_at": 100000}))
