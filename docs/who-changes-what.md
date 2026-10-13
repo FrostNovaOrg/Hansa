@@ -2,7 +2,7 @@
 
 What the principal sets on the web page, and what the coordinator sets with `hansa`. What workers and
 design sessions may touch is in [Workers and the sandbox](sandbox.md); the coordinator's own interface is
-[hansa/card.md](../hansa/card.md).
+[hansa/card.md](../hansa/card.md), and `hansa help` for the rest.
 
 ## The principal, the coordinator, and what runs outside the worker
 
@@ -119,8 +119,8 @@ open, its memory under `projects/` among them; a file that appears directly
 in the folder after the session starts is closed from the next start), and
 editing code in the lanes' repositories;
 code changes go through workers, so each gets a branch, the lane's check and
-a merge. Its whole interface is `hansa/card.md`, copied into the desk as
-`CLAUDE.md`.
+a merge. Its interface is `hansa/card.md`, copied into the desk as
+`CLAUDE.md`, and `hansa help` for the rest.
 
 ## Commit messages and identity
 

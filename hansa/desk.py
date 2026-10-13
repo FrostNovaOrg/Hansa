@@ -217,7 +217,7 @@ SHELL_ENV_WHY = ("cannot be set for a lane: sh, bash or zsh keeps it for itself 
 RUN_ENV_WHY = ("cannot be set for a lane: it tells a loader, git, a shell or Claude Code what to run; set it inside "
                "the check or setup command instead, where it runs in the sandbox")
 # The variables that exist to point a tool in the sandbox at the lane's own folder: what these name may be on
-# the lane's write list (the card names the cache ones)
+# the lane's write list (docs/sandbox.md names the cache ones)
 CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_CACHE_FOLDER", "CARGO_HOME",
              "GOMODCACHE", "GOCACHE", "GRADLE_USER_HOME", "MAVEN_OPTS", "CCACHE_DIR", "UV_CACHE_DIR",
              "POETRY_CACHE_DIR", "PIPENV_CACHE_DIR", "BUN_INSTALL_CACHE_DIR", "DENO_DIR", "NUGET_PACKAGES",
