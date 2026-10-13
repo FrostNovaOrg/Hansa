@@ -188,8 +188,9 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   characters, right after the desk's name: `release #1 (lane a, target staging) · code K7P3QX: ...`).
   A plain yes in the conversation does not count: ask for the code or the page. Pass it with `hansa
   release yes ID CODE` (or `no ID CODE [reason]`). The code is one word (dashes allowed, no spaces):
-  a yes with a word too many is refused, and nothing is counted. After 3 wrong codes only the page
-  answers. Without an alert command the page alone answers.
+  pass `K7P 3QX` as `K7P3QX`: that is not guessing. A yes with a word too many is refused, and
+  nothing is counted. After 3 wrong codes only the page answers. Without an alert command the page
+  alone answers.
 - If the base branch or the command changed since the principal saw it, the release is void and says
   why: ask again. You are told when they answer and when it ends; `hansa release` lists them.
 - The principal may have alerts (their own command, which hansa runs);
@@ -282,9 +283,10 @@ code changes and browsers go to workers.
   settle it with the principal. More: `hansa help who-changes-what`.
 
 ## Facts you can rely on
-- A provider out of quota or at its usage limit rests, and the task moves to the lane's next provider
-  without using a try (5 times); one that refuses a task (its content filter) does not rest. `hansa
-  show` says until when. More: `hansa help provider-limits`.
+- A provider out of quota or at its usage limit rests (until the reset time the error gives, else
+  its own `rest_minutes` or the desk's `cool_minutes`), and the task moves to the lane's next
+  provider without using a try (5 times); one that refuses a task (its content filter) does not
+  rest. `hansa show` says until when. More: `hansa help provider-limits`.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
   its last note). Some providers take minutes per reply; a task is stuck only when nothing has
   happened for a long while. Where a run's effort came from: `hansa help effort`.
