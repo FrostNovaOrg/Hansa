@@ -457,10 +457,13 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
-def mailbox_settings(s: dict) -> None:
-    """Read the unreleased mailbox setting's old spelling; only the new spelling is saved."""
+def mailbox_settings(s: dict) -> str:
+    """Read the old spelling, returning its effective key for validation; save only the new spelling."""
+    key = ("release_test_mailboxes" if "release_test_mailboxes" in s and "release_mailboxes" not in s
+           else "release_mailboxes")
     if "release_test_mailboxes" in s:
         s.setdefault("release_mailboxes", s.pop("release_test_mailboxes"))
+    return key
 
 
 def mailbox_allow_problem(entry) -> str:
@@ -469,6 +472,8 @@ def mailbox_allow_problem(entry) -> str:
         return "must be a full address or @domain"
     if not entry:
         return "an empty entry is not allowed"
+    if len(entry) > 254:
+        return "must be at most 254 characters"
     if any(c.isspace() for c in entry):
         return "spaces or other whitespace are not allowed"
     if any(c in entry for c in "*?[]"):
@@ -479,19 +484,26 @@ def mailbox_allow_problem(entry) -> str:
     domain = rf"{label}(?:\.{label})*"
     if not re.fullmatch(rf"(?:[A-Za-z0-9._%+-]+)?@{domain}", entry):
         return "must be a full address or @domain"
+    domain = entry.rsplit("@", 1)[1]
+    if "." not in domain:
+        return "the domain must contain a dot"
+    if not re.fullmatch(r"[A-Za-z]{2,}", domain.rsplit(".", 1)[-1]):
+        return "the domain's last label must be at least two letters"
     return ""
 
 
-def validate(s: dict, root=None, page: bool = False, before: dict | None = None) -> list:
+def validate(s: dict, root=None, page: bool = False, before: dict | None = None, mailbox_key: str = "") -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
     rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings).
-    before: saved settings, to name the existing merge lane when refusing a second one."""
+    before: saved settings, to name the existing merge lane when refusing a second one.
+    mailbox_key: the spelling before normalization, for a bad boolean's error."""
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
     s = dict(s)
-    mailbox_settings(s)
+    original_key = mailbox_settings(s)
+    mailbox_key = mailbox_key or original_key
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact"}
@@ -520,15 +532,22 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None)
                  "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)")
     words = s.get("release_forbidden", [])
     if not isinstance(s.get("release_mailboxes", False), bool):
-        p.append("release_mailboxes must be true or false")
+        p.append(f"{mailbox_key} must be true or false")
     mailbox_allow = s.get("release_mailbox_allow", [])
     if not isinstance(mailbox_allow, list) or len(mailbox_allow) > MAX_MAILBOX_ALLOW:
         p.append(f"release_mailbox_allow must be a list of at most {MAX_MAILBOX_ALLOW} entries, one per line")
     else:
+        seen = {}
         for i, entry in enumerate(mailbox_allow, 1):
             why = mailbox_allow_problem(entry)
             if why:
                 p.append(f"release_mailbox_allow entry {i}: {why}")
+            else:
+                folded = entry.casefold()
+                if folded in seen:
+                    p.append(f"release_mailbox_allow entry {i} repeats entry {seen[folded]}")
+                else:
+                    seen[folded] = i
     if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
         p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
@@ -2417,9 +2436,17 @@ class Desk:
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
             old = self.settings()
+            mailbox_key = ""
             if isinstance(new, dict):
                 new = copy.deepcopy(new)
-                mailbox_settings(new)
+                mailbox_key = mailbox_settings(new)
+                # A page or command loaded the normalized spelling of an invalid value still in the file.
+                if not isinstance(new.get("release_mailboxes", False), bool):
+                    saved = read_json(self.settings_path, {})
+                    if (isinstance(saved, dict) and "release_mailboxes" not in saved and "release_test_mailboxes" in saved
+                            and type(new["release_mailboxes"]) is type(saved["release_test_mailboxes"])
+                            and new["release_mailboxes"] == saved.get("release_test_mailboxes")):
+                        mailbox_key = "release_test_mailboxes"
                 migrate_releases(new)
             first = page_list_problems(new, old, self.root) if by == "page" and isinstance(new, dict) else []
             if first:
@@ -2452,7 +2479,8 @@ class Desk:
                     new[HIDDEN_BY] = hidden
             # the page cannot change lanes: a refused rule one holds is the coordinator's to remove, not the page's
             page = by == "page" and new.get("lanes") == old.get("lanes")
-            problems = (validate(new, self.root, page=page, before=old) + self.keys_in_release(old, new)
+            problems = (validate(new, self.root, page=page, before=old, mailbox_key=mailbox_key)
+                        + self.keys_in_release(old, new)
                         + self.keys_in_alert(old, new) + answer_names(old, new))
             lanes = new.get("lanes")
             for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
@@ -2835,6 +2863,11 @@ def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
+    mailbox_key = ""
+    if not isinstance(s.get("release_mailboxes", False), bool):
+        saved = read_json(desk.settings_path, {})
+        if isinstance(saved, dict):
+            mailbox_key = mailbox_settings(saved)
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
     # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
     kept, not_kept, stops = no_read_parts_shown(s, desk.root)
@@ -2849,6 +2882,6 @@ def public_settings(desk: Desk) -> dict:
                   "was": str(x.get("command", x.get("release", ""))) if isinstance(x, dict) else ""}
                  for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why
                  for lane, target in [listed_key(x)]]
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True), "rev": rev,
+    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}

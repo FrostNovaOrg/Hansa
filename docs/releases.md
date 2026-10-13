@@ -195,12 +195,18 @@ that address, ignoring case; `@domain` allows that domain and its subdomains,
 ignoring case (`@python.org` allows `a@python.org` and `a@mail.python.org`,
 not `a@notpython.org` or `a@python.org.evil.com`). Saving refuses empty entries,
 spaces, pattern characters (`*?[]`), `@` alone and entries in neither form.
+The domain must contain a dot and its last label must be at least two letters,
+as the matcher requires; `@com`, `@realmail` and `jane@realmail` are refused.
+Each entry may have at most 254 characters. Duplicates are refused ignoring
+case, naming both entry numbers. The page drops blank lines before saving;
+an empty entry sent by other means is refused.
 No command changes the rule or allowlist: on a refusal, which names each
 mailbox, commit, file and line (at most 20 hits), the coordinator replaces
 the address with an example one in a fresh retry, or, if the project needs
 it, asks the principal to add the address or its domain to the allowlist on
 the page (`hansa ask`). `hansa explain` says whether the rule is on and lists
-the allowlist. An allowlist change makes earlier scans unusable, whether an
+the first 20 allowlist entries, then says how many more are on the page.
+An allowlist change makes earlier scans unusable, whether an
 entry was added or removed. Before each scan the matcher must catch a
 built-in non-example mailbox, independently of the allowlist; if it cannot,
 the merge or release stops and says why.

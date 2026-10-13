@@ -76,10 +76,8 @@ RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
 MAILBOX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
-def mailbox_hits(line: str, allow=()) -> list:
+def mailbox_hits(line: str, addresses=frozenset(), domains=()) -> list:
     """Mailbox-shaped strings outside reserved example domains and the principal's allowlist."""
-    addresses = {entry.casefold() for entry in allow if not entry.startswith("@")}
-    domains = [entry[1:].casefold() for entry in allow if entry.startswith("@")]
     hits = []
     for mailbox in MAILBOX.findall(line):
         domain = mailbox.rsplit("@", 1)[1].casefold()
@@ -313,6 +311,9 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     if mailboxes and not mailbox_hits("mailbox-check@unreserved.hansa"):
         return [{"word": "mailbox rule", "commit": "", "where": "mailbox rule self-check",
                  "line": "the rule could not tell a real mailbox from an example one"}], 0
+    allow = [entry.casefold() for entry in mailbox_allow] if mailboxes else []
+    addresses = {entry for entry in allow if not entry.startswith("@")}
+    domains = tuple(entry[1:] for entry in allow if entry.startswith("@"))
     words = [w for w in words if isinstance(w, str) and w.strip()]
     folded = [(w, w.casefold()) for w in words]
     hits, seen, checked = [], set(), 0
@@ -352,7 +353,7 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     for sha, path, line in _added(patch):
         look(sha, path or "?", line)
         if mailboxes:
-            for mailbox in mailbox_hits(line, mailbox_allow):
+            for mailbox in mailbox_hits(line, addresses, domains):
                 place = (sha, path, line, mailbox)
                 if place not in mailboxes_seen:
                     mailboxes_seen.add(place)

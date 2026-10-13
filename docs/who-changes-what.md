@@ -16,7 +16,9 @@ uses, the folders the coordinator may read outside the desk without asking
 (`hansa explain` lists them), the folders and files workers may not read (the
 coordinator may add to them, below), the
 release targets that go out without asking (each ticked on its own), the words
-no release may send out, and the alert command ([Alerts](releases.md#alerts)).
+no release may send out, the mailbox rule and its address/domain allowlist
+([Releases](releases.md#forbidden-words-before-a-release)), and the alert command
+([Alerts](releases.md#alerts)).
 The page also shows what goes on, and asks the principal about each release
 ([Releases](releases.md)).
 

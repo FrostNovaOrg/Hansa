@@ -585,7 +585,7 @@ function renderSettings(problems) {
         S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.release_forbidden || []).join("\n")),
       T.releaseMailboxes, bind(S, "release_mailboxes", "bool"),
       T.releaseMailboxAllow, h("textarea", {placeholder:"maintainer@example.com\n@project.example", oninput: e => {
-        S.release_mailbox_allow = e.target.value === "" ? [] : e.target.value.split("\n");
+        S.release_mailbox_allow = e.target.value.split("\n").filter(x => x.trim());
       }}, (S.release_mailbox_allow || []).join("\n")))),
     alertSection(),
     section(T.prices, h("p", {class:"muted"}, T.pricesNote),
