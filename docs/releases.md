@@ -181,17 +181,33 @@ With an empty list and the mailbox rule off nothing is looked for and nothing ch
 own word scan stays as it was, the last net: a word set after a merge, or a
 commit that came to the base branch another way, is still found there.
 
-On the same page the principal can turn on `release_test_mailboxes` (off by
-default; no command changes it): merges and releases then require reserved
-domains for mailbox-shaped strings
-(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) in added test lines, even
-with no forbidden words. Test paths have a folder named `test`, `tests`,
-`spec`, `specs`, `__tests__`, `fixtures` or `testdata`, or a filename matching
-`test_*`, `*_test.*`, `*.test.*` or `*.spec.*`. Allowed domains, ignoring case,
-are `example.com`, `example.org`, `example.net` and their subdomains, and
-domains ending in `.invalid`, `.test` or `.example`; a hit names the mailbox,
-commit, file and line. Before each scan the matcher must catch a built-in
-non-example mailbox; if it cannot, the merge or release stops and says why.
+On the same page the principal can turn on `release_mailboxes` (off by
+default): merges and releases then check mailbox-shaped strings
+(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) in every added line, in every
+file the word scan reads as UTF-8, even with no forbidden words. The rule does
+not check removed or unchanged lines, commit messages, names or file names;
+a merge's own lines are read as the word scan reads them. Reserved example
+domains, ignoring case, are `example.com`, `example.org`, `example.net` and
+their subdomains, and domains ending in `.invalid`, `.test` or `.example`.
+The principal's `release_mailbox_allow` on that page allows addresses the
+project needs: one entry per line, at most 500 entries. A full address allows
+that address, ignoring case; `@domain` allows that domain and its subdomains,
+ignoring case (`@python.org` allows `a@python.org` and `a@mail.python.org`,
+not `a@notpython.org` or `a@python.org.evil.com`). Saving refuses empty entries,
+spaces, pattern characters (`*?[]`), `@` alone and entries in neither form.
+The domain must contain a dot and its last label must be at least two letters,
+as the matcher requires; `@com`, `@realmail` and `jane@realmail` are refused.
+Each entry may have at most 254 characters. Duplicates are refused ignoring
+case, naming both entry numbers. The page drops blank lines before saving;
+an empty entry sent by other means is refused.
+No command changes the rule or allowlist: on a refusal, which names each
+mailbox, commit, file and line (at most 20 hits), the coordinator replaces
+the address with an example one in a fresh retry, or, if the project needs
+it, asks the principal to add the address or its domain to the allowlist on
+the page (`hansa ask`). `hansa explain` says whether the rule is on and lists
+the first 20 allowlist entries, then says how many more are on the page.
+An allowlist change makes earlier scans unusable, whether an
+entry was added or removed.
 
 The word scan is a net, not a proof. A word is matched within one line only,
 so a phrase split over a line break is not found; and only in text hansa can

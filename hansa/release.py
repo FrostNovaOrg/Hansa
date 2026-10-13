@@ -41,7 +41,6 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 """
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import hmac
 import json
@@ -77,23 +76,18 @@ RANGE = re.compile(r"[-+]\d+(?:,(\d+))?")
 MAILBOX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
-def mailbox_hits(line: str) -> list:
-    """Mailbox-shaped strings whose domains are not reserved for examples."""
+def mailbox_hits(line: str, addresses=frozenset(), domains=()) -> list:
+    """Mailbox-shaped strings outside reserved example domains and the principal's allowlist."""
     hits = []
     for mailbox in MAILBOX.findall(line):
         domain = mailbox.rsplit("@", 1)[1].casefold()
         if (any(domain == d or domain.endswith("." + d) for d in ("example.com", "example.org", "example.net"))
                 or domain.endswith((".invalid", ".test", ".example"))):
             continue
+        if mailbox.casefold() in addresses or any(domain == d or domain.endswith("." + d) for d in domains):
+            continue
         hits.append(mailbox)
     return hits
-
-
-def test_file(path: str) -> bool:
-    """Paths where the principal's mailbox rule checks added lines."""
-    parts = path.casefold().split("/")
-    return (bool(set(parts[:-1]) & {"test", "tests", "spec", "specs", "__tests__", "fixtures", "testdata"})
-            or any(fnmatch.fnmatchcase(parts[-1], p) for p in ("test_*", "*_test.*", "*.test.*", "*.spec.*")))
 
 
 def releases_file(desk: Desk) -> Path:
@@ -297,7 +291,8 @@ def _added(lines):
                     old, new = sides[:n], sides[n]
 
 
-def forbidden_in(repo, since: str, commit: str, words: list, command: str = "", test_mailboxes: bool = False) -> tuple:
+def forbidden_in(repo, since: str, commit: str, words: list, command: str = "", mailboxes: bool = False,
+                 mailbox_allow=()) -> tuple:
     """Where what goes out holds one of the principal's forbidden words (any case, within one line, in text read as
     UTF-8): the release command line, and every outgoing commit's message, its author's and committer's names and
     emails (where: author or committer; line: Name <email>), the names of the files it adds or
@@ -306,16 +301,16 @@ def forbidden_in(repo, since: str, commit: str, words: list, command: str = "", 
     what a merge brings in from a branch is read in that branch's commits when they go out, and not at all when
     they are on a remote-tracking branch, already out. ([{word, commit, where, line}], each place once, at most
     MOST_HITS; how many commits were checked)."""
-    return words_in(repo, _range(since, commit), words, [("release command", command)], test_mailboxes)
+    return words_in(repo, _range(since, commit), words, [("release command", command)], mailboxes, mailbox_allow)
 
 
-def words_in(repo, rng: list, words: list, texts=(), test_mailboxes: bool = False) -> tuple:
+def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, mailbox_allow=()) -> tuple:
     """forbidden_in for any range of commits (git log's arguments, ending in --), and for texts that are not in a
     commit yet ([(where, text)], each line looked at, commit ''): a merge's message before it is made, say.
-    test_mailboxes: also require reserved domains in mailbox-shaped strings on added test-file lines."""
-    if test_mailboxes and not mailbox_hits("mailbox-check@unreserved.hansa"):
-        return [{"word": "mailbox rule", "commit": "", "where": "mailbox rule self-check",
-                 "line": "the rule could not tell a real mailbox from an example one"}], 0
+    mailboxes: also check mailbox-shaped strings on every added line against example domains and the allowlist."""
+    allow = [entry.casefold() for entry in mailbox_allow] if mailboxes else []
+    addresses = {entry for entry in allow if not entry.startswith("@")}
+    domains = tuple(entry[1:] for entry in allow if entry.startswith("@"))
     words = [w for w in words if isinstance(w, str) and w.strip()]
     folded = [(w, w.casefold()) for w in words]
     hits, seen, checked = [], set(), 0
@@ -338,7 +333,7 @@ def words_in(repo, rng: list, words: list, texts=(), test_mailboxes: bool = Fals
             sha, checked = line[1:].strip(), checked + 1
         elif folded:
             look(sha, "commit message", line)
-    if not folded and not test_mailboxes:
+    if not folded and not mailboxes:
         return [], checked
     for line in _git_lines(repo, "log", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce", *rng):
         sha, *who = line.split("\x1f")
@@ -354,12 +349,12 @@ def words_in(repo, rng: list, words: list, texts=(), test_mailboxes: bool = Fals
                        "--unified=0", "--no-renames", "--format=%x00%H", *rng)
     for sha, path, line in _added(patch):
         look(sha, path or "?", line)
-        if test_mailboxes and path and test_file(path):
-            for mailbox in mailbox_hits(line):
+        if mailboxes:
+            for mailbox in mailbox_hits(line, addresses, domains):
                 place = (sha, path, line, mailbox)
                 if place not in mailboxes_seen:
                     mailboxes_seen.add(place)
-                    hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path,
+                    hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
                                  "line": line.strip()[:300]})
         if len(hits) >= MOST_HITS:
             patch.close()
@@ -397,18 +392,17 @@ def hits_text(hits: list) -> str:
 
 def mailbox_refusal(hits: list, tid: str = "") -> str:
     """Mailbox-specific reason and remedy; empty for ordinary forbidden-word hits."""
-    if any(h["where"] == "mailbox rule self-check" for h in hits):
-        return ("the mailbox rule's matcher is broken, so hansa merges and releases nothing until it is fixed\n"
-                + hits_text(hits))
     if not any(h.get("kind") == "mailbox" for h in hits):
         return ""
-    reason = "a mailbox in a test file does not use a reserved example domain"
+    reason = "a mailbox does not use a reserved example domain and is not on the principal's allowlist"
     if any(h.get("kind") != "mailbox" for h in hits):
         reason += "; the change also holds words the principal keeps from going out"
     retry = (f'Replace it with an example address in hansa retry {tid} --fresh "..." '
              f"(a retry that continues from {tid} keeps its commits)" if tid else
              "Replace it with an example address in the outgoing history")
-    return (f"{reason}\n{hits_text(hits)}\n{retry}, or ask the principal (hansa ask). "
+    return (f"{reason}\n{hits_text(hits)}\n{retry} (example.com, example.org, example.net, or a domain ending in "
+            ".invalid, .test or .example), or, if the project needs the address, ask the principal to add it or "
+            "its domain to the allowlist on the page (hansa ask). "
             "More: hansa help forbidden-words")
 
 
@@ -441,16 +435,16 @@ def _has_commit(repo, sha: str) -> bool:
 
 
 # -- asking ------------------------------------------------------------------------------------------------------
-def scan_key(repo, since: str, commit: str, words: list, command: str, test_mailboxes: bool = False) -> str:
+def scan_key(repo, since: str, commit: str, words: list, command: str, mailboxes: bool = False,
+             mailbox_allow=()) -> str:
     """What a forbidden-word scan depends on, in one string: the commit, the starting point (the target's last
-    release and the repository's remote-tracking branches), the principal's words, mailbox rule and command line. A scan
+    release and the repository's remote-tracking branches), the principal's words, mailbox rule, allowlist and command line. A scan
     made with the same key finds the same."""
     remotes = _git_bytes(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes")
-    words = sorted(w for w in words if isinstance(w, str) and w.strip())
+    words = sorted(w.casefold() for w in words if isinstance(w, str) and w.strip())
     # "identities": a scan from before authors and committers were read does not count for one that reads them
-    parts = [repo_key(repo), commit, since, remotes, words, command, "identities"]
-    if test_mailboxes:
-        parts.append("test mailboxes")
+    parts = [repo_key(repo), commit, since, remotes, words, command, "identities",
+             mailboxes, sorted(entry.casefold() for entry in mailbox_allow)]
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -508,9 +502,10 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
             s = desk.settings()
             a = _askable(desk, s, lane, target)
             words = s.get("release_forbidden") or []
-            test_mailboxes = s.get("release_test_mailboxes", False)
+            mailboxes = s.get("release_mailboxes", False)
+            mailbox_allow = s.get("release_mailbox_allow") or []
             try:
-                key = scan_key(a["repo"], a["since"], a["commit"], words, a["command"], test_mailboxes)
+                key = scan_key(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow)
             except RuntimeError as e:
                 raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). "
                                  "Nothing was asked")
@@ -519,7 +514,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
                 break
         try:  # without the lock: the server's round, the page and other commands go on meanwhile
             commits, files = outgoing(a["repo"], a["since"], a["commit"])
-            hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"], test_mailboxes)
+            hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow)
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
         scanned = ((key, a["target"]), commits, files, hits, checked)
@@ -1005,9 +1000,11 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
                     void(desk, rid, why[0], ("approved",), why[1])
                 return None
             words = s.get("release_forbidden") or []
-            test_mailboxes = s.get("release_test_mailboxes", False)
+            mailboxes = s.get("release_mailboxes", False)
+            mailbox_allow = s.get("release_mailbox_allow") or []
             try:
-                key = scan_key(r["repo"], r.get("since") or "", r["commit"], words, r["command"], test_mailboxes)
+                key = scan_key(r["repo"], r.get("since") or "", r["commit"], words, r["command"], mailboxes,
+                               mailbox_allow)
             except RuntimeError as e:
                 void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
                      desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
@@ -1030,7 +1027,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
                 break
         try:  # without the lock: the server's round goes on meanwhile
             scanned = (key, *forbidden_in(r["repo"], r.get("since") or "", r["commit"], words, r["command"],
-                                         test_mailboxes))
+                                         mailboxes, mailbox_allow))
         except RuntimeError as e:
             void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
                  desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
@@ -1340,9 +1337,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         mailbox = mailbox_refusal(r.get("hits", []))
         if mailbox:
             if zh:
-                return ("被拒绝：邮箱规则的匹配器已损坏；修好之前 hansa 不合并也不发布" if
-                        any(h["where"] == "mailbox rule self-check" for h in r["hits"]) else
-                        f"被拒绝：测试文件里的邮箱未使用保留的示例域名（{n} 处）")
+                return f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）"
             return "refused: " + mailbox.splitlines()[0]
         return (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
                 f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")

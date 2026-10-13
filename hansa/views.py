@@ -1531,6 +1531,10 @@ def release_settings_line(s: dict) -> str:
     listed = [named(k) for k in listed_targets(s) if release.lane_listed(s, *k)]
     changed = [named(k) for k in listed_targets(s) if named(k) not in listed]
     words = s.get("release_forbidden") or []
+    mailbox_allow = s.get("release_mailbox_allow") or []
+    allowed = ", ".join(mailbox_allow[:20]) if mailbox_allow else "(empty)"
+    if len(mailbox_allow) > 20:
+        allowed += f", and {len(mailbox_allow) - 20} more, all on the page"
     return ("Releases (hansa release L [TARGET]) go out only after the principal's yes on the page"
             + (f", but for lanes {', '.join(listed)}, which the principal lets go out without asking while the desk is "
                "not paused (each target ticked on its own)" if listed else "")
@@ -1538,9 +1542,11 @@ def release_settings_line(s: dict) -> str:
                "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
             + f"; {len(words)} word(s) the principal keeps from going out are checked at hansa add (a task's title), at each merge and before each release. Both lists are the "
             "principal's, on the web page; you cannot set them (hansa ask). "
-            f"The mailbox rule (release_test_mailboxes) is {'on' if s.get('release_test_mailboxes') else 'off'}: "
-            "when on, mailboxes in added test lines must use reserved example domains at merges and releases. "
-            "It is also the principal's, on the same page. Do not push or deploy yourself.")
+            f"The mailbox rule (release_mailboxes) is {'on' if s.get('release_mailboxes') else 'off'}: "
+            "when on, mailboxes in every added line must use reserved example domains at merges and releases, "
+            "or be allowed by release_mailbox_allow: " + allowed
+            + ". A full address allows that address; @domain allows the domain and its subdomains, ignoring case. "
+            "The rule and allowlist are also the principal's, on the same page (hansa ask). Do not push or deploy yourself.")
 
 
 def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:

@@ -2691,19 +2691,20 @@ def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", l
     """Where a task's merge into the base would hold one of the principal's release_forbidden words, matched as a
     release matches them (release.words_in): the commits from commit that the base (at tip) does not hold, their
     messages, identities, file names and added lines; and, for a merge not made yet (message given), its message
-    and the lane's identity, which hansa gives it. Also checks added test lines when release_test_mailboxes is on.
+    and the lane's identity, which hansa gives it. Also checks every added line when release_mailboxes is on.
     [] when the list is empty and the mailbox rule is off."""
     settings = desk.settings()
     words = [w for w in settings.get("release_forbidden") or [] if isinstance(w, str) and w.strip()]
-    test_mailboxes = settings.get("release_test_mailboxes", False)
-    if not words and not test_mailboxes:
+    mailboxes = settings.get("release_mailboxes", False)
+    if not words and not mailboxes:
         return []
     from .release import words_in
     texts = []
     if message:
         name, email, _ = lane_identity(lane)
         texts = [("merge message", message), ("merge author and committer", f"{name} <{email}>")]
-    return words_in(repo, [commit, f"^{tip}", "--"], words, texts, test_mailboxes)[0]
+    return words_in(repo, [commit, f"^{tip}", "--"], words, texts, mailboxes,
+                    settings.get("release_mailbox_allow") or [])[0]
 
 
 def words_text(tid: str, hits: list) -> str:

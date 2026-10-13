@@ -3212,112 +3212,188 @@ class DeskTest(unittest.TestCase):
         self.forbid()  # nothing changes when the list is empty
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
 
-    def test_test_mailboxes_are_unrestricted_when_the_rule_is_off(self):
+    def test_mailbox_merge_cases(self):
         from hansa import release
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
-        tid = self.done_with(env={"FAKE_WRITE": "a@unreserved.hansa", "FAKE_WRITE_FILE": "test_mailboxes.py"})
-        with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
-            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-            self.assertEqual(release.words_in(self.repo, ["HEAD", "--"], ["no such phrase"])[0], [])
-            matcher.assert_not_called()
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        # The stand-in writes into existing folders, as a worker would.
+        self.commit_in_repo("src/app.py", "clean\n")
+        self.commit_in_repo("tests/test_x.py", "clean\n")
+        example_domains = ("example.com", "sub.example.org", "example.net", "x.invalid", "x.test", "x.example",
+                           "example.org", "deep.mail.example.com", "mail.example.net")
+        examples = " ".join("a@" + domain for domain in example_domains)
+        examples += " " + examples.upper()
+        cases = [
+            # row, rule, allowlist, paths, added line, refused mailboxes
+            (1, True, [], ("README.md", "package.json", "src/app.py"), "jane@realmail.hansa", ["jane@realmail.hansa"]),
+            (2, True, [], ("tests/test_x.py",), "jane@realmail.hansa", ["jane@realmail.hansa"]),
+            (3, True, [], ("README.md", "package.json", "src/app.py", "tests/test_x.py"), examples, []),
+            (4, True, ["jane@realmail.hansa"], ("README.md",), "Jane@RealMail.hansa", []),
+            (5, True, ["@RealMail.HANSA"], ("package.json",), "a@realmail.hansa a@mx.realmail.hansa", []),
+            (6, True, ["@realmail.hansa"], ("src/app.py",), "a@notrealmail.hansa a@realmail.hansa.evil.io",
+             ["a@notrealmail.hansa", "a@realmail.hansa.evil.io"]),
+            (7, True, ["jane@realmail.hansa"], ("README.md",), "john@realmail.hansa", ["john@realmail.hansa"]),
+            (8, False, ["jane@realmail.hansa"], ("src/app.py",), "jane@realmail.hansa john@realmail.hansa", []),
+        ]
+        for row, enabled, allow, paths, line, rejected in cases:
+            for path in paths:
+                with self.subTest(row=row, path=path):
+                    self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=enabled,
+                                                                      release_mailbox_allow=allow)),
+                                     {"ok": True, "problems": []})
+                    tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": path})
+                    tip, head = self.git_out("rev-parse", "main"), self.desk.meta(tid)["head"]
+                    with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
+                        if rejected:
+                            said = self.refused("merge", tid)
+                            self.assertIn(f"{head[:10]} {path}: {line}", said)
+                            for mailbox in rejected:
+                                self.assertIn(f'("{mailbox}")', said)
+                            self.assertIn("Nothing was merged", said)
+                            self.assertEqual(self.git_out("rev-parse", "main"), tip)
+                            self.assertNotIn("test file", said)
+                            self.assertNotIn("holds words the principal keeps from going out", said)
+                            self.assertIn(f'Replace it with an example address in hansa retry {tid} --fresh "..." ', said)
+                            for remedy in ("example.com", "example.org", "example.net", ".invalid", ".test",
+                                           ".example", "ask the principal to add it or its domain",
+                                           "allowlist on the page (hansa ask)"):
+                                self.assertIn(remedy, said)
+                        else:
+                            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+                        if enabled:
+                            self.assertGreater(matcher.call_count, 0)
+                        else:
+                            self.assertEqual(release.words_in(self.repo, ["HEAD", "--"], ["no such phrase"],
+                                                             mailbox_allow=allow)[0], [])
+                            matcher.assert_not_called()
 
-    def test_a_non_example_test_mailbox_stops_a_merge_with_its_commit_file_and_line(self):
+    def test_the_mailbox_allowlist_is_folded_once_per_scan(self):
         from hansa import release
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        line = "contacts = ['a@unreserved.hansa', 'b@elsewhere.hansa']"
-        tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": "test_mailboxes.py"})
-        tip, head = self.git_out("rev-parse", "main"), self.desk.meta(tid)["head"]
-        said = self.refused("merge", tid)
-        self.assertIn(f"{head[:10]} test_mailboxes.py: {line}", said)
-        self.assertIn("a mailbox in a test file does not use a reserved example domain", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn(f'Replace it with an example address in hansa retry {tid} --fresh "..."', said)
-        self.assertIn("or ask the principal", said)
-        for mailbox in ("a@unreserved.hansa", "b@elsewhere.hansa"):
-            self.assertIn(f'("{mailbox}")', said)
-        self.assertIn("Nothing was merged", said)
-        self.assertEqual(self.git_out("rev-parse", "main"), tip)
-        # The same text outside a test path passes, even while the rule is on.
-        tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": "contacts.py"})
-        with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
-            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-            matcher.assert_called_once_with("mailbox-check@unreserved.hansa")
+        folds = 0
 
-    def test_reserved_test_mailboxes_pass_the_merge_scan(self):
+        class Entry(str):
+            def casefold(self):
+                nonlocal folds
+                folds += 1
+                return super().casefold()
+
+            def __getitem__(self, key):
+                return Entry(super().__getitem__(key))
+
+        head = self.commit_in_repo("src/app.py", "".join(
+            f"ordinary added line {i} a@example.org\n" for i in range(20000)))
+        for count in (0, 1, 500):
+            with self.subTest(entries=count):
+                allow = [Entry(f"Person{i}@RealMail.hansa" if i % 2 else f"@mail{i}.RealMail.hansa")
+                         for i in range(count)]
+                folds = 0
+                hits, checked = release.words_in(self.repo, [head, "--"], [], mailboxes=True, mailbox_allow=allow)
+                self.assertEqual((hits, checked), ([], 2))
+                self.assertEqual(folds, count)
+        folds = 0
+        release.words_in(self.repo, [head, "--"], [], mailbox_allow=[Entry("Jane@RealMail.hansa")])
+        self.assertEqual(folds, 0)  # the disabled rule does not even fold entries
+
+    def test_the_mailbox_scan_checks_only_added_lines_and_not_other_text(self):
         from hansa import release
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        mailboxes = ("a@example.com", "a@mail.example.org", "a@x.invalid", "a@y.test", "a@z.example",
-                     "a@example.org", "a@example.net", "a@deep.mail.example.com", "a@mail.example.net",
-                     "A@MAIL.EXAMPLE.ORG", "A@X.INVALID", "A@Y.TEST", "A@Z.EXAMPLE")
-        line = " ".join(mailboxes)
-        tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": "test_mailboxes.py"})
-        with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
-            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-            self.assertIn(unittest.mock.call(line), matcher.call_args_list)
-
-    def test_a_broken_mailbox_matcher_stops_a_merge_before_scanning(self):
-        tid = self.done_with()  # even a change with no test files must check the matcher
-        tip = self.git_out("rev-parse", "main")
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        with unittest.mock.patch("hansa.release.MAILBOX", re.compile(r"(?!)")):
-            said = self.refused("merge", tid)
-        self.assertIn("mailbox rule self-check", said)
-        self.assertIn("the rule could not tell a real mailbox from an example one", said)
-        self.assertIn("the mailbox rule's matcher is broken", said)
-        self.assertIn("hansa merges and releases nothing until it is fixed", said)
-        self.assertNotIn("hansa retry", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("Nothing was merged", said)
-        self.assertEqual(self.git_out("rev-parse", "main"), tip)
-
-    def test_the_mailbox_scan_checks_all_test_paths_and_only_added_lines(self):
-        from hansa import release
-        paths = [f"src/{folder}/contacts.txt" for folder in
-                 ("test", "tests", "spec", "specs", "__tests__", "fixtures", "testdata")]
-        paths += ["src/test_contacts", "src/contacts_test.py", "src/contacts.test.js", "src/contacts.spec.ts"]
-        # Lookalike folders and filenames are ordinary files.
-        ordinary = ("src/testing/contacts.txt", "src/specification/contacts.txt", "src/fixtures.txt", "src/test.txt",
-                    "src/contacts_test", "src/contacts.test", "src/other/tests", "src/other/testdata")
-        for path in [*paths, *ordinary]:
-            self.commit_in_repo(path, "a@unreserved.hansa\n")
-        hits, _ = release.words_in(self.repo, ["HEAD", "--"], [], test_mailboxes=True)
-        self.assertEqual({h["where"] for h in hits}, set(paths))
-        self.assertTrue(all(h["word"] == "a@unreserved.hansa" for h in hits))
+        self.commit_in_repo("README.md", "jane@realmail.hansa\nremove john@realmail.hansa\n")
         before = self.git_out("rev-parse", "HEAD")
-        self.commit_in_repo(paths[0], "a@unreserved.hansa\nclean line\n")
-        self.commit_in_repo(paths[1], "clean line\n")
-        self.assertEqual(release.words_in(self.repo, [f"{before}..HEAD", "--"], [], test_mailboxes=True)[0], [])
+        self.commit_in_repo("README.md", "jane@realmail.hansa\nclean line\n", message="jane@realmail.hansa")
+        self.commit_in_repo("jane@realmail.hansa", "clean\n")
+        # Real mailboxes in identities, messages, filenames and uncommitted merge texts are outside this rule.
+        sh("git", "-c", "user.name=jane@realmail.hansa", "-c", "user.email=jane@realmail.hansa", "commit", "-q",
+           "--allow-empty", "-m", "john@realmail.hansa", cwd=self.repo)
+        hits, checked = release.words_in(self.repo, [f"{before}..HEAD", "--"], [],
+                                        [("merge message", "jane@realmail.hansa"),
+                                         ("merge identity", "Jane <jane@realmail.hansa>")], mailboxes=True)
+        self.assertEqual(hits, [])
+        self.assertEqual(checked, 3)
 
-    def test_the_mailbox_scan_matches_test_paths_without_regard_to_case(self):
-        from hansa import release
-        paths = [f"src/{folder}/contacts.txt" for folder in
-                 ("Test", "Tests", "Spec", "Specs", "__Tests__", "Fixtures", "TestData")]
-        paths += ["Test_a.py", "A_Test.py", "A.Test.js", "A.Spec.js"]
-        for path in paths:
-            self.commit_in_repo(path, "a@unreserved.hansa\n")
-        self.commit_in_repo("Testing/contacts.txt", "a@unreserved.hansa\n")
-        hits, _ = release.words_in(self.repo, ["HEAD", "--"], [], test_mailboxes=True)
-        self.assertEqual({h["where"] for h in hits}, set(paths))
+    def test_adding_a_mailbox_to_the_allowlist_allows_a_previously_refused_merge(self):
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        tid = self.done_with(env={"FAKE_WRITE": "jane@realmail.hansa", "FAKE_WRITE_FILE": "README.md"})
+        tip = self.git_out("rev-parse", "main")
+        self.assertIn("jane@realmail.hansa", self.refused("merge", tid))
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["jane@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
 
     def test_explain_says_whether_the_principals_mailbox_rule_is_on(self):
         for enabled in (False, True, False):
-            self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=enabled)),
+            self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=enabled,
+                                                              release_mailbox_allow=["Jane@RealMail.hansa", "@python.org"])),
                              {"ok": True, "problems": []})
             said = self.hansa("explain")
-            self.assertIn(f"The mailbox rule (release_test_mailboxes) is {'on' if enabled else 'off'}", said)
+            self.assertIn(f"The mailbox rule (release_mailboxes) is {'on' if enabled else 'off'}", said)
             self.assertIn("reserved example domains at merges and releases", said)
-            self.assertIn("It is also the principal's, on the same page", said)
+            self.assertIn("The rule and allowlist are also the principal's, on the same page", said)
+            self.assertIn("every added line", said)
+            self.assertIn("release_mailbox_allow: Jane@RealMail.hansa, @python.org", said)
             self.assertIn("word(s) the principal keeps from going out", said)
+            self.assertNotIn("more, all on the page", said)
+        for count in (0, 20, 21, 500):
+            with self.subTest(entries=count):
+                entries = [f"person{i}@realmail.hansa" for i in range(count)]
+                self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)),
+                                 {"ok": True, "problems": []})
+                said = self.hansa("explain")
+                shown = ", ".join(entries[:20]) if entries else "(empty)"
+                self.assertIn("release_mailbox_allow: " + shown, said)
+                if count > 20:
+                    self.assertIn(f"and {count - 20} more, all on the page", said)
+                    for hidden in entries[20:]:
+                        self.assertNotIn(hidden, said)
+                else:
+                    self.assertNotIn("more, all on the page", said)
+
+    def test_mailbox_help_describes_entry_rules_and_the_explain_limit(self):
+        said = " ".join(self.hansa("help", "forbidden-words").split())
+        for rule in ("domain must contain a dot", "last label must be at least two letters",
+                     "at most 254 characters", "Duplicates are refused ignoring case",
+                     "page drops blank lines", "first 20 allowlist entries"):
+            self.assertIn(rule, said)
+        said = " ".join(self.hansa("help", "who-changes-what").split())
+        self.assertIn("The principal, on the page", said)
+        self.assertIn("the mailbox rule and its address/domain allowlist", said)
 
     def test_example_domain_lookalikes_and_mailbox_characters_are_checked(self):
         from hansa import release
         mailboxes = ("a@example.com.hansa", "a@notexample.org", "a@example.netx", "a@invalid.hansa",
                      "a.b_c%tag+more-x@real-domain.hansa")
         head = self.commit_in_repo("tests/contacts.txt", " ".join(mailboxes) + "\n")
-        hits, checked = release.words_in(self.repo, [head, "--"], [], test_mailboxes=True)
+        hits, checked = release.words_in(self.repo, [head, "--"], [], mailboxes=True)
         self.assertEqual([h["word"] for h in hits], list(mailboxes))
         self.assertTrue(all(h["commit"] == head and h["where"] == "tests/contacts.txt" for h in hits))
         self.assertGreater(checked, 0)
+
+    def test_mailboxes_in_utf16_and_binary_files_are_read_as_the_word_scan_reads_them(self):
+        from hansa import release
+        before = self.git_out("rev-parse", "HEAD")
+        (self.repo / "utf16.txt").write_bytes("jane@realmail.hansa\n".encode("utf-16"))
+        (self.repo / "binary.bin").write_bytes(b"\x00\xffjane@realmail.hansa\x00\n")
+        sh("git", "add", "utf16.txt", "binary.bin", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add encoded data", cwd=self.repo)
+        head = self.git_out("rev-parse", "HEAD")
+        rng = [f"{before}..{head}", "--"]
+        word_hits = release.words_in(self.repo, rng, ["jane@realmail.hansa"])[0]
+        mailbox_hits = release.words_in(self.repo, rng, [], mailboxes=True)[0]
+        self.assertEqual([(h["commit"], h["where"], h["line"]) for h in mailbox_hits],
+                         [(h["commit"], h["where"], h["line"]) for h in word_hits])
+        self.assertEqual([h["where"] for h in mailbox_hits], ["binary.bin"])
+        self.assertEqual(mailbox_hits[0]["word"], "jane@realmail.hansa")
+
+    def test_the_mailbox_scan_returns_at_most_most_hits(self):
+        from hansa import release
+        for separator in ("\n", " "):
+            with self.subTest(separator=separator):
+                before = self.git_out("rev-parse", "HEAD")
+                addresses = [f"person{i}@realmail.hansa" for i in range(release.MOST_HITS + 10)]
+                head = self.commit_in_repo("README.md", separator.join(addresses) + "\n")
+                hits, _ = release.words_in(self.repo, [f"{before}..{head}", "--"], [], mailboxes=True)
+                self.assertEqual(len(hits), release.MOST_HITS)
+                self.assertEqual([h["word"] for h in hits], addresses[:release.MOST_HITS])
+                self.assertTrue(all(h["commit"] == head and h["where"] == "README.md" for h in hits))
 
     def test_a_forbidden_word_in_a_file_name_an_author_or_the_merge_message_stops_a_merge(self):
         tid = self.done_with(env={"FAKE_HELLO": "falcon-notes.txt"})
@@ -19414,25 +19490,35 @@ class DeskTest(unittest.TestCase):
         heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_forbidden"), {"key": "k", "session": None})]
         self.assertEqual(len(heard), 1)  # the one found at the ask, the coordinator saw itself
 
-    def test_a_release_finds_non_example_test_mailboxes_in_outgoing_history(self):
+    def test_a_release_finds_non_example_mailboxes_in_outgoing_history(self):
         from hansa import release
         self.with_release("true")
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        head = self.commit_in_repo("fixtures/contacts.txt", "a@unreserved.hansa\n")
-        self.commit_in_repo("fixtures/contacts.txt", "a@example.com\n")  # still in what goes out
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        head = self.commit_in_repo("docs/contacts.md", "a@unreserved.hansa\n")
+        self.commit_in_repo("docs/contacts.md", "a@example.com\n")  # still in what goes out
         said = self.refused("release", "a")
-        self.assertIn(f'{head[:10]} fixtures/contacts.txt: a@unreserved.hansa  ("a@unreserved.hansa")', said)
-        self.assertIn("a mailbox in a test file does not use a reserved example domain", said)
+        self.assertIn(f'{head[:10]} docs/contacts.md: a@unreserved.hansa  ("a@unreserved.hansa")', said)
+        self.assertIn("a mailbox does not use a reserved example domain", said)
         self.assertNotIn("holds words the principal keeps from going out", said)
         self.assertIn("Replace it with an example address", said)
-        self.assertIn("or ask the principal", said)
-        self.assertIn("a mailbox in a test file does not use a reserved example domain", self.hansa("release"))
+        self.assertIn("ask the principal", said)
+        self.assertNotIn("test file", said)
+        for remedy in ("example.com", "example.org", "example.net", ".invalid", ".test", ".example",
+                       "allowlist on the page (hansa ask)"):
+            self.assertIn(remedy, said)
+        self.assertIn("a mailbox does not use a reserved example domain", self.hansa("release"))
         r = release.get(self.desk, 1)
         self.assertEqual(r["state"], "forbidden")
         self.assertEqual(r["hits"], [{"kind": "mailbox", "word": "a@unreserved.hansa", "commit": head,
-                                      "where": "fixtures/contacts.txt", "line": "a@unreserved.hansa"}])
+                                      "where": "docs/contacts.md", "line": "a@unreserved.hansa"}])
         self.assertIsNone(release.start(self.desk, 1))
         self.assertEqual(self.events("release_started"), [])
+        self.assertNotIn("测试文件", release.state_text(self.desk, r, self.desk.settings(), zh=True))
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["a@unreserved.hansa"])),
+                         {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        self.assertIsNone(release.get(self.desk, 2).get("hits"))
 
     def test_turning_on_the_mailbox_rule_rescans_an_approved_release(self):
         from hansa import release
@@ -19441,26 +19527,94 @@ class DeskTest(unittest.TestCase):
         self.hansa("release", "a")
         r = release.get(self.desk, 1)
         self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
         self.assertIsNone(release.start(self.desk, 1))
         self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
         self.assertEqual(release.get(self.desk, 1)["hits"][0]["word"], "a@unreserved.hansa")
         self.assertEqual(self.events("release_started"), [])
 
-    def test_a_broken_mailbox_matcher_refuses_a_release(self):
+    def test_removing_a_mailbox_allowlist_entry_rescans_an_approved_release(self):
         from hansa import release
         self.with_release("true")
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        with unittest.mock.patch("hansa.release.mailbox_hits", return_value=[]):
-            said = self.refused("release", "a")
-        self.assertIn("the rule could not tell a real mailbox from an example one", said)
-        self.assertIn("the mailbox rule's matcher is broken", said)
-        self.assertIn("hansa merges and releases nothing until it is fixed", said)
-        self.assertNotIn("hansa retry", said)
-        self.assertNotIn("Replace it", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("the mailbox rule's matcher is broken", self.hansa("release"))
-        self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
+        self.commit_in_repo("package.json", '{"author": "jane@realmail.hansa"}\n')
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True,
+                                                          release_mailbox_allow=["jane@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        with unittest.mock.patch("hansa.release.forbidden_in", wraps=release.forbidden_in) as scan:
+            self.hansa("release", "a")
+            self.assertEqual(scan.call_count, 1)
+            r = release.get(self.desk, 1)
+            self.assertEqual(r["state"], "waiting")
+            self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+            self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=[])), {"ok": True, "problems": []})
+            self.assertIsNone(release.start(self.desk, 1))
+            self.assertEqual(scan.call_count, 2)
+        refused = release.get(self.desk, 1)
+        self.assertEqual(refused["commit"], r["commit"])
+        self.assertEqual(refused["state"], "forbidden")
+        self.assertEqual(refused["hits"][0]["word"], "jane@realmail.hansa")
+        self.assertEqual(self.events("release_started"), [])
+
+    def test_the_scan_key_holds_the_mailbox_rule_and_sorted_casefolded_allowlist(self):
+        from hansa import release
+        head = self.git_out("rev-parse", "HEAD")
+
+        def key(enabled, allow):
+            return release.scan_key(self.repo, "", head, [], "true", enabled, allow)
+        self.assertEqual(key(True, ["Jane@RealMail.hansa", "@PYTHON.org"]),
+                         key(True, ["@python.ORG", "jane@realmail.COM"]))
+        self.assertNotEqual(key(True, []), key(False, []))
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.assertNotEqual(key(enabled, []), key(enabled, ["jane@realmail.hansa"]))
+                self.assertNotEqual(key(enabled, ["@realmail.hansa"]), key(enabled, ["jane@realmail.hansa"]))
+        self.assertEqual(release.scan_key(self.repo, "", head, ["Falcon", "SECRET"], "true"),
+                         release.scan_key(self.repo, "", head, ["secret", "FALCON"], "true"))
+
+    def test_adding_an_unrelated_allowlist_entry_rescans_and_starts_an_approved_release(self):
+        from hansa import release
+        self.with_release("true")
+        self.commit_in_repo("README.md", "jane@realmail.hansa\n")
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True,
+                                                          release_mailbox_allow=["jane@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        with unittest.mock.patch("hansa.release.forbidden_in", wraps=release.forbidden_in) as scan:
+            self.hansa("release", "a")
+            r = release.get(self.desk, 1)
+            self.assertEqual(r["state"], "waiting")
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+            self.assertEqual(self.page_save(lambda s: s["release_mailbox_allow"].append("@other.org")),
+                             {"ok": True, "problems": []})
+            process = release.start(self.desk, 1)
+            self.assertIsNotNone(process)
+            process.wait(timeout=20)
+            self.assertEqual(scan.call_count, 2)
+            self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(release.get(self.desk, 1)["commit"], r["commit"])
+        self.assertEqual(len(self.events("release_started")), 1)
+
+    def test_an_allowlist_change_during_a_release_scan_makes_it_scan_again(self):
+        from hansa import release
+        self.with_release("true")
+        self.commit_in_repo("README.md", "jane@realmail.hansa\n")
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        real_scan = release.forbidden_in
+        calls = []
+
+        def changed_during_scan(*args, **kw):
+            found = real_scan(*args, **kw)
+            calls.append(found)
+            if len(calls) == 1:
+                self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["jane@realmail.hansa"])),
+                                 {"ok": True, "problems": []})
+            return found
+        with unittest.mock.patch("hansa.release.forbidden_in", changed_during_scan):
+            self.hansa("release", "a")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0][0]["word"], "jane@realmail.hansa")
+        self.assertEqual(calls[1][0], [])
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
 
     def test_a_listed_lane_goes_out_without_asking_only_while_it_is_what_the_principal_listed(self):
         from hansa import release
@@ -20843,6 +20997,7 @@ const reply = path => given[Object.keys(given).find(p => path.startsWith(p))] ??
 const fetch = async path => { const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r}; };
 const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
   setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
+if (process.argv[4]) ctx.navigator.language = process.argv[4];
 vm.runInContext(script, ctx);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()])", ctx).then(() => {
@@ -20855,17 +21010,32 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(() => {
   if (ask === "mailboxes") {
-    let input = null;
+    let input = null, allow = null, ruleLabel = "", allowLabel = "";
     walk(ids["#tab-settings"], el => {
-      const i = el.kids.findIndex(k => k instanceof Text && k.textContent.startsWith("Require reserved example domains"));
-      if (i >= 0) input = el.kids[i + 1];
+      const i = el.kids.findIndex(k => k instanceof Text &&
+        (k.textContent.startsWith("Require reserved example domains") || k.textContent.startsWith("新增行中的邮箱")));
+      if (i >= 0) {
+        input = el.kids[i + 1]; ruleLabel = el.kids[i].textContent;
+        allowLabel = el.kids[i + 2].textContent; allow = el.kids[i + 3];
+      }
     });
     if (!input || input.attrs.type !== "checkbox") throw new Error("mailbox rule checkbox missing");
+    if (!allow || allow.tag !== "textarea") throw new Error("mailbox allowlist textarea missing beside checkbox");
     const before = input.checked;
     input.checked = !before; input.on.change({target: input});
-    const after = vm.runInContext("S.release_test_mailboxes", ctx);
+    const after = vm.runInContext("S.release_mailboxes", ctx);
     input.checked = before; input.on.change({target: input});
-    console.log(JSON.stringify({before, after, restored: vm.runInContext("S.release_test_mailboxes", ctx)}));
+    const allowBefore = allow.textContent;
+    allow.value = "\nJane@RealMail.hansa\n \t\n@python.org\n\n"; allow.on.input({target: allow});
+    const allowAfter = vm.runInContext("S.release_mailbox_allow", ctx);
+    allow.value = "\n \t\n"; allow.on.input({target: allow});
+    const allowBlank = vm.runInContext("S.release_mailbox_allow", ctx);
+    allow.value = " a b@c.com "; allow.on.input({target: allow});
+    const allowSpaces = vm.runInContext("S.release_mailbox_allow", ctx);
+    allow.value = ""; allow.on.input({target: allow});
+    console.log(JSON.stringify({before, after, restored: vm.runInContext("S.release_mailboxes", ctx),
+      allowBefore, allowAfter, allowBlank, allowSpaces,
+      allowCleared: vm.runInContext("S.release_mailbox_allow", ctx), ruleLabel, allowLabel}));
     return;
   }
   const ticks = [];
@@ -21101,37 +21271,152 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertIn("for lanes a target default, which the principal lets go out without asking", self.hansa("explain"))
 
     def test_the_mailbox_rule_is_a_boolean_setting_only_the_principal_can_change(self):
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
         settings = self.desk.settings()
-        settings["release_test_mailboxes"] = True
-        self.assertIn("release_test_mailboxes is the principal's", " ".join(self.desk.save_settings(settings, by="coordinator")))
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
+        settings["release_mailboxes"] = True
+        self.assertIn("release_mailboxes is the principal's", " ".join(self.desk.save_settings(settings, by="coordinator")))
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
         for bad in ("true", 1, [], None):
             with self.subTest(bad=bad):
-                self.assertFalse(self.page_save(lambda s: s.update(release_test_mailboxes=bad))["ok"])
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
+                self.assertFalse(self.page_save(lambda s: s.update(release_mailboxes=bad))["ok"])
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
         self.hansa("concurrency", "2")
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], True)
+        self.assertIs(self.desk.settings()["release_mailboxes"], True)
         settings = self.desk.settings()
-        settings["release_test_mailboxes"] = False
+        settings["release_mailboxes"] = False
         self.assertTrue(self.desk.save_settings(settings, by="coordinator"))
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], True)
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=False)), {"ok": True, "problems": []})
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
+        self.assertIs(self.desk.settings()["release_mailboxes"], True)
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=False)), {"ok": True, "problems": []})
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
+
+    def test_the_mailbox_allowlist_refuses_invalid_entries_and_only_the_principal_changes_it(self):
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        bad_lists = [([""], "empty entry"), (["jane"], "full address or @domain"), (["@"], "@ alone"),
+                     (["*@realmail.hansa"], "pattern characters"), (["jane?@realmail.hansa"], "pattern characters"),
+                     (["[jane]@realmail.hansa"], "pattern characters"), (["a b@c.com"], "spaces"),
+                     (["jane@realmail.hansa"] * 501, "at most 500"), ("jane@realmail.hansa", "list"),
+                     ([None], "full address or @domain"),
+                     (["@com"], "domain must contain a dot"), (["@realmail"], "domain must contain a dot"),
+                     (["jane@realmail"], "domain must contain a dot"),
+                     (["@realmail.c"], "last label must be at least two letters"),
+                     (["jane@realmail.c1"], "last label must be at least two letters"),
+                     (["@realmail.12"], "last label must be at least two letters"),
+                     (["a" * 242 + "@realmail.hansa"], "at most 254 characters"),
+                     (["@" + "a" * 251 + ".com"], "at most 254 characters"),
+                     (["Jane@RealMail.hansa", "jane@realmail.COM"], "entry 2 repeats entry 1"),
+                     (["@PYTHON.org", "jane@realmail.hansa", "@python.ORG"], "entry 3 repeats entry 1")]
+        for entries, reason in bad_lists:
+            with self.subTest(reason=reason):
+                saved = self.page_save(lambda s: s.update(release_mailbox_allow=entries))
+                self.assertFalse(saved["ok"])
+                self.assertIn(reason, " ".join(saved["problems"]))
+                self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        entries = ["Jane@RealMail.hansa", "@python.org"]
+        settings = self.desk.settings()
+        settings["release_mailbox_allow"] = entries
+        said = " ".join(self.desk.save_settings(settings, by="coordinator"))
+        self.assertIn("release_mailbox_allow is the principal's", said)
+        self.assertIn("hansa ask", said)
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)), {"ok": True, "problems": []})
+        self.hansa("concurrency", "2")
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], entries)
+        settings = self.desk.settings()
+        settings["release_mailbox_allow"] = []
+        self.assertIn("release_mailbox_allow is the principal's", " ".join(self.desk.save_settings(settings)))
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], entries)
+        entries = [f"person{i}@realmail.hansa" for i in range(498)]
+        entries += ["a" * 241 + "@realmail.hansa", "@" + "a" * 249 + ".com"]  # both 254 characters
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=[])), {"ok": True, "problems": []})
+
+    def test_the_old_mailbox_setting_is_read_then_dropped_at_the_next_save(self):
+        old = self.desk.settings()
+        del old["release_mailboxes"]
+        old["release_test_mailboxes"] = True
+        write_json(self.desk.settings_path, old)
+        self.assertEqual(validate(old, self.desk.root), [])
+        settings = self.desk.settings()
+        self.assertIs(settings["release_mailboxes"], True)
+        self.assertNotIn("release_test_mailboxes", settings)
+        tid = self.done_with(env={"FAKE_WRITE": "jane@realmail.hansa", "FAKE_WRITE_FILE": "README.md"})
+        self.assertIn("jane@realmail.hansa", self.refused("merge", tid))
+        self.assertIn("The mailbox rule (release_mailboxes) is on", self.hansa("explain"))
+        saved = json.loads(self.desk.settings_path.read_text())
+        self.assertIs(saved["release_mailboxes"], True)
+        self.assertNotIn("release_test_mailboxes", saved)
+        # If both spellings were present, the new one wins, even if the old one is invalid.
+        saved.update(release_mailboxes=False, release_test_mailboxes="old")
+        write_json(self.desk.settings_path, saved)
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
+        self.assertEqual(validate(saved, self.desk.root), [])
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        self.assertNotIn("release_test_mailboxes", json.loads(self.desk.settings_path.read_text()))
+        # A caller such as a page tab loaded before the rename passes only the old spelling itself.
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                legacy = self.desk.settings()
+                del legacy["release_mailboxes"]
+                legacy["release_test_mailboxes"] = enabled
+                self.assertEqual(self.desk.save_settings(legacy, by="page"), [])
+                saved = json.loads(self.desk.settings_path.read_text())
+                self.assertIs(saved.get("release_mailboxes"), enabled)
+                self.assertNotIn("release_test_mailboxes", saved)
+
+    def test_a_bad_legacy_mailbox_value_names_the_key_the_file_holds(self):
+        for key in ("release_test_mailboxes", "release_mailboxes"):
+            for bad in ("yes", 1, None, []):
+                with self.subTest(key=key, value=bad):
+                    settings = self.desk.settings()
+                    settings.pop("release_mailboxes", None)
+                    settings[key] = bad
+                    write_json(self.desk.settings_path, settings)
+                    saved = self.desk.settings_path.read_bytes()
+                    why = f"{key} must be true or false"
+                    self.assertIn(why, validate(settings, self.desk.root))
+                    self.assertIn(why, public_settings(self.desk)["problems"])
+                    self.assertIn(why, self.desk.save_settings(settings, by="page"))
+                    self.assertIn(why, self.desk.save_settings(self.desk.settings(), by="coordinator"))
+                    self.assertIn(why, self.page_save(lambda s: None)["problems"])
+                    self.assertEqual(self.desk.settings_path.read_bytes(), saved)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_the_settings_page_can_turn_the_mailbox_rule_on_and_off(self):
+    def test_the_settings_page_can_turn_the_mailbox_rule_on_and_off_and_edit_the_allowlist(self):
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-        for enabled in (False, True):
-            with self.subTest(enabled=enabled):
-                self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=enabled)), {"ok": True, "problems": []})
-                result = subprocess.run(["node", str(harness), str(page), "mailboxes"],
-                                        input=json.dumps({"/api/settings": public_settings(self.desk)}),
-                                        capture_output=True, text=True, timeout=60)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout), {"before": enabled, "after": not enabled, "restored": enabled})
+        entries = ["a@realmail.hansa", "@realmail.hansa"]
+        for language in ("en", "zh"):
+            for enabled in (False, True):
+                with self.subTest(language=language, enabled=enabled):
+                    self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=enabled,
+                                                                      release_mailbox_allow=entries)),
+                                     {"ok": True, "problems": []})
+                    result = subprocess.run(["node", str(harness), str(page), "mailboxes", language],
+                                            input=json.dumps({"/api/settings": public_settings(self.desk)}),
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    saved = json.loads(result.stdout)
+                    self.assertEqual([saved[k] for k in ("before", "after", "restored")],
+                                     [enabled, not enabled, enabled])
+                    self.assertEqual(saved["allowBefore"], "\n".join(entries))
+                    self.assertEqual(saved["allowAfter"], ["Jane@RealMail.hansa", "@python.org"])
+                    self.assertEqual(saved["allowBlank"], [])
+                    self.assertEqual(saved["allowSpaces"], [" a b@c.com "])
+                    self.assertEqual(saved["allowCleared"], [])
+                    if language == "en":
+                        self.assertNotIn("test data", saved["ruleLabel"])
+                        self.assertIn("added lines", saved["ruleLabel"])
+                        for label in ("full address allows that address", "@domain allows the domain and its subdomains",
+                                      "one entry per line", "ignoring case"):
+                            self.assertIn(label, saved["allowLabel"])
+                    else:
+                        self.assertNotIn("测试数据", saved["ruleLabel"])
+                        self.assertIn("新增行", saved["ruleLabel"])
+                        for label in ("完整邮箱地址允许该地址", "@域名允许该域名及其子域名", "每行一项", "忽略大小写"):
+                            self.assertIn(label, saved["allowLabel"])
 
     # -- release targets (hansa lane target; hansa release L TARGET) ---------------------------------------------
     def with_targets(self, **targets):
