@@ -5,9 +5,21 @@ the page records that it saved it, and when. hansa runs it when a release starts
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a request to the principal is filed (hansa ask), when a lane's runs cannot
 start because their sandbox cannot (once for each lane and reason: run.hold), when free space goes under the floor
-and hansa serve starts nothing new (once each time: disk.look), and
-when hansa serve has finished no round for STUCK_ALERT seconds; not for ordinary task events, which go to the
+and hansa serve starts nothing new (once each time: disk.look),
+when hansa serve has finished no round for STUCK_ALERT seconds, and when what hansa posts to the coordinator's session
+cannot reach it (kind `coordinator`, below); not for ordinary task events, which go to the
 coordinator. The coordinator sends none: no hansa command does.
+
+The `coordinator` alert has three cases, each after the minutes the principal sets on the page (settings
+`coordinator_alert`, desk.COORDINATOR_ALERT; 0 turns a case off):
+    no session listens   something a follower would post (notify._item) has waited no_session_min in the event log
+                         while the desk has no live follower: hansa serve sends it once (unheard_check), and again only
+                         after a follower has run and the case begun anew
+    waits on its window  `claude agents --json` lists a live follower's session as `waiting` (a permission dialog or a
+                         question) window_min after something was posted to it: once per stretch of waiting
+    work sits untouched  a task posted to the session has waited review_min for review, and the session is `idle` at
+                         a lookup after that: once for that task; hansa does not post it again
+The follower looks for the last two (notify.Watch) and asks the desk to queue them (from_follower).
 
 Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
 as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
@@ -51,7 +63,8 @@ from pathlib import Path
 from . import without_session
 from .desk import Desk, now, read_json, write_json
 
-KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "test")
+KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator",
+         "test")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
@@ -62,6 +75,7 @@ MOST_RUNS = 20  # runs an hour at most; beyond it, alerts are held and go out to
 HOUR = 3600
 STUCK_ALERT = 15 * 60  # seconds hansa serve finishes no round before the principal is alerted
 EVERY = 2.0  # seconds between the alert thread's looks
+UNHEARD_EVERY = 10.0  # seconds between its looks at whether any session hears from hansa (unheard_check)
 
 
 def queue_file(desk: Desk) -> Path:
@@ -381,13 +395,168 @@ def stuck_check(desk: Desk, told: float) -> float:
     return told
 
 
+# -- the coordinator's session cannot be reached (kind `coordinator`) -------------------------------------------------
+def unheard_file(desk: Desk) -> Path:
+    return desk.state_dir / "coordinator-alert.json"
+
+
+def _unheard(desk: Desk) -> dict:
+    try:
+        rec = read_json(unheard_file(desk), {})
+    except ValueError:  # not UTF-8: a hand edit; hansa writes it whole
+        rec = {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def _mins(seconds: float) -> int:
+    return max(0, int(seconds // 60))
+
+
+def _at(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _short(line: str) -> str:
+    """What waits, as a follower's line says it, without its next command."""
+    line = " ".join(str(line).split()).split(" · next: ")[0]
+    return line if len(line) <= 160 else line[:159] + "…"
+
+
+def _waiting(rec: dict) -> list:
+    """What the record says waits unheard, the oldest first: [{at, line}]."""
+    waits = rec.get("waits") if isinstance(rec.get("waits"), dict) else {}
+    return sorted((x for x in waits.values() if isinstance(x, dict) and _at(x.get("at"))), key=lambda x: x["at"])
+
+
+def unheard_check(desk: Desk, t: float | None = None) -> dict:
+    """hansa serve's look at the first case of the `coordinator` alert: something a follower would post (notify._item)
+    has waited no_session_min in the event log, and the desk has no live follower. What waits since a follower last
+    posted is kept in unheard_file ({pos, waits: {what: {at, line}}, told}); told: when it was alerted. A live
+    follower, or the case turned off, clears it: the case begins anew. Returns the record as it is now."""
+    from . import notify
+    from .desk import coordinator_alert_settings
+    t = time.time() if t is None else t
+    s = desk.settings()
+    mins = coordinator_alert_settings(s)["no_session_min"]
+    rec, end = _unheard(desk), notify.log_end(desk)
+    if not mins or not isinstance(rec.get("pos"), int) or notify.live_records(desk):
+        new = {"pos": end}  # a session hears from hansa (or this is the first look): nothing waits unheard
+    else:
+        posted = [r["pos"] for r in notify.records(desk) if isinstance(r.get("pos"), int)]  # where a follower got to
+        pos = min(max([rec["pos"], *posted]), end)
+        waits = dict(rec["waits"]) if isinstance(rec.get("waits"), dict) else {}
+        while pos < end:
+            events, at = notify.read_log(desk, pos, end - pos)
+            if at == pos:
+                break
+            pos = at
+            for e in events:
+                it = notify._item(desk, e)
+                if it and not it[4]:  # not a cancel the session made itself: that one knows
+                    key = f"task {it[0][1]}" if it[0][0] in ("task", "merge") else " ".join(map(str, it[0]))
+                    waits.setdefault(key, {"at": e["ts"] if _at(e.get("ts")) else t,
+                                           "line": _short(desk.redact(it[1]))})
+        new = {"pos": pos, "waits": waits, **({"told": rec["told"]} if _at(rec.get("told")) else {})}
+        items = _waiting(new)
+        if items and "told" not in new and t - items[0]["at"] >= mins * 60 and command(s) \
+                and add(desk, "coordinator", unheard_text(desk, items, t)):
+            new["told"] = t
+    if new != rec:
+        desk.state_dir.mkdir(exist_ok=True)
+        write_json(unheard_file(desk), new)
+    return new
+
+
+def unheard_text(desk: Desk, items: list, t: float) -> str:
+    """The first case's alert: the case, the session that last heard from hansa, and what waits."""
+    from . import notify
+    last = max(notify.records(desk), key=lambda r: r.get("seen") or 0, default=None)
+    if last:
+        sess = last.get("session") or {}
+        how = ("its session ended" if notify.gone(sess) else
+               "its session runs, but notifications were turned off or its follower stopped")
+        who = (f"the last was session {notify.who(sess.get('pid'), str(last.get('name') or ''))}, until "
+               f"{_when(last.get('ended') or last.get('seen'))}: {how}")
+    else:
+        who = "none has on this desk yet"
+    return (f"the coordinator's session cannot be reached: no session hears from hansa ({who}) · {len(items)} "
+            f"thing(s) wait for the coordinator, the oldest for {_mins(t - items[0]['at'])} min: {items[0]['line']}")
+
+
+def session_minutes(s: dict) -> dict:
+    """What a follower watches its session for (notify.Watch): the minutes of the second and third cases, 0 for off;
+    both 0 when no alert command is set, so that it looks nothing up."""
+    from .desk import coordinator_alert_settings
+    mins = coordinator_alert_settings(s)
+    on = bool(command(s))
+    return {"window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0}
+
+
+def from_follower(desk: Desk, me: dict, req: dict) -> bool:
+    """A follower's case of the `coordinator` alert (notify.Watch), queued in words: the session (its pid, and its name
+    when known), the case, and what waits. False when nothing was queued."""
+    from . import notify
+    sess = me.get("session") if isinstance(me.get("session"), dict) else {}
+    who = notify.who(sess.get("pid"), str(me.get("name") or "")[:80])
+    t = time.time()
+    if req.get("case") == "window":
+        since = req["since"] if _at(req.get("since")) else t
+        count = req["count"] if isinstance(req.get("count"), int) else 0
+        text = (f"the coordinator's session {who} has waited on its window (a permission dialog or a question) for "
+                f"{_mins(t - since)} min, so it cannot act on what hansa posted to it: {count} thing(s) since "
+                f"{time.strftime('%H:%M', time.localtime(since))}, the oldest: {_short(req.get('oldest') or '')} · "
+                "answer it in that session")
+    elif req.get("case") == "review" and notify.TASK_ID.match(str(req.get("task") or "")):
+        tid = req["task"]
+        try:
+            title = desk.meta(tid).get("title", "")
+        except SystemExit:
+            return False
+        posted = req["posted"] if _at(req.get("posted")) else t
+        text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
+                f"min since hansa posted it there: {title} · hansa does not post it again")
+    else:
+        return False
+    return add(desk, "coordinator", text)
+
+
+def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
+    """For hansa status: one line for each case of the `coordinator` alert that holds now, alerted or not (the second
+    and third as the followers last recorded them; they look only while an alert command is set)."""
+    from . import notify
+    from .desk import coordinator_alert_settings
+    t = time.time() if t is None else t
+    mins = coordinator_alert_settings(s)
+    lives, out = notify.live_records(desk), []
+    items = _waiting(_unheard(desk)) if not lives and mins["no_session_min"] else []
+    if items and t - items[0]["at"] >= mins["no_session_min"] * 60:
+        out.append(f"no session hears from hansa, so the coordinator's session cannot be reached: {len(items)} "
+                   f"thing(s) wait for it, the oldest for {_mins(t - items[0]['at'])} min ({items[0]['line']})")
+    for r in lives:
+        holds = r.get("coordinator") if isinstance(r.get("coordinator"), dict) else {}
+        who = notify.who((r.get("session") or {}).get("pid"), r.get("name") or "")
+        since = holds.get("window")
+        if mins["window_min"] and _at(since) and t - since >= mins["window_min"] * 60:
+            out.append(f"the coordinator's session {who} has waited on its window for {_mins(t - since)} min (a "
+                       "permission dialog or a question), with what hansa posted to it unanswered")
+        tasks = holds.get("review") if isinstance(holds.get("review"), dict) else {}
+        shown = [f"{tid} for {_mins(t - at)} min" for tid, at in sorted(tasks.items()) if _at(at)]
+        if mins["review_min"] and shown:
+            out.append(f"waiting for review while the coordinator's session {who} is idle: {', '.join(shown)}")
+    return out
+
+
 def start_thread(desk: Desk, every: float = EVERY) -> threading.Thread:
-    """hansa serve's alert thread: it sends what gathered, and alerts when the server's own rounds stop coming."""
+    """hansa serve's alert thread: it sends what gathered, and alerts when the server's own rounds stop coming or
+    no session hears from hansa (unheard_check, every UNHEARD_EVERY seconds)."""
     def loop():
-        told = 0.0
+        told, unheard = 0.0, 0.0
         while True:
             try:
                 told = stuck_check(desk, told)
+                if time.time() >= unheard:
+                    unheard = time.time() + UNHEARD_EVERY
+                    unheard_check(desk)
                 send_due(desk)
             except Exception as e:  # noqa: BLE001 - keep sending; the error is on record
                 with contextlib.suppress(Exception):
@@ -431,6 +600,9 @@ def explain_line(s: dict) -> str:
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
             "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, free space goes under the "
-            "floor (hansa disk-floor), or hansa serve finishes no round for a long time. You send no alerts and cannot set it. A release waiting for the principal gets a "
+            "floor (hansa disk-floor), hansa serve finishes no round for a long time, or what hansa posts to your "
+            "session cannot reach it (no session hears from hansa, your session waits on a permission dialog or a "
+            "question, or a task posted to it waits for review while it is idle). You send no alerts and cannot set "
+            "it. A release waiting for the principal gets a "
             "one-time code that only that alert carries: the principal answers on the page, or says the code in the "
             "conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). Never guess one.")

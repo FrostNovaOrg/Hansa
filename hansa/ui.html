@@ -146,9 +146,11 @@ const T = ZH ? {
   releaseForbidden:"不许发出去的字眼（每行一个词或短语，不分大小写；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   releaseTestMailboxes:"测试数据中的邮箱必须使用保留示例域名（合并和发布时检查；默认关闭）",
   f_release:"发布命令",
-  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮）由 hansa 运行，以这台机器的账号在沙箱外、在桌面 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
+  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调者会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在桌面 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调者能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
+  alertNoSession:"没有会话在听 hansa 多少分钟后提醒", alertWindow:"协调者会话停在窗口上多少分钟后提醒", alertReview:"任务等审、协调者会话空闲多少分钟后提醒",
+  alertCoordinatorNote:"种类 coordinator：hansa 发给协调者会话的消息到不了它时提醒你：没有会话在听 hansa、要发的东西等了这么久（hansa serve 提醒一次，有会话再听过之后才会再提醒）；会话停在权限对话框或问题上，发给它的东西没人理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有提醒命令时一种也不提醒。协调者不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
 } : {
@@ -227,9 +229,11 @@ const T = ZH ? {
   releaseForbidden:"Words or phrases no release may send out (one per line, any case; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   releaseTestMailboxes:"Require reserved example domains for mailboxes in test data (checked at merges and releases; off by default)",
   f_release:"release",
-  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
+  alertNoSession:"Alert when no session has heard from hansa for (minutes)", alertWindow:"Alert when the coordinator's session has waited on its window for (minutes)", alertReview:"Alert when a task has waited for review, its session idle, for (minutes)",
+  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert command, none goes out. The coordinator cannot change them",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
@@ -467,7 +471,8 @@ function pick(obj, key, options, labels) {
   return h("select", {onchange: e => { obj[key] = e.target.value; }},
     options.map((o, i) => h("option", {value:o, selected: (obj[key] || "") === o}, labels ? labels[i] : (o || T.effortDefault))));
 }
-/* The principal's alert command; who saved it and when are recorded by hansa as the page saves it */
+/* The principal's alert command; who saved it and when are recorded by hansa as the page saves it. With it, the minutes
+   of the coordinator alert's three cases (blank: the default) */
 function alertSection() {
   S.alert = S.alert || {command:""};
   const said = h("span", {});
@@ -477,9 +482,13 @@ function alertSection() {
         || (r.timed_out ? "timeout" : `exit ${r.exit}`) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
     test.disabled = false; }}, T.alertTest);
+  S.coordinator_alert = S.coordinator_alert || {};
   return section(T.alerts, h("div", {class:"grid"},
     T.alertCmd, h("div", {}, bind(S.alert, "command"), S.alert.at ? h("div", {class:"muted"}, T.alertSavedAt(when(S.alert.at))) : null,
-      h("div", {class:"muted"}, T.alertKeep), h("div", {class:"row"}, test, said))));
+      h("div", {class:"muted"}, T.alertKeep), h("div", {class:"row"}, test, said)),
+    T.alertNoSession, bind(S.coordinator_alert, "no_session_min", "number"),
+    T.alertWindow, bind(S.coordinator_alert, "window_min", "number"),
+    T.alertReview, h("div", {}, bind(S.coordinator_alert, "review_min", "number"), h("div", {class:"muted"}, T.alertCoordinatorNote))));
 }
 /* an entry of the releases without asking: [lane, target]; an old unnamed entry stays distinct unless migrated */
 const listedKey = x => typeof x === "string" ? [x, ""] : [x.lane, x.target || ""];
