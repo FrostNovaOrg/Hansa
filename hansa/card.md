@@ -22,6 +22,9 @@ a gap in hansa, not in you: say so with `hansa ask`.
 - Guess a release code, or ask the principal to send it anywhere else: it travels only in their alert.
 - Ask for the page's address or its token: it approves releases and is the principal's alone.
 - Poll or schedule wakeups to learn what hansa posts to you: end your turn and wait.
+- Write scripts of your own to check your own work. When something slips through, fix what should
+  have caught it: the project's tests or CI (a task), or the lane's settings or standing
+  instructions; or tell the principal.
 
 ## Tell the principal
 - In the conversation, what you changed and why, after each change to a lane's `allow`, network
@@ -120,16 +123,16 @@ result, calls the worker had no permission for (with the reason Claude Code gave
 Such a call means the worker could not do something (git history is hansa's; the desk's keys and
 state stay closed): decide whether the task should be rewritten. A refused command or a failed
 network call is usually the sandbox doing its job: fix the task (ask for less, leave the download to
-the setup) or the lane. Claude Code refuses a `bash -c "..."` it cannot check, such as one that runs
-`rm`: workers are told to put such a line in a script file in their temporary folder and run it with
-`sh`; ask for it that way. A failed check: send the task back with `hansa retry`; `hansa diff NEW
---new` then shows what the follow-up added. A check that "could not run" never ran: the machine
-could not start `srt`, and the task is not judged on it (one that failed printing nothing usually
-could not start either); `hansa explain server` says how to fix it, then `hansa merge <id>
---recheck`. Merge with `--despite-check` only when the failure is not the task's doing and cannot be
-run again, and say why. If the setup failed, the worker never started: `hansa show` has the setup's
-last lines; fix it with `hansa lane set L setup "<command>"`, then retry. More: `hansa help
-check-output`.
+the setup) or the lane, never by switching the sandbox off. Claude Code refuses a `bash -c "..."` it
+cannot check, such as one that runs `rm`: workers are told to put such a line in a script file in
+their temporary folder and run it with `sh`; ask for it that way. A failed check: send the task back
+with `hansa retry`; `hansa diff NEW --new` then shows what the follow-up added. A check that "could
+not run" never ran: the machine could not start `srt`, and the task is not judged on it (one that
+failed printing nothing usually could not start either); `hansa explain server` says how to fix it,
+then `hansa merge <id> --recheck`. Merge with `--despite-check` only when the failure is not the
+task's doing and cannot be run again, and say why. If the setup failed, the worker never started:
+`hansa show` has the setup's last lines; fix it with `hansa lane set L setup "<command>"`, then
+retry. More: `hansa help check-output`.
 
 ## Checking before you merge
 The lane's check runs on every task that changed something; `hansa diff <id> --stat` shows what the
@@ -170,7 +173,8 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   help commits`.
 - Set a target: `hansa lane target L NAME "<command>"`, one shell command line (a push, a wait for
   CI, a deploy script). A `--fixed` target's command sends `$HANSA_RELEASE_COMMIT`, never the base
-  branch. More: `hansa help release-flow`.
+  branch; give it in single quotes, so the variable is read when it runs: `hansa lane target L NAME
+  'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"' --fixed`. More: `hansa help release-flow`.
 - List the build files a release runs outside the sandbox (`hansa lane set L release_files "pom.xml
   build.sh"`): `hansa merge` refuses a change touching one until `hansa verify <id>` holds, and
   neither `--despite-check` nor anything else lets it through. More: `hansa help release-files`.
@@ -284,6 +288,8 @@ code changes and browsers go to workers.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
   its last note). Some providers take minutes per reply; a task is stuck only when nothing has
   happened for a long while. Where a run's effort came from: `hansa help effort`.
+- Every JVM in a lane prints `Picked up JAVA_TOOL_OPTIONS: ...` first on stderr, so a script that
+  reads a version must look for the line holding `version "`. More: `hansa help java`.
 - Each task stops at its lane's ceiling of turns and minutes, set high: reaching it means the task
   was too big or unclear, or the worker got stuck. It fails with the worker's notes as its report:
   read them, then split the task or make it clearer rather than re-running it unchanged.
