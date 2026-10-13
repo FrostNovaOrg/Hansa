@@ -83,6 +83,9 @@ NETWORK = re.compile(r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?P<server>API Error:?[ \t]
                      r"\((?P<unreach>ENETUNREACH)\)[ \t.]*$|"  # the network itself out of reach, at a line's end
                      r"\"type\"[ \t]*:[ \t]*\"(?P<json>overloaded_error)\"", re.I | re.M)
 OVERLOADED_STATUS = 529
+# A run the system killed (SIGKILL, as Linux's kernel kills the largest process when memory runs short): its exit as
+# Popen gives it, and as a shell or hansa/preview.py passes it on
+KILLED_EXITS = (-9, 137)
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
               "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
@@ -1296,8 +1299,9 @@ def rest_text(st: dict) -> str:
 
 
 def tries_used(attempts: list) -> int:
-    """The tries a task has used: each earlier run but those that ended on a usage limit and cost no try."""
-    return sum(1 for a in attempts if a.get("kind") != "limit" or a.get("counted"))
+    """The tries a task has used: each earlier run but those that ended on a usage limit and cost no try, and
+    those the system killed (finish), which cost none."""
+    return sum(1 for a in attempts if a.get("kind") != "killed" and (a.get("kind") != "limit" or a.get("counted")))
 
 
 def refused_by(m: dict) -> set:
@@ -2687,23 +2691,24 @@ def command_rules(command: str) -> list:
     return [f"Bash({p.strip()}:*)" for p in parts + [cur] if p.strip()]
 
 
-def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None) -> list:
+def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None, lane_name: str = "") -> list:
     """Where a task's merge into the base would hold one of the principal's release_forbidden words, matched as a
     release matches them (release.words_in): the commits from commit that the base (at tip) does not hold, their
     messages, identities, file names and added lines; and, for a merge not made yet (message given), its message
-    and the lane's identity, which hansa gives it. Also checks added test lines when release_test_mailboxes is on.
+    and the lane's identity, which hansa gives it. Also checks every added line when release_mailboxes is on.
     [] when the list is empty and the mailbox rule is off."""
     settings = desk.settings()
-    words = [w for w in settings.get("release_forbidden") or [] if isinstance(w, str) and w.strip()]
-    test_mailboxes = settings.get("release_test_mailboxes", False)
-    if not words and not test_mailboxes:
+    from .release import lane_words, words_in
+    words = lane_words(settings, lane_name)
+    mailboxes = settings.get("release_mailboxes", False)
+    if not words and not mailboxes:
         return []
-    from .release import words_in
     texts = []
     if message:
         name, email, _ = lane_identity(lane)
         texts = [("merge message", message), ("merge author and committer", f"{name} <{email}>")]
-    return words_in(repo, [commit, f"^{tip}", "--"], words, texts, test_mailboxes)[0]
+    return words_in(repo, [commit, f"^{tip}", "--"], words, texts, mailboxes,
+                    settings.get("release_mailbox_allow") or [])[0]
 
 
 def words_text(tid: str, hits: list) -> str:
@@ -4195,7 +4200,7 @@ def read_detail(desk: Desk, tid: str, what: str, default, fn, *args):
 
 
 def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
-    """When a run is cut off by a dropped connection or the provider's limit, and hansa queues it again:
+    """When a run is cut off by a dropped connection, the provider's limit or the system, and hansa queues it again:
     1. The run's own work is the commits from where it started (run_start) to its head. A run started
        by an older hansa, with no run_start, counts from its start_from, else from its base.
     2. Carry on from its head when that work is not empty, holds no key and no conflict markers,
@@ -4247,6 +4252,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
+    # killed by the system once the lane's setup had finished, before the worker wrote its result; hansa's own stops
+    # (a changed .git file, cancel, sandbox_failed, timed_out) and design sessions keep their branches, which come first.
+    # Then the kill, before its stderr is read for the provider's quota, key, login or refusal (unusable_reason)
+    killed = not run and set_up and returncode in KILLED_EXITS
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
     setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
     result = run.get("result") or ""
@@ -4351,7 +4360,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     attempts = list(meta.get("attempts", []))
     if setup:
         fields["setup_exit"] = int(setup.group(1))
-    kind, why = ("", "") if meta.get("cancel") or setup or changed else unusable_reason(run, err)
+    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else unusable_reason(run, err)
     # a report written before the connection went is the worker's finished work: that run ends as it did
     net = "" if kind or late else network_reason(run, err)
     if changed:
@@ -4406,6 +4415,23 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             "queued again once" if state == "queued" else
             "the connection to the provider failed twice, so hansa stopped trying. This is the machine's or the "
             f"provider's problem, not the task's: when the connection is back, {retry}")
+    elif killed:  # queued again once, as after a dropped connection, without using a try; each cause counts its own
+        before = [a for a in attempts if a.get("kind") == "killed"]
+        how = f"killed by the system (exit {returncode})"
+        state = "failed" if before else "queued"
+        retry = (f"hansa verify {meta['parent']}" if meta.get("kind") == "verify" and meta.get("parent")
+                 else f"hansa retry {tid}")
+        error = f"{how}; queued again once, without using a try" if state == "queued" else (
+            f"killed by the system twice (exit {before[0].get('exit')}, then exit {returncode}), with no word from "
+            f"the {'verifier' if meta.get('kind') == 'verify' else 'worker'}: the machine may be short of memory, "
+            f"so fewer runs at once may help (hansa concurrency). Next: {retry}")
+        attempts.append({"provider": meta["provider"], "at": now(), "kind": "killed", "exit": returncode,
+                         "error": error if state == "queued" else how})
+        if isinstance(resumed.get("turns"), int) and not isinstance(fields["turns"], int):  # its first process's
+            fields["turns"] = resumed["turns"]  # turns are known, even 0; its killed continuation's own are not
+            attempts[-1]["turns_unknown_after_resume"] = True
+        if meta.get("kind") == "verify":  # a killed run gives no verdict, whatever its record said before the kill
+            fields["verdict"] = ""
     elif run.get("is_error") or run.get("subtype") not in ("success", None) or not run:
         state = "failed"
         lines = (result or err).strip().splitlines()
@@ -4429,7 +4455,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             kept = {"usage": {}, "turns": None}
         again = {"resumed": None, "restart": None} if final == "queued" else {}
         if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
-                and meta.get("kind") not in ("verify", "design") and (kind == "quota" or net)):
+                and meta.get("kind") not in ("verify", "design")
+                and (kind == "quota" or net or attempts[-1].get("kind") == "killed")):
             again["restart"] = restart or interrupted_restart(desk, wt, meta, fields)
         if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
             kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
@@ -4874,7 +4901,7 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
         else:
             leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
             words = [] if leaked else words_in_merge(desk, repo, tip, m["head"],
-                                                     merge_message(lane, m["lane"], tid, m["title"]), lane)
+                                                     merge_message(lane, m["lane"], tid, m["title"]), lane, m["lane"])
             if leaked:
                 desk.update(tid, leaked=leaked)
                 why = f"the change holds the key of {', '.join(leaked)}"
@@ -5079,7 +5106,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
             why = f"the checkout at {repo} has uncommitted changes"
         else:
             leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
-            words = [] if leaked else words_in_merge(desk, repo, tip, result["commit"])  # the merge commit too
+            words = [] if leaked else words_in_merge(desk, repo, tip, result["commit"], lane_name=m["lane"])  # the merge commit too
             if leaked:
                 desk.update(tid, leaked=leaked)
                 why = f"the change holds the key of {', '.join(leaked)}"

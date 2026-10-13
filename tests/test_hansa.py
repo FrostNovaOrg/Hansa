@@ -184,6 +184,60 @@ if os.environ.get("CLAUDE_ENV_FILE"):  # the lane's env: the real one runs the f
     os.environ.clear()
     os.environ.update(json.loads(seen.stdout))
 ''' + BG_SHAPES + r'''
+def killed():
+    # FAKE_KILL "KILL|TERM:runs:count file": the runs numbered in runs (1,2: the first two) write half a file, then
+    # end by that signal. FAKE_KILL_SEE: where each run started and what it was told; FAKE_KILL_NO_WRITE: nothing
+    # written; FAKE_KILL_USAGE: a reply with its tokens in the session record first; FAKE_KILL_RESULT: its result
+    # written first; FAKE_KILL_WRAPPED: killed in a child, whose end it passes on as a shell or hansa/preview.py does;
+    # FAKE_KILL_ERR: these words on its stderr first; FAKE_KILL_LATE: its session record holds a report, then a
+    # correction ending in these words, in a turn a background notice opened
+    if not os.environ.get("FAKE_KILL"):
+        return
+    import signal
+    how, runs, count = os.environ["FAKE_KILL"].split(":", 2)
+    n = (int(open(count).read()) if os.path.exists(count) else 0) + 1
+    open(count, "w").write(str(n))
+    if os.environ.get("FAKE_KILL_SEE"):
+        head = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        open(os.environ["FAKE_KILL_SEE"], "a").write(json.dumps({
+            "head": head, "partial": open("partial.txt").read() if os.path.exists("partial.txt") else None,
+            "hello": open("hello.txt").read() if os.path.exists("hello.txt") else None,
+            "system": sys.argv[sys.argv.index("--append-system-prompt") + 1] if "-p" in sys.argv else ""}) + "\n")
+    if str(n) not in runs.split(","):
+        return
+    if not os.environ.get("FAKE_KILL_NO_WRITE"):
+        open("partial.txt", "w").write("half of a file, run " + str(n) + " of " + os.environ.get("HANSA_TASK", "?"))
+    sid = sys.argv[sys.argv.index("--session-id") + 1] if "--session-id" in sys.argv else "s-killed"
+    if os.environ.get("FAKE_KILL_USAGE"):
+        rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+        os.makedirs(os.path.dirname(rec), exist_ok=True)
+        with open(rec, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"id": "k" + str(n), "model": "mimo-x", "content": [
+                {"type": "text", "text": "Working on it."}], "usage": {"input_tokens": 70 * n, "output_tokens": 7}}}) + "\n")
+    if os.environ.get("FAKE_KILL_LATE"):
+        rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+        os.makedirs(os.path.dirname(rec), exist_ok=True)
+        say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "model": "mimo-x", "content": [
+            {"type": "text", "text": t}]}}
+        rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": "Do it"}},
+                say("k1", "Report: wrote half of the file."),
+                {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
+                    "role": "user", "content": "<task-notification> <task-id>bk1</task-id> timed out"}},
+                say("k2", "Correction: the other half is still to write. " + os.environ["FAKE_KILL_LATE"])]
+        with open(rec, "a") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+    if os.environ.get("FAKE_KILL_ERR"):
+        sys.stderr.write(os.environ["FAKE_KILL_ERR"] + "\n")
+        sys.stderr.flush()
+    if os.environ.get("FAKE_KILL_RESULT"):
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
+                          "result": "Wrote partial.txt; done."}), flush=True)
+    sig = getattr(signal, "SIG" + how)
+    if os.environ.get("FAKE_KILL_WRAPPED"):
+        rc = subprocess.call([sys.executable, "-c", "import os; os.kill(os.getpid(), %d)" % sig])
+        sys.exit(128 - rc)
+    os.kill(os.getpid(), sig)
+    time.sleep(30)
 prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
 if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
     if os.environ.get("FAKE_SHOW_ARGV"):
@@ -196,6 +250,7 @@ if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
         for i, t in enumerate(("Here is how it looks now.", "Hand-in: the badge is bigger; the checks pass.")):
             f.write(json.dumps({"type": "assistant", "message": {"id": f"d{i}", "model": "claude-x", "content": [
                 {"type": "text", "text": t}], "usage": {"input_tokens": 100, "output_tokens": 20}}}) + "\n")
+    killed()
     time.sleep(float(os.environ.get("FAKE_DESIGN_SECONDS", "0")))
     sys.exit(0)
 if "--resume" in sys.argv:  # hansa resuming a run that left background work: it runs it in the foreground
@@ -211,6 +266,13 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
         sys.exit(1)
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
     counted = {"usage": {"input_tokens": 10, "output_tokens": 5}} if os.environ.get("FAKE_RECORD_USAGE") else {}
+    gone = os.environ.get("FAKE_RESUME_KILL")  # a file: the first resumed run replies once, then the system kills it
+    if gone and not os.path.exists(gone):
+        import signal
+        open(gone, "w").write("killed\n")
+        with open(rec, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"id": "rk", "model": "mimo-x", "content": [], **counted}}) + "\n")
+        os.kill(os.getpid(), signal.SIGKILL)
     limit = os.environ.get("FAKE_RESUME_LIMIT")  # a file: the first resumed run ends on the provider's usage limit
     if limit and not os.path.exists(limit):
         open(limit, "w").write("limit\n")
@@ -242,6 +304,7 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
                       "result": report, **totals}))
     sys.exit(0)
+killed()
 compat =bool(os.environ.get("ANTHROPIC_BASE_URL"))
 if compat and os.environ.get("FAKE_BADKEY_ON_COMPAT"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
@@ -388,8 +451,8 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
         print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 9,
                           "session_id": sid}))
         sys.exit(1)
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 5, "session_id": sid,
-                      "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "num_turns": int(os.environ.get("FAKE_TURNS", "5")), "session_id": sid, "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
                       **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
     sys.exit(0)
 if os.environ.get("FAKE_SANDBOX_START"):  # "first", "after-ok": a Bash call whose sandbox could not start
@@ -3198,6 +3261,276 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         return tid
 
+    def test_forbidden_patterns_and_lane_exceptions_cases(self):
+        from hansa import release
+        pattern = r"re:\blane [a-k]\b"
+        product = "Claude Code"
+
+        def except_e(c):
+            c.hansa("lane", "add", "e", "--like", "a")
+            c.forbid(product)
+            c.assertEqual(c.page_save(lambda s: s.update(
+                release_forbidden_except=[{"entry": product, "lanes": ["e"]}])), {"ok": True, "problems": []})
+
+        def finished(c, lane, line, path="notes.txt", **fields):
+            s = c.desk.settings()
+            s["lanes"][lane].update(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": path}, **fields)
+            c.assertEqual(c.desk.save_settings(s), [])
+            tid = c.desk.new_task("Add a note", lane=lane)
+            c.assertEqual(c.settle(Dispatcher(c.desk), tid)["state"], "done")
+            return tid
+
+        def added_shape(c):
+            entry = r"re:第\s*\d+\s*笔"
+            c.forbid(entry)
+            tid = finished(c, "a", "记录第 123 笔")
+            head = c.desk.meta(tid)["head"]
+            said = c.refused("merge", tid)
+            c.assertIn(f'{head[:10]} notes.txt: 记录第 123 笔  ("{entry}")', said)
+            c.assertIn("Nothing was merged", said)
+
+        def message_shape(c):
+            c.forbid(pattern)
+            tid = finished(c, "a", "clean", commit_message="Lane B: {title}")
+            c.assertIn("Lane B", c.refused("merge", tid))
+            c.assertIn(pattern, c.refused("merge", tid))
+            head = c.desk.meta(tid)["head"]
+            c.assertNotEqual(release.scan_key(c.repo, "", head, [r"re:\d"], "true"),
+                             release.scan_key(c.repo, "", head, [r"re:\D"], "true"))
+
+        def title_shape(c):
+            c.forbid(pattern)
+            said = c.refused("add", "Work", "--lane", "a", "--title", "For Lane B")
+            c.assertIn("--title holds", said)
+            # The title refusal uses JSON quoting, as literal-word refusals do.
+            c.assertIn(json.dumps(pattern), said)
+            c.assertIn("Nothing was queued", said)
+            c.assertEqual(c.desk.tasks(), [])
+
+        def command_shape(c):
+            c.forbid(pattern)
+            said = c.hansa("lane", "target", "a", "ship", "echo Lane B")
+            c.assertIn(f'Warning: lane a\'s release target ship holds "{pattern}"', said)
+            c.assertEqual(c.desk.settings()["lanes"]["a"]["targets"]["ship"]["command"], "echo Lane B")
+            said = c.refused("release", "a", "ship")
+            c.assertIn(pattern, said)
+            c.assertIn("release command: echo Lane B", said)
+
+        def invalid_patterns(c):
+            c.forbid("existing")
+            before = c.desk.settings_path.read_bytes()
+            for entry, why in (("re:(", "does not compile"), ("re:x*", "matches the empty string"),
+                               ("re:" + "x" * 201, "at most 200 characters")):
+                with c.subTest(entry=entry):
+                    saved = c.page_save(lambda s: s.update(release_forbidden=[entry], cool_minutes=7))
+                    c.assertFalse(saved["ok"])
+                    c.assertIn(why, " ".join(saved["problems"]))
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
+            c.forbid("re:" + "x" * 197)  # 200 characters including the prefix
+
+        def literal_metacharacters(c):
+            c.forbid("a.b")
+            tid = finished(c, "a", "axb")
+            c.assertIn("merged into main", c.hansa("merge", tid))
+            tid = finished(c, "a", "a.b")
+            c.assertIn('notes.txt: a.b  ("a.b")', c.refused("merge", tid))
+
+        def excepted_merges(c):
+            except_e(c)
+            e = finished(c, "e", product, "e.txt")
+            a = finished(c, "a", product, "a.txt")
+            c.assertIn("merged into main", c.hansa("merge", e))
+            c.assertIn(product, c.refused("merge", a))
+            c.assertEqual(c.desk.meta(a)["state"], "done")
+
+        def excepted_titles_commands_releases(c):
+            except_e(c)
+            c.assertIn("queued for lane e", c.hansa("add", "Work", "--lane", "e", "--title", product))
+            c.assertIn("Nothing was queued", c.refused("add", "Work", "--lane", "a", "--title", product))
+            with unittest.mock.patch.object(account, "LINUX", False):
+                c.assertIn("queued", c.hansa("design", "Work", "--lane", "e", "--title", product))
+                c.assertIn("Nothing was queued", c.refused("design", "Work", "--lane", "a", "--title", product))
+            command = "echo '" + product + "'"
+            c.assertNotIn("Warning", c.hansa("lane", "target", "e", "ship", command))
+            c.assertIn("Warning", c.hansa("lane", "target", "a", "ship", command))
+            c.commit_in_repo("subject.txt", product + "\n")
+            c.hansa("release", "e", "ship")
+            c.assertEqual(release.get(c.desk, 1)["state"], "waiting")
+            c.assertIn(product, c.refused("release", "a", "ship"))
+            c.assertIn("1 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "e"))
+            c.assertIn("0 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "a"))
+            c.forbid(product, "unprinted-phrase")
+            c.assertEqual(c.page_save(lambda s: s["release_forbidden_except"].append(
+                {"entry": "unprinted-phrase", "lanes": ["e"]})), {"ok": True, "problems": []})
+            c.assertNotIn("unprinted-phrase", c.hansa("explain", "lane", "e", "--all"))
+            c.assertIn("2 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "e"))
+            c.assertIn("Nothing was queued", c.refused("add", "unprinted-phrase", "--lane", "a"))
+            c.forbid(product, "still-forbidden")
+            c.assertIn("Nothing was queued", c.refused("add", "still-forbidden", "--lane", "e"))
+            # Excepting a word that looks like an address does not allow it through the mailbox rule.
+            c.forbid("jane@realmail.hansa")
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailboxes=True, release_forbidden_except=[
+                {"entry": "jane@realmail.hansa", "lanes": ["e"]}])), {"ok": True, "problems": []})
+            tid = finished(c, "e", "jane@realmail.hansa")
+            c.assertIn("a mailbox does not use a reserved example domain", c.refused("merge", tid))
+
+        def excepted_merge_lane(c):
+            except_e(c)
+            c.merge_lane_for_checks("test -f notes.txt")
+            tid = finished(c, "e", product, check="true")
+            c.hansa("merge", tid)
+            m = c.settle_merge(Dispatcher(c.desk), tid)
+            c.assertEqual(m["state"], "merged", m)
+            c.assertEqual(m["merge_check_result"]["lane"], "m")
+            # The merge lane's own exception must not cover a task on lane a.
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[
+                {"entry": product, "lanes": ["m"]}])), {"ok": True, "problems": []})
+            tid = finished(c, "a", product, "a.txt", check="true")
+            c.assertIn(product, c.refused("merge", tid))
+
+        def unmatched_exceptions(c):
+            c.forbid("private-phrase")
+            entries = [{"entry": "private-phrase", "lanes": ["z"]}, {"entry": "absent-entry", "lanes": ["a"]}]
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=entries)), {"ok": True, "problems": []})
+            c.hansa("concurrency", "2")
+            c.assertEqual(c.desk.settings()["release_forbidden_except"], entries)
+            settings = c.desk.settings()
+            settings["release_forbidden_except"] = []
+            c.assertIn("release_forbidden_except is the principal's", " ".join(c.desk.save_settings(settings)))
+            with contextlib.redirect_stderr(io.StringIO()):
+                c.refused("lane", "set", "a", "release_forbidden_except", "a")
+            c.assertNotIn("private-phrase", c.hansa("explain", "lane", "a", "--all"))
+            c.assertNotIn("absent-entry", c.hansa("explain", "lane", "a", "--all"))
+            if not shutil.which("node"):
+                c.skipTest("needs node to verify the page's exception rows")
+            harness = c.tmp / "page.js"
+            harness.write_text(c.PAGE_HARNESS)
+            page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+            for language in ("en", "zh"):
+                result = subprocess.run(["node", str(harness), str(page), "exceptions", language],
+                                        input=json.dumps({"/api/settings": public_settings(c.desk)}),
+                                        capture_output=True, text=True, timeout=60)
+                c.assertEqual(result.returncode, 0, result.stderr)
+                shown = json.loads(result.stdout)
+                c.assertEqual(shown["before"], entries)
+                c.assertEqual(shown["rows"], 2)
+                for entry in ("z", "absent-entry"):
+                    c.assertTrue(any(entry in w for w in shown["warnings"]), shown)
+                c.assertTrue(all(("matches nothing" if language == "en" else "不匹配任何项") in w
+                                 for w in shown["warnings"]))
+                c.assertEqual(shown["edited"], {"entry": "private-phrase", "lanes": ["a", "e"]})
+                c.assertEqual(shown["afterRemove"], [entries[1]])
+                c.assertEqual(shown["afterAdd"], [entries[1], {"entry": "", "lanes": []}])
+
+        def changed_exceptions_rescan(c):
+            c.forbid("nowhere")
+            c.with_release("true")
+            with unittest.mock.patch.object(release, "forbidden_in", wraps=release.forbidden_in) as scan:
+                c.hansa("release", "a")
+                r = release.get(c.desk, 1)
+                c.assertEqual(scan.call_count, 1)
+                c.assertEqual(release.answer(c.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+                c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=[
+                    {"entry": "nowhere", "lanes": ["a"]}])), {"ok": True, "problems": []})
+                c.assertEqual(c.settle_release(Dispatcher(c.desk), 1)["state"], "done")
+                c.assertEqual(scan.call_count, 2)
+                c.assertNotEqual(release.get(c.desk, 1)["scanned"], r["scanned"])
+            head = c.git_out("rev-parse", "HEAD")
+            # Even an unmatched exception is part of the lane's settings, independent of effective words.
+            c.assertNotEqual(release.scan_key(c.repo, "", head, [], "true", exceptions=[]),
+                             release.scan_key(c.repo, "", head, [], "true", exceptions=["absent-entry"]))
+            c.assertNotEqual(release.scan_key(c.repo, "", head, [], "true", exceptions=["Falcon"]),
+                             release.scan_key(c.repo, "", head, [], "true", exceptions=["falcon"]))
+
+        def existing_words(c):
+            c.forbid("Falcon Plan")
+            c.assertEqual(release.title_hits("FALCON PLAN", ["Falcon Plan"]), ["Falcon Plan"])
+            c.assertEqual(release.title_hits("Falcon\nPlan", ["Falcon Plan"]), [])
+            before = c.git_out("rev-parse", "HEAD")
+            c.commit_in_repo("split.txt", "Falcon\nPlan\n")
+            (c.repo / "utf16.txt").write_bytes("Falcon Plan\n".encode("utf-16"))
+            sh("git", "add", "utf16.txt", cwd=c.repo)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Encoded", cwd=c.repo)
+            c.assertEqual(release.words_in(c.repo, [f"{before}..HEAD", "--"], ["Falcon Plan"])[0], [])
+            head = c.commit_in_repo("found.txt", "FALCON PLAN\n" * 30)
+            hits, _ = release.words_in(c.repo, [f"{before}..HEAD", "--"], ["Falcon Plan"])
+            c.assertTrue(hits)
+            c.assertTrue(all(h["commit"] == head and h["where"] == "found.txt" for h in hits))
+            c.assertLessEqual(len(hits), release.MOST_HITS)
+
+        def domain_comparisons(c):
+            comparisons, folds = 0, 0
+
+            class Entry(str):
+                def casefold(self):
+                    nonlocal folds
+                    folds += 1
+                    return Entry(super().casefold())
+
+                def __getitem__(self, key):
+                    return Entry(super().__getitem__(key))
+
+                def __eq__(self, other):
+                    nonlocal comparisons
+                    comparisons += 1
+                    return super().__eq__(other)
+
+                __hash__ = str.__hash__
+
+            allow = [Entry(f"@domain{i}.realmail.hansa") for i in range(500)]
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailboxes=True, release_mailbox_allow=allow)),
+                          {"ok": True, "problems": []})
+            before = c.git_out("rev-parse", "HEAD")
+            c.commit_in_repo("addresses.txt", "".join(f"person{i}@deep.mail.domain499.realmail.hansa\n" for i in range(20000)))
+            comparisons = folds = 0
+            hits, _ = release.words_in(c.repo, [f"{before}..HEAD", "--"], [], mailboxes=True, mailbox_allow=allow)
+            c.assertEqual(hits, [])
+            c.assertEqual(folds, 500)
+            c.assertGreater(comparisons, 0)
+            c.assertLessEqual(comparisons, 20000 * 5 + 500)
+            c.assertEqual(release.mailbox_hits("a@a.b.c a@b.c a@c.com", domains={"c", "com"}), [])
+            c.assertEqual(release.mailbox_hits("a@notrealmail.hansa a@realmail.hansa.evil.io", domains={"realmail.hansa"}),
+                          ["a@notrealmail.hansa", "a@realmail.hansa.evil.io"])
+
+        def hide_migrates_mailboxes(c):
+            for enabled in (True, False):
+                old = c.desk.settings()
+                del old["release_mailboxes"]
+                old["release_test_mailboxes"] = enabled
+                write_json(c.desk.settings_path, old)
+                c.hansa("hide", str(c.tmp / f"hidden-{enabled}"))
+                saved = json.loads(c.desk.settings_path.read_text())
+                c.assertIs(saved["release_mailboxes"], enabled)
+                c.assertNotIn("release_test_mailboxes", saved)
+
+        def invalid_mailboxes(c):
+            c.assertEqual(c.page_save(lambda s: s.update(release_mailbox_allow=["@allowed.com"])),
+                          {"ok": True, "problems": []})
+            before = c.desk.settings_path.read_bytes()
+            for entry, why in (("@realmail..hansa", "empty label"), ("@.realmail.hansa", "empty label"),
+                               ("@realmail.hansa.", "empty label"), ("a@@b.com", "exactly one @"),
+                               ("jane@realmail.hansa@evil.io", "exactly one @")):
+                with c.subTest(entry=entry):
+                    saved = c.page_save(lambda s: s.update(release_mailbox_allow=[entry]))
+                    c.assertFalse(saved["ok"])
+                    c.assertIn(why, " ".join(saved["problems"]))
+                    c.assertEqual(c.desk.settings_path.read_bytes(), before)
+
+        cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
+                 (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
+                 (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
+                 (11, changed_exceptions_rescan), (12, existing_words), (13, domain_comparisons),
+                 (14, hide_migrates_mailboxes), (15, invalid_mailboxes)]
+        for row, check in cases:
+            with self.subTest(row=row, case=check.__name__):
+                # No row inherits settings, repository history or task state from another row.
+                c = DeskTest(self._testMethodName)
+                try:
+                    c.setUp()
+                    check(c)
+                finally:
+                    c.doCleanups()
+
     def test_a_title_holding_a_forbidden_word_is_refused_at_add_and_the_text_is_not_looked_at(self):
         self.forbid("Falcon")
         said = self.refused("add", "Fix the badge", "--title", "Ship the FALCON badge")
@@ -3230,112 +3563,188 @@ class DeskTest(unittest.TestCase):
         self.forbid()  # nothing changes when the list is empty
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
 
-    def test_test_mailboxes_are_unrestricted_when_the_rule_is_off(self):
+    def test_mailbox_merge_cases(self):
         from hansa import release
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
-        tid = self.done_with(env={"FAKE_WRITE": "a@unreserved.hansa", "FAKE_WRITE_FILE": "test_mailboxes.py"})
-        with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
-            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-            self.assertEqual(release.words_in(self.repo, ["HEAD", "--"], ["no such phrase"])[0], [])
-            matcher.assert_not_called()
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        # The stand-in writes into existing folders, as a worker would.
+        self.commit_in_repo("src/app.py", "clean\n")
+        self.commit_in_repo("tests/test_x.py", "clean\n")
+        example_domains = ("example.com", "sub.example.org", "example.net", "x.invalid", "x.test", "x.example",
+                           "example.org", "deep.mail.example.com", "mail.example.net")
+        examples = " ".join("a@" + domain for domain in example_domains)
+        examples += " " + examples.upper()
+        cases = [
+            # row, rule, allowlist, paths, added line, refused mailboxes
+            (1, True, [], ("README.md", "package.json", "src/app.py"), "jane@realmail.hansa", ["jane@realmail.hansa"]),
+            (2, True, [], ("tests/test_x.py",), "jane@realmail.hansa", ["jane@realmail.hansa"]),
+            (3, True, [], ("README.md", "package.json", "src/app.py", "tests/test_x.py"), examples, []),
+            (4, True, ["jane@realmail.hansa"], ("README.md",), "Jane@RealMail.hansa", []),
+            (5, True, ["@RealMail.HANSA"], ("package.json",), "a@realmail.hansa a@mx.realmail.hansa", []),
+            (6, True, ["@realmail.hansa"], ("src/app.py",), "a@notrealmail.hansa a@realmail.hansa.evil.io",
+             ["a@notrealmail.hansa", "a@realmail.hansa.evil.io"]),
+            (7, True, ["jane@realmail.hansa"], ("README.md",), "john@realmail.hansa", ["john@realmail.hansa"]),
+            (8, False, ["jane@realmail.hansa"], ("src/app.py",), "jane@realmail.hansa john@realmail.hansa", []),
+        ]
+        for row, enabled, allow, paths, line, rejected in cases:
+            for path in paths:
+                with self.subTest(row=row, path=path):
+                    self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=enabled,
+                                                                      release_mailbox_allow=allow)),
+                                     {"ok": True, "problems": []})
+                    tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": path})
+                    tip, head = self.git_out("rev-parse", "main"), self.desk.meta(tid)["head"]
+                    with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
+                        if rejected:
+                            said = self.refused("merge", tid)
+                            self.assertIn(f"{head[:10]} {path}: {line}", said)
+                            for mailbox in rejected:
+                                self.assertIn(f'("{mailbox}")', said)
+                            self.assertIn("Nothing was merged", said)
+                            self.assertEqual(self.git_out("rev-parse", "main"), tip)
+                            self.assertNotIn("test file", said)
+                            self.assertNotIn("holds words the principal keeps from going out", said)
+                            self.assertIn(f'Replace it with an example address in hansa retry {tid} --fresh "..." ', said)
+                            for remedy in ("example.com", "example.org", "example.net", ".invalid", ".test",
+                                           ".example", "ask the principal to add it or its domain",
+                                           "allowlist on the page (hansa ask)"):
+                                self.assertIn(remedy, said)
+                        else:
+                            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+                        if enabled:
+                            self.assertGreater(matcher.call_count, 0)
+                        else:
+                            self.assertEqual(release.words_in(self.repo, ["HEAD", "--"], ["no such phrase"],
+                                                             mailbox_allow=allow)[0], [])
+                            matcher.assert_not_called()
 
-    def test_a_non_example_test_mailbox_stops_a_merge_with_its_commit_file_and_line(self):
+    def test_the_mailbox_allowlist_is_folded_once_per_scan(self):
         from hansa import release
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        line = "contacts = ['a@unreserved.hansa', 'b@elsewhere.hansa']"
-        tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": "test_mailboxes.py"})
-        tip, head = self.git_out("rev-parse", "main"), self.desk.meta(tid)["head"]
-        said = self.refused("merge", tid)
-        self.assertIn(f"{head[:10]} test_mailboxes.py: {line}", said)
-        self.assertIn("a mailbox in a test file does not use a reserved example domain", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn(f'Replace it with an example address in hansa retry {tid} --fresh "..."', said)
-        self.assertIn("or ask the principal", said)
-        for mailbox in ("a@unreserved.hansa", "b@elsewhere.hansa"):
-            self.assertIn(f'("{mailbox}")', said)
-        self.assertIn("Nothing was merged", said)
-        self.assertEqual(self.git_out("rev-parse", "main"), tip)
-        # The same text outside a test path passes, even while the rule is on.
-        tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": "contacts.py"})
-        with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
-            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-            matcher.assert_called_once_with("mailbox-check@unreserved.hansa")
+        folds = 0
 
-    def test_reserved_test_mailboxes_pass_the_merge_scan(self):
+        class Entry(str):
+            def casefold(self):
+                nonlocal folds
+                folds += 1
+                return super().casefold()
+
+            def __getitem__(self, key):
+                return Entry(super().__getitem__(key))
+
+        head = self.commit_in_repo("src/app.py", "".join(
+            f"ordinary added line {i} a@example.org\n" for i in range(20000)))
+        for count in (0, 1, 500):
+            with self.subTest(entries=count):
+                allow = [Entry(f"Person{i}@RealMail.hansa" if i % 2 else f"@mail{i}.RealMail.hansa")
+                         for i in range(count)]
+                folds = 0
+                hits, checked = release.words_in(self.repo, [head, "--"], [], mailboxes=True, mailbox_allow=allow)
+                self.assertEqual((hits, checked), ([], 2))
+                self.assertEqual(folds, count)
+        folds = 0
+        release.words_in(self.repo, [head, "--"], [], mailbox_allow=[Entry("Jane@RealMail.hansa")])
+        self.assertEqual(folds, 0)  # the disabled rule does not even fold entries
+
+    def test_the_mailbox_scan_checks_only_added_lines_and_not_other_text(self):
         from hansa import release
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        mailboxes = ("a@example.com", "a@mail.example.org", "a@x.invalid", "a@y.test", "a@z.example",
-                     "a@example.org", "a@example.net", "a@deep.mail.example.com", "a@mail.example.net",
-                     "A@MAIL.EXAMPLE.ORG", "A@X.INVALID", "A@Y.TEST", "A@Z.EXAMPLE")
-        line = " ".join(mailboxes)
-        tid = self.done_with(env={"FAKE_WRITE": line, "FAKE_WRITE_FILE": "test_mailboxes.py"})
-        with unittest.mock.patch.object(release, "mailbox_hits", wraps=release.mailbox_hits) as matcher:
-            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
-            self.assertIn(unittest.mock.call(line), matcher.call_args_list)
-
-    def test_a_broken_mailbox_matcher_stops_a_merge_before_scanning(self):
-        tid = self.done_with()  # even a change with no test files must check the matcher
-        tip = self.git_out("rev-parse", "main")
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        with unittest.mock.patch("hansa.release.MAILBOX", re.compile(r"(?!)")):
-            said = self.refused("merge", tid)
-        self.assertIn("mailbox rule self-check", said)
-        self.assertIn("the rule could not tell a real mailbox from an example one", said)
-        self.assertIn("the mailbox rule's matcher is broken", said)
-        self.assertIn("hansa merges and releases nothing until it is fixed", said)
-        self.assertNotIn("hansa retry", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("Nothing was merged", said)
-        self.assertEqual(self.git_out("rev-parse", "main"), tip)
-
-    def test_the_mailbox_scan_checks_all_test_paths_and_only_added_lines(self):
-        from hansa import release
-        paths = [f"src/{folder}/contacts.txt" for folder in
-                 ("test", "tests", "spec", "specs", "__tests__", "fixtures", "testdata")]
-        paths += ["src/test_contacts", "src/contacts_test.py", "src/contacts.test.js", "src/contacts.spec.ts"]
-        # Lookalike folders and filenames are ordinary files.
-        ordinary = ("src/testing/contacts.txt", "src/specification/contacts.txt", "src/fixtures.txt", "src/test.txt",
-                    "src/contacts_test", "src/contacts.test", "src/other/tests", "src/other/testdata")
-        for path in [*paths, *ordinary]:
-            self.commit_in_repo(path, "a@unreserved.hansa\n")
-        hits, _ = release.words_in(self.repo, ["HEAD", "--"], [], test_mailboxes=True)
-        self.assertEqual({h["where"] for h in hits}, set(paths))
-        self.assertTrue(all(h["word"] == "a@unreserved.hansa" for h in hits))
+        self.commit_in_repo("README.md", "jane@realmail.hansa\nremove john@realmail.hansa\n")
         before = self.git_out("rev-parse", "HEAD")
-        self.commit_in_repo(paths[0], "a@unreserved.hansa\nclean line\n")
-        self.commit_in_repo(paths[1], "clean line\n")
-        self.assertEqual(release.words_in(self.repo, [f"{before}..HEAD", "--"], [], test_mailboxes=True)[0], [])
+        self.commit_in_repo("README.md", "jane@realmail.hansa\nclean line\n", message="jane@realmail.hansa")
+        self.commit_in_repo("jane@realmail.hansa", "clean\n")
+        # Real mailboxes in identities, messages, filenames and uncommitted merge texts are outside this rule.
+        sh("git", "-c", "user.name=jane@realmail.hansa", "-c", "user.email=jane@realmail.hansa", "commit", "-q",
+           "--allow-empty", "-m", "john@realmail.hansa", cwd=self.repo)
+        hits, checked = release.words_in(self.repo, [f"{before}..HEAD", "--"], [],
+                                        [("merge message", "jane@realmail.hansa"),
+                                         ("merge identity", "Jane <jane@realmail.hansa>")], mailboxes=True)
+        self.assertEqual(hits, [])
+        self.assertEqual(checked, 3)
 
-    def test_the_mailbox_scan_matches_test_paths_without_regard_to_case(self):
-        from hansa import release
-        paths = [f"src/{folder}/contacts.txt" for folder in
-                 ("Test", "Tests", "Spec", "Specs", "__Tests__", "Fixtures", "TestData")]
-        paths += ["Test_a.py", "A_Test.py", "A.Test.js", "A.Spec.js"]
-        for path in paths:
-            self.commit_in_repo(path, "a@unreserved.hansa\n")
-        self.commit_in_repo("Testing/contacts.txt", "a@unreserved.hansa\n")
-        hits, _ = release.words_in(self.repo, ["HEAD", "--"], [], test_mailboxes=True)
-        self.assertEqual({h["where"] for h in hits}, set(paths))
+    def test_adding_a_mailbox_to_the_allowlist_allows_a_previously_refused_merge(self):
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        tid = self.done_with(env={"FAKE_WRITE": "jane@realmail.hansa", "FAKE_WRITE_FILE": "README.md"})
+        tip = self.git_out("rev-parse", "main")
+        self.assertIn("jane@realmail.hansa", self.refused("merge", tid))
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["jane@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
 
     def test_explain_says_whether_the_principals_mailbox_rule_is_on(self):
         for enabled in (False, True, False):
-            self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=enabled)),
+            self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=enabled,
+                                                              release_mailbox_allow=["Jane@RealMail.hansa", "@python.org"])),
                              {"ok": True, "problems": []})
             said = self.hansa("explain")
-            self.assertIn(f"The mailbox rule (release_test_mailboxes) is {'on' if enabled else 'off'}", said)
+            self.assertIn(f"The mailbox rule (release_mailboxes) is {'on' if enabled else 'off'}", said)
             self.assertIn("reserved example domains at merges and releases", said)
-            self.assertIn("It is also the principal's, on the same page", said)
+            self.assertIn("The rule and allowlist are also the principal's, on the same page", said)
+            self.assertIn("every added line", said)
+            self.assertIn("release_mailbox_allow: Jane@RealMail.hansa, @python.org", said)
             self.assertIn("word(s) the principal keeps from going out", said)
+            self.assertNotIn("more, all on the page", said)
+        for count in (0, 20, 21, 500):
+            with self.subTest(entries=count):
+                entries = [f"person{i}@realmail.hansa" for i in range(count)]
+                self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)),
+                                 {"ok": True, "problems": []})
+                said = self.hansa("explain")
+                shown = ", ".join(entries[:20]) if entries else "(empty)"
+                self.assertIn("release_mailbox_allow: " + shown, said)
+                if count > 20:
+                    self.assertIn(f"and {count - 20} more, all on the page", said)
+                    for hidden in entries[20:]:
+                        self.assertNotIn(hidden, said)
+                else:
+                    self.assertNotIn("more, all on the page", said)
+
+    def test_mailbox_help_describes_entry_rules_and_the_explain_limit(self):
+        said = " ".join(self.hansa("help", "forbidden-words").split())
+        for rule in ("domain must contain a dot", "last label must be at least two letters",
+                     "at most 254 characters", "Duplicates are refused ignoring case",
+                     "page drops blank lines", "first 20 allowlist entries"):
+            self.assertIn(rule, said)
+        said = " ".join(self.hansa("help", "who-changes-what").split())
+        self.assertIn("The principal, on the page", said)
+        self.assertIn("the mailbox rule and its address/domain allowlist", said)
 
     def test_example_domain_lookalikes_and_mailbox_characters_are_checked(self):
         from hansa import release
         mailboxes = ("a@example.com.hansa", "a@notexample.org", "a@example.netx", "a@invalid.hansa",
                      "a.b_c%tag+more-x@real-domain.hansa")
         head = self.commit_in_repo("tests/contacts.txt", " ".join(mailboxes) + "\n")
-        hits, checked = release.words_in(self.repo, [head, "--"], [], test_mailboxes=True)
+        hits, checked = release.words_in(self.repo, [head, "--"], [], mailboxes=True)
         self.assertEqual([h["word"] for h in hits], list(mailboxes))
         self.assertTrue(all(h["commit"] == head and h["where"] == "tests/contacts.txt" for h in hits))
         self.assertGreater(checked, 0)
+
+    def test_mailboxes_in_utf16_and_binary_files_are_read_as_the_word_scan_reads_them(self):
+        from hansa import release
+        before = self.git_out("rev-parse", "HEAD")
+        (self.repo / "utf16.txt").write_bytes("jane@realmail.hansa\n".encode("utf-16"))
+        (self.repo / "binary.bin").write_bytes(b"\x00\xffjane@realmail.hansa\x00\n")
+        sh("git", "add", "utf16.txt", "binary.bin", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add encoded data", cwd=self.repo)
+        head = self.git_out("rev-parse", "HEAD")
+        rng = [f"{before}..{head}", "--"]
+        word_hits = release.words_in(self.repo, rng, ["jane@realmail.hansa"])[0]
+        mailbox_hits = release.words_in(self.repo, rng, [], mailboxes=True)[0]
+        self.assertEqual([(h["commit"], h["where"], h["line"]) for h in mailbox_hits],
+                         [(h["commit"], h["where"], h["line"]) for h in word_hits])
+        self.assertEqual([h["where"] for h in mailbox_hits], ["binary.bin"])
+        self.assertEqual(mailbox_hits[0]["word"], "jane@realmail.hansa")
+
+    def test_the_mailbox_scan_returns_at_most_most_hits(self):
+        from hansa import release
+        for separator in ("\n", " "):
+            with self.subTest(separator=separator):
+                before = self.git_out("rev-parse", "HEAD")
+                addresses = [f"person{i}@realmail.hansa" for i in range(release.MOST_HITS + 10)]
+                head = self.commit_in_repo("README.md", separator.join(addresses) + "\n")
+                hits, _ = release.words_in(self.repo, [f"{before}..{head}", "--"], [], mailboxes=True)
+                self.assertEqual(len(hits), release.MOST_HITS)
+                self.assertEqual([h["word"] for h in hits], addresses[:release.MOST_HITS])
+                self.assertTrue(all(h["commit"] == head and h["where"] == "README.md" for h in hits))
 
     def test_a_forbidden_word_in_a_file_name_an_author_or_the_merge_message_stops_a_merge(self):
         tid = self.done_with(env={"FAKE_HELLO": "falcon-notes.txt"})
@@ -6630,15 +7039,12 @@ class DeskTest(unittest.TestCase):
         m = self.desk.settings()["lanes"]["m"]
         self.assertEqual(m, {**a, "providers": ["mimo"]})
         self.assertEqual((m["preview"], m["note"]), ("make serve", "the C++ lane"))
-        card = (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
-        row = next(x for x in card.splitlines() if x.startswith("| `hansa lane add L --like"))
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         said = " ".join(helped.getvalue().split())
         for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
                       "preview_wait_s", "commit_message", "merge_message", "identity", "release targets",
-                      "note"):  # all it copies, said
-            self.assertIn(field, row)
+                      "note"):  # all it copies, said in its help (the card points there)
             self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
                                                                                  "brief.md").read_text())
@@ -8298,6 +8704,378 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"run started from: {last_start['source']} {last_start['commit'][:12]}", shown)
         for index, head in enumerate(heads, 1):
             self.assertEqual(git_out("rev-parse", f"task/{tid}-try{index}"), head)
+
+    def kill_desk(self, row):
+        """A desk and repository of their own for one row of the killed-run table, and the row's folder."""
+        root = self.tmp / f"killed-{row}"
+        repo = root / "repo"
+        repo.mkdir(parents=True)
+        sh("git", "init", "-q", "-b", "main", cwd=repo)
+        (repo / "README.md").write_text("demo\n")
+        sh("git", "add", ".", cwd=repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=repo)
+        desk = init_desk(root / "desk", str(repo), "a")
+        s = desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(root / "claude-home")  # its session records: not ~/.claude
+        self.assertEqual(desk.save_settings(s), [])
+        return desk, repo, root
+
+    def kill_runs(self, desk, tid, env, mark=None, as_exit=None, most=4):
+        """tid's runs with lane a's env, each ended as hansa serve ends it (run.finish with the exit its process gave,
+        or as_exit(that exit)), while it is queued again: [(exit, meta as it ended)]. mark(tid): before each run's end
+        is read, as hansa's own stops mark a run."""
+        from hansa import run
+        s = desk.settings()
+        s["lanes"]["a"]["env"] = env
+        self.assertEqual(desk.save_settings(s), [])
+        out = []
+        while len(out) < most and desk.meta(tid)["state"] == "queued":
+            proc = run.start(desk, tid, "a", "claude")
+            self.assertIsNotNone(proc)
+            rc = proc.wait(timeout=20)
+            if mark:
+                mark(tid)
+            out.append((rc, run.finish(desk, tid, as_exit(rc) if as_exit else rc)))
+        return out
+
+    def test_a_run_the_system_killed_is_queued_again_once_by_the_rule_table(self):
+        # One subtest per row of the rule's table. The stand-in claude writes half a file, then kills itself
+        # (FAKE_KILL); each row has a desk and repository of its own
+        from hansa import run
+        once = "killed by the system (exit {}); queued again once, without using a try"
+        memory = "the machine may be short of memory, so fewer runs at once may help (hansa concurrency)"
+        lost = "what it reported, if anything, is not kept"
+        twice = "killed by the system twice (exit -9, then exit -9), with no word from the {}: " + memory + ". Next: {}"
+
+        def hansa_on(desk, *args):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(desk.root), *args])
+
+        def carries_on(n, wrapped, setup=False):
+            desk, repo, root = self.kill_desk(n)
+            if setup:  # the lane's setup runs, and finishes, before each run's worker starts
+                s = desk.settings()
+                s["lanes"]["a"]["setup"] = f"echo set up >>{shlex.quote(str(root / 'set-up'))}"
+                self.assertEqual(desk.save_settings(s), [])
+            tid, seen, code = desk.new_task("Add hello.txt"), root / "starts.jsonl", 137 if wrapped else -9
+            (rc, queued), (rc2, m) = self.kill_runs(desk, tid, {
+                "FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_SEE": str(seen),
+                **({"FAKE_KILL_WRAPPED": "1"} if wrapped else {})})
+            self.assertEqual((rc, queued["state"], queued["error"]), (code, "queued", once.format(code)), queued)
+            self.assertEqual([(a["kind"], a["exit"]) for a in queued["attempts"]], [("killed", code)])
+            if setup:
+                self.assertTrue(queued["setup_ran"])
+                self.assertEqual((root / "set-up").read_text(), "set up\n" * 2)  # before the killed run, and the next
+            self.assertEqual(run.tries_used(queued["attempts"]), 0)
+            self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")  # at once: nothing rests
+            half = f"half of a file, run 1 of {tid}"
+            self.assertEqual(self.git_out("show", f"{queued['head']}:partial.txt", cwd=repo), half)  # hansa committed it
+            self.assertEqual(queued["restart"], {"commit": queued["head"], "source": "earlier run's commit", "why": ""})
+            self.assertEqual((rc2, m["state"], m["files"]), (0, "done", ["hello.txt", "partial.txt"]), m)
+            first, second = map(json.loads, seen.read_text().splitlines())
+            self.assertEqual((first["head"], second["head"], second["partial"]), (m["base"], queued["head"], half))
+            self.assertIn("You carry on an interrupted run of this same task, from that run's commits "
+                          f"({queued['head'][:12]}).", second["system"])
+
+        def from_base(n):
+            desk, repo, root = self.kill_desk(n)
+            tid, seen, why = desk.new_task("Add hello.txt"), root / "starts.jsonl", "the interrupted run left no commits"
+            (rc, queued), (_, m) = self.kill_runs(desk, tid, {
+                "FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_SEE": str(seen), "FAKE_KILL_NO_WRITE": "1"})
+            self.assertEqual((rc, queued["state"], queued["head"]), (-9, "queued", queued["base"]), queued)
+            self.assertEqual(queued["restart"], {"commit": queued["base"], "source": "base", "why": why})
+            self.assertEqual((m["state"], m["files"], m["run_start"]["why"]), ("done", ["hello.txt"], why), m)
+            first, second = map(json.loads, seen.read_text().splitlines())
+            self.assertEqual((first["head"], second["head"], second["partial"]), (m["base"], m["base"], None))
+            self.assertNotIn("You carry on an interrupted run", second["system"])
+            self.assertIn(f"run started from: base {m['base'][:12]} ({why})", views.show_text(desk, tid))
+
+        def killed_twice(n):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            ends = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1,2:{root / 'count'}"})
+            self.assertEqual([(rc, m["state"]) for rc, m in ends], [(-9, "queued"), (-9, "failed")])
+            m = ends[-1][1]
+            self.assertEqual(m["error"], twice.format("worker", f"hansa retry {tid}"))
+            self.assertEqual([a["kind"] for a in m["attempts"]], ["killed", "killed"])
+            self.assertEqual((root / "count").read_text(), "2")  # no third run: it failed
+
+        def both_causes(n, first_net):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            ends = self.kill_runs(desk, tid, {"FAKE_NET": f"econnreset:1:{root / 'net'}",
+                                              "FAKE_KILL": f"KILL:{2 if first_net else 1}:{root / 'count'}"})
+            dropped = "claude: the connection to the provider failed (Connection dropped); queued again once"
+            self.assertEqual([(rc, m["state"], m["error"]) for rc, m in ends],
+                             [(1, "queued", dropped), (-9, "queued", once.format(-9)), (0, "done", "")] if first_net else
+                             [(-9, "queued", once.format(-9)), (1, "queued", dropped), (0, "done", "")])
+            self.assertEqual([a["kind"] for a in ends[-1][1]["attempts"]],
+                             ["network", "killed"] if first_net else ["killed", "network"])
+
+        def verification(n, runs):
+            desk, repo, root = self.kill_desk(n)
+            parent, seen = desk.new_task("Add hello.txt"), root / "starts.jsonl"
+            self.assertEqual(self.kill_runs(desk, parent, {})[0][1]["state"], "done")
+            hansa_on(desk, "verify", parent, "the file's contents")
+            vid = desk.meta(parent)["verify"]
+            ends = self.kill_runs(desk, vid, {"FAKE_KILL": f"KILL:{runs}:{root / 'count'}", "FAKE_KILL_SEE": str(seen),
+                                              "FAKE_VERDICT": "holds"})
+            rc, queued = ends[0]
+            self.assertEqual((rc, queued["state"], queued["kind"], queued["verdict"], queued["error"]),
+                             (-9, "queued", "verify", "", once.format(-9)), queued)
+            self.assertEqual((run.tries_used(queued["attempts"]), queued["restart"]), (0, None))
+            m = ends[-1][1]
+            if runs == "1":
+                self.assertEqual((len(ends), m["state"], m["verdict"]), (2, "done", "holds"), m)
+                self.assertNotIn("You carry on an interrupted run", json.loads(seen.read_text().splitlines()[1])["system"])
+            else:
+                self.assertEqual((len(ends), m["state"], m["error"]),
+                                 (2, "failed", twice.format("verifier", f"hansa verify {parent}")), m)
+
+        def as_today(n, state, error, sig="KILL", wrapped=False, mark=None, as_exit=None, **env):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            [(rc, m)] = self.kill_runs(desk, tid, {"FAKE_KILL": f"{sig}:1:{root / 'count'}", **env,
+                                                   **({"FAKE_KILL_WRAPPED": "1"} if wrapped else {})},
+                                       mark=mark and (lambda t: mark(desk, t)), as_exit=as_exit, most=1)
+            self.assertEqual(rc, {"KILL": -9, "TERM": -15}[sig] if not wrapped else 143)
+            self.assertEqual((m["state"], m["attempts"]), (state, []), m)
+            if callable(error):
+                error(m["error"])
+            else:
+                self.assertEqual(m["error"], error.format(exit=rc))
+            return m
+
+        def by_term(n):
+            for wrapped in (False, True):
+                as_today(f"{n}-{wrapped}", "failed", "error: no output (exit {exit})", "TERM", wrapped)
+
+        def setup_killed(n):
+            desk, repo, root = self.kill_desk(n)
+            started = root / "setup-started"
+            s = desk.settings()
+            s["lanes"]["a"].update(setup=f"touch {shlex.quote(str(started))}; sleep 30",
+                                   env={"FAKE_KILL": f"KILL:1:{root / 'count'}"})
+            self.assertEqual(desk.save_settings(s), [])
+            tid = desk.new_task("Add hello.txt")
+            proc = run.start(desk, tid, "a", "claude")
+            end = time.time() + 20
+            while not started.exists() and time.time() < end:
+                time.sleep(0.05)
+            os.killpg(proc.pid, signal.SIGKILL)  # as the system kills it, before the setup has finished
+            rc = proc.wait(timeout=20)
+            m = run.finish(desk, tid, rc)
+            self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "failed", "error: no output (exit -9)", []))
+            self.assertFalse((root / "count").exists())  # the worker never started
+
+        def setup_unfinished(n):
+            desk, repo, root = self.kill_desk(n)
+            s = desk.settings()
+            s["lanes"]["a"]["setup"] = "true"
+            self.assertEqual(desk.save_settings(s), [])
+            tid = desk.new_task("Add hello.txt")
+            unfinished = lambda t: (desk.state_dir / "runs" / t / "setup.log.done").unlink()  # its finish not marked
+            [(rc, m)] = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1:{root / 'count'}"}, mark=unfinished, most=1)
+            self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "failed", "error: no output (exit -9)", []))
+
+        def design_killed(n):
+            desk, repo, root = self.kill_desk(n)
+            did = desk.new_task("Make the badge bigger", kind="design", lane="a")
+            wt, base = run.prepare(desk, "a", desk.settings()["lanes"]["a"], desk.meta(did),
+                                   wt=desk.worktrees_dir / "a-design")
+            sid, p = str(uuid.uuid4()), desk.settings()["providers"]["claude"]
+            desk.update(did, state="running", provider="claude", worktree=str(wt), session_id=sid, model_asked="sonnet",
+                        base=base, branch=f"task/{did}")
+            rc = subprocess.run([os.environ["HANSA_CLAUDE"], "Make the badge bigger", "--session-id", sid], cwd=wt,
+                                stdin=subprocess.DEVNULL, env={**os.environ, "HANSA_TASK": did,
+                                                               "CLAUDE_CONFIG_DIR": str(run.config_home(desk, "claude", p)),
+                                                               "FAKE_KILL": f"KILL:1:{root / 'count'}"}).returncode
+            with unittest.mock.patch("hansa.run.end_design"):
+                m = run.finish(desk, did, rc)
+            self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "done", "", []), m)
+            self.assertEqual(sorted(m["files"]), ["badge.txt", "partial.txt"])
+
+        def follow_up(n):
+            desk, repo, root = self.kill_desk(n)
+            t1, t2 = desk.new_task("Add hello.txt"), desk.new_task("Add hello.txt too")
+            for t in (t1, t2):
+                self.assertEqual(self.kill_runs(desk, t, {})[0][1]["state"], "done")
+            hansa_on(desk, "merge", t1)
+            earlier, seen = desk.meta(t2)["head"], root / "starts.jsonl"
+            hansa_on(desk, "retry", t2, "--update", "settle the greeting")
+            tid = desk.meta(t2)["replaced_by"]
+            env = {"FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_SEE": str(seen), "FAKE_KILL_NO_WRITE": "1"}
+            [(rc, queued)] = self.kill_runs(desk, tid, env, most=1)
+            why = "the interrupted run's commits hold conflict markers"  # the update's, which hansa committed
+            self.assertEqual((rc, queued["state"]), (-9, "queued"), queued)
+            self.assertEqual(queued["restart"], {"commit": earlier, "source": "earlier task's commit", "why": why})
+            (repo / "moved.txt").write_text("the base moved\n")  # --update takes the base's tip again
+            sh("git", "add", "moved.txt", cwd=repo)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base moves", cwd=repo)
+            [(rc, m)] = self.kill_runs(desk, tid, env)
+            self.assertEqual((rc, m["state"], m["update_conflicts"]), (0, "done", ["hello.txt"]), m)
+            first, second = map(json.loads, seen.read_text().splitlines())
+            self.assertEqual((first["head"], second["head"]), (earlier, earlier))
+            for start in (first, second):
+                self.assertIn("<<<<<<<", start["hello"])
+                self.assertIn("conflicts in these files, which now hold git's conflict markers", start["system"])
+            self.assertNotIn("You carry on an interrupted run", second["system"])
+            self.assertEqual(m["base"], self.git_out("rev-parse", "main", cwd=repo))
+            self.assertEqual(self.git_out("show", f"{m['head']}:moved.txt", cwd=repo), "the base moved")
+            self.assertIn(f"run started from: earlier task's commit {earlier[:12]} ({why})", views.show_text(desk, tid))
+
+        def last_try(n):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            desk.update(tid, attempts=[{"provider": "claude", "at": now(), "error": "key rejected (HTTP 401)"}] * (run.TRIES - 1))
+            ends = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1:{root / 'count'}"})
+            self.assertEqual([(rc, m["state"]) for rc, m in ends], [(-9, "queued"), (0, "done")])
+            self.assertEqual(run.tries_used(ends[0][1]["attempts"]), run.TRIES - 1)  # the kill used none
+
+        def numbers(n):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            (_, queued), (_, m) = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_USAGE": "1"})
+            self.assertEqual({k: (u["in"], u["out"]) for k, u in queued["attempts"][0]["usage"].items()}, {"mimo-x": (70, 7)})
+            self.assertEqual((queued["usage"], queued["turns"]), ({}, None))  # the task's own: left for the next run
+            runs = cost.task_runs(m)
+            self.assertEqual([sorted(r["usage"]) for r in runs], [["mimo-x"], ["claude-haiku-4-5-20251001"]])
+            self.assertEqual(sum(u["in"] for r in runs for u in r["usage"].values()), 70 + 1000)  # each run once
+
+        def shown(n):
+            desk, repo, root = self.kill_desk(n)
+            tid, env = desk.new_task("Add hello.txt"), {"FAKE_KILL": f"KILL:1,2:{root / 'count'}"}
+            self.kill_runs(desk, tid, env, most=1)
+            st = views.status(desk)
+            self.assertEqual(st["queued"][0]["last_run"], once.format(-9))
+            self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}", views.show_text(desk, tid))
+            self.assertIn(f"  {tid} lane a: Add hello.txt\n      waiting: ", views.status_text(st))
+            self.assertIn(f"\n      last run: {once.format(-9)}", views.status_text(st))
+            self.kill_runs(desk, tid, env, most=1)
+            failure = twice.format("worker", f"hansa retry {tid}")
+            text = views.show_text(desk, tid)
+            self.assertIn(f"error: {failure}", text)
+            self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}\n", text)
+            self.assertIn(f"earlier run on claude: killed by the system (exit -9); {lost}\n", text)
+            self.assertIn(f"  {tid} a: {failure}", views.status_text(views.status(desk)))
+
+        quota, auth = "API Error: 429 rate_limit_error", "API Error: 401 authentication_error · Invalid API key"
+
+        def stderr_says(n, text):  # a kill comes before what its stderr says of the provider
+            desk, repo, root = self.kill_desk(n)
+            tid, env = desk.new_task("Add hello.txt"), {"FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_KILL_ERR": text}
+            [(rc, queued)] = self.kill_runs(desk, tid, env, most=1)
+            self.assertIn(text, (desk.tasks_dir / tid / "run.err").read_text())
+            self.assertEqual((rc, queued["state"], queued["error"]), (-9, "queued", once.format(-9)), queued)
+            self.assertEqual([a["kind"] for a in queued["attempts"]], ["killed"])
+            self.assertEqual(run.tries_used(queued["attempts"]), 0)
+            self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")  # neither rested nor blocked
+            [(_, m)] = self.kill_runs(desk, tid, env)
+            self.assertEqual(m["state"], "done", m)
+
+        def twice_with_stderr(n):
+            for i, text in enumerate((quota, auth)):
+                desk, repo, root = self.kill_desk(f"{n}-{i}")
+                tid = desk.new_task("Add hello.txt")
+                ends = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1,2:{root / 'count'}", "FAKE_KILL_ERR": text})
+                self.assertEqual([(rc, m["state"]) for rc, m in ends], [(-9, "queued"), (-9, "failed")])
+                m = ends[-1][1]
+                self.assertEqual(m["error"], twice.format("worker", f"hansa retry {tid}"))
+                self.assertEqual([a["kind"] for a in m["attempts"]], ["killed", "killed"])
+                self.assertEqual(((root / "count").read_text(), provider_problem(desk, desk.settings(), "claude")), ("2", ""))
+
+        def no_last_run(n, held):
+            desk, repo, root = self.kill_desk(n)
+            tid = desk.new_task("Add hello.txt")
+            self.assertNotIn("last_run", views.status(desk)["queued"][0])  # never run: no key at all
+            env = {"FAKE_KILL": f"KILL:1:{root / 'count'}", "FAKE_NET": f"quota:{0 if held else 1}:{root / 'net'}"}
+            self.kill_runs(desk, tid, env, most=1)
+            self.assertEqual(views.status(desk)["queued"][0]["last_run"], once.format(-9))  # waiting because of the kill
+            sandbox = (lambda t: desk.update(t, sandbox_failed="sandbox_apply: Invalid argument")) if held else None
+            [(_, m)] = self.kill_runs(desk, tid, env, mark=sandbox, most=1)
+            self.assertEqual((m["state"], bool(m.get("held")), m["attempts"][-1]["kind"]),
+                             ("queued", held, "killed" if held else "limit"), m)
+            st = views.status(desk)
+            self.assertNotIn("last_run", st["queued"][0])
+            self.assertNotIn("last run:", views.status_text(st))
+
+        def resumed_then_killed(n, turns=5):
+            desk, repo, root = self.kill_desk(n)
+            s = desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RECORD_USAGE": "1", "FAKE_TURNS": str(turns),
+                                      "FAKE_RESUME_KILL": str(root / "resume-killed")}
+            self.assertEqual(desk.save_settings(s), [])
+            tid = desk.new_task("Fix the badge")
+            self.assertEqual(run.start(desk, tid, "a", "claude").wait(timeout=20), 0)
+            again = run.resume(desk, tid)  # its first process said its turns, and left work running in the background
+            self.assertIsNotNone(again)
+            rc = again.wait(timeout=20)
+            m = run.finish(desk, tid, rc)
+            self.assertEqual((rc, m["state"], m["error"]), (-9, "queued", once.format(-9)), m)
+            [a] = m["attempts"]
+            self.assertEqual((a["kind"], a["turns"], a.get("turns_unknown_after_resume")), ("killed", turns, True), a)
+            self.assertEqual({k: (u["in"], u["out"]) for k, u in a["usage"].items()}, {"mimo-x": (300 + 10, 60 + 5)})
+            self.assertEqual([r["turns"] for r in cost.task_runs(m)], [turns])
+            self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}\n  its turns after hansa resumed it are unknown: "
+                          "the system killed it before it said", views.show_text(desk, tid))
+
+        def verdict_not_taken(n):
+            desk, repo, root = self.kill_desk(n)
+            parent = desk.new_task("Add hello.txt")
+            self.assertEqual(self.kill_runs(desk, parent, {})[0][1]["state"], "done")
+            hansa_on(desk, "verify", parent, "the file's contents")
+            vid = desk.meta(parent)["verify"]
+            [(rc, queued)] = self.kill_runs(desk, vid, {"FAKE_KILL": f"KILL:1:{root / 'count'}",
+                                                        "FAKE_KILL_LATE": "Checked it.\nVERDICT: holds"}, most=1)
+            self.assertEqual((rc, queued["state"], queued["verdict"]), (-9, "queued", ""), queued)
+            self.assertIn("VERDICT: holds", views.report_of(desk, vid))  # read from its record, but not its verdict
+            self.assertEqual(views.verification(desk, desk.meta(parent))["verdict"], "")
+
+        cancel = lambda desk, tid: hansa_on(desk, "cancel", tid)
+        table = (
+            (1, "worker killed (-9), no result, setup done, no marks, first time", lambda: carries_on(1, False, True)),
+            (2, "the same with exit 137", lambda: carries_on(2, True)),
+            (3, "killed with nothing written", lambda: from_base(3)),
+            (4, "killed a second time in the same task", lambda: killed_twice(4)),
+            (5, "killed after an earlier dropped connection", lambda: both_causes(5, True)),
+            (6, "a dropped connection after a kill", lambda: both_causes(6, False)),
+            (7, "a verification killed, first time", lambda: verification(7, "1")),
+            (8, "a verification killed twice", lambda: verification(8, "1,2")),
+            (9, "killed by TERM (-15 or 143)", lambda: by_term(9)),
+            (10, "hansa cancel, then the kill", lambda: as_today(10, "cancelled", "cancelled", mark=cancel)),
+            (11, "stopped at the time ceiling", lambda: as_today(
+                11, "failed", lambda e: self.assertTrue(e.startswith("stopped at the ceiling of 240 minutes: "), e),
+                mark=lambda desk, tid: desk.update(tid, timed_out=True))),
+            (12, "sandbox_failed marked", lambda: self.assertTrue(as_today(
+                12, "queued", "the sandbox could not start: sandbox_apply: Invalid argument",
+                mark=lambda desk, tid: desk.update(tid, sandbox_failed="sandbox_apply: Invalid argument"))["held"])),
+            (13, "the setup killed before it finished", lambda: setup_killed(13)),
+            (14, "killed after writing its result", lambda: as_today(14, "done", "", FAKE_KILL_RESULT="1")),
+            (15, "a design session killed", lambda: design_killed(15)),
+            (16, "exit code unknown", lambda: as_today(16, "failed", "error: no output (exit None)", as_exit=lambda rc: None)),
+            (17, "a follow-up with --update, killed with no commits of its own", lambda: follow_up(17)),
+            (18, "a task with all its tries used but one, then killed", lambda: last_try(18)),
+            (19, "cost", lambda: numbers(19)),
+            (20, "hansa show and hansa status after rows 1 and 4", lambda: shown(20)),
+            # not in the rule's table: its last mark, a changed .git file, ends the task as today
+            (21, "the worktree's .git file changed, then the kill", lambda: as_today(
+                21, "failed", lambda e: self.assertIn("the worktree's .git file was changed: it now points to", e),
+                mark=lambda desk, tid: (Path(desk.meta(tid)["worktree"]) / ".git").write_text(
+                    f"gitdir: {desk.root.parent / 'elsewhere'}\n"))),
+            (22, "killed, stderr holding API Error: 429", lambda: stderr_says(22, quota)),
+            (23, "killed, stderr holding an authentication error", lambda: stderr_says(23, auth)),
+            (24, "a second kill whose stderr holds a 429 or an authentication text", lambda: twice_with_stderr(24)),
+            (26, "killed, then held for a sandbox failure", lambda: no_last_run(26, True)),
+            (27, "killed, then queued again for a provider's limit", lambda: no_last_run(27, False)),
+            (28, "a resumed run whose first process recorded 5 turns, then killed", lambda: resumed_then_killed(28)),
+            # not in the rule's table: a verification's killed run, whose kept report gives a verdict, gives none
+            (29, "a verification killed after its record gave a verdict", lambda: verdict_not_taken(29)),
+            (30, "the same kill as row 1, its setup not finished", lambda: setup_unfinished(30)),
+            (31, "the same as row 28, its first process recorded 0 turns", lambda: resumed_then_killed(31, 0)),
+        )
+        for n, case, check in table:
+            with self.subTest(row=n, case=case):
+                check()
 
     def test_a_dropped_connection_is_tried_once_more_then_fails_plainly(self):
         from hansa import run
@@ -12204,6 +12982,10 @@ class DeskTest(unittest.TestCase):
         files_topic = cli.topic_text("desk-files")
         self.assertIn("### Where a desk's files are", files_topic)
         self.assertIn("### Where a desk's files grow", files_topic)
+        merging = cli.topic_text("merge-check")  # the rounds of a task sent back, which the card points to
+        self.assertIn("### Sending a task back", merging)
+        self.assertIn("says which round it is", " ".join(merging.split()))
+        self.assertNotIn("## What work costs", merging)
         # no topic can be taken for something else
         names = commands | lane_subs | targets | {"card", "topics"}
         for t in cli.TOPICS:
@@ -19432,25 +20214,35 @@ class DeskTest(unittest.TestCase):
         heard = [x["line"] for x in notify.items_for(self.desk, self.events("release_forbidden"), {"key": "k", "session": None})]
         self.assertEqual(len(heard), 1)  # the one found at the ask, the coordinator saw itself
 
-    def test_a_release_finds_non_example_test_mailboxes_in_outgoing_history(self):
+    def test_a_release_finds_non_example_mailboxes_in_outgoing_history(self):
         from hansa import release
         self.with_release("true")
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        head = self.commit_in_repo("fixtures/contacts.txt", "a@unreserved.hansa\n")
-        self.commit_in_repo("fixtures/contacts.txt", "a@example.com\n")  # still in what goes out
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        head = self.commit_in_repo("docs/contacts.md", "a@unreserved.hansa\n")
+        self.commit_in_repo("docs/contacts.md", "a@example.com\n")  # still in what goes out
         said = self.refused("release", "a")
-        self.assertIn(f'{head[:10]} fixtures/contacts.txt: a@unreserved.hansa  ("a@unreserved.hansa")', said)
-        self.assertIn("a mailbox in a test file does not use a reserved example domain", said)
+        self.assertIn(f'{head[:10]} docs/contacts.md: a@unreserved.hansa  ("a@unreserved.hansa")', said)
+        self.assertIn("a mailbox does not use a reserved example domain", said)
         self.assertNotIn("holds words the principal keeps from going out", said)
         self.assertIn("Replace it with an example address", said)
-        self.assertIn("or ask the principal", said)
-        self.assertIn("a mailbox in a test file does not use a reserved example domain", self.hansa("release"))
+        self.assertIn("ask the principal", said)
+        self.assertNotIn("test file", said)
+        for remedy in ("example.com", "example.org", "example.net", ".invalid", ".test", ".example",
+                       "allowlist on the page (hansa ask)"):
+            self.assertIn(remedy, said)
+        self.assertIn("a mailbox does not use a reserved example domain", self.hansa("release"))
         r = release.get(self.desk, 1)
         self.assertEqual(r["state"], "forbidden")
         self.assertEqual(r["hits"], [{"kind": "mailbox", "word": "a@unreserved.hansa", "commit": head,
-                                      "where": "fixtures/contacts.txt", "line": "a@unreserved.hansa"}])
+                                      "where": "docs/contacts.md", "line": "a@unreserved.hansa"}])
         self.assertIsNone(release.start(self.desk, 1))
         self.assertEqual(self.events("release_started"), [])
+        self.assertNotIn("测试文件", release.state_text(self.desk, r, self.desk.settings(), zh=True))
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["a@unreserved.hansa"])),
+                         {"ok": True, "problems": []})
+        self.hansa("release", "a")
+        self.assertEqual(release.get(self.desk, 2)["state"], "waiting")
+        self.assertIsNone(release.get(self.desk, 2).get("hits"))
 
     def test_turning_on_the_mailbox_rule_rescans_an_approved_release(self):
         from hansa import release
@@ -19459,26 +20251,94 @@ class DeskTest(unittest.TestCase):
         self.hansa("release", "a")
         r = release.get(self.desk, 1)
         self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
         self.assertIsNone(release.start(self.desk, 1))
         self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
         self.assertEqual(release.get(self.desk, 1)["hits"][0]["word"], "a@unreserved.hansa")
         self.assertEqual(self.events("release_started"), [])
 
-    def test_a_broken_mailbox_matcher_refuses_a_release(self):
+    def test_removing_a_mailbox_allowlist_entry_rescans_an_approved_release(self):
         from hansa import release
         self.with_release("true")
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
-        with unittest.mock.patch("hansa.release.mailbox_hits", return_value=[]):
-            said = self.refused("release", "a")
-        self.assertIn("the rule could not tell a real mailbox from an example one", said)
-        self.assertIn("the mailbox rule's matcher is broken", said)
-        self.assertIn("hansa merges and releases nothing until it is fixed", said)
-        self.assertNotIn("hansa retry", said)
-        self.assertNotIn("Replace it", said)
-        self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("the mailbox rule's matcher is broken", self.hansa("release"))
-        self.assertEqual(release.get(self.desk, 1)["state"], "forbidden")
+        self.commit_in_repo("package.json", '{"author": "jane@realmail.hansa"}\n')
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True,
+                                                          release_mailbox_allow=["jane@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        with unittest.mock.patch("hansa.release.forbidden_in", wraps=release.forbidden_in) as scan:
+            self.hansa("release", "a")
+            self.assertEqual(scan.call_count, 1)
+            r = release.get(self.desk, 1)
+            self.assertEqual(r["state"], "waiting")
+            self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+            self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=[])), {"ok": True, "problems": []})
+            self.assertIsNone(release.start(self.desk, 1))
+            self.assertEqual(scan.call_count, 2)
+        refused = release.get(self.desk, 1)
+        self.assertEqual(refused["commit"], r["commit"])
+        self.assertEqual(refused["state"], "forbidden")
+        self.assertEqual(refused["hits"][0]["word"], "jane@realmail.hansa")
+        self.assertEqual(self.events("release_started"), [])
+
+    def test_the_scan_key_holds_the_mailbox_rule_and_sorted_casefolded_allowlist(self):
+        from hansa import release
+        head = self.git_out("rev-parse", "HEAD")
+
+        def key(enabled, allow):
+            return release.scan_key(self.repo, "", head, [], "true", enabled, allow)
+        self.assertEqual(key(True, ["Jane@RealMail.hansa", "@PYTHON.org"]),
+                         key(True, ["@python.ORG", "jane@realmail.COM"]))
+        self.assertNotEqual(key(True, []), key(False, []))
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.assertNotEqual(key(enabled, []), key(enabled, ["jane@realmail.hansa"]))
+                self.assertNotEqual(key(enabled, ["@realmail.hansa"]), key(enabled, ["jane@realmail.hansa"]))
+        self.assertEqual(release.scan_key(self.repo, "", head, ["Falcon", "SECRET"], "true"),
+                         release.scan_key(self.repo, "", head, ["secret", "FALCON"], "true"))
+
+    def test_adding_an_unrelated_allowlist_entry_rescans_and_starts_an_approved_release(self):
+        from hansa import release
+        self.with_release("true")
+        self.commit_in_repo("README.md", "jane@realmail.hansa\n")
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True,
+                                                          release_mailbox_allow=["jane@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        with unittest.mock.patch("hansa.release.forbidden_in", wraps=release.forbidden_in) as scan:
+            self.hansa("release", "a")
+            r = release.get(self.desk, 1)
+            self.assertEqual(r["state"], "waiting")
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+            self.assertEqual(self.page_save(lambda s: s["release_mailbox_allow"].append("@other.org")),
+                             {"ok": True, "problems": []})
+            process = release.start(self.desk, 1)
+            self.assertIsNotNone(process)
+            process.wait(timeout=20)
+            self.assertEqual(scan.call_count, 2)
+            self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(release.get(self.desk, 1)["commit"], r["commit"])
+        self.assertEqual(len(self.events("release_started")), 1)
+
+    def test_an_allowlist_change_during_a_release_scan_makes_it_scan_again(self):
+        from hansa import release
+        self.with_release("true")
+        self.commit_in_repo("README.md", "jane@realmail.hansa\n")
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        real_scan = release.forbidden_in
+        calls = []
+
+        def changed_during_scan(*args, **kw):
+            found = real_scan(*args, **kw)
+            calls.append(found)
+            if len(calls) == 1:
+                self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["jane@realmail.hansa"])),
+                                 {"ok": True, "problems": []})
+            return found
+        with unittest.mock.patch("hansa.release.forbidden_in", changed_during_scan):
+            self.hansa("release", "a")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0][0]["word"], "jane@realmail.hansa")
+        self.assertEqual(calls[1][0], [])
+        self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
 
     def test_a_listed_lane_goes_out_without_asking_only_while_it_is_what_the_principal_listed(self):
         from hansa import release
@@ -20861,6 +21721,7 @@ const reply = path => given[Object.keys(given).find(p => path.startsWith(p))] ??
 const fetch = async path => { const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r}; };
 const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
   setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
+if (process.argv[4]) ctx.navigator.language = process.argv[4];
 vm.runInContext(script, ctx);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()])", ctx).then(() => {
@@ -20872,18 +21733,58 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
   console.log(JSON.stringify(nulls));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(() => {
-  if (ask === "mailboxes") {
-    let input = null;
+  if (ask === "exceptions") {
+    const read = () => JSON.parse(vm.runInContext("JSON.stringify(S.release_forbidden_except)", ctx));
+    const before = read(), warnings = [], rows = [];
+    let entry = null, lanes = null, remove = null, add = null;
     walk(ids["#tab-settings"], el => {
-      const i = el.kids.findIndex(k => k instanceof Text && k.textContent.startsWith("Require reserved example domains"));
-      if (i >= 0) input = el.kids[i + 1];
+      if (el.className === "forbidden-exception") rows.push(el);
+      if (el.className === "warn" && (el.textContent.includes("matches nothing") || el.textContent.includes("不匹配任何项"))) warnings.push(el.textContent);
+      if (el.attrs["data-exception-entry"] === "0") entry = el;
+      if (el.attrs["data-exception-lanes"] === "0") lanes = el;
+      if (el.tag === "button" && (el.textContent === "Add exception" || el.textContent === "添加豁免")) add = el;
+    });
+    walk(rows[0], el => { if (el.tag === "button") remove = el; });
+    if (!entry || !lanes || !remove || !add) throw new Error("exception editor missing");
+    entry.value = "private-phrase"; entry.on.input({target:entry});
+    lanes.value = "a, e"; lanes.on.input({target:lanes});
+    const edited = read()[0];
+    remove.on.click(); const afterRemove = read();
+    // Find the new button: the previous render held the array from before removal.
+    walk(ids["#tab-settings"], el => {
+      if (el.tag === "button" && (el.textContent === "Add exception" || el.textContent === "添加豁免")) add = el;
+    });
+    add.on.click();
+    console.log(JSON.stringify({before, rows:rows.length, warnings, edited, afterRemove, afterAdd:read()}));
+    return;
+  }
+  if (ask === "mailboxes") {
+    let input = null, allow = null, ruleLabel = "", allowLabel = "";
+    walk(ids["#tab-settings"], el => {
+      const i = el.kids.findIndex(k => k instanceof Text &&
+        (k.textContent.startsWith("Require reserved example domains") || k.textContent.startsWith("新增行中的邮箱")));
+      if (i >= 0) {
+        input = el.kids[i + 1]; ruleLabel = el.kids[i].textContent;
+        allowLabel = el.kids[i + 2].textContent; allow = el.kids[i + 3];
+      }
     });
     if (!input || input.attrs.type !== "checkbox") throw new Error("mailbox rule checkbox missing");
+    if (!allow || allow.tag !== "textarea") throw new Error("mailbox allowlist textarea missing beside checkbox");
     const before = input.checked;
     input.checked = !before; input.on.change({target: input});
-    const after = vm.runInContext("S.release_test_mailboxes", ctx);
+    const after = vm.runInContext("S.release_mailboxes", ctx);
     input.checked = before; input.on.change({target: input});
-    console.log(JSON.stringify({before, after, restored: vm.runInContext("S.release_test_mailboxes", ctx)}));
+    const allowBefore = allow.textContent;
+    allow.value = "\nJane@RealMail.hansa\n \t\n@python.org\n\n"; allow.on.input({target: allow});
+    const allowAfter = vm.runInContext("S.release_mailbox_allow", ctx);
+    allow.value = "\n \t\n"; allow.on.input({target: allow});
+    const allowBlank = vm.runInContext("S.release_mailbox_allow", ctx);
+    allow.value = " a b@c.com "; allow.on.input({target: allow});
+    const allowSpaces = vm.runInContext("S.release_mailbox_allow", ctx);
+    allow.value = ""; allow.on.input({target: allow});
+    console.log(JSON.stringify({before, after, restored: vm.runInContext("S.release_mailboxes", ctx),
+      allowBefore, allowAfter, allowBlank, allowSpaces,
+      allowCleared: vm.runInContext("S.release_mailbox_allow", ctx), ruleLabel, allowLabel}));
     return;
   }
   const ticks = [];
@@ -21119,37 +22020,152 @@ else vm.runInContext("loadSettings()", ctx).then(() => {
         self.assertIn("for lanes a target default, which the principal lets go out without asking", self.hansa("explain"))
 
     def test_the_mailbox_rule_is_a_boolean_setting_only_the_principal_can_change(self):
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
         settings = self.desk.settings()
-        settings["release_test_mailboxes"] = True
-        self.assertIn("release_test_mailboxes is the principal's", " ".join(self.desk.save_settings(settings, by="coordinator")))
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
+        settings["release_mailboxes"] = True
+        self.assertIn("release_mailboxes is the principal's", " ".join(self.desk.save_settings(settings, by="coordinator")))
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
         for bad in ("true", 1, [], None):
             with self.subTest(bad=bad):
-                self.assertFalse(self.page_save(lambda s: s.update(release_test_mailboxes=bad))["ok"])
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=True)), {"ok": True, "problems": []})
+                self.assertFalse(self.page_save(lambda s: s.update(release_mailboxes=bad))["ok"])
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
         self.hansa("concurrency", "2")
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], True)
+        self.assertIs(self.desk.settings()["release_mailboxes"], True)
         settings = self.desk.settings()
-        settings["release_test_mailboxes"] = False
+        settings["release_mailboxes"] = False
         self.assertTrue(self.desk.save_settings(settings, by="coordinator"))
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], True)
-        self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=False)), {"ok": True, "problems": []})
-        self.assertIs(self.desk.settings()["release_test_mailboxes"], False)
+        self.assertIs(self.desk.settings()["release_mailboxes"], True)
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=False)), {"ok": True, "problems": []})
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
+
+    def test_the_mailbox_allowlist_refuses_invalid_entries_and_only_the_principal_changes_it(self):
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        bad_lists = [([""], "empty entry"), (["jane"], "full address or @domain"), (["@"], "@ alone"),
+                     (["*@realmail.hansa"], "pattern characters"), (["jane?@realmail.hansa"], "pattern characters"),
+                     (["[jane]@realmail.hansa"], "pattern characters"), (["a b@c.com"], "spaces"),
+                     (["jane@realmail.hansa"] * 501, "at most 500"), ("jane@realmail.hansa", "list"),
+                     ([None], "full address or @domain"),
+                     (["@com"], "domain must contain a dot"), (["@realmail"], "domain must contain a dot"),
+                     (["jane@realmail"], "domain must contain a dot"),
+                     (["@realmail.c"], "last label must be at least two letters"),
+                     (["jane@realmail.c1"], "last label must be at least two letters"),
+                     (["@realmail.12"], "last label must be at least two letters"),
+                     (["a" * 242 + "@realmail.hansa"], "at most 254 characters"),
+                     (["@" + "a" * 251 + ".com"], "at most 254 characters"),
+                     (["Jane@RealMail.hansa", "jane@realmail.COM"], "entry 2 repeats entry 1"),
+                     (["@PYTHON.org", "jane@realmail.hansa", "@python.ORG"], "entry 3 repeats entry 1")]
+        for entries, reason in bad_lists:
+            with self.subTest(reason=reason):
+                saved = self.page_save(lambda s: s.update(release_mailbox_allow=entries))
+                self.assertFalse(saved["ok"])
+                self.assertIn(reason, " ".join(saved["problems"]))
+                self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        entries = ["Jane@RealMail.hansa", "@python.org"]
+        settings = self.desk.settings()
+        settings["release_mailbox_allow"] = entries
+        said = " ".join(self.desk.save_settings(settings, by="coordinator"))
+        self.assertIn("release_mailbox_allow is the principal's", said)
+        self.assertIn("hansa ask", said)
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], [])
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)), {"ok": True, "problems": []})
+        self.hansa("concurrency", "2")
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], entries)
+        settings = self.desk.settings()
+        settings["release_mailbox_allow"] = []
+        self.assertIn("release_mailbox_allow is the principal's", " ".join(self.desk.save_settings(settings)))
+        self.assertEqual(self.desk.settings()["release_mailbox_allow"], entries)
+        entries = [f"person{i}@realmail.hansa" for i in range(498)]
+        entries += ["a" * 241 + "@realmail.hansa", "@" + "a" * 249 + ".com"]  # both 254 characters
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=[])), {"ok": True, "problems": []})
+
+    def test_the_old_mailbox_setting_is_read_then_dropped_at_the_next_save(self):
+        old = self.desk.settings()
+        del old["release_mailboxes"]
+        old["release_test_mailboxes"] = True
+        write_json(self.desk.settings_path, old)
+        self.assertEqual(validate(old, self.desk.root), [])
+        settings = self.desk.settings()
+        self.assertIs(settings["release_mailboxes"], True)
+        self.assertNotIn("release_test_mailboxes", settings)
+        tid = self.done_with(env={"FAKE_WRITE": "jane@realmail.hansa", "FAKE_WRITE_FILE": "README.md"})
+        self.assertIn("jane@realmail.hansa", self.refused("merge", tid))
+        self.assertIn("The mailbox rule (release_mailboxes) is on", self.hansa("explain"))
+        saved = json.loads(self.desk.settings_path.read_text())
+        self.assertIs(saved["release_mailboxes"], True)
+        self.assertNotIn("release_test_mailboxes", saved)
+        # If both spellings were present, the new one wins, even if the old one is invalid.
+        saved.update(release_mailboxes=False, release_test_mailboxes="old")
+        write_json(self.desk.settings_path, saved)
+        self.assertIs(self.desk.settings()["release_mailboxes"], False)
+        self.assertEqual(validate(saved, self.desk.root), [])
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=["@realmail.hansa"])),
+                         {"ok": True, "problems": []})
+        self.assertNotIn("release_test_mailboxes", json.loads(self.desk.settings_path.read_text()))
+        # A caller such as a page tab loaded before the rename passes only the old spelling itself.
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                legacy = self.desk.settings()
+                del legacy["release_mailboxes"]
+                legacy["release_test_mailboxes"] = enabled
+                self.assertEqual(self.desk.save_settings(legacy, by="page"), [])
+                saved = json.loads(self.desk.settings_path.read_text())
+                self.assertIs(saved.get("release_mailboxes"), enabled)
+                self.assertNotIn("release_test_mailboxes", saved)
+
+    def test_a_bad_legacy_mailbox_value_names_the_key_the_file_holds(self):
+        for key in ("release_test_mailboxes", "release_mailboxes"):
+            for bad in ("yes", 1, None, []):
+                with self.subTest(key=key, value=bad):
+                    settings = self.desk.settings()
+                    settings.pop("release_mailboxes", None)
+                    settings[key] = bad
+                    write_json(self.desk.settings_path, settings)
+                    saved = self.desk.settings_path.read_bytes()
+                    why = f"{key} must be true or false"
+                    self.assertIn(why, validate(settings, self.desk.root))
+                    self.assertIn(why, public_settings(self.desk)["problems"])
+                    self.assertIn(why, self.desk.save_settings(settings, by="page"))
+                    self.assertIn(why, self.desk.save_settings(self.desk.settings(), by="coordinator"))
+                    self.assertIn(why, self.page_save(lambda s: None)["problems"])
+                    self.assertEqual(self.desk.settings_path.read_bytes(), saved)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_the_settings_page_can_turn_the_mailbox_rule_on_and_off(self):
+    def test_the_settings_page_can_turn_the_mailbox_rule_on_and_off_and_edit_the_allowlist(self):
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-        for enabled in (False, True):
-            with self.subTest(enabled=enabled):
-                self.assertEqual(self.page_save(lambda s: s.update(release_test_mailboxes=enabled)), {"ok": True, "problems": []})
-                result = subprocess.run(["node", str(harness), str(page), "mailboxes"],
-                                        input=json.dumps({"/api/settings": public_settings(self.desk)}),
-                                        capture_output=True, text=True, timeout=60)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout), {"before": enabled, "after": not enabled, "restored": enabled})
+        entries = ["a@realmail.hansa", "@realmail.hansa"]
+        for language in ("en", "zh"):
+            for enabled in (False, True):
+                with self.subTest(language=language, enabled=enabled):
+                    self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=enabled,
+                                                                      release_mailbox_allow=entries)),
+                                     {"ok": True, "problems": []})
+                    result = subprocess.run(["node", str(harness), str(page), "mailboxes", language],
+                                            input=json.dumps({"/api/settings": public_settings(self.desk)}),
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    saved = json.loads(result.stdout)
+                    self.assertEqual([saved[k] for k in ("before", "after", "restored")],
+                                     [enabled, not enabled, enabled])
+                    self.assertEqual(saved["allowBefore"], "\n".join(entries))
+                    self.assertEqual(saved["allowAfter"], ["Jane@RealMail.hansa", "@python.org"])
+                    self.assertEqual(saved["allowBlank"], [])
+                    self.assertEqual(saved["allowSpaces"], [" a b@c.com "])
+                    self.assertEqual(saved["allowCleared"], [])
+                    if language == "en":
+                        self.assertNotIn("test data", saved["ruleLabel"])
+                        self.assertIn("added lines", saved["ruleLabel"])
+                        for label in ("full address allows that address", "@domain allows the domain and its subdomains",
+                                      "one entry per line", "ignoring case"):
+                            self.assertIn(label, saved["allowLabel"])
+                    else:
+                        self.assertNotIn("测试数据", saved["ruleLabel"])
+                        self.assertIn("新增行", saved["ruleLabel"])
+                        for label in ("完整邮箱地址允许该地址", "@域名允许该域名及其子域名", "每行一项", "忽略大小写"):
+                            self.assertIn(label, saved["allowLabel"])
 
     # -- release targets (hansa lane target; hansa release L TARGET) ---------------------------------------------
     def with_targets(self, **targets):

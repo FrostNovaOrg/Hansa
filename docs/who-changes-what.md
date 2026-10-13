@@ -2,7 +2,7 @@
 
 What the principal sets on the web page, and what the coordinator sets with `hansa`. What workers and
 design sessions may touch is in [Workers and the sandbox](sandbox.md); the coordinator's own interface is
-[hansa/card.md](../hansa/card.md).
+[hansa/card.md](../hansa/card.md), and `hansa help` for the rest.
 
 ## The principal, the coordinator, and what runs outside the worker
 
@@ -16,7 +16,9 @@ uses, the folders the coordinator may read outside the desk without asking
 (`hansa explain` lists them), the folders and files workers may not read (the
 coordinator may add to them, below), the
 release targets that go out without asking (each ticked on its own), the words
-no release may send out, and the alert command ([Alerts](releases.md#alerts)).
+no release may send out, the mailbox rule and its address/domain allowlist
+([Releases](releases.md#forbidden-words-before-a-release)), and the alert command
+([Alerts](releases.md#alerts)).
 The page also shows what goes on, and asks the principal about each release
 ([Releases](releases.md)).
 
@@ -119,8 +121,8 @@ open, its memory under `projects/` among them; a file that appears directly
 in the folder after the session starts is closed from the next start), and
 editing code in the lanes' repositories;
 code changes go through workers, so each gets a branch, the lane's check and
-a merge. Its whole interface is `hansa/card.md`, copied into the desk as
-`CLAUDE.md`.
+a merge. Its interface is `hansa/card.md`, copied into the desk as
+`CLAUDE.md`, and `hansa help` for the rest.
 
 ## Commit messages and identity
 

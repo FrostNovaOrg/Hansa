@@ -504,6 +504,14 @@ def page_of(desk: Desk, server: dict) -> dict:
             "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists()}
 
 
+def killed_last(m: dict) -> dict:
+    """{"last_run": how its last run ended} for a queued task while it waits because the system killed that run and
+    hansa queued it again (run.finish); {} otherwise. Its error is then the kill's: holding it (run.hold) or
+    queuing it again for another cause since gives it another."""
+    a = (m.get("attempts") or [{}])[-1]
+    return {"last_run": m["error"]} if a.get("kind") == "killed" and a.get("error") == m.get("error") else {}
+
+
 def status(desk: Desk) -> dict:
     s = desk.settings()
     tasks = desk.tasks()
@@ -583,7 +591,7 @@ def status(desk: Desk) -> dict:
                     "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                     "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
-                    "waiting": waiting_reason(desk, s, m, busy, looks)} for m in queued],
+                    "waiting": waiting_reason(desk, s, m, busy, looks), **killed_last(m)} for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": merge_check_lane(s, m),
                      **({"waiting_for": merge_lane_wait(desk, m, tasks)} if merge_check_lane(s, m) != m.get("lane") else {}),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
@@ -675,7 +683,8 @@ def status_text(st: dict) -> str:
                 for m in st["design"]]
     if st["queued"]:
         out.append("queued:")
-        out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}" for m in st["queued"]]
+        out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}"
+                + (f"\n      last run: {m['last_run']}" if m.get("last_run") else "") for m in st["queued"]]
     if st.get("merging"):
         out.append("merging (each merges by itself if its check passes on the base as it is now, or in its turn; "
                    + ("hansa tells this session when each ends):" if st.get("heard") else "hansa wait <id>):"))
@@ -976,9 +985,13 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") != "limit" else
+        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
+                   f"earlier run on {on}: {a['error']}; what it reported, if anything, is not kept"
+                   if a.get("kind") == "killed" else  # it used no try
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
+        if a.get("turns_unknown_after_resume"):  # run.finish: the system killed the run hansa resumed
+            out.append("  its turns after hansa resumed it are unknown: the system killed it before it said")
         start = a.get("run_start")
         if (not start and a.get("kind") in ("network", "limit") and m.get("base")
                 and m.get("kind") not in ("verify", "design")):
@@ -1383,6 +1396,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *(["    runs leave the ignored ones out; the coordinator removes them with: "
                + allow_fix(name, ln.get("allow", []))] if any(map(refused_rule, ln.get("allow", []))) else []),
             *release.lane_lines(desk, name, ln),
+            f"  {len(set(release.lane_exceptions(s, name)) & set(s.get('release_forbidden') or []))} "
+            "forbidden entry/entries excepted on this lane (the principal's, on the page)",
             *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"
               for f, what in (("commit_message", "message of the commit of a task's work, and of the merge of the base"
                                                  " into a task's branch"),
@@ -1533,6 +1548,10 @@ def release_settings_line(s: dict) -> str:
     listed = [named(k) for k in listed_targets(s) if release.lane_listed(s, *k)]
     changed = [named(k) for k in listed_targets(s) if named(k) not in listed]
     words = s.get("release_forbidden") or []
+    mailbox_allow = s.get("release_mailbox_allow") or []
+    allowed = ", ".join(mailbox_allow[:20]) if mailbox_allow else "(empty)"
+    if len(mailbox_allow) > 20:
+        allowed += f", and {len(mailbox_allow) - 20} more, all on the page"
     return ("Releases (hansa release L [TARGET]) go out only after the principal's yes on the page"
             + (f", but for lanes {', '.join(listed)}, which the principal lets go out without asking while the desk is "
                "not paused (each target ticked on its own)" if listed else "")
@@ -1540,9 +1559,11 @@ def release_settings_line(s: dict) -> str:
                "is no longer what it was when the principal saved it, so theirs wait for the yes)" if changed else "")
             + f"; {len(words)} word(s) the principal keeps from going out are checked at hansa add (a task's title), at each merge and before each release. Both lists are the "
             "principal's, on the web page; you cannot set them (hansa ask). "
-            f"The mailbox rule (release_test_mailboxes) is {'on' if s.get('release_test_mailboxes') else 'off'}: "
-            "when on, mailboxes in added test lines must use reserved example domains at merges and releases. "
-            "It is also the principal's, on the same page. Do not push or deploy yourself.")
+            f"The mailbox rule (release_mailboxes) is {'on' if s.get('release_mailboxes') else 'off'}: "
+            "when on, mailboxes in every added line must use reserved example domains at merges and releases, "
+            "or be allowed by release_mailbox_allow: " + allowed
+            + ". A full address allows that address; @domain allows the domain and its subdomains, ignoring case. "
+            "The rule and allowlist are also the principal's, on the same page (hansa ask). Do not push or deploy yourself.")
 
 
 def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:

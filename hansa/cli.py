@@ -65,7 +65,8 @@ TOPICS = {
     "effort": ("tasks.md", "Effort", "which effort a run gets, and where it comes from"),
     "browser": ("tasks.md", "Browser tasks and the preview", "a task with a browser, the browser tool and the "
                 "lane's preview"),
-    "merge-check": ("tasks.md", "Merging, the merge check and conflicts", "merging, the merge check and conflicts"),
+    "merge-check": ("tasks.md", "Merging, the merge check and conflicts", "merging, the merge check and conflicts, "
+                    "and sending a task back"),
     "cost-figures": ("tasks.md", "What work costs", "what hansa cost counts, and what the figures mean"),
     "states": ("tasks.md", "Task states", "a task's states and what each means"),
     "inbox": ("desk.md", "Hearing from hansa", "how hansa posts to the coordinator's session, hansa wait, and the "
@@ -357,13 +358,13 @@ def _waits(desk: Desk, tid: str) -> str:
     return f"\n{tid} waits: {why}" if "no provider ready" in why else ""
 
 
-def _title_allowed(desk: Desk, s: dict, title: str | None, text: str) -> None:
+def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str) -> None:
     """Refuse, before anything is queued, a title that holds one of the principal's forbidden words: hansa puts it
     in the task's commit message and its merge's. With no --title it is the text's first line, cut at 80
     characters, as new_task makes it; the rest of the text is never committed and not looked at."""
     given = desk.redact(title or "")
     title = given or (desk.redact(text.strip()).splitlines() or [""])[0][:80]
-    found = release.title_hits(title, s.get("release_forbidden") or [])
+    found = release.title_hits(title, release.lane_words(s, lane))
     if found:
         where = "--title" if given else "the title (the first line of the text, as no --title was given)"
         raise SystemExit(desk.redact(
@@ -381,7 +382,7 @@ def cmd_add(a):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued. "
                          + see_more("browser"))
     text = _text(a)
-    _title_allowed(desk, s, a.title, text)
+    _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None,
                         **notify.recorded(notify.session_here()))
@@ -418,7 +419,7 @@ def cmd_design(a):
                          else f"hansa: there is no lane {lane}")
     _work_lane(s, lane)
     text = _text(a)
-    _title_allowed(desk, s, a.title, text)
+    _title_allowed(desk, s, a.title, text, lane)
     with desk.lock():
         open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
                  and m["state"] in ("queued", "running")]
@@ -723,7 +724,7 @@ def _mergeable(desk: Desk, a):
                          f"was merged, and no flag overrides this. Next: hansa retry {a.id} --update \"settle the "
                          f"markers in {', '.join(markers)}\"\n{MARKERS_ON_PURPOSE}\n{see_more('merge-check')}")
     words = words_in_merge(desk, repo, git("rev-parse", base, cwd=repo), m["head"],
-                           merge_message(lane, m["lane"], a.id, m["title"]), lane)
+                           merge_message(lane, m["lane"], a.id, m["title"]), lane, m["lane"])
     if words:
         desk.event("merge_forbidden", task=a.id, found=len(words))
         raise SystemExit(desk.redact(f"hansa: {words_text(a.id, words)}. Nothing was merged"))
@@ -2288,7 +2289,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
 
 def _say_forbidden(desk: Desk, name: str, ln: dict, only: str | None = None) -> None:
     """Say at once when a release command just set holds one of the principal's forbidden words."""
-    hits = release.command_hits(ln, desk.settings().get("release_forbidden") or [], only)
+    hits = release.command_hits(ln, release.lane_words(desk.settings(), name), only)
     if hits:
         print(release.command_hits_text(desk, name, hits))
 

@@ -9,8 +9,8 @@ short version.
 
 Workers (task and verification workers) change files in their worktree and
 report, inside Claude Code's sandbox, which the operating system enforces: any
-command, but files changed only in the worktree (and its temporary folder and
-the lane's write list, `hansa lane set L write ...`), no
+command, but files changed only in the worktree (and its temporary folder, made
+for each run and removed when it ends, and the lane's write list, `hansa lane set L write ...`), no
 reading of the desk's keys and state, the coordinator's notes (`notes/`) and
 card (the desk's `CLAUDE.md`; design sessions may not read these either), of any provider's Claude Code folder or
 `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
