@@ -3986,6 +3986,33 @@ class DeskTest(unittest.TestCase):
                 signal.signal(signal.SIGALRM, old_handler)
                 signal.setitimer(signal.ITIMER_REAL, *old_timer)
 
+        def pattern_scan_slow_reading(c):
+            entry = r"re:private-\d+x"
+            c.commit_in_repo("ordinary.txt", "ordinary change")
+            git_lines, real_matches, clock, searched = release._git_lines, release.matches, [0.0], []
+
+            def slow_git_lines(*args):
+                for line in git_lines(*args):
+                    clock[0] += 2.0  # Reading alone exceeds the whole scan's 1 s matching limit.
+                    signal.raise_signal(signal.SIGALRM)
+                    yield line
+
+            def cheap_matches(matcher, line, folded):
+                searched.append(line)
+                clock[0] += 0.001
+                return real_matches(matcher, line, folded)
+
+            scan_clock = types.SimpleNamespace(monotonic=lambda: clock[0])
+            with small_pattern_limits(), unittest.mock.patch.object(release, "time", scan_clock), \
+                    unittest.mock.patch.object(release, "_git_lines", slow_git_lines), \
+                    unittest.mock.patch.object(release, "matches", cheap_matches):
+                hits, checked = release.forbidden_in(c.repo, "", c.git_out("rev-parse", "main"), [entry])
+            c.assertEqual(hits, [])
+            c.assertGreater(checked, 0)
+            c.assertIn("ordinary change", searched)
+            c.assertGreater(clock[0], 1.0)
+            c.assertLess(len(searched) * 0.001, 1.0)
+
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
@@ -3995,7 +4022,7 @@ class DeskTest(unittest.TestCase):
                  (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
                  (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry),
                  (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
-                 (30, pattern_scan_thread), (31, pattern_scan_restores_signal)]
+                 (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.

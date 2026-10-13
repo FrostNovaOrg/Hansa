@@ -186,7 +186,7 @@ any case. The page refuses to save a pattern that does not compile, exceeds
 saving nothing. It also refuses backreferences and repeats of two or more
 whose body contains a group, alternation or another repeat, because they can
 backtrack badly and stall the desk.
-To end stalls from allowed patterns on long lines, each scan has fixed limits of 2 seconds on one line and 60 seconds in all; reaching either limit refuses the change at that place, so shorten or split the line or ask the principal to change the pattern (the limits can go when matching itself has a bounded runtime).
+To end stalls from allowed patterns on long lines, each scan has fixed limits of 2 seconds on one line and 60 seconds spent matching patterns in all; reaching either limit refuses the change at that place, so shorten or split the line or ask the principal to change the pattern (the limits can go when matching itself has a bounded runtime).
 Other entries stay literal, including regex characters such
 as the dot in `a.b`. These patterns catch shapes a finite word list cannot;
 the principal can remove an entry when that shape is safe to send out.

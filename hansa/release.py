@@ -69,7 +69,7 @@ MOST_FILES = 500
 MOST_HITS = 20
 SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the time it is recorded
 PATTERN_LINE_LIMIT = 2.0  # seconds on one line, across its patterns; not a setting
-PATTERN_SCAN_LIMIT = 60.0  # seconds in one scan; end a stall, not pace ordinary releases
+PATTERN_SCAN_LIMIT = 60.0  # seconds matching patterns in one scan; end a stall, not pace ordinary releases
 PATTERN_TIMER_INTERVAL = 0.25
 _UNRUN_PATTERN = object()
 TAIL = 15
@@ -160,12 +160,12 @@ class PatternScan:
         self.matchers = word_matchers(words)
         self.main_thread = threading.current_thread() is threading.main_thread()
         self.running = False
+        self.matching_time = 0.0
         self.armed = False
         self.hits = []
         self.checked = 0
 
     def __enter__(self):
-        self.started = time.monotonic()
         if self.main_thread and any(isinstance(m, re.Pattern) for _, m in self.matchers):
             self.handler = signal.getsignal(signal.SIGALRM)
             self.timer = signal.getitimer(signal.ITIMER_REAL)
@@ -191,7 +191,7 @@ class PatternScan:
         elapsed = time.monotonic()
         if not self.main_thread:
             reason = "patterns were not run: this scan is off the main thread, so the line was not checked"
-        elif elapsed - self.started >= PATTERN_SCAN_LIMIT:
+        elif self.matching_time + (elapsed - self.search_started) >= PATTERN_SCAN_LIMIT:
             reason = f"the patterns took over {PATTERN_SCAN_LIMIT:g} s in this scan, so the rest was not checked"
         elif elapsed - self.line_started >= PATTERN_LINE_LIMIT:
             reason = f"the pattern took over {PATTERN_LINE_LIMIT:g} s here, so the line was not checked"
@@ -203,6 +203,7 @@ class PatternScan:
         if not isinstance(matcher, re.Pattern) and matcher is not _UNRUN_PATTERN:
             return matches(matcher, line, folded)
         self.place = {"word": word, "commit": sha or "", "where": where, "line": line.strip()[:300]}
+        self.search_started = time.monotonic()
         try:
             self.running = True
             self._check()
@@ -211,6 +212,7 @@ class PatternScan:
             return found
         finally:
             self.running = False
+            self.matching_time += time.monotonic() - self.search_started
 
 
 def releases_file(desk: Desk) -> Path:
