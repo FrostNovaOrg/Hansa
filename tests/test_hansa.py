@@ -2528,7 +2528,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["error"],
                          f"refusing to commit changes to protected paths: {', '.join(sorted(paths))}; the workers' "
                          "sandbox does not let them write these paths, so the changes can only have come through "
-                         "git's index; nothing was committed; the work is left staged")
+                         "git's index; nothing was committed; the work is left staged. To change these paths, "
+                         "ask the principal: they change them outside a task")
         self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), base)
         self.assertEqual(self.git_out("rev-list", "--all", cwd=wt), before)
         self.assertIn("ordinary.txt", self.git_out("diff", "--cached", "--name-only", cwd=wt))
@@ -7340,6 +7341,8 @@ class DeskTest(unittest.TestCase):
         self.assertIn("lane a was not removed", str(e.exception.code))
         self.assertIn(".idea/x.xml", str(e.exception.code))
         self.assertIn("the workers' sandbox does not let them write", str(e.exception.code))
+        self.assertTrue(str(e.exception.code).endswith(
+            "To change these paths, ask the principal: they change them outside a task"))
         self.assertIn("a", self.desk.settings()["lanes"])
         self.assertTrue(wt.is_dir())
         self.assertIn(str(wt.resolve()), self.worktrees())

@@ -2189,7 +2189,8 @@ def stage_work(desk: Desk, wt: Path, old: str, merged=()) -> list:
         raise SandboxPathChanged(
             f"refusing to commit changes to protected paths: {', '.join(sorted(refused))}; the workers' sandbox "
             "does not let them write these paths, so the changes can only have come through git's index; "
-            "nothing was committed; the work is left staged")
+            "nothing was committed; the work is left staged. To change these paths, ask the principal: "
+            "they change them outside a task")
     return paths
 
 
