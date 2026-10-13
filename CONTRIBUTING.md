@@ -2,9 +2,9 @@
 
 - Standard library only.
 - Change a task through the desk (`Desk.change`, under the desk lock); the event log is append-only.
-- `hansa/card.md` is the coordinator's whole interface: when a change alters what the coordinator can rely on, the card says so. Nobody should need to read the code to use hansa.
+- `hansa/card.md` and `hansa help` are the coordinator's interface: when a change alters what the coordinator can rely on, the card or the topic of `hansa help` that holds it says so. Nobody should need to read the code to use hansa.
 - `README.md` is the front page: what hansa is, how to start, where to read more. Keep it short. The details of how hansa behaves go in the matching file under `docs/` (the sandbox, releases and alerts, how a task runs, a Linux server, ...), linked from the README's Documentation table.
-- The card is the coordinator's whole interface and must stand alone; `docs/` explains the same behaviour to people. A change to a fact that both state changes both, in the same commit.
+- The coordinator carries the card whole on every turn, so it keeps what the coordinator follows every turn; the detail lives once in `docs/`, reached by `hansa help <topic>`, with a pointer in the card (`More: hansa help TOPIC`). A change to a fact that both state changes both, in the same commit.
 - Run `python3 -m unittest tests.test_hansa` before opening a change. It uses a stand-in for `claude`, so no model is called.
 - The coordinator's mod (`hansa/mod/`, a Claude Code plugin) has tests of its own, in Claude Code's test kit: after a change there, run `claude plugin validate hansa/mod` and `claude plugin test hansa/mod` (Claude Code 2.1.290 or later; no model is called).
 - Run the tests as an ordinary user, not as root (in a container, say): as root, `test_a_lane_repository_must_belong_to_the_user_hansa_runs_as` makes hansa switch to another account with `runuser`, which replaces the test process, and the suite stops partway.

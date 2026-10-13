@@ -178,7 +178,7 @@ check blocks it unless the coordinator says `--despite-check` (recorded), and
 so does a verification that does not hold. That flag skips the merge check
 even when the base moved; it never overrides release files or a key.
 
-A [merge lane](desk.md) serves its repository and base's checks with its own worktree, sandbox, env, setup, command and limit; otherwise they use the task's lane as below. With a merge lane, a command of its own means its merge command differs from the task lane's check, which the task already passed.
+A [merge lane](desk.md) serves its repository and base's checks with its own worktree, sandbox, env, setup, command and limit; otherwise they use the task's lane as below. With a merge lane, a command of its own means its merge command differs from the task lane's check, which the task already passed. For long merge checks and busy task lanes: `hansa lane add m --like a`, its own caches through `write` and `env`, then `hansa lane set m merge_lane true`. One per repository and base, it takes no work (a lane with work queued or running cannot become one) and keeps the task lane's merge message and identity. It is chosen when the check starts: unmarking or removing it while queued restores the task lane, and a check already running keeps the lane it recorded. With every concurrency slot busy, a merge check takes the next slot before new work when a task ends anywhere, and that task's lane waits about one merge check; raising concurrency by one removes the wait if the machine can run the check beside the lanes' work.
 
 - **When it merges at once.** When the lane's base has not moved since the task
   was made and the lane has no merge check of its own (below), or when the lane
