@@ -137,7 +137,7 @@ const T = ZH ? {
   releaseUnmatched:"清单上这些工作线已和保存清单时不一样，它们的发布要等你点头（直接保存会保留旧的记录：用下面的按钮，或取消勾选再勾上，然后保存，才会重新算进来）：",
   releaseTakeBack:"按现在的样子重新算进来（之后点保存）",
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
-  releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼",
+  releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼", releaseUnchecked:"这一行无法检查",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
@@ -224,7 +224,7 @@ const T = ZH ? {
   releaseUnmatched:"These lanes on the list are no longer what they were when the list was saved, so their releases wait for your yes (a plain Save keeps them as they were: take them back in with the button below, or untick and tick them again, then Save):",
   releaseTakeBack:"Take them back in as they are now (then Save)",
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
-  releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out",
+  releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out", releaseUnchecked:"The line could not be checked",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
@@ -415,6 +415,22 @@ function releaseStop(r) {
     h("button", {title:T.releaseStopNote, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
       .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
 }
+function patternLimitReason(x) {
+  if (!ZH) return x.reason;
+  const seconds = x.seconds || (x.code === "scan" ? 60 : 2);
+  return ({long:"这一行超过 10,000 字符，因此正则无法检查它",
+    line:`正则在这里耗时超过 ${seconds} 秒，因此这一行未检查`,
+    scan:`本次检查中正则的总耗时超过 ${seconds} 秒，因此剩余内容未检查`,
+    thread:"本次检查不在主线程上，正则未运行，因此这一行未检查"})[x.code] || x.reason;
+}
+function releaseHits(hits) {
+  return [false, true].map(limit => {
+    const group = (hits || []).filter(x => (x.kind === "pattern_limit") === limit);
+    return group.length ? h("div", {class:"mono"}, (limit ? T.releaseUnchecked : T.releaseHits) + ":",
+      group.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line} ("${x.word}")`,
+        limit ? `; ${patternLimitReason(x)}` : null))) : null;
+  });
+}
 function releasesSection(rel) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
   if (!rel.length) return null;
@@ -422,8 +438,9 @@ function releasesSection(rel) {
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
       "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
-        (ZH && r.what_zh) || r.what, r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
-        (r.hits || []).length ? h("div", {class:"mono"}, T.releaseHits + ":", r.hits.map(x => h("div", {}, `${x.commit.slice(0, 10)} ${x.where}: ${x.line}`))) : null,
+        r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
+        r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
+        releaseHits(r.hits),
         (r.tail || []).length && ["failed", "stopped"].includes(r.state) ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null,
         releaseStop(r))]))] : null);
 }

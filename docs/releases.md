@@ -186,6 +186,7 @@ any case. The page refuses to save a pattern that does not compile, exceeds
 saving nothing. It also refuses backreferences and repeats of two or more
 whose body contains a group, alternation or another repeat, because they can
 backtrack badly and stall the desk.
+To end stalls from allowed patterns, each scan has fixed limits of 2 seconds on one line and 60 seconds spent matching patterns in all, and with patterns set a line over 10,000 characters is refused without searching it with patterns (literal words still check the whole line): shorten or split the line, or ask the principal to except the entry for that lane (the limits can go when matching itself has a bounded runtime).
 Other entries stay literal, including regex characters such
 as the dot in `a.b`. These patterns catch shapes a finite word list cannot;
 the principal can remove an entry when that shape is safe to send out.
@@ -277,8 +278,12 @@ the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
 `release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `test`; comma-separated when several go
 out together)
 and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
-characters; a release's text names its lane and target. A phone shows the
-first hundred characters or so, so the alert for a release that waits with a
+characters; a release's text names its lane and target.
+For a release refused by the word scan, the alert gives only counts of hits
+and lines that could not be checked against patterns; the entries, lines and
+reasons stay in the page's release list and `hansa release`, so refused
+content does not go out in the alert. A phone shows the first hundred
+characters or so, so the alert for a release that waits with a
 code gives the code, and what to do with it, right after the desk's name:
 
     [hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator in the conversation (this release only, once, 24 hours; send it nowhere else), or answer on the page · main at 08e2cfc99f, 8 commit(s), command: ...; note: ...

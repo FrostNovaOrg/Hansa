@@ -51,6 +51,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -67,6 +68,11 @@ MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are check
 MOST_FILES = 500
 MOST_HITS = 20
 SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the time it is recorded
+PATTERN_LINE_LIMIT = 2.0  # seconds on one line, across its patterns; not a setting
+PATTERN_SCAN_LIMIT = 60.0  # seconds matching patterns in one scan; end a stall, not pace ordinary releases
+PATTERN_TIMER_INTERVAL = 0.25
+PATTERN_LINE_LENGTH = 10000  # bound re loops that do not check signals on Python 3.9
+_UNRUN_PATTERN = object()
 TAIL = 15
 STOP_GRACE = 30  # seconds between the TERM a stopped release's command gets and the KILL to what still runs
 # $0 is the launch word, which finds the run again after hansa serve restarts; the exit code goes in a file
@@ -129,13 +135,101 @@ def word_matchers(words: list) -> list:
     matchers = []
     for word in words or []:
         if isinstance(word, str) and word.strip():
-            pattern = forbidden_pattern(word)[0] if word.startswith("re:") else None
+            pattern = (forbidden_pattern(word)[0] if threading.current_thread() is threading.main_thread()
+                       else _UNRUN_PATTERN) if word.startswith("re:") else None
             matchers.append((word, pattern if pattern is not None else word.casefold()))
     return matchers
 
 
 def matches(matcher, line: str, folded: str) -> bool:
-    return bool(matcher.search(line)) if isinstance(matcher, re.Pattern) else matcher in folded
+    if not isinstance(matcher, re.Pattern):
+        return matcher in folded
+    return bool(matcher.search(line))
+
+
+class PatternLimit(Exception):
+    def __init__(self, hit):
+        self.hit = hit
+        super().__init__(hit["reason"])
+
+
+class PatternScan:
+    """Only a running search may raise from SIGALRM; git reads and desk writes are never interrupted.
+
+    Keep the timer for the whole scan and restore its caller's signal state on every exit.
+    Off the main thread, refuse without running patterns.
+    """
+    def __init__(self, words):
+        self.matchers = word_matchers(words)
+        self.main_thread = threading.current_thread() is threading.main_thread()
+        self.running = False
+        self.matching_time = 0.0
+        self.armed = False
+        self.hits = []
+        self.checked = 0
+
+    def __enter__(self):
+        if self.main_thread and any(isinstance(m, re.Pattern) for _, m in self.matchers):
+            self.handler = signal.getsignal(signal.SIGALRM)
+            self.timer = signal.getitimer(signal.ITIMER_REAL)
+            signal.signal(signal.SIGALRM, self._alarm)
+            signal.setitimer(signal.ITIMER_REAL, PATTERN_TIMER_INTERVAL, PATTERN_TIMER_INTERVAL)
+            self.armed = True
+        return self
+
+    def __exit__(self, *_):
+        if self.armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.handler)
+            signal.setitimer(signal.ITIMER_REAL, *self.timer)
+
+    def line(self, line, sha="", where=""):
+        self.line_started = time.monotonic()
+        self.too_long = len(line) > PATTERN_LINE_LENGTH
+        if self.too_long:
+            word = next((w for w, m in self.matchers if isinstance(m, re.Pattern) or m is _UNRUN_PATTERN), None)
+            if word:
+                self.hits.append({"word": word, "commit": sha or "", "where": where,
+                                  "line": line.strip()[:300], "kind": "pattern_limit", "code": "long",
+                                  "reason": f"the line is longer than {PATTERN_LINE_LENGTH:,} characters, "
+                                            "so patterns could not check it"})
+
+    def _alarm(self, *_):
+        if self.running:
+            self._check()
+
+    def _check(self):
+        elapsed = time.monotonic()
+        if not self.main_thread:
+            code, seconds = "thread", None
+            reason = "patterns were not run: this scan is off the main thread, so the line was not checked"
+        elif self.matching_time + (elapsed - self.search_started) >= PATTERN_SCAN_LIMIT:
+            code, seconds = "scan", PATTERN_SCAN_LIMIT
+            reason = f"the patterns took over {PATTERN_SCAN_LIMIT:g} s in this scan, so the rest was not checked"
+        elif elapsed - self.line_started >= PATTERN_LINE_LIMIT:
+            code, seconds = "line", PATTERN_LINE_LIMIT
+            reason = f"the pattern took over {PATTERN_LINE_LIMIT:g} s here, so the line was not checked"
+        else:
+            return
+        raise PatternLimit({**self.place, "kind": "pattern_limit", "code": code,
+                            "seconds": seconds, "reason": reason})
+
+    def search(self, word, matcher, line, folded, sha="", where=""):
+        if not isinstance(matcher, re.Pattern) and matcher is not _UNRUN_PATTERN:
+            return matches(matcher, line, folded)
+        if self.too_long:
+            return False
+        self.place = {"word": word, "commit": sha or "", "where": where, "line": line.strip()[:300]}
+        self.search_started = time.monotonic()
+        try:
+            self.running = True
+            self._check()
+            found = matches(matcher, line, folded)
+            self._check()
+            return found
+        finally:
+            self.running = False
+            self.matching_time += time.monotonic() - self.search_started
 
 
 def releases_file(desk: Desk) -> Path:
@@ -356,17 +450,26 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     """forbidden_in for any range of commits (git log's arguments, ending in --), and for texts that are not in a
     commit yet ([(where, text)], each line looked at, commit ''): a merge's message before it is made, say.
     mailboxes: also check mailbox-shaped strings on every added line against example domains and the allowlist."""
+    with PatternScan(words) as scan:
+        try:
+            return _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan)
+        except PatternLimit as e:
+            return scan.hits[:MOST_HITS - 1] + [e.hit], scan.checked
+
+
+def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
     allow = [entry.casefold() for entry in mailbox_allow] if mailboxes else []
     addresses = {entry for entry in allow if not entry.startswith("@")}
     domains = mailbox_domains({entry[1:] for entry in allow if entry.startswith("@")})
-    matchers = word_matchers(words)
-    hits, seen, checked = [], set(), 0
+    matchers = scan.matchers
+    hits, seen, checked = scan.hits, set(), 0
     mailboxes_seen = set()
 
     def look(sha, where, line):
+        scan.line(line, sha, where)
         low = line.casefold()
         for w, matcher in matchers:
-            if matches(matcher, line, low) and (where, line) not in seen:
+            if scan.search(w, matcher, line, low, sha, where) and (where, line) not in seen:
                 seen.add((where, line))
                 hits.append({"word": w, "commit": sha or "", "where": where, "line": line.strip()[:300]})
                 return
@@ -378,6 +481,7 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
     for line in _git_lines(repo, "log", "--format=%x00%H%n%B", *rng):
         if line.startswith("\0"):
             sha, checked = line[1:].strip(), checked + 1
+            scan.checked = checked
         elif matchers:
             look(sha, "commit message", line)
     if not matchers and not mailboxes:
@@ -394,34 +498,44 @@ def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, ma
             look(sha, "file name", line)
     patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--unified=0", "--no-renames", "--format=%x00%H", *rng)
-    for sha, path, line in _added(patch):
-        look(sha, path or "?", line)
-        if mailboxes:
-            for mailbox in mailbox_hits(line, addresses, domains):
-                place = (sha, path, line, mailbox)
-                if place not in mailboxes_seen:
-                    mailboxes_seen.add(place)
-                    hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
-                                 "line": line.strip()[:300]})
-        if len(hits) >= MOST_HITS:
-            patch.close()
-            break
+    try:
+        for sha, path, line in _added(patch):
+            look(sha, path or "?", line)
+            if mailboxes:
+                for mailbox in mailbox_hits(line, addresses, domains):
+                    place = (sha, path, line, mailbox)
+                    if place not in mailboxes_seen:
+                        mailboxes_seen.add(place)
+                        hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
+                                     "line": line.strip()[:300]})
+            if len(hits) >= MOST_HITS:
+                break
+    finally:
+        patch.close()
     return hits[:MOST_HITS], checked
 
 
 def command_hits(ln: dict, words: list, only: str | None = None) -> list:
     """The forbidden words in a lane's release targets' command lines (any case, within one line), each
     (target, word, line) once; only: that one target's ("" the unnamed one)."""
-    matchers = word_matchers(words)
     out = []
-    for target, t in sorted(lane_targets(ln).items()):
-        if only is not None and target != only:
-            continue
-        for line in str(t.get("command") or "").splitlines():
-            low = line.casefold()
-            w = next((w for w, matcher in matchers if matches(matcher, line, low)), None)
-            if w:
-                out.append((target, w, line.strip()[:300]))
+    with PatternScan(words) as scan:
+        try:
+            for target, t in sorted(lane_targets(ln).items()):
+                if only is not None and target != only:
+                    continue
+                for line in str(t.get("command") or "").splitlines():
+                    before = len(scan.hits)
+                    scan.line(line, where="release command")
+                    low = line.casefold()
+                    w = next((w for w, matcher in scan.matchers
+                              if scan.search(w, matcher, line, low, where="release command")), None)
+                    if w:
+                        out.append((target, w, line.strip()[:300]))
+                    for hit in scan.hits[before:]:
+                        out.append((target, hit["word"], hit["line"] + "; " + pattern_limit_text(hit)))
+        except PatternLimit as e:
+            out.append((target, e.hit["word"], e.hit["line"] + "; " + pattern_limit_text(e.hit)))
     return out
 
 
@@ -434,8 +548,27 @@ def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
           "command, or ask the principal about the word")
 
 
-def hits_text(hits: list) -> str:
-    return "\n".join(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")" for h in hits)
+def hits_text(hits: list, zh: bool = False) -> str:
+    out = []
+    for limit, heading in ((False, "查到的禁发字眼" if zh else "Words found that must not go out"),
+                           (True, "这一行无法检查" if zh else "The line could not be checked")):
+        group = [h for h in hits if (h.get("kind") == "pattern_limit") == limit]
+        if group:
+            out.append(heading + ":")
+            out.extend(f"  {h['commit'][:10]} {h['where']}: {h['line']}  (\"{h['word']}\")"
+                       + ("; " + pattern_limit_text(h, zh) if limit else "") for h in group)
+    return "\n".join(out)
+
+
+def pattern_limit_text(hit, zh: bool = False):
+    if zh:
+        seconds = hit.get("seconds") or (PATTERN_SCAN_LIMIT if hit.get("code") == "scan" else PATTERN_LINE_LIMIT)
+        reason = {"long": "这一行超过 10,000 字符，因此正则无法检查它",
+                  "line": f"正则在这里耗时超过 {seconds:g} 秒，因此这一行未检查",
+                  "scan": f"本次检查中正则的总耗时超过 {seconds:g} 秒，因此剩余内容未检查",
+                  "thread": "本次检查不在主线程上，正则未运行，因此这一行未检查"}.get(hit.get("code"), hit["reason"])
+        return reason + "。请缩短或拆分这一行，或请负责人修改正则（hansa ask）"
+    return (hit["reason"] + ". Shorten or split the line, or ask the principal to change the pattern (hansa ask)")
 
 
 def mailbox_refusal(hits: list, tid: str = "") -> str:
@@ -443,7 +576,7 @@ def mailbox_refusal(hits: list, tid: str = "") -> str:
     if not any(h.get("kind") == "mailbox" for h in hits):
         return ""
     reason = "a mailbox does not use a reserved example domain and is not on the principal's allowlist"
-    if any(h.get("kind") != "mailbox" for h in hits):
+    if any(h.get("kind") not in ("mailbox", "pattern_limit") for h in hits):
         reason += "; the change also holds words the principal keeps from going out"
     retry = (f'Replace it with an example address in hansa retry {tid} --fresh "..." '
              f"(a retry that continues from {tid} keeps its commits)" if tid else
@@ -454,12 +587,23 @@ def mailbox_refusal(hits: list, tid: str = "") -> str:
             "More: hansa help forbidden-words")
 
 
-def title_hits(title: str, words: list) -> list:
+def title_hits(title: str, words: list, detailed: bool = False) -> list:
     """The forbidden words in a task's title, which hansa puts in its commit message and its merge's: each
     word once, any case."""
-    lines = (title or "").splitlines()
-    return list(dict.fromkeys(w for w, matcher in word_matchers(words)
-                              if any(matches(matcher, line, line.casefold()) for line in lines)))
+    seen = set()
+    with PatternScan(words) as scan:
+        hits = scan.hits
+        try:
+            for line in (title or "").splitlines():
+                scan.line(line, where="title")
+                low = line.casefold()
+                for w, matcher in scan.matchers:
+                    if w not in seen and scan.search(w, matcher, line, low, where="title"):
+                        seen.add(w)
+                        hits.append({"word": w, "commit": "", "where": "title", "line": line.strip()[:300]})
+        except PatternLimit as e:
+            hits.append(e.hit)
+    return hits if detailed else [h["word"] for h in hits]
 
 
 def named_files(command: str, files: list) -> list:
@@ -1384,14 +1528,21 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     if st == "void":
         return f"作废：{r.get('void_zh') or r.get('void')}；什么都没运行" if zh else f"void: {r.get('void')}; nothing was run"
     if st == "forbidden":
-        n = len(r.get("hits", []))
-        mailbox = mailbox_refusal(r.get("hits", []))
-        if mailbox:
-            if zh:
-                return f"被拒绝：邮箱未使用保留的示例域名，也不在允许名单中（{n} 处）"
-            return "refused: " + mailbox.splitlines()[0]
-        return (f"被拒绝：要发出去的内容里有你不许发出去的字眼（{n} 处）" if zh else
-                f"refused: what goes out holds words the principal keeps from going out ({n} place(s))")
+        # This summary also goes out in alerts: keep the hits themselves on the machine.
+        hits = r.get("hits", [])
+        limits = sum(h.get("kind") == "pattern_limit" for h in hits)
+        ordinary = [h for h in hits if h.get("kind") != "pattern_limit"]
+        parts = []
+        if ordinary or not limits:
+            mailbox = mailbox_refusal(ordinary)
+            parts.append((f"邮箱未使用保留的示例域名，也不在允许名单中（{len(ordinary)} 处）" if zh else
+                          mailbox.splitlines()[0]) if mailbox else
+                         (f"要发出去的内容里有你不许发出去的字眼（{len(ordinary)} 处）" if zh else
+                          f"what goes out holds words the principal keeps from going out ({len(ordinary)} place(s))"))
+        if limits:
+            parts.append(f"{limits} 行无法用正则检查" if zh else
+                         f"{limits} line(s) could not be checked against the patterns")
+        return ("被拒绝：" if zh else "refused: ") + ("；" if zh else "; ").join(parts)
     return st or "?"
 
 
@@ -1439,10 +1590,10 @@ def list_text(desk: Desk) -> str:
             out.append("  " + line(desk, r, s))
             out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
             out.append(f"      {checked_text(r)}")
+            if r.get("state") == "forbidden":
+                out += [f"      {x}" for x in hits_text(r.get("hits", [])).splitlines()]
             if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
                 out += [f"      | {x}" for x in r["tail"][-5:]]
-            if r.get("state") == "forbidden":
-                out += ["    " + x for x in hits_text(r.get("hits", [])).splitlines()]
     out.append("the whole output of a release: .hansa/releases/<id>.log (the principal's; hansa release shows its last lines)")
     return "\n".join(out)
 

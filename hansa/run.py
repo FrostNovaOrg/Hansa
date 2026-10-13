@@ -2757,6 +2757,10 @@ def words_text(tid: str, hits: list) -> str:
     mailbox = mailbox_refusal(hits, tid)
     if mailbox:
         return f"the change in {tid} is not merged: {mailbox}"
+    if any(h.get("kind") == "pattern_limit" for h in hits):
+        return (f"the change in {tid} is not merged:\n{hits_text(hits)}\n"
+                f"For words found in the history, take them out with hansa retry {tid} --fresh \"...\", "
+                "or ask the principal (hansa ask). More: hansa help forbidden-words")
     return (f"the change in {tid} holds words the principal keeps from going out (release_forbidden), so it is not "
             f"merged: once on the base branch, its history would keep them\n{hits_text(hits)}\nTake them out with "
             f"hansa retry {tid} --fresh \"...\" (a retry that continues from {tid} keeps its commits; a word in the "

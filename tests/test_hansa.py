@@ -3435,7 +3435,7 @@ class DeskTest(unittest.TestCase):
         return tid
 
     def test_forbidden_patterns_and_lane_exceptions_cases(self):
-        from hansa import release
+        from hansa import release, run
         pattern = r"re:\blane [a-k]\b"
         product = "Claude Code"
 
@@ -3980,6 +3980,404 @@ class DeskTest(unittest.TestCase):
                                   [f"release_forbidden_except: the exception for lanes {lanes} has no entry"])
                     c.assertEqual(c.desk.settings_path.read_bytes(), before)
 
+        @contextlib.contextmanager
+        def small_pattern_limits():
+            with unittest.mock.patch.object(release, "PATTERN_LINE_LIMIT", 0.2), \
+                    unittest.mock.patch.object(release, "PATTERN_SCAN_LIMIT", 1.0):
+                yield
+
+        def assert_pattern_limit(c, said, entry, path):
+            c.assertIn(entry, said)
+            c.assertIn(path, said)
+            c.assertIn("over 0.2 s", said)
+            c.assertIn("the line was not checked", said)
+            c.assertIn("Shorten or split the line", said)
+            c.assertIn("ask the principal to change the pattern", said)
+
+        def pattern_line_merge(c):
+            entry = r"re:\d+\d+\d+x"
+            c.forbid(entry)
+            tid = finished(c, "a", "7" * 2000)
+            tip = c.git_out("rev-parse", "main")
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            with small_pattern_limits():
+                start = time.monotonic()
+                said = c.refused("merge", tid)
+                c.assertLess(time.monotonic() - start, 1.2)
+            assert_pattern_limit(c, said, entry, "notes.txt")
+            c.assertNotIn("holds words the principal keeps from going out", said)
+            c.assertEqual(c.git_out("rev-parse", "main"), tip)
+            c.assertEqual(c.desk.meta(tid)["state"], "done")
+            c.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+            c.assertEqual(signal.getitimer(signal.ITIMER_REAL), timer)
+            # The release uses the same limits and records the incomplete check as a hit.
+            c.commit_in_repo("release.txt", "7" * 2000)
+            c.with_release("true")
+            with small_pattern_limits():
+                said = c.refused("release", "a")
+            assert_pattern_limit(c, said, entry, "release.txt")
+            c.assertNotIn("holds words the principal keeps from going out", said)
+            # Put the long line in the command, which is read even before outgoing commits.
+            with small_pattern_limits():
+                warning = c.hansa("lane", "target", "a", "default", "7" * 1000)
+                assert_pattern_limit(c, warning, entry, "release target default")
+                start = time.monotonic()
+                said = c.refused("release", "a")
+                c.assertLess(time.monotonic() - start, 1.2)
+            assert_pattern_limit(c, said, entry, "release command")
+            c.assertEqual(release.get(c.desk, 1)["state"], "forbidden")
+            with small_pattern_limits():
+                said = c.refused("add", "Work", "--lane", "a", "--title", "7" * 2000)
+            assert_pattern_limit(c, said, entry, "title")
+            c.assertIn("Nothing was queued", said)
+
+        def pattern_line_merge_lane(c):
+            entry = r"re:\d+\d+\d+x"
+            c.merge_lane_for_checks("true")
+            tid = finished(c, "a", "7" * 2000, check="true")
+            tip = c.move_main()
+            c.assertIn("is not merged yet", c.hansa("merge", tid))
+            c.forbid(entry)  # The setting arrives after the CLI scan, before the lane lands the merge.
+            original_lock, spans, depth = c.desk.lock, [], [0]
+
+            @contextlib.contextmanager
+            def timed_lock():
+                with original_lock():
+                    outer = depth[0] == 0
+                    start = time.monotonic()
+                    depth[0] += 1
+                    try:
+                        yield
+                    finally:
+                        depth[0] -= 1
+                        if outer:
+                            spans.append(time.monotonic() - start)
+
+            with small_pattern_limits(), unittest.mock.patch.object(c.desk, "lock", timed_lock):
+                m = c.settle_merge(Dispatcher(c.desk), tid)
+            c.assertEqual(m["state"], "done", m)
+            c.assertEqual(m["merge_check_result"]["lane"], "m")
+            c.assertLess(max(spans), 1.2)
+            assert_pattern_limit(c, m["merge_check_result"]["note"], entry, "notes.txt")
+            c.assertEqual(c.git_out("rev-parse", "main"), tip)
+
+        def pattern_scan_total(c):
+            entry = r"re:slow-\d+x"
+            tid = finished(c, "a", "\n".join(f"slow-{i}" for i in range(100)), "many.txt")
+            c.forbid(entry)
+            real_matches, searched, clock = release.matches, [], [0.0]
+            real_check, limits = release.PatternScan._check, []
+
+            def record_limit(scan):
+                try:
+                    return real_check(scan)
+                except release.PatternLimit as e:
+                    limits.append(e.hit)
+                    raise
+
+            def slow_matches(matcher, line, folded):
+                if line.startswith("slow-"):
+                    # Model consistent search latency without tying this row to CPU speed or scheduling.
+                    searched.append(line)
+                    clock[0] += 0.19  # Each line is just under the 0.2 s line limit.
+                return real_matches(matcher, line, folded)
+
+            scan_clock = types.SimpleNamespace(monotonic=lambda: clock[0])
+            with small_pattern_limits(), unittest.mock.patch.object(release, "matches", slow_matches), \
+                    unittest.mock.patch.object(release, "time", scan_clock), \
+                    unittest.mock.patch.object(release.PatternScan, "_check", record_limit):
+                start = time.monotonic()
+                said = c.refused("merge", tid)
+                c.assertLess(time.monotonic() - start, 2.0)
+            c.assertIn(entry, said)
+            c.assertIn("many.txt: " + searched[-1], said)
+            c.assertIn("over 1 s in this scan, so the rest was not checked", said)
+            c.assertEqual([h["code"] for h in limits], ["scan"])
+            c.assertNotIn("the line was not checked", said)
+            c.assertGreater(len(searched), 1)
+            c.assertLess(len(searched), 100)
+            c.assertEqual(c.desk.meta(tid)["state"], "done")
+
+        def pattern_scan_thread(c):
+            entry = r"re:\d+\d+\d+x"
+            got, errors = {}, []
+
+            def scan():
+                try:
+                    got["change"] = release.words_in(c.repo, ["HEAD", "--"], [entry],
+                                                     [("message", "7" * 2000)])[0]
+                    got["title"] = release.title_hits("7" * 2000, [entry], detailed=True)
+                    got["command"] = release.command_hits({"targets": {"": {"command": "7" * 2000}}}, [entry])
+                except BaseException as e:
+                    errors.append(e)
+
+            with unittest.mock.patch.object(release, "matches", side_effect=AssertionError("pattern was run")):
+                worker = threading.Thread(target=scan)
+                worker.start()
+                worker.join(2)
+            c.assertFalse(worker.is_alive())
+            c.assertEqual(errors, [])
+            for key, where in (("change", "message"), ("title", "title")):
+                c.assertEqual(got[key][0]["word"], entry)
+                c.assertEqual(got[key][0]["where"], where)
+                c.assertEqual(got[key][0]["code"], "thread")
+                c.assertIn("off the main thread", got[key][0]["reason"])
+                c.assertIn("patterns were not run", got[key][0]["reason"])
+            c.assertIn(entry, got["command"][0])
+            c.assertIn("off the main thread", got["command"][0][2])
+
+        def pattern_scan_restores_signal(c):
+            entry = r"re:第\s*\d+\s*笔"
+            tid = finished(c, "a", "ordinary change")
+            c.forbid(entry)
+            old_handler, old_timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+
+            def previous_alarm(*_):
+                c.fail("the previous timer fired during a scan")
+
+            def restored():
+                c.assertIs(signal.getsignal(signal.SIGALRM), previous_alarm)
+                remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+                c.assertAlmostEqual(remaining, 100, delta=0.2)
+                c.assertEqual(interval, 0.7)
+
+            try:
+                signal.signal(signal.SIGALRM, previous_alarm)
+                signal.setitimer(signal.ITIMER_REAL, 100, 0.7)
+                with small_pattern_limits():
+                    git_lines = release._git_lines
+
+                    def idle_alarm(*args):
+                        # The alarm must do nothing between searches, even while git output is read.
+                        signal.raise_signal(signal.SIGALRM)
+                        yield from git_lines(*args)
+
+                    with unittest.mock.patch.object(release, "_git_lines", idle_alarm):
+                        c.assertIn("merged into main", c.hansa("merge", tid))
+                    restored()
+                    c.assertEqual(release.title_hits("记录第 123 笔", [entry]), [entry])
+                    restored()
+                    c.assertEqual(release.command_hits({"targets": {"": {"command": "记录第 123 笔"}}}, [entry]),
+                                  [("", entry, "记录第 123 笔")])
+                    restored()
+                    hits = release.title_hits("7" * 2000, [r"re:\d+\d+\d+x"], detailed=True)
+                    c.assertEqual(hits[0]["kind"], "pattern_limit")
+                    restored()
+                    with unittest.mock.patch.object(release, "matches", side_effect=RuntimeError("scan failed")):
+                        with c.assertRaisesRegex(RuntimeError, "scan failed"):
+                            release.forbidden_in(c.repo, "", c.git_out("rev-parse", "main"), [entry])
+                    restored()
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old_handler)
+                signal.setitimer(signal.ITIMER_REAL, *old_timer)
+
+        def pattern_scan_slow_reading(c):
+            entry = r"re:private-\d+x"
+            c.commit_in_repo("ordinary.txt", "ordinary change")
+            git_lines, real_matches, clock, searched = release._git_lines, release.matches, [0.0], []
+
+            def slow_git_lines(*args):
+                for line in git_lines(*args):
+                    clock[0] += 2.0  # Reading alone exceeds the whole scan's 1 s matching limit.
+                    signal.raise_signal(signal.SIGALRM)
+                    yield line
+
+            def cheap_matches(matcher, line, folded):
+                searched.append(line)
+                clock[0] += 0.001
+                return real_matches(matcher, line, folded)
+
+            scan_clock = types.SimpleNamespace(monotonic=lambda: clock[0])
+            with small_pattern_limits(), unittest.mock.patch.object(release, "time", scan_clock), \
+                    unittest.mock.patch.object(release, "_git_lines", slow_git_lines), \
+                    unittest.mock.patch.object(release, "matches", cheap_matches):
+                hits, checked = release.forbidden_in(c.repo, "", c.git_out("rev-parse", "main"), [entry])
+            c.assertEqual(hits, [])
+            c.assertGreater(checked, 0)
+            c.assertIn("ordinary change", searched)
+            c.assertGreater(clock[0], 1.0)
+            c.assertLess(len(searched) * 0.001, 1.0)
+
+        def pattern_long_merge(c):
+            entry = r"re:\w+@\w+"
+            c.forbid(entry)
+            tid = finished(c, "a", "a" * 100000)
+            tip = c.git_out("rev-parse", "main")
+            with small_pattern_limits():
+                start = time.monotonic()
+                said = c.refused("merge", tid)
+                elapsed = time.monotonic() - start
+            c.assertLess(elapsed, 0.4)
+            c.assertIn(entry, said)
+            c.assertIn("notes.txt", said)
+            c.assertIn("longer than 10,000 characters, so patterns could not check it", said)
+            c.assertIn("Shorten or split the line", said)
+            c.assertEqual(c.git_out("rev-parse", "main"), tip)
+
+        def pattern_length_boundary(c):
+            entry, literal = r"re:never-\d+x", "Falcon"
+            lines = ["a" * (length - len(literal)) + literal for length in (10000, 10001)]
+            c.forbid(entry)
+            real_matches, searched = release.matches, []
+
+            def record(matcher, line, folded):
+                if isinstance(matcher, re.Pattern):
+                    searched.append(line)
+                return real_matches(matcher, line, folded)
+
+            with small_pattern_limits(), unittest.mock.patch.object(release, "matches", record):
+                tid = finished(c, "a", lines[0], "boundary.txt")
+                c.assertIn("merged into main", c.hansa("merge", tid))
+                c.assertIn(lines[0], searched)
+                tid = finished(c, "a", lines[1], "boundary.txt")
+                said = c.refused("merge", tid)
+                c.assertIn("longer than 10,000", said)
+                c.assertNotIn(lines[1], searched)
+                # Literal checks reach the end of both lines, regardless of entry order.
+                for words in ([entry, literal], [literal, entry], [literal]):
+                    for line in lines:
+                        hits, _ = release.words_in(c.repo, ["HEAD", "^HEAD", "--"], words, [("message", line)])
+                        c.assertIn(literal, [h["word"] for h in hits if h.get("kind") != "pattern_limit"])
+                        limits = [h for h in hits if h.get("kind") == "pattern_limit"]
+                        c.assertEqual([h["code"] for h in limits], ["long"] if len(line) > 10000 and entry in words else [])
+            # The same cap applies before title and command patterns, including a seen title entry.
+            c.assertEqual(release.title_hits("never-1x\n" + lines[1], [entry], detailed=True)[-1]["code"], "long")
+            c.assertIn("longer than 10,000", release.command_hits(
+                {"targets": {"": {"command": lines[1]}}}, [entry])[0][2])
+
+        def pattern_plain_search(c):
+            cases = [(r"re:x.{0,1500}\b", "a" * 2600 + "x a" + "a" * 3000, True),
+                     (r"re:a.{0,2000}$|ab", "c" * 2500 + "ab" + "c" * 3000, True),
+                     (r"re:a(?!.{0,5}b)", "c" * 3997 + "a" + "cc" + "b" + "c" * 3000, False),
+                     (r"re:a(?!\w*b)", "c" * 3990 + "a" + "c" * 20 + "b" + "c" * 3000, False)]
+            for entry, line, expected in cases:
+                with c.subTest(entry=entry), small_pattern_limits():
+                    matcher = release.word_matchers([entry])[0][1]
+                    c.assertLess(len(line), 10000)
+                    c.assertEqual(bool(matcher.search(line)), expected)
+                    c.assertEqual(release.matches(matcher, line, line.casefold()), expected)
+                    c.assertEqual(release.title_hits(line, [entry]), [entry] if expected else [])
+
+        def count_summary(c, r, zh=False):
+            hits = r["hits"]
+            limits = sum(h.get("kind") == "pattern_limit" for h in hits)
+            ordinary = len(hits) - limits
+            parts = []
+            if ordinary:
+                parts.append(f"要发出去的内容里有你不许发出去的字眼（{ordinary} 处）" if zh else
+                             f"what goes out holds words the principal keeps from going out ({ordinary} place(s))")
+            if limits:
+                parts.append(f"{limits} 行无法用正则检查" if zh else
+                             f"{limits} line(s) could not be checked against the patterns")
+            text = release.state_text(c.desk, r, zh=zh)
+            c.assertEqual(text, ("被拒绝：" if zh else "refused: ") + ("；" if zh else "; ").join(parts))
+            for hit in hits:
+                for field in ("line", "word", "where"):
+                    c.assertNotIn(hit[field], text)
+
+        def pattern_limit_principal(c):
+            entry, literal = r"re:\d+\d+\d+x", "Falcon"
+            c.forbid(entry, literal)
+            c.commit_in_repo("unchecked.txt", "Falcon\n" + "7" * 2000)
+            c.with_release("true")
+            with small_pattern_limits():
+                coordinator = c.refused("release", "a")
+
+            def grouped(text, zh=False, code="line", where="unchecked.txt"):
+                ordinary = "查到的禁发字眼:" if zh else "Words found that must not go out:"
+                limit = "这一行无法检查:" if zh else "The line could not be checked:"
+                c.assertEqual(text.count(ordinary), 1)
+                c.assertEqual(text.count(limit), 1)
+                words, limits = text.split(ordinary, 1)[1].split(limit, 1)
+                c.assertIn(literal, words)
+                c.assertNotIn(entry, words)
+                c.assertIn(entry, limits)
+                c.assertIn(where, limits)
+                reasons = {"line": ("over 0.2 s here, so the line was not checked", "这里耗时超过 0.2 秒，因此这一行未检查"),
+                           "scan": ("over 1 s in this scan, so the rest was not checked", "总耗时超过 1 秒，因此剩余内容未检查"),
+                           "long": ("longer than 10,000 characters, so patterns could not check it", "超过 10,000 字符，因此正则无法检查它"),
+                           "thread": ("off the main thread, so the line was not checked", "不在主线程上，正则未运行，因此这一行未检查")}
+                c.assertIn(reasons[code][int(zh)], limits)
+                if zh:
+                    c.assertNotIn("so the line was not checked", limits)
+
+            grouped(coordinator)
+            said = c.hansa("status")
+            c.assertIn("1 place(s)", said)
+            c.assertIn("1 line(s) could not be checked against the patterns", said)
+            said = c.hansa("release")
+            grouped(said)
+            assert_pattern_limit(c, said, entry, "unchecked.txt")
+            r = release.get(c.desk, 1)
+            c.assertEqual(r["hits"][-1]["code"], "line")
+            grouped(run.words_text("t0001", r["hits"]))
+            with small_pattern_limits():
+                grouped(c.refused("add", "Work", "--lane", "a", "--title", "Falcon\n" + "7" * 2000), where="title")
+            said = c.refused("add", "Work", "--lane", "a", "--title", literal)
+            c.assertIn("Words found that must not go out:", said)
+            c.assertNotIn("The line could not be checked:", said)
+            for zh in (False, True):
+                count_summary(c, r, zh)
+                for limit_only in (False, True):
+                    single = {**r, "hits": [h for h in r["hits"] if (h.get("kind") == "pattern_limit") == limit_only]}
+                    count_summary(c, single, zh)
+            if not shutil.which("node"):
+                c.skipTest("needs node to render the release's hits")
+            st = json.loads(c.hansa("status", "--json"))
+            # The page shows the state summary once, and renders its own groups and translations.
+            harness = c.tmp / "page.js"
+            harness.write_text(c.PAGE_HARNESS)
+            page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+            for code, reason, seconds in (("line", r["hits"][-1]["reason"], 0.2),
+                                          ("scan", "the patterns took over 1 s in this scan, so the rest was not checked", 1),
+                                          ("long", "the line is longer than 10,000 characters, so patterns could not check it", None),
+                                          ("thread", "patterns were not run: this scan is off the main thread, so the line was not checked", None)):
+                hits = [r["hits"][0], {**r["hits"][-1], "code": code, "reason": reason, "seconds": seconds}]
+                st["releases"][0]["hits"] = hits
+                for language in ("en", "zh"):
+                    zh = language == "zh"
+                    count_summary(c, {**r, "hits": hits}, zh)
+                    for selected in (hits, hits[:1], hits[1:]):
+                        st["releases"][0]["hits"] = selected
+                        result = subprocess.run(["node", str(harness), str(page), "release-hits", language],
+                                                input=json.dumps({"/api/status": st}),
+                                                capture_output=True, text=True, timeout=60)
+                        c.assertEqual(result.returncode, 0, result.stderr)
+                        text = json.loads(result.stdout)
+                        if len(selected) == 2:
+                            grouped(text, zh, code)
+                        else:
+                            c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if selected == hits[1:] else
+                                          ("这一行无法检查:" if zh else "The line could not be checked:"), text)
+
+        def pattern_limit_alert(c):
+            from hansa import alert
+            entry, literal = r"re:\d+\d+\d+x", "Falcon"
+            ordinary_line, limit_line = "private Falcon note", "7" * 2000
+            c.forbid(entry, literal)
+            c.commit_in_repo("unchecked.txt", ordinary_line + "\n" + limit_line)
+            c.with_release("true")
+            out = c.alert_fake()
+            with small_pattern_limits():
+                coordinator = c.refused("release", "a")
+            r = release.get(c.desk, 1)
+            c.assertEqual([h.get("kind") for h in r["hits"]], [None, "pattern_limit"])
+            c.assertTrue(alert.send_due(c.desk, gather=0)["ok"])
+            [sent] = c.alerted(out)
+            c.assertEqual(sent["kind"], "release_ended")
+            c.assertIn("what goes out holds words the principal keeps from going out (1 place(s))", sent["text"])
+            c.assertIn("1 line(s) could not be checked against the patterns", sent["text"])
+            for private in (ordinary_line, limit_line[:300], literal, entry, "unchecked.txt"):
+                c.assertNotIn(private, sent["text"])
+            for zh in (False, True):
+                count_summary(c, r, zh)
+            for text in (coordinator, c.hansa("release")):
+                for detail in (ordinary_line, limit_line[:300], literal, entry, "unchecked.txt",
+                               "Words found that must not go out:", "The line could not be checked:",
+                               "over 0.2 s here, so the line was not checked", "Shorten or split the line"):
+                    c.assertIn(detail, text)
+
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
@@ -3987,7 +4385,11 @@ class DeskTest(unittest.TestCase):
                  (14, hide_migrates_mailboxes), (15, invalid_mailboxes), (16, unsafe_patterns), (17, safe_patterns),
                  (18, legacy_patterns), (19, legacy_unsafe_pattern), (20, malformed_exceptions),
                  (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
-                 (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry)]
+                 (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry),
+                 (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
+                 (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading),
+                 (33, pattern_long_merge), (34, pattern_length_boundary), (35, pattern_plain_search),
+                 (36, pattern_limit_principal), (37, pattern_limit_alert)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.
@@ -22231,6 +22633,9 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
     if (!ids[tab] || !ids[tab].kids.length) nulls.push(tab + " not built");
   }
   console.log(JSON.stringify(nulls));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "release-hits") vm.runInContext("loadStatus()", ctx).then(() => {
+  console.log(JSON.stringify(ids["#tab-status"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
   if (ask === "settings-problems") {

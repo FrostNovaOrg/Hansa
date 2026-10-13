@@ -364,11 +364,16 @@ def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str)
     characters, as new_task makes it; the rest of the text is never committed and not looked at."""
     given = desk.redact(title or "")
     title = given or (desk.redact(text.strip()).splitlines() or [""])[0][:80]
-    found = release.title_hits(title, release.lane_words(s, lane))
+    hits = release.title_hits(title, release.lane_words(s, lane), detailed=True)
+    if any(h.get("kind") == "pattern_limit" for h in hits):
+        raise SystemExit(desk.redact(
+            f"hansa: the title could not be checked:\n{release.hits_text(hits)}\nNothing was queued"))
+    found = [h["word"] for h in hits]
     if found:
         where = "--title" if given else "the title (the first line of the text, as no --title was given)"
         raise SystemExit(desk.redact(
-            f"hansa: {where} holds {', '.join(json.dumps(w, ensure_ascii=False) for w in found)}, which the principal "
+            f"hansa: Words found that must not go out:\n"
+            f"{where} holds {', '.join(json.dumps(w, ensure_ascii=False) for w in found)}, which the principal "
             f"keeps from going out, and the title goes into the task's commit message and its merge's: "
             f"{json.dumps(title, ensure_ascii=False)}. Nothing was queued: give another --title, or ask the principal "
             f"about the words (hansa ask). {see_more('forbidden-words')}"))
@@ -1200,9 +1205,11 @@ def cmd_release(a):
         if mailbox:
             raise SystemExit(desk.redact(
                 f"hansa: {head}\nrefused: {mailbox}\nNothing waits for the principal and nothing runs"))
+        refusal = ("refused" if any(h.get("kind") == "pattern_limit" for h in r["hits"]) else
+                   "refused: what goes out holds words the principal keeps from going out (the web page, Settings)")
         raise SystemExit(desk.redact(
-            f"hansa: {head}\nrefused: what goes out holds words the principal keeps from going out (the web page, "
-            f"Settings), so nothing waits for the principal and nothing runs:\n{release.hits_text(r['hits'])}\n"
+            f"hansa: {head}\n{refusal}, so nothing waits for the principal and nothing runs:\n"
+            f"{release.hits_text(r['hits'])}\n"
             f"Take them out of the history of {r['base']} (hansa add a task for it, if it is in the code; a word in "
             f"a commit message or a file name stays in the history) or out of the release command, or ask the "
             f"principal with hansa ask. {see_more('forbidden-words')}"))
