@@ -711,10 +711,11 @@ def status_text(st: dict) -> str:
     wr = max(map(len, rests), default=0)
     for p, rest in zip(st["providers"], rests):
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
-    if [r for r in st.get("releases") or [] if r["state"] in release.OPEN]:
+    shown_releases = [r for r in st.get("releases") or [] if r["state"] in release.OPEN
+                      or any(h.get("kind") == "pattern_limit" for h in r.get("hits") or [])]
+    if shown_releases:
         out.append("releases (hansa release):")
-        out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in st["releases"]
-                if r["state"] in release.OPEN]
+        out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in shown_releases]
         if any(r["state"] == "waiting" for r in st["releases"]):
             out.append("  the principal answers on the page, or says the one-time code of their alert in the "
                        "conversation: pass it with hansa release yes|no ID CODE" if st.get("release_codes") else

@@ -4013,6 +4013,83 @@ class DeskTest(unittest.TestCase):
             c.assertGreater(clock[0], 1.0)
             c.assertLess(len(searched) * 0.001, 1.0)
 
+        def pattern_window_merge(c):
+            entry = r"re:\w+@\w+"
+            c.forbid(entry)
+            tid = finished(c, "a", "a" * 100000)
+            tip = c.git_out("rev-parse", "main")
+            with small_pattern_limits():
+                start = time.monotonic()
+                said = c.refused("merge", tid)
+                elapsed = time.monotonic() - start
+            c.assertLess(elapsed, 0.6)
+            assert_pattern_limit(c, said, entry, "notes.txt")
+            c.assertEqual(c.git_out("rev-parse", "main"), tip)
+
+        def pattern_window_cut(c):
+            # The spaces stop at the first window's cut, not at the real end of the line.
+            line = "a" * 3970 + " " * 30 + "a" * 10000
+            for entry, text in ((r"re:\s+$", line), (r"re:\s+(?![\sa])", line),
+                                (r"re:a{30}\b", "x" * 3970 + "a" * 30 + "b" * 10000)):
+                with c.subTest(entry=entry), small_pattern_limits():
+                    hits, _ = release.words_in(c.repo, ["HEAD", "^HEAD", "--"], [entry], [("message", text)])
+                    c.assertEqual(hits, [])
+            # Rejecting a cut match must continue within the same window, from its start + 1.
+            line = "a" * 100 + "y" + "a" * 13900
+            entry = r"re:^.{1,4000}$|y"
+            with small_pattern_limits():
+                c.assertEqual(release.title_hits(line, [entry]), [entry])
+
+        def pattern_window_overlap(c):
+            entry = r"re:x.{0,50}y"
+            line = "a" * 3980 + "x" + "a" * 40 + "y" + "a" * 10000
+            with small_pattern_limits():
+                hits, _ = release.words_in(c.repo, ["HEAD", "--"], [entry], [("message", line)])
+            c.assertEqual([(h["word"], h["where"]) for h in hits], [(entry, "message")])
+            # pos/endpos preserve the real preceding character: slices would invent these hits.
+            for entry in (r"re:^x", r"re:\bx", r"re:(?<!a)x"):
+                with c.subTest(entry=entry), small_pattern_limits():
+                    c.assertEqual(release.title_hits("a" * 3000 + "x" + "a" * 10000, [entry]), [])
+            entry = r"re:(?<=a)x"
+            with small_pattern_limits():
+                c.assertEqual(release.title_hits("a" * 3000 + "x" + "a" * 10000, [entry]), [entry])
+
+        def pattern_limit_principal(c):
+            entry = r"re:\d+\d+\d+x"
+            c.forbid(entry)
+            c.commit_in_repo("unchecked.txt", "7" * 2000)
+            c.with_release("true")
+            with small_pattern_limits():
+                c.refused("release", "a")
+            said = c.hansa("status")
+            c.assertIn("the line could not be checked", said)
+            c.assertNotIn("what goes out holds words", said)
+            assert_pattern_limit(c, said, entry, "unchecked.txt")
+            r = release.get(c.desk, 1)
+            for zh in (False, True):
+                text = release.state_text(c.desk, r, zh=zh)
+                c.assertIn("这一行无法检查" if zh else "the line could not be checked", text)
+                assert_pattern_limit(c, text, entry, "unchecked.txt")
+            if not shutil.which("node"):
+                c.skipTest("needs node to render the release's hits")
+            st = json.loads(c.hansa("status", "--json"))
+            # Test the page's hit list independently of the already formatted state_text.
+            for row in st["releases"]:
+                row["what"] = row["what_zh"] = ""
+            harness = c.tmp / "page.js"
+            harness.write_text(c.PAGE_HARNESS)
+            page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+            for language in ("en", "zh"):
+                result = subprocess.run(["node", str(harness), str(page), "release-hits", language],
+                                        input=json.dumps({"/api/status": st}),
+                                        capture_output=True, text=True, timeout=60)
+                c.assertEqual(result.returncode, 0, result.stderr)
+                text = json.loads(result.stdout)
+                c.assertIn("这一行无法检查" if language == "zh" else "The line could not be checked", text)
+                c.assertIn(entry, text)
+                c.assertIn("unchecked.txt", text)
+                c.assertIn("over 0.2 s here, so the line was not checked", text)
+
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
                  (5, invalid_patterns), (6, literal_metacharacters), (7, excepted_merges),
                  (8, excepted_titles_commands_releases), (9, excepted_merge_lane), (10, unmatched_exceptions),
@@ -4022,7 +4099,9 @@ class DeskTest(unittest.TestCase):
                  (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
                  (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry),
                  (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
-                 (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading)]
+                 (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading),
+                 (33, pattern_window_merge), (34, pattern_window_cut), (35, pattern_window_overlap),
+                 (36, pattern_limit_principal)]
         for row, check in cases:
             with self.subTest(row=row, case=check.__name__):
                 # No row inherits settings, repository history or task state from another row.
@@ -22239,6 +22318,9 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
     if (!ids[tab] || !ids[tab].kids.length) nulls.push(tab + " not built");
   }
   console.log(JSON.stringify(nulls));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "release-hits") vm.runInContext("loadStatus()", ctx).then(() => {
+  console.log(JSON.stringify(ids["#tab-status"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
   if (ask === "settings-problems") {

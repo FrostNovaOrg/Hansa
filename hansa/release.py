@@ -141,7 +141,25 @@ def word_matchers(words: list) -> list:
 
 
 def matches(matcher, line: str, folded: str) -> bool:
-    return bool(matcher.search(line)) if isinstance(matcher, re.Pattern) else matcher in folded
+    if not isinstance(matcher, re.Pattern):
+        return matcher in folded
+    if len(line) <= 4000:
+        return bool(matcher.search(line))
+    # Some re loops on Python 3.9 never check signals. Bound each call so the alarm can run
+    # between windows; the overlap preserves real matches of up to 1000 characters.
+    for start in range(0, len(line), 3000):
+        end = min(start + 4000, len(line))
+        pos = start
+        while pos <= end:
+            found = matcher.search(line, pos, end)
+            if found is None:
+                break
+            if found.end() != end or end == len(line):
+                return True
+            # The cut can invent a match through $, a boundary or a lookahead. Search past
+            # this match's start, keeping the real line for ^, boundaries and lookbehind.
+            pos = found.start() + 1
+    return False
 
 
 class PatternLimit(Exception):
@@ -153,8 +171,9 @@ class PatternLimit(Exception):
 class PatternScan:
     """Only a running search may raise from SIGALRM; git reads and desk writes are never interrupted.
 
-    CPython checks signals even inside a backtracking search. Keep the timer for the whole scan and
-    restore its caller's signal state on every exit. Off the main thread, refuse without running patterns.
+    Windows bound re loops that do not check signals; backtracking searches check them internally.
+    Keep the timer for the whole scan and restore its caller's signal state on every exit.
+    Off the main thread, refuse without running patterns.
     """
     def __init__(self, words):
         self.matchers = word_matchers(words)
@@ -1494,6 +1513,9 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         return f"作废：{r.get('void_zh') or r.get('void')}；什么都没运行" if zh else f"void: {r.get('void')}; nothing was run"
     if st == "forbidden":
         n = len(r.get("hits", []))
+        if any(h.get("kind") == "pattern_limit" for h in r.get("hits", [])):
+            return (("被拒绝：这一行无法检查" if zh else "refused: the line could not be checked")
+                    + "\n" + hits_text(r["hits"]))
         mailbox = mailbox_refusal(r.get("hits", []))
         if mailbox:
             if zh:
