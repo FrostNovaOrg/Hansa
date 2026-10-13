@@ -65,7 +65,8 @@ TOPICS = {
     "effort": ("tasks.md", "Effort", "which effort a run gets, and where it comes from"),
     "browser": ("tasks.md", "Browser tasks and the preview", "a task with a browser, the browser tool and the "
                 "lane's preview"),
-    "merge-check": ("tasks.md", "Merging, the merge check and conflicts", "merging, the merge check and conflicts"),
+    "merge-check": ("tasks.md", "Merging, the merge check and conflicts", "merging, the merge check and conflicts, "
+                    "and sending a task back"),
     "cost-figures": ("tasks.md", "What work costs", "what hansa cost counts, and what the figures mean"),
     "states": ("tasks.md", "Task states", "a task's states and what each means"),
     "inbox": ("desk.md", "Hearing from hansa", "how hansa posts to the coordinator's session, hansa wait, and the "

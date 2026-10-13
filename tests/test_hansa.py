@@ -12182,6 +12182,10 @@ class DeskTest(unittest.TestCase):
         files_topic = cli.topic_text("desk-files")
         self.assertIn("### Where a desk's files are", files_topic)
         self.assertIn("### Where a desk's files grow", files_topic)
+        merging = cli.topic_text("merge-check")  # the rounds of a task sent back, which the card points to
+        self.assertIn("### Sending a task back", merging)
+        self.assertIn("says which round it is", " ".join(merging.split()))
+        self.assertNotIn("## What work costs", merging)
         # no topic can be taken for something else
         names = commands | lane_subs | targets | {"card", "topics"}
         for t in cli.TOPICS:

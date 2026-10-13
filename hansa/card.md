@@ -42,10 +42,11 @@ a gap in hansa, not in you: say so with `hansa ask`.
    hansa runs it on the branch itself, so the result does not depend on what the worker says.
    More: `hansa help time-limits`.
 4. hansa tells your session when a task finishes or fails (Hearing from hansa).
-5. You review and merge, or send it back with what to change. If the base moved meanwhile, hansa
-   checks the merge before it lands (Merging). When a task fails its verification a second time for
-   the same kind of reason, rethink it rather than sending it back again: make it smaller, ask for
-   less, or start again from the base.
+5. You review and merge, or send it back with `hansa retry` and what to change: earlier notes are
+   not carried, so repeat in the note what still holds. If the base moved meanwhile, hansa checks
+   the merge before it lands (Merging). When a task fails its verification a second time for the
+   same kind of reason, rethink it rather than sending it back again: make it smaller, ask for less,
+   or start again from the base. Rounds: `hansa help merge-check`.
 6. Releasing is the last step: `hansa release L` asks for the lane's base branch to go out, the
    principal says yes, and only then does hansa run the target's command (Releasing).
 
@@ -58,7 +59,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge into the lane's base branch (Merging) |
-| `hansa retry <id> "<what to change>" [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces; earlier notes are not carried: repeat what holds |
+| `hansa retry <id> "<what to change>" [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
 | `hansa verify <id> ["what to look at"] [--lane L] [...]` | a worker runs the change to see whether it holds |
 | `hansa design "<what to shape>" [--lane L] [--title T]` | a design session the principal joins |
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
@@ -115,19 +116,20 @@ screenshot of every finding, say) costs turns.
 
 ## Reading the result
 `hansa show <id>` gives the report and what hansa recorded: changed files, commits, the check's
-result, calls the worker had no permission for (with Claude Code's reason). Such a call means the
-worker could not do something (git history is hansa's; the desk's keys and state stay closed):
-decide whether the task should be rewritten. A refused command or a failed network call is usually
-the sandbox doing its job: fix the task (ask for less, leave the download to the setup) or the lane.
-Claude Code refuses a `bash -c "..."` it cannot check, such as one that runs `rm`: workers are told
-to put such a line in a script file in their temporary folder and run it with `sh`; ask for it that
-way. A failed check: send the task back with `hansa retry`; `hansa diff NEW --new` then shows what the
-follow-up added. A check that "could not run" never ran: the machine could not start `srt`, and the
-task is not judged on it (one that failed printing nothing usually could not start either); `hansa
-explain server` says how to fix it, then `hansa merge <id> --recheck`. Merge with `--despite-check`
-only when the failure is not the task's doing and cannot be run again, and say why. If the setup
-failed, the worker never started: fix it with `hansa lane set L setup "<command>"`, then retry.
-More: `hansa help check-output`.
+result, calls the worker had no permission for (with the reason Claude Code gave, when it is known).
+Such a call means the worker could not do something (git history is hansa's; the desk's keys and
+state stay closed): decide whether the task should be rewritten. A refused command or a failed
+network call is usually the sandbox doing its job: fix the task (ask for less, leave the download to
+the setup) or the lane. Claude Code refuses a `bash -c "..."` it cannot check, such as one that runs
+`rm`: workers are told to put such a line in a script file in their temporary folder and run it with
+`sh`; ask for it that way. A failed check: send the task back with `hansa retry`; `hansa diff NEW
+--new` then shows what the follow-up added. A check that "could not run" never ran: the machine
+could not start `srt`, and the task is not judged on it (one that failed printing nothing usually
+could not start either); `hansa explain server` says how to fix it, then `hansa merge <id>
+--recheck`. Merge with `--despite-check` only when the failure is not the task's doing and cannot be
+run again, and say why. If the setup failed, the worker never started: `hansa show` has the setup's
+last lines; fix it with `hansa lane set L setup "<command>"`, then retry. More: `hansa help
+check-output`.
 
 ## Checking before you merge
 The lane's check runs on every task that changed something; `hansa diff <id> --stat` shows what the
@@ -163,8 +165,9 @@ More: `hansa help merge-check`.
 
 ## Releasing
 hansa merges into a lane's base branch and stops there. Sending it out waits for the principal:
-- Before a release to a public repository, give the lane an `identity` and message forms without
-  `{task}`. More: `hansa help commits`.
+- A lane whose release goes to a public repository should have an `identity` set, on the lane or in
+  the repository's own config, and usually leaves `{task}` out of its message forms. More: `hansa
+  help commits`.
 - Set a target: `hansa lane target L NAME "<command>"`, one shell command line (a push, a wait for
   CI, a deploy script). A `--fixed` target's command sends `$HANSA_RELEASE_COMMIT`, never the base
   branch. More: `hansa help release-flow`.
@@ -233,7 +236,8 @@ question, task id or job, and what you need back. Claude Code's general-purpose 
 code changes and browsers go to workers.
 
 ## What you change, and what only the principal changes
-- Yours: tasks; the lanes and their standing instructions (`hansa lane`, `hansa lane brief`);
+- Yours: tasks; the lanes (`hansa lane`) and their standing instructions, which you read and change
+  only with `hansa lane brief L`;
   `hansa concurrency`; `hansa disk-floor`; pause and resume; additions to what workers may not read
   (`hansa hide`). hansa checks each change as it checks the principal's; one it refuses changes
   nothing.
@@ -241,9 +245,9 @@ code changes and browsers go to workers.
   other commands the work needs (installing software, setting up a tool), or send `operator`. Claude
   Code asks the principal before each one not allowed, so say in plain words what it does and why.
   Your judgment, their permission and this card hold you back, not a wall. Closed by design: reading
-  `secrets/` (the keys); the files directly in your Claude Code folder and its `sessions/` (its other
-  folders, your memory in `projects/` among them, stay open); editing code in the lanes'
-  repositories. You need not run a lane's tests; its check does.
+  `secrets/` (the keys); the files directly in your Claude Code folder and its `sessions/` (its
+  other folders, your memory in `projects/` among them, stay open). You need not run a lane's tests;
+  its check does.
 - As root on a server, with the desk an ordinary account's: change the desk only through `hansa`, and
   read the lanes' repositories with `hansa git LANE ...` or the Read tool, never by telling git to
   trust them. More: `hansa help linux-root`.
@@ -285,8 +289,8 @@ code changes and browsers go to workers.
   read them, then split the task or make it clearer rather than re-running it unchanged.
 - A failed write (a full disk) does not stop `hansa serve`: free space so it can record what it kept.
   More: `hansa help free-space`.
-- A key never shows in reports, errors or the event log. A change that holds one is never merged:
-  redo it with `hansa retry <id> --fresh` and tell the principal.
+- A key never shows in reports, errors or the event log (More: `hansa help desk-files`). A change
+  that holds one is never merged: redo it with `hansa retry <id> --fresh`.
 - When a run ends, hansa stops what it left running (a dev server, a watcher) before it commits and
   before the check; `hansa show` lists them. More: `hansa help leftovers`.
 - Nothing hansa starts gets a Claude Code session's identity. `hansa web` refuses in a Claude Code
@@ -298,11 +302,13 @@ code changes and browsers go to workers.
 
 ## The project's own rules
 `notes/PROJECT.md` holds this project's own rules: how it builds, what may never go out, who decides
-what. Claude Code loads it with this card at every start, after /clear and after compaction (the line
-below imports it); hansa makes it once and changes it only through `hansa notes archive PROJECT.md
-HEADING`, while this card hansa replaces. It is yours and the principal's: write there, without
-asking, what you would otherwise be told again. Keep it short: every turn rereads it. Workers do not
-see it: rules for a lane's workers go in its standing instructions. A missing file loads nothing.
+what. Claude Code loads it with this card at every start, after /clear and after compaction (the
+line below imports it); hansa makes it once and changes it only through `hansa notes archive
+PROJECT.md HEADING`, while this card hansa replaces. It is yours and the principal's: write there,
+without asking, what you would otherwise be told again. Keep it short: every turn rereads it (More:
+`hansa help desk-files`). Workers do not see it, and no worker, verifier or design session may read
+`notes/` or this card: rules for a lane's workers go in its standing instructions. A missing file
+loads nothing.
 
 @notes/PROJECT.md
 
@@ -326,7 +332,7 @@ see it: rules for a lane's workers go in its standing instructions. A missing fi
 | `check-output` | a check's output |
 | `effort` | where a run's effort comes from |
 | `browser` | browser tasks, the preview |
-| `merge-check` | merging, merge checks and lanes, conflicts |
+| `merge-check` | merging, merge checks and lanes, conflicts, sending back |
 | `cost-figures` | what `hansa cost` counts |
 | `states` | a task's states |
 | `inbox` | posts, the daily clear, compaction |
