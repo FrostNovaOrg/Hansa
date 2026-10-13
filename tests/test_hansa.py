@@ -786,13 +786,15 @@ class FailedWriteTest(unittest.TestCase):
         with self.desk.lock():
             pass
 
-    def assert_failed_replacement(self, path, write, old=b"old contents\n"):
+    def assert_failed_replacement(self, path, write, old=b"old contents\n", *, raises=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(old)
         path.chmod(0o600)
         before = set(path.parent.iterdir())
-        with partial_write(path) as hit, self.assertRaises(OSError):
-            write()
+        with partial_write(path) as hit, self.assertRaises(OSError) if raises else contextlib.nullcontext():
+            result = write()
+            if not raises:
+                self.assertEqual(result, [path])
         self.assertTrue(hit, "the write fault must reach this writer")
         self.assertEqual(path.read_bytes(), old)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
@@ -872,13 +874,13 @@ class FailedWriteTest(unittest.TestCase):
                 continue
             with self.subTest(writer="scrub", file=name):
                 self.assert_failed_replacement(task / name, lambda: self.desk.scrub("old-key-123456", "api"),
-                                               b"old-key-123456 in a saved output\n")
+                                               b"old-key-123456 in a saved output\n", raises=False)
                 (task / name).unlink()  # only this row contains the newly saved key
         for name in ("try.log", "merge-check-try.log"):
             path = self.desk.lanes_dir / "a" / name
             with self.subTest(writer="scrub", file=name):
                 self.assert_failed_replacement(path, lambda: self.desk.scrub("old-key-123456", "api"),
-                                               b"old-key-123456 in a saved try\n")
+                                               b"old-key-123456 in a saved try\n", raises=False)
                 path.unlink()
         env = self.desk.raw_dir("t0001") / "lane-env.sh"
         self.assert_failed_replacement(env, lambda: run.env_file(self.desk, "t0001", {"env": {"DEMO": "value"}}))
@@ -4615,6 +4617,87 @@ class DeskTest(unittest.TestCase):
             self.desk.write_key("mimo", "sk-saved-later-0654")
         self.assertNotIn(log, [call.args[0] for call in writer.call_args_list])
         self.assertEqual(log.read_bytes(), before)
+
+    def test_a_failed_scrub_write_does_not_stop_other_files_or_unsave_the_key(self):
+        from hansa.desk import write_bytes
+        key = "sk-saved-later-0654"
+        for name in ("note.md", "meta.json"):
+            with self.subTest(file=name):
+                tid = self.desk.new_task("A saved output")
+                task = self.desk.tasks_dir / tid
+                before, failed, after = task / "task.md", task / name, task / "merge-check.log"
+                before.write_text(key)
+                after.write_text(key)
+                original = json.dumps({"title": key}).encode() if name == "meta.json" else key.encode()
+                failed.write_bytes(original)
+
+                def writer(path, *args, **kwargs):
+                    if path == failed:
+                        raise OSError(errno.ENOSPC, "injected write failure")
+                    return write_bytes(path, *args, **kwargs)
+
+                count = len(self.events("key_set"))
+                with unittest.mock.patch("hansa.desk.write_bytes", side_effect=writer), self.assertRaises(ValueError):
+                    self.desk.write_key("mimo", key)
+                self.assertEqual(before.read_text(), "[key of mimo]")
+                self.assertEqual(after.read_text(), "[key of mimo]")
+                self.assertEqual(failed.read_bytes(), original)
+                self.assertEqual(self.desk.read_key("mimo"), key)
+                self.assertEqual(len(self.events("key_set")), count + 1)
+                self.desk.write_key("mimo", key)  # saving the same key retries the failed file
+                self.assertNotIn(key, failed.read_text())
+
+    def test_the_key_save_reply_names_unscrubbed_files_without_the_key(self):
+        from hansa import web
+        from hansa.desk import write_bytes
+        key = "sk-saved-later-0654"
+        tid = self.desk.new_task("A saved output")
+        failed = self.desk.tasks_dir / tid / "note.md"
+        failed.write_text(key)
+
+        def writer(path, *args, **kwargs):
+            if path == failed:
+                raise OSError(errno.ENOSPC, f"failed to write {key}")
+            return write_bytes(path, *args, **kwargs)
+
+        # Exercise the page's POST handler directly, without needing sockets in a lane's sandbox.
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        page = object.__new__(server.call_args.args[1])
+        body = json.dumps({"provider": "mimo", "key": key}).encode()
+        page.path = f"/api/key?t={self.desk.web_token()}"
+        page.headers = {"X-Hansa": "1", "Content-Length": str(len(body))}
+        page.rfile = io.BytesIO(body)
+        page._send = unittest.mock.Mock()
+        with unittest.mock.patch("hansa.desk.write_bytes", side_effect=writer):
+            page.do_POST()
+        code, reply = page._send.call_args.args
+        self.assertEqual(code, 400)
+        self.assertFalse(reply["ok"])
+        said = " ".join(reply["problems"])
+        self.assertIn(str(failed.relative_to(self.desk.root)), said)
+        self.assertIn("The key was saved", said)
+        self.assertIn("Fix them and save the key again", said)
+        self.assertNotIn(key, json.dumps(reply))
+        self.assertEqual(self.desk.read_key("mimo"), key)
+        self.assertEqual(self.events("key_set")[-1]["by"], "page")
+
+    def test_json_that_cannot_parse_after_scrubbing_is_left_intact(self):
+        key = "12345678"
+        tid = self.desk.new_task("A saved output")
+        task = self.desk.tasks_dir / tid
+        original = '{"number": 12345678, "text": "12345678"}\n'
+        paths = [self.desk.asks_path, task / "meta.json"]
+        for path in paths:
+            path.write_text(original)
+        after = self.desk.lanes_dir / "a" / "try.log"
+        after.write_text(key)
+        self.assertEqual(json.loads(original)["number"], int(key))
+        self.assertEqual(self.desk.scrub(key, "mimo"), paths)
+        for path in paths:
+            self.assertEqual(path.read_text(), original)
+        self.assertEqual(after.read_text(), "[key of mimo]")
 
     def test_a_key_that_only_a_merge_commit_brings_is_found(self):
         from hansa.run import keys_in_change

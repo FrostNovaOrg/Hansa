@@ -2517,20 +2517,25 @@ class Desk:
         with self.lock():  # a provider check compares and records under the same lock
             write_text(f, value.strip() + "\n", mode=0o600, follow_symlinks=False)
             self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
-            self.scrub(value.strip(), provider)
+            failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
+        if failed:
+            paths = ", ".join(str(f.relative_to(self.root)) for f in failed)
+            raise ValueError(self.redact(f"The key was saved, but these files still hold it: {paths}. "
+                                        "Fix them and save the key again to scrub them again."))
         self.ready_news()
 
     PUBLISHED = ("task.md", "note.md", "result.md", "run.json", "run.err", "setup.log", "check.log", "meta.json", "merge-check.log",
                  "merge-setup.log", "merge-check.err")
 
-    def scrub(self, key: str, provider: str) -> None:
+    def scrub(self, key: str, provider: str) -> list[Path]:
         """Take a newly saved key out of what hansa has already written down (text that was not a key
         when it was written): the task folders, the requests and the lanes' kept try output. The event
-        log only ever grows, so it keeps it."""
+        log only ever grows, so it keeps it. Return paths that could not be scrubbed."""
         tasks = self.tasks_dir.iterdir() if self.tasks_dir.is_dir() else []
         lanes = list(self.lanes_dir.iterdir()) if self.lanes_dir.is_dir() else []
         key_bytes, marker = key.encode("utf-8"), f"[key of {provider}]"
+        failed = []
         for f in [self.asks_path, *(d / name for d in tasks for name in self.PUBLISHED),
                   *(d / name for d in lanes for name in ("try.log", "merge-check-try.log"))]:
             if f.name not in ("meta.json", "asks.json"):
@@ -2540,7 +2545,10 @@ class Desk:
                     continue
                 changed = data.replace(key_bytes, marker.encode("utf-8"))
                 if changed != data:
-                    write_bytes(f, changed)
+                    try:
+                        write_bytes(f, changed)
+                    except OSError:
+                        failed.append(f)
                 continue
             try:
                 text = f.read_text(encoding="utf-8")
@@ -2549,7 +2557,11 @@ class Desk:
             if key in text:
                 text = text.replace(key, marker)
                 self.writes += f.name == "meta.json"
-                write_json(f, json.loads(text))
+                try:
+                    write_json(f, json.loads(text))
+                except (OSError, json.JSONDecodeError):
+                    failed.append(f)
+        return failed
 
     def raw_dir(self, tid: str) -> Path:
         """Where a task's processes write before hansa removes keys from what they wrote: under
