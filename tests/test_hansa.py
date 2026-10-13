@@ -401,6 +401,21 @@ if os.environ.get("FAKE_NO_CHANGES"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "Nothing to do.",
                       "num_turns": 1}))
     sys.exit(0)
+if "single word OK" in prompt and sys.argv[sys.argv.index("--model") + 1] == "tool-first":  # answers with a tool call
+    print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 2,
+                      "stop_reason": "tool_use", "terminal_reason": "max_turns",
+                      "modelUsage": {"tool-first": {"inputTokens": 1, "outputTokens": 1}}}))
+    sys.exit(1)
+if "single word OK" in prompt and sys.argv[sys.argv.index("--model") + 1] == "tool-first-429":  # the same, with a 429
+    print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 2,
+                      "stop_reason": "tool_use", "terminal_reason": "max_turns", "api_error_status": 429,
+                      "modelUsage": {"tool-first-429": {"inputTokens": 1, "outputTokens": 1}}}))
+    sys.exit(1)
+if "single word OK" in prompt and sys.argv[sys.argv.index("--model") + 1] == "api-error":  # fails after it answered
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "api_error_status": 500,
+                      "stop_reason": "tool_use", "terminal_reason": "api_error", "result": "API Error: 500 Internal server error",
+                      "modelUsage": {"api-error": {"inputTokens": 1, "outputTokens": 1}}}))
+    sys.exit(1)
 if "single word OK" in prompt:
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "OK",
                       "modelUsage": {"fake-model": {"inputTokens": 1, "outputTokens": 1}}}))
@@ -11269,6 +11284,43 @@ class DeskTest(unittest.TestCase):
         self.assertIn("--strict-mcp-config", seen["argv"])
         self.assertIn(str(self.desk.root / "CLAUDE.md"),
                       json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["claudeMdExcludes"])
+
+    def ping_on(self, model: str) -> dict:
+        """`hansa ping` of a compatible provider whose model is `model`, with the fake claude."""
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": model, "effort": "", "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-ping-0001")
+        with unittest.mock.patch.object(run.subprocess, "run", wraps=subprocess.run) as ran:
+            r = run.check_provider(self.desk, "mimo")
+        self.argv = ran.call_args.args[0]
+        return r
+
+    def test_the_ping_gives_its_run_no_tools(self):
+        self.assertTrue(self.ping_on("mimo-x")["ok"])
+        self.assertIn("--tools", self.argv)
+        self.assertEqual(self.argv[self.argv.index("--tools") + 1], "")
+        self.assertIn("--strict-mcp-config", self.argv)  # its other options stay
+
+    def test_a_ping_stopped_at_the_turn_limit_after_an_answer_is_ok(self):
+        r = self.ping_on("tool-first")
+        self.assertEqual((r["ok"], r["detail"]), (True, "tool-first: answered, but stopped at the turn limit"))
+        self.assertEqual(self.desk.provider_state()["mimo"]["check"]["detail"], r["detail"])
+        self.assertEqual(self.hansa("ping", "mimo").strip(), "mimo: ok - tool-first: answered, but stopped at the turn limit")
+
+    def test_a_ping_stopped_at_the_turn_limit_with_a_429_is_not_ok_and_rests(self):
+        r = self.ping_on("tool-first-429")
+        self.assertEqual((r["ok"], r["detail"]), (False, "out of quota (HTTP 429)"))
+        st = self.desk.provider_state()["mimo"]
+        self.assertGreater(st["cool_until"], time.time())
+        self.assertEqual(st["reason"], "out of quota (HTTP 429)")
+
+    def test_a_ping_with_an_api_error_is_not_ok(self):
+        r = self.ping_on("api-error")
+        self.assertFalse(r["ok"])
+        self.assertNotIn("answered", r["detail"])
+        self.assertIn("NOT ok", self.hansa("ping", "mimo"))
 
     def test_check_points_to_ping_without_sending_a_request(self):
         before = self.desk.events_path.read_bytes()
