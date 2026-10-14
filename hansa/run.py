@@ -42,6 +42,83 @@ SRT_OUTPUT = shlex.join(protected([]))
 # Set the child's score before srt can hide /proc; its children inherit it. A shell wrapper
 # is safe when serve has threads (preexec_fn is not), and a refused write must not stop a run.
 OOM_SCRIPT = '{ printf "500\\n" > /proc/self/oom_score_adj; } 2>/dev/null || :\nexec "$@"'
+OOM_VMSTAT = Path("/proc/vmstat")  # replaceable in tests; read by hansa, never through srt
+
+
+def oom_kill():
+    """The machine's count since boot (Linux 4.13+), or unknown. Counting must never prevent a run."""
+    if account.LINUX:
+        try:
+            for line in OOM_VMSTAT.read_text().splitlines():
+                words = line.split()
+                if len(words) == 2 and words[0] == "oom_kill":
+                    value = int(words[1])
+                    return value if value >= 0 else None
+        except (OSError, ValueError, UnicodeError):
+            pass
+    return None
+
+
+def oom_result(start, end=None) -> dict:
+    end = oom_kill() if end is None else end
+    return {"oom_kills": end - start} if start is not None and end is not None and end > start else {}
+
+
+def oom_begin(record: dict, prefix: str = "") -> dict:
+    """Clear a previous run's counts under its record's lock. Unknown means no count fields at all."""
+    for field in ("oom_start", "oom_kills", "setup_oom_kills"):
+        record.pop(prefix + field, None)
+    start = oom_kill()
+    return {prefix + "oom_start": start} if start is not None else {}
+
+
+def oom_text(record: dict) -> str:
+    n = record.get("oom_kills")
+    return (f"the system's out-of-memory killer killed {n} processes while it ran "
+            "(a count for the whole machine)") if n else ""
+
+
+def oom_lines(record: dict, what: str) -> list:
+    out = [f"{what}: {oom_text(record)}"] if oom_text(record) else []
+    if record.get("setup_oom_kills"):
+        out.append(f"{what}'s setup: " + oom_text({"oom_kills": record["setup_oom_kills"]}))
+    if record.get("retried"):
+        out += oom_lines(record["retried"], f"{what}'s killed run")
+    return out
+
+
+def setup_oom(raw: Path, name: str) -> dict:
+    """Setup wrappers record both ends outside srt; a killed wrapper has only its start."""
+    def read(suffix):
+        try:
+            return int((raw / (name + ".oom-" + suffix)).read_text().strip())
+        except (OSError, ValueError):
+            return None
+    return oom_result(read("start"), read("end")) if account.LINUX else {}
+
+
+def clear_setup_marks(raw: Path, log: str, err: str) -> None:
+    """Only after the end is saved: a failed end write must leave its snapshots recoverable."""
+    for name in (log + ".oom-start", log + ".oom-end", err + ".stopped"):
+        (raw / name).unlink(missing_ok=True)
+    try:
+        raw.rmdir()
+    except OSError:
+        pass
+
+
+# A setup runs in the shell around srt, before the worker/check replaces it. Keep its own count there,
+# including when serve restarts. A missing/refused vmstat produces no snapshot. write_file replaces safely.
+OOM_COUNT_SCRIPT = WRITE_FILE + """oom_count() {
+  [ -n "${HANSA_OOM_VMSTAT:-}" ] && [ -r "$HANSA_OOM_VMSTAT" ] || return 0
+  { while read -r key value rest; do
+      if [ "$key" = oom_kill ]; then
+        case "$value" in ''|*[!0-9]*) return 0;; esac
+        write_file "$1" "$value"; return 0
+      fi
+    done < "$HANSA_OOM_VMSTAT"; } 2>/dev/null || :
+}
+"""
 
 
 def with_oom_score(argv: list, cwd=None, env=None) -> list:
@@ -105,15 +182,19 @@ SETUP_FAILED = re.compile(r"^hansa: the lane's setup command failed \(exit (\d+)
 # check_git_file); otherwise the worker does not start, and hansa's finish says what happened.
 # sh -c SETUP_SCRIPT hansa-setup <setup> <log> <error file> <.git line> <temporary folder> <srt> <srt settings>
 #   <its own temporary folder> <worker command...> (the two folders of run_tmp, both removed after it)
-SETUP_SCRIPT = ("""ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
+SETUP_SCRIPT = (OOM_COUNT_SCRIPT + """ok() { [ -f .git ] && [ ! -L .git ] && [ "$(cat .git)" = "$line" ]; }
 line=$4
+oom_count "$2.oom-start"
 rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$5" CLAUDE_CODE_TMPDIR="$5" "$6" --settings "$7" -- """ + SRT_OUTPUT + """ /bin/sh -c "$1" </dev/null 2>&1 3>&-
   echo $? >&3; } | cat >"$2"; } 3>&1 )
+oom_count "$2.oom-end"
 [ "$rc" = 0 ] || {
   rm -rf "$5" "$8"
   ! ok || [ -z "$(git status --porcelain)" ] || git stash push --include-untracked -q -m "hansa: what the lane's failed setup changed" >>"$2" 2>&1
   echo "hansa: the lane's setup command failed (exit $rc)" >>"$3"; exit 97; }
-ok || { echo "hansa: the worktree's .git file was changed during the lane's setup; hansa ran no git there" >>"$3"; exit 96; }
+ok || {
+  write_file "$3.stopped" "the worktree's .git file was changed during the lane's setup"
+  echo "hansa: the worktree's .git file was changed during the lane's setup; hansa ran no git there" >>"$3"; exit 96; }
 if [ -n "$(git status --porcelain)" ]; then
   git stash push --include-untracked -q -m "hansa: what the lane's setup changed" >>"$2" 2>&1
   echo "hansa: the setup changed files in the repository; they were set aside (git stash), so they are not part of the task" >>"$2"
@@ -140,11 +221,13 @@ CHECK_SCRIPT = WRITE_FILE + '{ "$4" --settings "$5" -- ' + SRT_OUTPUT + ' sh -c 
 # Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
 # and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
 # sh -c TRY_SCRIPT <token> <folder> <srt> [<name> <command> <srt settings> <temporary folder> <its own>]...
-TRY_SCRIPT = (WRITE_FILE + """d=$1 srt=$2
+TRY_SCRIPT = (OOM_COUNT_SCRIPT + """d=$1 srt=$2
 run() {
   t0=$(date +%s)
+  oom_count "$d/$1.log.oom-start"
   rc=$( { { env """ + " ".join(f"-u {v}" for v in KEY_VARS) + """ TMPDIR="$4" CLAUDE_CODE_TMPDIR="$4" "$srt" --settings "$3" -- """ + SRT_OUTPUT + """ /bin/sh -c "$2" </dev/null 2>&1 3>&-
     echo $? >&3; } | cat >"$d/$1.log"; } 3>&1 )
+  oom_count "$d/$1.log.oom-end"
   rm -rf "$4" "$5"
   write_file "$d/$1.exit" "$rc $(( $(date +%s) - t0 ))"
   [ "$rc" = 0 ]
@@ -516,7 +599,8 @@ def base_env() -> dict:
     """hansa's own environment, as what it runs outside the sandbox is given it (srt, the scripts around a
     setup or check and their git, Claude Code): never a lane's env, which reaches only what runs in the
     sandbox (in_sandbox, env_file)."""
-    return {k: os.environ[k] for k in BASE_ENV if k in os.environ}
+    return {**{k: os.environ[k] for k in BASE_ENV if k in os.environ},
+            **({"HANSA_OOM_VMSTAT": str(OOM_VMSTAT)} if account.LINUX else {})}
 
 
 def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
@@ -3663,6 +3747,9 @@ def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict
         return argv
     raw = desk.raw_dir(tid)
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
+    for suffix in ("start", "end"):
+        (raw / f"setup.log.oom-{suffix}").unlink(missing_ok=True)
+    (raw / "run.err.stopped").unlink(missing_ok=True)
     srt, settings, tmp, own = in_srt(desk, tid, "setup", lane, pname, p, wt)
     line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
     return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", in_sandbox(desk, lane, lane["setup"]), str(raw / "setup.log"), str(raw / "run.err"),
@@ -3897,8 +3984,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
         (d / PREVIEW_FIRST_LOG).unlink(missing_ok=True)  # an earlier try's
-        desk.update(tid, launch=sid, session_id=sid, base=base, branch=f"task/{tid}", worktree=str(wt),
-                    setup_ran=bool(lane.get("setup")), resumed=None)  # a new session: an earlier try's resume is not its own
+        desk.change(tid, lambda x: {"launch": sid, "session_id": sid, "base": base, "branch": f"task/{tid}",
+                                   "worktree": str(wt), "setup_ran": bool(lane.get("setup")), "resumed": None,
+                                   "check_retry": None, "check_stopped": None, **oom_begin(x)})
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(with_oom_score(command, str(wt), env), cwd=str(wt), env=env, stdin=stdin, stdout=out,
@@ -3913,6 +4001,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
 def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str) -> dict:
     """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
     return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), "HANSA_TASK": tid,
+            **({"HANSA_OOM_VMSTAT": str(OOM_VMSTAT)} if account.LINUX else {}),
             "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
             "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
             "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
@@ -4091,7 +4180,8 @@ def start_design(desk: Desk, tid: str, lane_name: str) -> None:
         effort_from="design" if ds.get("effort") else "coordinator" if pname == co["provider"] and co.get("effort")
         else "provider" if p.get("effort") else "",
         started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False, cancel=False,
-        tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None)
+        tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None,
+        **oom_begin({}))
     if not meta:
         return
     no_read(desk)  # as a worker's start
@@ -4305,6 +4395,8 @@ def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
 
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
+    memory = oom_result(meta.get("oom_start"))
+    setup_memory = setup_oom(desk.state_dir / "runs" / tid, "setup.log") if meta.get("setup_ran") else {}
     d = desk.tasks_dir / tid
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
@@ -4352,7 +4444,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
                           meta.get("session_id", "")) if p and denied else {}
     write_text(d / "result.md", report + ("\n" if report else ""))
-    fields = {"finished": now(), "exit": returncode, "pid": None,
+    fields = {"finished": now(), "exit": returncode, "pid": None, **memory,
+              **({"setup_oom_kills": setup_memory["oom_kills"]} if setup_memory else {}),
               "session_id": run.get("session_id") or meta.get("session_id", ""),
               "turns": run.get("num_turns"), "subtype": run.get("subtype", ""),
               "usage": usage, "denials": [desk.redact(denial_of(x)) for x in denied],
@@ -4491,8 +4584,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             f"killed by the system twice (exit {before[0].get('exit')}, then exit {returncode}), with no word from "
             f"the {'verifier' if meta.get('kind') == 'verify' else 'worker'}: the machine may be short of memory, "
             f"so fewer runs at once may help (hansa concurrency). Next: {retry}")
+        if state == "failed":
+            counts = [f"run {i}: {oom_text(a)}" for i, a in enumerate([before[0], memory], 1) if oom_text(a)]
+            if counts:
+                error += "; " + "; ".join(counts)
         attempts.append({"provider": meta["provider"], "at": now(), "kind": "killed", "exit": returncode,
-                         "error": error if state == "queued" else how})
+                         "error": error if state == "queued" else how, **memory})
         if isinstance(resumed.get("turns"), int) and not isinstance(fields["turns"], int):  # its first process's
             fields["turns"] = resumed["turns"]  # turns are known, even 0; its killed continuation's own are not
             attempts[-1]["turns_unknown_after_resume"] = True
@@ -4531,6 +4628,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
                 "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
+    clear_setup_marks(desk.state_dir / "runs" / tid, "setup.log", "run.err")
     if meta["state"] == "queued" and meta.get("sandbox_failed"):
         hold(desk, tid, meta.get("lane") or "", meta["error"], "",
              {"verify": "verifier", "design": "design session"}.get(meta.get("kind"), "worker"))
@@ -4548,7 +4646,8 @@ def run_numbers(meta: dict, fields: dict) -> dict:
     return {"usage": fields.get("usage") or {}, "turns": fields.get("turns"), "session_id": fields.get("session_id", ""),
             "launch": meta.get("launch", ""), "ran_from": meta.get("started"), "ended": fields.get("finished") or now(),
             "model": meta.get("model_asked", ""), "effort": meta.get("effort_used", ""),
-            "effort_from": meta.get("effort_from", ""), "run_start": meta.get("run_start")}
+            "effort_from": meta.get("effort_from", ""), "run_start": meta.get("run_start"),
+            **{k: fields[k] for k in ("oom_kills", "setup_oom_kills") if fields.get(k)}}
 
 
 def keep_lost_run(desk: Desk, m: dict) -> dict:
@@ -4593,7 +4692,8 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
         env = {**base_env(), "HANSA_TASK": tid, "HANSA_RUN": run_mark(desk, tid), "TERM": "dumb", "TMPDIR": tmp,
                "CLAUDE_CODE_TMPDIR": tmp}
-        desk.update(tid, launch=token, check_started=now(), check_command=lane["check"])
+        desk.change(tid, lambda x: {"launch": token, "check_started": now(), "check_command": lane["check"],
+                                   "check_stopped": None, "timed_out": False, **oom_begin(x, "check_")})
         with open(raw / "check.log", "wb") as out:
             proc = subprocess.Popen(with_oom_score(["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, lane["check"]), str(raw / "check.exit"), tmp,
                                                    srt, settings, own], str(wt), env), cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
@@ -4616,6 +4716,7 @@ def check_not_started(desk: Desk, tid: str, e: Exception) -> None:
 
 def finish_check(desk: Desk, tid: str) -> dict:
     m = desk.meta(tid)
+    memory = oom_result(m.get("check_oom_start"))
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     done = raw / "check.exit" if (raw / "check.exit").exists() else d / "check.exit"
     try:
@@ -4633,15 +4734,42 @@ def finish_check(desk: Desk, tid: str) -> dict:
             check_git_file(desk, Path(m["worktree"]))
         except GitFileChanged as e:
             changed = git_file_changed(desk, tid, e)
-    check ={"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
+    check = {"command": m.get("check_command", ""), "ok": code == 0 and not note, "exit": code, "note": note,
+             **memory, **({"retried": m["check_retry"]} if m.get("check_retry") else {}),
              "seconds": round(now() - (m.get("check_started") or now())), "tail": log.strip().splitlines()[-15:]}
+    stopped = m.get("cancel") or m.get("timed_out") or m.get("check_stopped") or changed
+    if check_killed(check, stopped):
+        if not check.get("retried"):
+            check["note"] = f"killed by the system (exit {code}); ran again once"
+            queued = desk.change(tid, lambda x: None if x.get("cancel") or x.get("timed_out") or x.get("check_stopped") else
+                                 {"check_retry": check, "check": check, "pid": None, "pid_start": "", "launch": "",
+                                  "check_started": None, "lookup_failing_since": None})
+            if queued:
+                done.unlink(missing_ok=True)
+                sweep(desk, tid)
+                desk.event("check_killed", task=tid, exit=code, **memory)
+                return desk.meta(tid)
+            latest = desk.meta(tid)  # a stop arrived while the output was being published
+            check["note"] = "stopped on request" if latest.get("cancel") else "stopped at the lane's time ceiling"
+        else:
+            check["note"] = killed_twice(check["retried"], check)
     m = desk.change(tid, lambda now_meta: {"state": "failed" if changed else "cancelled" if now_meta.get("cancel")
                                            else "done", "phase": "", "pid": None, "pid_start": "", "check": check,
                                            "error": changed or ("cancelled" if now_meta.get("cancel") else "")})
     done.unlink(missing_ok=True)  # the exit remains recoverable until the end is recorded
-    desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=note)
+    desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=check["note"])
     sweep(desk, tid)
     return desk.meta(tid)
+
+
+def check_killed(result: dict, stopped) -> bool:
+    return not stopped and (result.get("exit") in (*KILLED_EXITS, None)
+                            or (not result["ok"] and bool(result.get("oom_kills"))))
+
+
+def killed_twice(first: dict, last: dict) -> str:
+    return (f"killed by the system twice (exit {first.get('exit')}, then exit {last.get('exit')}): "
+            "the machine may be short of memory, so fewer runs at once may help (hansa concurrency)")
 
 
 # A merge check: `hansa merge` of a task whose base has moved since it was made, on a lane with a check or a
@@ -5010,7 +5138,8 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     None when it did not start (cancelled meanwhile), or ended at once (a conflict; or no command any more, and
     so merged)."""
     raw = desk.raw_dir(tid)
-    for f in ("merge-check.exit", "merge-setup.log.done", *MERGE_FILES):
+    for f in ("merge-check.exit", "merge-setup.log.done", "merge-setup.log.oom-start", "merge-setup.log.oom-end",
+              "merge-check.err.stopped", *MERGE_FILES):
         (raw / f).unlink(missing_ok=True)
     token = f"hansa-merge-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
     with desk.lock():  # a cancel lands before this (no check) or after it (the check is stopped)
@@ -5069,9 +5198,11 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                     stmp, ssrt, ssettings, sown, *argv]
         env = {**base_env(), "HANSA_TASK": tid, "HANSA_RUN": run_mark(desk, tid), "TERM": "dumb", "TMPDIR": tmp,
                "CLAUDE_CODE_TMPDIR": tmp}
+        memory = oom_begin(mc)
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
               "own": own_merge_check(lane, task_lane), "message_note": said,
-              "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt)}
+              "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt),
+              **memory, "stopped": None, "timed_out": False}
         desk.update(tid, merge_check=mc)
         with open(raw / "merge-check.log", "wb") as out:
             proc = subprocess.Popen(with_oom_score(argv, str(wt), env), cwd=str(wt), env=env, stdin=subprocess.DEVNULL, stdout=out,
@@ -5097,6 +5228,8 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
     if m["state"] != "merging" or mc.get("phase") not in ("starting", "running"):
         return None
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
+    memory = oom_result(mc.get("oom_start"))
+    setup_memory = setup_oom(raw, "merge-setup.log") if mc.get("setup") else {}
     try:
         code = int((raw / "merge-check.exit").read_text().strip())
     except (OSError, ValueError):
@@ -5110,25 +5243,54 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         return (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).exists() else ""
     err = read("merge-check.err").strip()
     setup = SETUP_FAILED.search(err)
+    # SETUP_SCRIPT stops before the check when its git guard fails, marking before exit 96. Its error
+    # line also identifies that stop if the marker could not be written; neither is a system kill.
+    guarded = (raw / "merge-check.err.stopped").exists() or "hansa ran no git there" in err
     note = ("stopped on request" if mc.get("cancel") else "stopped at the lane's time ceiling" if mc.get("timed_out")
             else f"the lane's setup failed (exit {setup.group(1)}), so the check did not run" if setup
             else "" if code is not None else (err.splitlines()[-1] if err else "the check was interrupted"))
+    changed = False
     if mc.get("worktree") and expected_git_line(desk, Path(mc["worktree"])):
         try:
             check_git_file(desk, Path(mc["worktree"]))
         except GitFileChanged as e:
             note = git_file_changed(desk, tid, e)
+            changed = True
     result = {"ok": code == 0 and not note, "exit": code, "note": note, "command": mc.get("command", ""),
+              **memory, **({"setup_oom_kills": setup_memory["oom_kills"]} if setup_memory else {}),
+              **({"retried": mc["retried"]} if mc.get("retried") else {}),
               **merge_result_lane(m, mc.get("lane")),
               **({"own": True} if mc.get("own") else {}),
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
+    stopped = mc.get("cancel") or mc.get("timed_out") or mc.get("stopped") or changed or guarded
+    # A failed setup has its own exit; an absent check exit then says nothing about a killed check.
+    outcome = {**result, "exit": int(setup.group(1))} if setup else result
+    if check_killed(outcome, stopped):
+        if not result.get("retried"):
+            result["note"] = f"killed by the system (exit {outcome['exit']}); ran again once"
+            def retry(x):
+                current = x.get("merge_check") or {}
+                if x["state"] != "merging" or current.get("cancel") or current.get("timed_out") or current.get("stopped"):
+                    return None
+                return {"merge_check": {**current, "phase": "queued", "pid": None, "pid_start": "",
+                                        "launch": "", "started": None, "retried": result}}
+            if desk.change(tid, retry):
+                (raw / "merge-check.exit").unlink(missing_ok=True)
+                clear_setup_marks(raw, "merge-setup.log", "merge-check.err")
+                desk.event("merge_check_killed", task=tid, exit=outcome["exit"], **memory)
+                return desk.meta(tid)
+            mc = desk.meta(tid).get("merge_check") or {}
+            result["note"] = "stopped on request" if mc.get("cancel") else "stopped at the lane's time ceiling"
+        else:
+            result["note"] = killed_twice(result["retried"], outcome)
+    note = result["note"]
     desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note, command=result["command"],
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     try:
         if mc.get("cancel"):
-            return end_merge_check(desk, tid, None)
+            return end_merge_check(desk, tid, result)
         if not result["ok"]:
             return end_merge_check(desk, tid, result)
         return land_merge(desk, tid, result)
@@ -5136,6 +5298,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         ended = desk.meta(tid)
         if ended["state"] != "merging" or (ended.get("merge_check") or {}).get("phase") not in ("starting", "running"):
             (raw / "merge-check.exit").unlink(missing_ok=True)
+            clear_setup_marks(raw, "merge-setup.log", "merge-check.err")
 
 
 def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
@@ -5295,7 +5458,8 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
             end_try(desk, lane_name, {"ok": False, "could_not_run": True, "steps": {}, "onto": tip,
                                       "note": desk.redact(f"could not run: {e}")[:600]})
             return None
-        t = {**t, "phase": "running", "launch": token, "onto": tip, "worktree": str(wt), "started": now(),
+        memory = oom_begin(t)
+        t = {**t, "phase": "running", "launch": token, "onto": tip, "worktree": str(wt), "started": now(), **memory,
              "tmp": tmps, **steps}
         write_try(desk, lane_name, t)
         with open(d / "try.err", "wb") as err:
@@ -5320,6 +5484,7 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
     """After a try's process ended: read what each step did, keys removed, and put the worktree back clean at
     the base's tip it ran on."""
     t = read_try(desk, lane_name)
+    memory = oom_result(t.get("oom_start"))
     d = desk.state_dir / "tries" / lane_name
     steps, failed, whole = {}, "", []
     for step in TRY_STEPS:
@@ -5334,7 +5499,7 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
             "utf-8") if f.exists() else ""  # a byte that is not UTF-8 is one "?"
         ran = code is not None or f.exists()
         steps[step] = {"command": t[step], "ran": ran, "exit": code, "seconds": secs,
-                       "tail": log.strip().splitlines()[-15:]}
+                       "tail": log.strip().splitlines()[-15:], **setup_oom(d, f"{step}.log")}
         if ran and code != 0:
             steps[step]["hints"] = output_hints(log)
         if ran:
@@ -5357,7 +5522,7 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
     ok = bool(steps) and all(x["exit"] == 0 for x in steps.values()) and not note
     log = keep_try_log(desk, lane_name, t, whole)
     try:
-        return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean,
+        return end_try(desk, lane_name, {"ok": ok, "steps": steps, "note": note, "clean": clean, **memory,
                                          **({"log": str(log)} if log else {})})
     finally:
         if read_try(desk, lane_name).get("phase") == "done":
@@ -5490,7 +5655,17 @@ def recording_start(desk: Desk, key, pid, proc=None, cleanup=None):
         yield
     except Exception as e:
         if key is not None:
-            desk.failed_starts[key] = e
+            desk.failed_starts[key] = e  # mark BEFORE stopping, even when no disk write is possible
+            # These stops must never turn into a system-kill retry. The in-memory mark above makes
+            # retry_start_failure take the start-failure path if this durable mark also fails.
+            try:
+                if key[0] == "check":
+                    desk.update(key[1], check_stopped="the process id could not be recorded")
+                elif key[0] == "merge":
+                    desk.change(key[1], lambda x: {"merge_check": {**x["merge_check"],
+                                                                 "stopped": "the process id could not be recorded"}})
+            except Exception:
+                pass
         try:
             stop(pid, proc=proc)
             if proc is None:
@@ -5711,7 +5886,8 @@ class Dispatcher:
             except Exception as e:
                 check_not_started(desk, tid, e)
             return
-        if (desk.state_dir / "runs" / tid / "check.exit").exists():
+        if ((desk.state_dir / "runs" / tid / "check.exit").exists()
+                and not (m.get("check_retry") and m.get("check_started") is None)):
             finish_check(desk, tid)
             return
         lane = s["lanes"].get(m.get("lane"), {})
@@ -6020,7 +6196,9 @@ class Dispatcher:
                 if m["state"] != "running":
                     continue
                 limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
-                over = time.time() - m.get("started", time.time()) > limit and m.get("kind") != "design"
+                began = ((m.get("check_started") or time.time()) if m.get("phase") == "checking" and m.get("check_retry")
+                         else m.get("started", time.time()))
+                over = time.time() - began > limit and m.get("kind") != "design"
                 if m.get("cancel") or over:  # a design session waits on the principal, so it has no time ceiling
                     proc = self.procs.get(m["id"])
                     if not run_running(m, proc):

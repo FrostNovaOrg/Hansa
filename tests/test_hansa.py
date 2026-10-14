@@ -9700,6 +9700,410 @@ class DeskTest(unittest.TestCase):
         for index, head in enumerate(heads, 1):
             self.assertEqual(git_out("rev-parse", f"task/{tid}-try{index}"), head)
 
+    @contextlib.contextmanager
+    def oom_counter(self):
+        from hansa import run
+        vmstat = self.tmp / "vmstat"
+        vmstat.write_text("pgfault 100\noom_kill 10\n")
+        with unittest.mock.patch.object(account, "LINUX", True), unittest.mock.patch.object(run, "OOM_VMSTAT", vmstat):
+            yield vmstat
+
+    def oom_command(self, folder, mode, vmstat):
+        """A real command: count starts, optionally raise the machine count, kill itself or fail."""
+        script = folder / "check.py"
+        script.write_text(textwrap.dedent(f"""\
+            import os, signal, time
+            from pathlib import Path
+            count = Path({str(folder / 'count')!r})
+            n = int(count.read_text()) + 1 if count.exists() else 1
+            count.write_text(str(n))
+            print('last output from run', n, flush=True)
+            mode = {mode!r}
+            if mode in ('rise-fail', 'rise-pass', 'rise-kill', 'wait') and (n == 1 or mode == 'rise-kill'):
+                counter = Path({str(vmstat)!r})
+                value = int(counter.read_text().split('oom_kill ')[1].split()[0])
+                counter.write_text('oom_kill ' + str(value + n) + '\\n')
+            if mode == 'wait' or (mode == 'lost' and n == 1):
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                Path({str(folder / 'ready')!r}).touch()
+                while True: time.sleep(60)
+            if mode in ('kill-twice', 'rise-kill') or (mode == 'kill-once' and n == 1):
+                os.kill(os.getpid(), signal.SIGKILL)
+            if mode == 'fail' or (mode == 'rise-fail' and n == 1):
+                raise SystemExit(1)
+            if mode == 'ceiling' and n == 2:
+                Path({str(folder / 'ready')!r}).touch()
+                while not Path({str(folder / 'go')!r}).exists(): time.sleep(.05)
+            if mode == 'ceiling' and n == 1:
+                Path({str(folder / 'first-ready')!r}).touch()
+                while not Path({str(folder / 'first-go')!r}).exists(): time.sleep(.05)
+                os.kill(os.getpid(), signal.SIGKILL)
+            """))
+        return "exec " + shlex.join([sys.executable, str(script)])
+
+    def oom_check_task(self, row, mode, vmstat, merge=False):
+        from hansa import run
+        desk, repo, root = self.kill_desk("oom-" + str(row))
+        command = self.oom_command(root, mode, vmstat)
+        s = desk.settings()
+        s["lanes"]["a"]["check"] = "" if merge else command
+        if merge:
+            s["lanes"]["m"] = {**s["lanes"]["a"], "check": "", "merge_check": command, "merge_lane": True}
+        s["concurrency"] = 1
+        self.assertEqual(desk.save_settings(s), [])
+        tid = desk.new_task("Add hello.txt", lane="a")
+        d = Dispatcher(desk)
+        if merge:
+            self.oom_settle(d, desk, tid)
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(desk.root), "merge", tid])
+        return d, desk, tid, root
+
+    def oom_settle(self, dispatcher, desk, tid):
+        end = time.time() + 30
+        while time.time() < end:
+            dispatcher.tick()
+            m = desk.meta(tid)
+            if m["state"] not in ("queued", "running", "merging"):
+                return m
+            time.sleep(.05)
+        self.fail(f"run did not end: {desk.meta(tid)}")
+
+    def test_system_killed_checks_retry_by_the_rule_table(self):
+        # Rows 1-5, and row 7's first two cases, all with real check commands and fake /proc/vmstat.
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                for row, mode, starts, ok in ((1, "kill-once", 2, True), (2, "kill-twice", 2, False),
+                                               (3, "rise-fail", 2, True), (4, "fail", 1, False),
+                                               (5, "rise-pass", 1, True)):
+                    with self.subTest(row=row, merge=merge):
+                        d, desk, tid, root = self.oom_check_task(f"{row}-{merge}", mode, vmstat, merge)
+                        m = self.oom_settle(d, desk, tid)
+                        result = m["merge_check_result" if merge else "check"]
+                        self.assertEqual((result["ok"], int((root / "count").read_text())), (ok, starts), m)
+                        self.assertEqual(m["state"], "merged" if merge and ok else "done")
+                        if merge:
+                            self.assertEqual(result["lane"], "m")
+                        shown = views.check_output_text(desk, tid)
+                        if starts == 2:
+                            self.assertIn("ran again", shown)
+                            self.assertIn("killed by the system", shown)
+                            self.assertIn("last output from run 1", shown)
+                            self.assertEqual(result["retried"]["exit"], 1 if row == 3 else 137)
+                        else:
+                            self.assertNotIn("retried", result)
+                        if row == 2:
+                            for words in ("killed by the system twice", "short of memory", "hansa concurrency"):
+                                self.assertIn(words, shown)
+                            self.assertEqual(result["exit"], 137)
+                        if row in (3, 5):
+                            counted = result["retried"] if row == 3 else result
+                            self.assertEqual(counted["oom_kills"], 1)
+                            for text in (shown, views.show_text(desk, tid)):
+                                self.assertIn("out-of-memory killer killed 1 processes", text)
+                                self.assertIn("a count for the whole machine", text)
+                            # The end notice uses the saved result even after the raw folder is swept.
+                            ended = next(json.loads(x) for x in reversed(desk.events_path.read_text().splitlines())
+                                         if json.loads(x).get("event") in ("task_checked", "task_merged"))
+                            self.assertIn("out-of-memory killer", notify._item(desk, ended)[1])
+
+    def test_a_killed_check_without_an_exit_file_retries_after_restart(self):
+        from hansa import run
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    d, desk, tid, root = self.oom_check_task(f"lost-{merge}", "lost", vmstat, merge)
+                    try:
+                        self.soon(lambda: (d.tick(), (root / "ready").exists())[1])
+                        proc = (d.merge_procs if merge else d.procs)[tid]
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait(timeout=10)
+                        m = self.oom_settle(Dispatcher(desk), desk, tid)
+                        result = m["merge_check_result" if merge else "check"]
+                        self.assertTrue(result["ok"])
+                        self.assertIsNone(result["retried"]["exit"])
+                        self.assertEqual((root / "count").read_text(), "2")
+                        self.assertIn("exit None", views.check_output_text(desk, tid))
+                    finally:
+                        for proc in [*d.procs.values(), *d.merge_procs.values()]:
+                            run.stop(proc.pid, proc=proc)
+            self.assertTrue(run.check_killed({"exit": -9, "ok": False}, False))
+
+    def test_a_killed_checks_exit_left_after_a_failed_cleanup_is_not_taken_for_its_reruns_exit(self):
+        unlink = Path.unlink
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    d, desk, tid, root = self.oom_check_task(f"exit-cleanup-{merge}", "kill-once", vmstat, merge)
+                    def started():
+                        d.tick()
+                        m = desk.meta(tid)
+                        return (tid in d.merge_procs if merge else
+                                m.get("phase") == "checking" and m.get("check_started") and tid in d.procs)
+                    self.soon(started)
+                    (d.merge_procs if merge else d.procs)[tid].wait(timeout=15)
+                    exit_file = desk.state_dir / "runs" / tid / ("merge-check.exit" if merge else "check.exit")
+                    refused = []
+                    def full(path, *args, **kwargs):
+                        if path == exit_file and not refused:
+                            refused.append(True)
+                            raise OSError(errno.ENOSPC, "exit cleanup failed")
+                        return unlink(path, *args, **kwargs)
+                    with unittest.mock.patch.object(Path, "unlink", full), self.assertRaises(OSError):
+                        d.tick()
+                    result = self.oom_settle(d, desk, tid)["merge_check_result" if merge else "check"]
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["retried"]["exit"], 137)
+                    self.assertEqual((root / "count").read_text(), "2")
+
+    def test_merge_setups_and_both_killed_check_runs_keep_their_oom_counts(self):
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    d, desk, tid, root = self.oom_check_task(f"counted-kills-{merge}", "rise-kill", vmstat, merge)
+                    result = self.oom_settle(d, desk, tid)["merge_check_result" if merge else "check"]
+                    self.assertEqual((result["retried"]["oom_kills"], result["oom_kills"]), (1, 2))
+                    shown = views.check_output_text(desk, tid)
+                    for n in (1, 2):
+                        self.assertIn(f"out-of-memory killer killed {n} processes", shown)
+                    self.assertIn("killed by the system twice", result["note"])
+            d, desk, tid, root = self.oom_check_task("merge-setup", "pass", vmstat, True)
+            s = desk.settings()
+            script = root / "setup.py"
+            script.write_text(f"from pathlib import Path\nPath({str(vmstat)!r}).write_text('oom_kill 99\\n')\n")
+            s["lanes"]["m"]["setup"] = shlex.join([sys.executable, str(script)])
+            self.assertEqual(desk.save_settings(s), [])
+            vmstat.write_text("oom_kill 96\n")
+            m = self.oom_settle(d, desk, tid)
+            self.assertEqual((m["state"], m["merge_check_result"]["setup_oom_kills"]), ("merged", 3))
+            self.assertIn("merge check's setup: the system's out-of-memory killer killed 3 processes",
+                          views.show_text(desk, tid))
+
+    def test_a_merge_setups_own_stops_are_not_missing_exit_system_kills(self):
+        with self.oom_counter() as vmstat:
+            for guarded in (False, True):
+                with self.subTest(guarded=guarded):
+                    d, desk, tid, root = self.oom_check_task(f"setup-stop-{guarded}", "pass", vmstat, True)
+                    s = desk.settings()
+                    s["lanes"]["m"]["setup"] = "echo 'gitdir: /elsewhere' > .git" if guarded else "exit 23"
+                    self.assertEqual(desk.save_settings(s), [])
+                    self.soon(lambda: (d.tick(), tid in d.merge_procs)[1])
+                    d.merge_procs[tid].wait(timeout=15)
+                    if guarded:
+                        self.assertTrue((desk.state_dir / "runs" / tid / "merge-check.err.stopped").exists())
+                    m = self.oom_settle(d, desk, tid)
+                    self.assertEqual(m["state"], "done")
+                    self.assertFalse(m["merge_check_result"]["ok"])
+                    self.assertNotIn("retried", m["merge_check_result"])
+                    self.assertFalse((root / "count").exists())  # the check never ran
+
+    def test_hansas_check_stops_never_retry_a_sigkill(self):
+        # Rows 6 and 7: exercise the real cancel and timeout paths, forcing their escalation to SIGKILL.
+        from hansa import run
+        real_stop = run.stop
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                for cause in ("cancel", "ceiling"):
+                    with self.subTest(merge=merge, cause=cause):
+                        d, desk, tid, root = self.oom_check_task(f"6-{merge}-{cause}", "wait", vmstat, merge)
+                        try:
+                            self.soon(lambda: (d.tick(), (root / "ready").exists())[1])
+                            def kill(pid, start="", proc=None):
+                                if proc is not None and proc.poll() is not None:
+                                    return real_stop(pid, start, proc)
+                                current = desk.meta(tid)
+                                record = current["merge_check"] if merge else current
+                                self.assertTrue(record.get("cancel") or record.get("timed_out"), record)
+                                os.killpg(pid, signal.SIGKILL)
+                                if proc:
+                                    proc.wait(timeout=10)
+                            with unittest.mock.patch.object(run, "stop", side_effect=kill), \
+                                    unittest.mock.patch.object(cli, "stop", side_effect=kill):
+                                if cause == "cancel":
+                                    with contextlib.redirect_stdout(io.StringIO()):
+                                        main(["--desk", str(desk.root), "cancel", tid])
+                                else:
+                                    m = desk.meta(tid)
+                                    if merge:
+                                        desk.update(tid, merge_check={**m["merge_check"], "started": now() - 100000})
+                                    else:
+                                        desk.update(tid, started=now() - 100000)
+                                    d.tick()
+                                m = self.oom_settle(d, desk, tid)
+                            result = m["merge_check_result" if merge else "check"]
+                            self.assertEqual(int((root / "count").read_text()), 1)
+                            self.assertNotIn("retried", result)
+                            self.assertFalse(result["ok"])
+                            self.assertEqual(m["state"], "done" if merge else "cancelled" if cause == "cancel" else "done")
+                            self.assertIn("request" if cause == "cancel" else "ceiling", result["note"])
+                        finally:
+                            for proc in [*d.procs.values(), *d.merge_procs.values()]:
+                                real_stop(proc.pid, proc=proc)
+
+    def test_a_cancel_arriving_while_a_killed_checks_output_is_published_prevents_its_retry(self):
+        from hansa import run
+        publish = run.publish
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    d, desk, tid, root = self.oom_check_task(f"cancel-at-end-{merge}", "kill-once", vmstat, merge)
+                    def started():
+                        d.tick()
+                        m = desk.meta(tid)
+                        return (tid in d.merge_procs if merge else
+                                m.get("phase") == "checking" and m.get("check_started") and tid in d.procs)
+                    self.soon(started)
+                    proc = (d.merge_procs if merge else d.procs)[tid]
+                    proc.wait(timeout=15)
+                    def cancel(desk, task, *names, **kwargs):
+                        publish(desk, task, *names, **kwargs)
+                        m = desk.meta(task)
+                        if merge:
+                            desk.update(task, merge_check={**m["merge_check"], "cancel": True})
+                        else:
+                            desk.update(task, cancel=True)
+                    with unittest.mock.patch.object(run, "publish", side_effect=cancel):
+                        d.tick()
+                    m = desk.meta(tid)
+                    self.assertEqual(m["state"], "done" if merge else "cancelled")
+                    self.assertNotIn("retried", m["merge_check_result" if merge else "check"])
+                    self.assertEqual((root / "count").read_text(), "1")
+
+    def test_a_killed_checks_rerun_has_a_fresh_ceiling_and_merge_keeps_its_place(self):
+        # Rows 7 and 8: the second run stays alive past the first run's ceiling, still ahead of another merge.
+        from hansa import run
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    d, desk, tid, root = self.oom_check_task(f"8-{merge}", "ceiling", vmstat, merge)
+                    try:
+                        if merge:
+                            queued = desk.meta(tid)["merge_check"]["queued"]
+                            other = desk.new_task("waiting merge", lane="a")
+                            desk.update(other, state="merging", merge_check={"phase": "queued", "plain": True,
+                                                                              "queued": queued + 1})
+                        self.soon(lambda: (d.tick(), (root / "first-ready").exists())[1])
+                        m = desk.meta(tid)
+                        if merge:
+                            desk.update(tid, merge_check={**m["merge_check"], "started": now() - 100000})
+                        else:
+                            desk.update(tid, started=now() - 100000, check_started=now() - 100000)
+                        (root / "first-go").touch()
+                        (d.merge_procs if merge else d.procs)[tid].wait(timeout=15)
+                        self.soon(lambda: (d.tick(), (root / "ready").exists())[1])
+                        m = desk.meta(tid)
+                        if merge:
+                            self.assertEqual(m["merge_check"]["queued"], queued)
+                            self.assertEqual(desk.meta(other)["merge_check"]["phase"], "queued")
+                            self.assertEqual(run.merge_check_ahead(desk.settings(), desk.meta(other), desk.tasks())["id"], tid)
+                        d.tick()
+                        m = desk.meta(tid)
+                        self.assertFalse((m["merge_check"] if merge else m).get("timed_out"), m)
+                        (root / "go").touch()
+                        result = self.oom_settle(d, desk, tid)["merge_check_result" if merge else "check"]
+                        self.assertTrue(result["ok"])
+                        self.assertGreater(result["retried"]["seconds"], 90000)
+                    finally:
+                        (root / "first-go").touch()
+                        (root / "go").touch()
+                        for proc in [*d.procs.values(), *d.merge_procs.values()]:
+                            run.stop(proc.pid, proc=proc)
+
+    def test_linux_oom_counts_workers_setups_verifications_tries_and_releases(self):
+        # Row 9, plus verification records. Lane tries and releases never retry a kill.
+        from hansa import release, run
+        with self.oom_counter() as vmstat:
+            bump = shlex.join([sys.executable, "-c", f"from pathlib import Path; Path({str(vmstat)!r}).write_text('oom_kill 13\\n')"])
+            s = self.desk.settings()
+            s["lanes"]["a"]["setup"] = bump
+            self.assertEqual(self.desk.save_settings(s), [])
+            tid = self.desk.new_task("Add hello.txt")
+            m = self.settle(Dispatcher(self.desk), tid)
+            self.assertEqual((m["oom_kills"], m["setup_oom_kills"]), (3, 3))
+            self.assertFalse((self.desk.state_dir / "runs" / tid).exists())
+            self.assertIn("setup: the system's out-of-memory killer killed 3 processes", views.show_text(self.desk, tid))
+            self.assertIn("out-of-memory killer", notify.task_line(self.desk, m))
+            for kind in ("worker", "verify"):
+                vmstat.write_text("oom_kill 10\n")
+                t = self.desk.new_task("Add hello again", kind=kind) if kind == "verify" else self.desk.new_task("Add hello again")
+                p = run.start(self.desk, t, "a", "claude")
+                rc = p.wait(timeout=20)
+                result = run.finish(self.desk, t, rc)
+                self.assertEqual(result["oom_kills"], 3)
+                self.assertIn("a count for the whole machine", views.show_text(self.desk, t))
+            vmstat.write_text("oom_kill 10\n")
+            s = self.desk.settings()
+            s["lanes"]["a"].update(setup="", check=self.oom_command(self.tmp, "rise-kill", vmstat))
+            self.assertEqual(self.desk.save_settings(s), [])
+            run.write_try(self.desk, "a", {"phase": "queued", "id": "one-try"})
+            p = run.start_try(self.desk, "a", s["lanes"]["a"])
+            p.wait(timeout=20)
+            tried = run.finish_try(self.desk, "a")
+            self.assertEqual((tried["oom_kills"], tried["steps"]["check"]["oom_kills"]), (1, 1))
+            self.assertIn("out-of-memory killer", views.try_text("a", tried))
+            self.assertEqual((self.tmp / "count").read_text(), "1")
+            vmstat.write_text("oom_kill 10\n")
+            self.with_release(self.oom_command(self.tmp, "rise-kill", vmstat))
+            self.hansa("release", "a")
+            r = release.get(self.desk, 1)
+            release.answer(self.desk, 1, True, "", r["commit"], r["command"])
+            r = self.settle_release(Dispatcher(self.desk), 1)
+            self.assertEqual((r["state"], r["oom_kills"]), ("failed", 2))
+            self.assertEqual((self.tmp / "count").read_text(), "2")
+            self.assertIn("out-of-memory killer", release.list_text(self.desk))
+            event = self.events("release_ended")[-1]
+            self.assertIn("out-of-memory killer", notify._item(self.desk, event)[1])
+
+    def test_unavailable_vmstat_and_macos_leave_no_oom_count(self):
+        # Row 10: real runs still end normally, and an unreadable reader does not raise.
+        from hansa import run
+        with self.oom_counter() as vmstat:
+            for case in ("missing", "no-line", "macos"):
+                with self.subTest(case=case):
+                    if case == "missing":
+                        vmstat.unlink()
+                    else:
+                        vmstat.write_text("pgfault 20\n" if case == "no-line" else "oom_kill 20\n")
+                    with unittest.mock.patch.object(account, "LINUX", case != "macos"):
+                        self.assertIsNone(run.oom_kill())
+                        tid = self.desk.new_task("Add hello.txt")
+                        m = self.settle(Dispatcher(self.desk), tid)
+                        self.assertNotIn("oom_kills", m)
+                        self.assertNotIn("oom_start", m)
+                        self.assertNotIn("out-of-memory", views.show_text(self.desk, tid))
+            with unittest.mock.patch.object(Path, "read_text", side_effect=PermissionError("unreadable")):
+                self.assertIsNone(run.oom_kill())
+            original = Path.read_text
+            def unreadable(path, *args, **kwargs):
+                if path == vmstat:
+                    raise PermissionError("unreadable vmstat")
+                return original(path, *args, **kwargs)
+            with unittest.mock.patch.object(Path, "read_text", unreadable):
+                tid = self.desk.new_task("Add hello.txt")
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done")
+                self.assertNotIn("oom_kills", m)
+                self.assertNotIn("oom_start", m)
+            for text in ("oom_kill broken\n", "oom_kill -1\n"):
+                vmstat.write_text(text)
+                self.assertIsNone(run.oom_kill())
+
+    def test_workers_killed_twice_keep_both_known_oom_counts(self):
+        from hansa import run
+        with self.oom_counter() as vmstat:
+            for kind in ("task", "verify"):
+                desk, repo, root = self.kill_desk("counts-" + kind)
+                tid = desk.new_task("Add hello.txt", kind=kind)
+                def raised(_):
+                    n = int((root / "count").read_text())
+                    vmstat.write_text(f"oom_kill {10 + n * (n + 1) // 2}\n")
+                vmstat.write_text("oom_kill 10\n")
+                runs = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1,2:{root / 'count'}"}, mark=raised)
+                last = runs[-1][1]
+                self.assertEqual([a["oom_kills"] for a in last["attempts"]], [1, 2])
+                for n in (1, 2):
+                    self.assertIn(f"out-of-memory killer killed {n} processes", last["error"])
+
     def kill_desk(self, row):
         """A desk and repository of their own for one row of the killed-run table, and the row's folder."""
         root = self.tmp / f"killed-{row}"

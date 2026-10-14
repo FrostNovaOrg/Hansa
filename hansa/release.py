@@ -61,6 +61,7 @@ from . import outside, without_session
 from .desk import (WRITE_FILE, Desk, _is_int, forbidden_exceptions_ok, forbidden_pattern, lane_targets, listed_key,
                    listed_mismatch, now, read_json, target_name, write_json, write_text)
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
+                  oom_begin, oom_result, oom_text,
                   run_running, save_stopped, serve_step, recording_start, retry_start_failure,
                   merge_check_lane, merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
@@ -1346,6 +1347,7 @@ def _launch(desk: Desk, r: dict, token: str, cwd) -> subprocess.Popen:
            "HANSA_RELEASE_TARGET": r.get("target") or "", "HANSA_RELEASE_REPO": r["repo"]}
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
+    change(desk, rid, lambda x: oom_begin(x))
     with open(d / f"{rid}.log", "wb") as out:
         proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["command"], str(d / f"{rid}.exit")],
                                 cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out,
@@ -1362,6 +1364,7 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
     r = get(desk, rid)
     if not r or r.get("state") not in ("starting", "running"):
         return None
+    memory = oom_result(r.get("oom_start")) if ran else {}
     left = stop_recorded(_left(r), SWEEP_GRACE)
     if left:
         desk.event("release_left_running_stopped", id=rid, pids=left)
@@ -1389,7 +1392,7 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
         # that came after its command had ended ends it as its exit says (stop_late)
         stopped = bool(x.get("stop_asked")) and (bool(x.get("termed")) or not ran)
         late = bool(x.get("stop_asked")) and not stopped
-        return {"state": "stopped" if stopped else "done" if ok else "failed", "exit": code, "ran": ran,
+        return {"state": "stopped" if stopped else "done" if ok else "failed", "exit": code, "ran": ran, **memory,
                 "problem": "" if stopped else problem, "ended": now(), "tail": text.strip().splitlines()[-TAIL:],
                 "seconds": round(now() - (x.get("started") or now())), "pid": None, "pid_start": "",
                 **({"stop_late": x.get("stop_late") or now()} if late else {})}
@@ -1765,7 +1768,7 @@ def runs_text(t: dict, zh: bool = False) -> str:
 
 def line(desk: Desk, r: dict, s: dict | None = None) -> str:
     return (f"#{r['id']} {what(r)} at {r.get('commit', '')[:10]} ({r.get('base')}): "
-            f"{state_text(desk, r, s)}")
+            f"{state_text(desk, r, s)}" + (f"; {oom_text(r)}" if oom_text(r) else ""))
 
 
 def list_text(desk: Desk) -> str:

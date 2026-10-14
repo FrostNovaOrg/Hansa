@@ -144,3 +144,16 @@ so the process hansa records is the command's own. A refused write does not
 stop the run, and a program that cannot be found starts without that shell,
 so hansa says it could not start as before. This does not choose among the
 workers; systemd-oomd, where it runs, picks by other rules.
+
+hansa reads `oom_kill` in `/proc/vmstat` outside the sandbox at each run's start and end (Linux 4.13+).
+Workers, verifications, design sessions, setups, checks, merge checks, lane tries and releases keep a positive
+difference on their records; `hansa show` and end notices say how many processes the kernel killed while
+the run ran. This is the whole machine's count, so another run can account for it. macOS, a missing or
+unreadable file, or a file without `oom_kill` leaves no count and does not interrupt the run.
+
+A failing check during which the count rose, or a check with exit 137, -9 or no exit code, runs once more
+unless hansa stopped it itself. The rerun has a fresh time ceiling; a merge check stays first in line.
+`hansa show ID --check` keeps the killed run's exit and last lines. A second kill fails with a memory hint:
+fewer runs at once may help (`hansa concurrency`). Workers and verifications also retry one system kill;
+lane tries and releases only record the count. The count detects a killed test child even when its check
+shell exits 1. It is diagnostic evidence, not proof that this particular run exhausted memory.

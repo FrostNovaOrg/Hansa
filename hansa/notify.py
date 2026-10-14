@@ -210,9 +210,13 @@ def task_line(desk: Desk, m: dict) -> str:
         what = "merge" if (m.get("merge_check") or {}).get("plain") else "merge check"
         head += f" (its {what} is queued and waits for {ahead})" if ahead else f" (its {what} is queued or running)"
     from .views import background_note
+    from .run import oom_lines
     rethink = rethink_text(desk, m) if m.get("kind") == "verify" else ""
     note = background_note(m)
+    memory = [*oom_lines(m, "run"), *oom_lines(chk, "check")]
+    memory += [line for i, a in enumerate(m.get("attempts") or [], 1) for line in oom_lines(a, f"earlier run {i}")]
     return (f"{head}{' · ' + rethink if rethink else ''} · next: {_next_step(desk, tid)}"
+            + (" · " + " · ".join(memory) if memory else "")
             + (f" · {note}" if note else ""))
 
 
@@ -223,7 +227,7 @@ def _item(desk: Desk, e: dict):
     if kind in ("task_finished", "task_checked", "task_not_started", "merge_check_ended", "task_merged"):
         if kind == "task_finished" and e.get("state") in ("checking", "queued"):  # not ended yet / moved on
             return None
-        if kind == "merge_check_ended" and e.get("note") == "cancelled":  # the coordinator cancelled it
+        if kind == "merge_check_ended" and e.get("note") in ("cancelled", "stopped on request"):  # the coordinator cancelled it
             return None
         if kind == "task_merged" and not e.get("merge_checked") and not e.get("waited"):  # the coordinator saw it
             return None
@@ -247,6 +251,11 @@ def _item(desk: Desk, e: dict):
                                             if e.get("command") and not e.get("waited") else ""))
         else:
             key, line = ("task", tid), task_line(desk, m)
+        if kind in ("merge_check_ended", "task_merged"):
+            from .run import oom_lines
+            memory = oom_lines(m.get("merge_check_result") or {}, "merge check")
+            if memory:
+                line += " · " + " · ".join(memory)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
     # hansa closes a design session's request itself, and the coordinator knows of one it closed (hansa ask --close)
     if kind == "ask_closed" and e.get("by") != "hansa" and not e.get("coordinator"):
@@ -348,6 +357,9 @@ def _release_item(desk: Desk, e: dict):
         key = ("release", rid)
         line = (f"{head} refused: what goes out holds words the principal keeps from going out · next: "
                 f"hansa release lists where")
+    from .run import oom_text
+    if kind in ("release_ended", "release_stopped") and oom_text(r):
+        line += " · " + oom_text(r)
     return key, line, r.get("session"), False, None
 
 
