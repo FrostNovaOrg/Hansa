@@ -260,16 +260,20 @@ A command can also name a file outside the lane's repository: hansa looks
 in its words, inside quotes too, for absolute paths, `~/`, `$HOME/` or
 `${HOME}/` paths, and relative paths that leave the repository, expanding
 HOME and following links. This includes a relative path such as
-`./deploy.sh` through a repository link to an outside file or folder; an
-outside link back into the repository is not named. Words split on `=`,
-not `:`: `--config=~/x` and `env V=~/x` name `~/x`, while remote paths such
-as `host:/etc/hosts` and `PATH=/usr/bin:/bin` name nothing. Comments (from
-a `#` starting a word), the word after `<<<`, and heredoc bodies through
-their end marker are not looked into. An output redirection's destination
+`./deploy.sh` or `deploy.sh` in `bash deploy.sh` through a repository link
+to an outside file or folder; an outside link back into the repository is
+not named. Words split on `=`, not `:`: `--config=~/x` and `env V=~/x`
+name `~/x`, while remote paths such as `host:/etc/hosts` and
+`PATH=/usr/bin:/bin` name nothing. Words are split with `shlex`, falling
+back to splitting on spaces when it cannot split the line. Comments,
+here-strings and heredoc bodies are read as words too.
+Process and command substitution (`>( )`, `<( )`, `$( )`, backticks) is
+read as part of the command around it. An output redirection's destination
 (`>`, `>>`, `>|`, `&>`, `&>>`, including a descriptor number such as `2>`)
 and `tee`'s file arguments (options aside) are files the command writes,
 so they are not named or fingerprinted; an input redirection's file (`<`)
-is still looked into.
+is still looked into. `tee` run through `sudo`, `env` or `xargs` is not
+recognized, so its file is named.
 Existing regular text files (no NUL in the first 8 KB) are named when a
 target is set and recorded with their sha256 on a release request and on
 the principal's tick; no worker can change them and no verification covers
@@ -283,18 +287,18 @@ the tick was saved makes that tick stop counting; the page names the file,
 and taking changed entries back in records their new fingerprints. An
 older request or tick that did not record an outside file is void or stops
 counting too, saying it did not record the file; one with no outside file
-keeps counting. Outside folders named as where the command
-runs are shown without a fingerprint; files over 16 MB or unreadable are
-named as not fingerprinted, and a file recorded without a fingerprint is
-not compared. Devices, binaries, bare names found on PATH, variables other
-than HOME, and what a script runs in turn are not
-looked into. Fingerprints are taken only when a target is set, a release is
-asked or checked again, or a tick is saved or evaluated, never in an idle
-round with no release waiting or approved. The page fingerprints each tick
-once per load, sharing the result between languages. It also notes an alert
-command's outside text files that are outside the desk's `secrets/`: the
-coordinator can change them and one-time release codes pass through them,
-so keep them under `secrets/`; saving is still allowed.
+keeps counting. Outside folders named as where the command runs are shown
+without a fingerprint; files over 16 MB or unreadable are named as not
+fingerprinted, and a file recorded without a fingerprint is not compared.
+Devices, binaries, bare names found on PATH, variables other than HOME,
+and what a script runs in turn are not looked into. Fingerprints are taken
+only when a target is set, a release is asked or checked again, or a tick
+is saved or evaluated, never in an idle round with no release waiting or
+approved. The page fingerprints each tick once per load, sharing the result
+between languages. It also notes an alert command's outside text files
+that are outside the desk's `secrets/`: the coordinator can change them and
+one-time release codes pass through them, so keep them under `secrets/`;
+saving is still allowed.
 
 ## Alerts
 

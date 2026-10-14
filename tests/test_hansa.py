@@ -22094,7 +22094,8 @@ class DeskTest(unittest.TestCase):
                  (18, "recorded fingerprint becomes unavailable"), (19, "new unfingerprintable file"),
                  (20, "tee outputs"), (21, "remote paths and PATH"), (22, "equals paths"),
                  (23, "comments and shell input text"), (24, "relative outside link"),
-                 (25, "old request with file")]
+                 (25, "old request with file"), (26, "shlex fallback after bash quoting"),
+                 (27, "bare outside link")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22236,17 +22237,21 @@ class DeskTest(unittest.TestCase):
                                           [str(config.resolve())])
                     elif row == 23:
                         local = ops / "x"
-                        local.write_text("not an argument\n")
+                        local.write_text("shell input text\n")
                         for cmd in ("./d # ~/ops/x", "./d # unmatched ' ~/ops/x", "cat <<< ~/ops/x",
                                     "cat <<EOF\n~/ops/x\nEOF\n", "cat <<'EOF'\n~/ops/x ' >\nEOF\n",
                                     "cat <<-EOF\n\t~/ops/x\n\tEOF\n",
                                     "cat <<A <<B\n~/ops/x\nA\n~/ops/x\nB\n"):
-                            c.assertEqual(outside.inspect(cmd, c.repo), {"outside": [], "outside_folders": []}, cmd)
-                        # Quoted and interior # characters remain arguments; commands after the marker count.
-                        for cmd in ("./d '#' ~/ops/x", "./d word#literal ~/ops/x", "cat <<EOF\nignored\nEOF\ncat ~/ops/x",
-                                    "./d # ~/ops/deploy.sh\ncat ~/ops/x"):
+                            found = outside.inspect(cmd, c.repo)
+                            c.assertEqual([f["path"] for f in found["outside"]], [str(local.resolve())], cmd)
+                            c.assertEqual(found["outside_folders"], [], cmd)
+                        # Quoted and interior # characters are words too, as are commands after a marker.
+                        for cmd, expect in (("./d '#' ~/ops/x", [str(local.resolve())]),
+                                            ("./d word#literal ~/ops/x", [str(local.resolve())]),
+                                            ("cat <<EOF\nignored\nEOF\ncat ~/ops/x", [str(local.resolve())]),
+                                            ("./d # ~/ops/deploy.sh\ncat ~/ops/x", [path, str(local.resolve())])):
                             c.assertEqual([f["path"] for f in outside.inspect(cmd, c.repo)["outside"]],
-                                          [str(local.resolve())], cmd)
+                                          expect, cmd)
                     elif row == 24:
                         (c.repo / "deploy.sh").symlink_to(script)
                         warning(c, "./deploy.sh", script)
@@ -22270,6 +22275,20 @@ class DeskTest(unittest.TestCase):
                         c.assertIn("request did not record the outside file " + path, answer["void"])
                         c.assertNotIn("changed", answer["void"])
                         c.assertEqual(release.get(c.desk, r["id"])["state"], "void")
+                    elif row == 26:
+                        local = ops / "x"
+                        local.write_text("after bash quoting\n")
+                        cmd = r"echo $'it\'s' ; cat ~/ops/x"
+                        warning(c, cmd, local)
+                        c.assertEqual([f["path"] for f in outside.inspect(cmd, c.repo)["outside"]],
+                                      [str(local.resolve())])
+                    elif row == 27:
+                        (c.repo / "deploy.sh").symlink_to(script)
+                        warning(c, "bash deploy.sh", script)
+                        c.assertEqual([f["path"] for f in outside.inspect("bash deploy.sh", c.repo)["outside"]],
+                                      [path])
+                        (c.repo / "ops").symlink_to(ops, target_is_directory=True)
+                        c.assertEqual(outside.inspect("cd ops", c.repo)["outside_folders"], [folder])
                     else:
                         c.with_targets(prod=command)
                         if row == 5:
