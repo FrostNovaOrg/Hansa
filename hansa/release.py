@@ -419,7 +419,7 @@ def direct_commits(repo, since: str, commit: str, commits: list, merges: set) ->
     """Outgoing first-parent commits other than hansa landings, and what their merges brought in."""
     rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *_range(since, commit))
     line = [row.split() for row in rows.splitlines()]
-    if not since:
+    if not since and not _git_bytes(repo, "for-each-ref", "--format=%(refname)", "refs/remotes").strip():
         oldest = [i for i, row in enumerate(line) if row[0] in merges]
         if oldest:
             line = line[:oldest[-1] + 1]  # before hansa's first landing is the repository's earlier history
@@ -774,7 +774,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
     commits, files, hits, checked, directs = scanned
     if direct is not None and not directs:
         raise SystemExit("hansa: --direct was given, but this release has no direct commits. Nothing was asked")
-    held = bool(directs) and s.get("release_direct", "record") == "hold"
+    held = bool(directs) and s.get("release_direct", "record") != "record"
     if held and direct is None:
         names = "\n".join(f"  {c['sha'][:10]} {c['subject']}" for c in directs[:10])
         raise SystemExit(desk.redact(

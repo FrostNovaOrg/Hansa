@@ -9,16 +9,19 @@ The request lists direct commits among its outgoing commits, with their count (a
 subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in
 this repository and base, from any lane, and what it brought in are not direct. Every other commit
 on that line, and what a direct merge brought in (even a task's branch merged by hand), is direct; a
-later hansa merge does not hide an earlier direct commit. On a first release, history older on that
-line than the oldest hansa merge in the outgoing range is history from before hansa and is not
-direct. Commits on remote-tracking branches or in the target's last release are not looked at, nor
-are working files or uncommitted changes; tasks are read for this at the ask only, never in an idle
-round. Only the principal saves `release_direct` on the page: `record` (default) lists these commits
-and keeps ticked targets going out without asking; `hold` refuses a release with them unless asked
-with `--direct "<why>"`, then records the reason and waits for the principal's yes even for a ticked
-target. The refusal names the first ten commits and their count and records nothing; `--direct` with
-no direct commits is refused. The page and `hansa release` show the recorded commits and reason;
-waiting alerts give only their count, never subjects. Older requests show as before.
+later hansa merge does not hide an earlier direct commit. With no remote-tracking branch and no
+readable last release, history older on that line than the oldest hansa merge in the outgoing range
+is history from before hansa and is not direct. With no hansa merge in that range either, every
+outgoing commit is listed as direct: hansa cannot tell what came before it. With a remote-tracking
+branch, no such cutoff applies, even when the last release's commit is gone. Commits on
+remote-tracking branches or in the target's last release are not looked at, nor are working files
+or uncommitted changes; tasks are read for this at the ask only, never in an idle round. Only the
+principal saves `release_direct` on the page: `record` (default) lists these commits and keeps ticked
+targets going out without asking; `hold` (also used for an unknown setting value) refuses a release
+with them unless asked with `--direct "<why>"`, then records the reason and waits for the principal's
+yes even for a ticked target. The refusal names the first ten commits and their count and records
+nothing; `--direct` with no direct commits is refused. The page and `hansa release` show the recorded
+commits and reason; waiting alerts give only their count, never subjects. Older requests show as before.
 
 Releases are the last step. hansa merges into a lane's base branch and stops
 there; a lane's release command (a push, a wait for CI such as `gh run watch

@@ -22488,7 +22488,10 @@ class DeskTest(unittest.TestCase):
                  (5, "pull merge excludes remote-tracking commits"), (6, "first release excludes pre-hansa history"),
                  (7, "hold refuses without a reason"), (8, "hold overrides tick and alert has count only"),
                  (9, "record keeps ticked target automatic"), (10, "reason refused without direct commits"),
-                 (11, "only principal saves setting on page"), (12, "older request displays unchanged")]
+                 (11, "only principal saves setting on page"), (12, "older request displays unchanged"),
+                 (13, "first release with remote preserves direct commit before hansa merge"),
+                 (14, "missing last release with remote preserves direct commit before hansa merge"),
+                 (15, "unknown direct policy holds release")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22496,8 +22499,8 @@ class DeskTest(unittest.TestCase):
                 try:
                     c.with_targets(prod="true")
                     initial = c.git_out("rev-parse", "HEAD")
-                    if row != 6:
-                        # A previous release makes the range precise; row 6 alone tests the first-release cutoff.
+                    if row not in (6, 13, 14):
+                        # These rows have a previous release; the others test an empty outgoing boundary.
                         release._write(c.desk, [{"id": 1, "lane": "a", "target": "prod", "state": "done",
                                                 "repo": str(c.repo.resolve()), "base": "main", "commit": initial,
                                                 "command": "true", "count": 0, "commits": []}])
@@ -22703,6 +22706,46 @@ class DeskTest(unittest.TestCase):
                         release._write(c.desk, [r])
                         c.assertEqual(release.releases_file(c.desk).read_bytes(), before)
                         c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                    elif row in (13, 14):
+                        if row == 14:
+                            gone = c.commit_in_repo("gone.txt", "gone\n", "Discarded last release")
+                            release._write(c.desk, [{"id": 1, "lane": "a", "target": "prod", "state": "done",
+                                                    "repo": str(c.repo.resolve()), "base": "main", "commit": gone,
+                                                    "command": "true", "count": 1, "commits": []}])
+                            c.git_out("reset", "--hard", initial)
+                            c.git_out("reflog", "expire", "--expire=now", "--all")
+                            c.git_out("prune", "--expire", "now")
+                            c.assertFalse(release._has_commit(c.repo, gone))
+                            c.assertEqual(release.last_out(c.desk, "a", str(c.repo), "main", "prod")["commit"], gone)
+                        remote = c.tmp / "remote.git"
+                        c.git_out("init", "--bare", "-q", str(remote))
+                        c.git_out("remote", "add", "origin", str(remote))
+                        c.git_out("push", "-q", "origin", "main")
+                        c.assertEqual(c.git_out("rev-parse", "refs/remotes/origin/main"), initial)
+                        direct = c.commit_in_repo("direct.txt", "direct\n", "D0 before hansa merge")
+                        d, tid = task(c, "task.txt")
+                        c.hansa("merge", tid)
+                        m = c.desk.meta(tid)
+                        c.assertEqual(m["state"], "merged")
+                        r = ask(c, [direct])
+                        c.assertEqual(r["since"], "")
+                        c.assertIsNone(r["since_release"])
+                        c.assertEqual({x["sha"] for x in r["commits"]}, {direct, m["head"], m["merge_commit"]})
+                    elif row == 15:
+                        direct = c.commit_in_repo("direct.txt", "direct\n", "Direct under unknown policy")
+                        s = c.desk.settings()
+                        s["release_direct"] = "bogus"
+                        write_json(c.desk.settings_path, s)  # hand edit bypasses save validation
+                        c.assertEqual(c.desk.settings()["release_direct"], "bogus")
+                        before = release.releases_file(c.desk).read_bytes()
+                        events = c.desk.events_path.read_bytes()
+                        told = c.refused("release", "a", "prod")
+                        c.assertIn("1 direct commit(s)", told)
+                        c.assertIn(direct[:10], told)
+                        c.assertIn("Direct under unknown policy", told)
+                        c.assertIn('--direct "<why>"', told)
+                        c.assertEqual(release.releases_file(c.desk).read_bytes(), before)
+                        c.assertEqual(c.desk.events_path.read_bytes(), events)
                 finally:
                     c.doCleanups()
 
