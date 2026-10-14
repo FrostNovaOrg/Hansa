@@ -22437,6 +22437,275 @@ class DeskTest(unittest.TestCase):
                 finally:
                     c.doCleanups()
 
+    def test_direct_release_commits_cases(self):
+        from hansa import alert, release
+
+        def page(c, tab="release-hits", language="en"):
+            harness = c.tmp / "direct-page.js"
+            harness.write_text(c.PAGE_HARNESS.replace("  const ticks = [];", r"""
+  if (ask === "direct-setting") {
+    let input = null, save = null;
+    walk(ids["#tab-settings"], el => {
+      if (el.tag === "select" && el.kids.some(k => k.value === "hold")) input = el;
+      if (el.tag === "button" && el.className === "primary" &&
+          (el.textContent === "Save settings" || el.textContent === "保存设置")) save = el;
+    });
+    if (!input || !save) throw new Error("direct setting or save button missing");
+    const before = input.kids.find(k => "selected" in k.attrs).value;
+    input.value = "hold"; input.on.change({target:input}); await save.on.click();
+    console.log(JSON.stringify({before, text:input.textContent, posted})); return;
+  }
+  const ticks = [];
+"""))
+            replies = {"/api/status": views.status(c.desk), "/api/settings": public_settings(c.desk)}
+            got = subprocess.run(["node", str(harness), str(Path(cli.__file__).with_name("ui.html")), tab, language],
+                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+            c.assertEqual(got.returncode, 0, got.stderr)
+            return json.loads(got.stdout)
+
+        def task(c, name):
+            s = c.desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_HELLO": name}
+            c.assertEqual(c.desk.save_settings(s), [])
+            d = Dispatcher(c.desk)
+            tid = c.desk.new_task("Add " + name, lane="a")
+            c.assertEqual(c.settle(d, tid)["state"], "done")
+            return d, tid
+
+        def ask(c, expected):
+            c.hansa("release", "a", "prod")
+            r = release.releases(c.desk)[-1]
+            c.assertEqual(r["direct_count"], len(expected))
+            c.assertEqual({x["sha"] for x in r["direct"]}, set(expected))
+            subjects = {x["sha"]: x["subject"] for x in r["commits"]}
+            c.assertEqual(r["direct"], [x for x in r["commits"] if x["sha"] in expected])
+            for x in r["direct"]:
+                c.assertEqual(x["subject"], subjects[x["sha"]])
+            return r
+
+        cases = [(1, "base checkout commit recorded and shown"), (2, "later hansa merge preserves direct commit"),
+                 (3, "all three hansa landings excluded"), (4, "hand merges include task and other branches"),
+                 (5, "pull merge excludes remote-tracking commits"), (6, "first release excludes pre-hansa history"),
+                 (7, "hold refuses without a reason"), (8, "hold overrides tick and alert has count only"),
+                 (9, "record keeps ticked target automatic"), (10, "reason refused without direct commits"),
+                 (11, "only principal saves setting on page"), (12, "older request displays unchanged")]
+        for row, label in cases:
+            with self.subTest(row=row, case=label):
+                c = DeskTest(self._testMethodName)
+                c.setUp()
+                try:
+                    c.with_targets(prod="true")
+                    initial = c.git_out("rev-parse", "HEAD")
+                    if row != 6:
+                        # A previous release makes the range precise; row 6 alone tests the first-release cutoff.
+                        release._write(c.desk, [{"id": 1, "lane": "a", "target": "prod", "state": "done",
+                                                "repo": str(c.repo.resolve()), "base": "main", "commit": initial,
+                                                "command": "true", "count": 0, "commits": []}])
+                    expected = []
+                    if row in (1, 2, 7, 8, 9, 12):
+                        subject = "Direct checkout correction"
+                        direct = c.commit_in_repo("direct.txt", "direct\n", subject)
+                        expected.append(direct)
+                    if row == 1:
+                        r = ask(c, expected)
+                        c.assertEqual(views.status(c.desk)["releases"][-1]["direct"], r["direct"])
+                        for text in (c.hansa("release"), page(c), page(c, language="zh")):
+                            c.assertIn(direct[:10], text)
+                            c.assertIn(subject, text)
+                        # The count covers all direct commits even when the recorded list is capped.
+                        for i in range(3):
+                            c.commit_in_repo(f"extra-{i}.txt", "extra\n", f"Direct extra {i}")
+                        with unittest.mock.patch.object(release, "MOST_COMMITS", 2):
+                            r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual((r["direct_count"], len(r["direct"])), (4, 2))
+                        c.assertIn("4 direct commit(s) (the first 2 shown)", c.hansa("release"))
+                        c.assertIn("4 direct commit(s) (the first 2 shown)", page(c))
+                    elif row == 2:
+                        ask(c, expected)  # the earlier waiting request must not become the outgoing boundary
+                        d, tid = task(c, "task.txt")
+                        c.hansa("merge", tid, "--despite-check")
+                        m = c.desk.meta(tid)
+                        c.assertEqual(m["state"], "merged")
+                        r = ask(c, expected)
+                        c.assertTrue({m["head"], m["merge_commit"]} <= {x["sha"] for x in r["commits"]})
+                    elif row == 3:
+                        d, tid = task(c, "plain.txt")
+                        c.hansa("merge", tid)
+                        plain = c.desk.meta(tid)
+                        d, t1, t2 = c.two_lanes(check="true")
+                        c.merge_lane_for_checks("true")
+                        c.hansa("merge", t1, "--recheck")
+                        c.hansa("merge", t2, "--despite-check")
+                        c.assertTrue(c.desk.meta(t2)["merge_check"]["plain"])
+                        checked, waited = c.settle_merge(d, t1), c.settle_merge(d, t2)
+                        c.assertEqual(checked["merge_check_result"]["lane"], "m")
+                        c.assertIsNone(waited.get("merge_check_result"))
+                        c.assertTrue(any(e.get("waited") and e["task"] == t2 for e in c.events("task_merged")))
+                        landings = [plain, checked, waited]
+                        c.assertTrue(all(m["state"] == "merged" for m in landings))
+                        c.assertTrue(all((m["merge_repo"], m["merge_base"]) == (str(c.repo.resolve()), "main")
+                                         for m in landings))
+                        # Lane settings can move later; the recorded landing still belongs to main.
+                        c.hansa("lane", "set", "b", "base", "other")
+                        r = ask(c, [])
+                        c.assertTrue({m[k] for m in landings for k in ("head", "merge_commit")} <=
+                                     {x["sha"] for x in r["commits"]})
+                    elif row == 4:
+                        d, tid = task(c, "hand-task.txt")
+                        m = c.desk.meta(tid)
+                        c.git_out("-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "-m",
+                                  "Hand merge of task", m["head"])
+                        expected.extend([m["head"], c.git_out("rev-parse", "HEAD")])
+                        c.assertFalse(c.desk.meta(tid).get("merge_commit"))
+                        c.git_out("checkout", "-q", "-b", "hand-other", initial)
+                        expected.append(c.commit_in_repo("hand-other.txt", "other\n", "Other branch work"))
+                        c.git_out("checkout", "-q", "main")
+                        c.git_out("-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "-m",
+                                  "Hand merge of other branch", "hand-other")
+                        expected.append(c.git_out("rev-parse", "HEAD"))
+                        # A merge record for a different base or repository cannot bless a hand merge here.
+                        for fields in ({"merge_repo": str(c.repo), "merge_base": "other"},
+                                       {"merge_repo": str(c.tmp / "elsewhere"), "merge_base": "main"}):
+                            fake = c.desk.new_task("Another landing", lane="a")
+                            c.desk.update(fake, state="merged", merge_commit=expected[-1], **fields)
+                        ask(c, expected)
+                    elif row == 5:
+                        remote = c.tmp / "remote"
+                        c.git_out("clone", "-q", str(c.repo), str(remote))
+                        (remote / "remote.txt").write_text("pulled\n")
+                        c.git_out("add", ".", cwd=remote)
+                        c.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m",
+                                  "Pulled remote work", cwd=remote)
+                        pulled = c.git_out("rev-parse", "HEAD", cwd=remote)
+                        expected.append(c.commit_in_repo("local.txt", "local\n", "Local before pull"))
+                        c.git_out("remote", "add", "origin", str(remote))
+                        c.git_out("-c", "user.name=t", "-c", "user.email=t@t", "pull", "--no-rebase", "--no-ff",
+                                  "--no-edit", "origin", "main")
+                        expected.append(c.git_out("rev-parse", "HEAD"))
+                        c.assertEqual(c.git_out("rev-parse", "refs/remotes/origin/main"), pulled)
+                        r = ask(c, expected)
+                        c.assertNotIn(pulled, {x["sha"] for x in r["commits"]})
+                    elif row == 6:
+                        before = c.commit_in_repo("before.txt", "old\n", "Before hansa")
+                        d, tid = task(c, "first-task.txt")
+                        c.hansa("merge", tid)
+                        expected.append(c.commit_in_repo("between.txt", "direct\n", "Between hansa merges"))
+                        d, tid = task(c, "second-task.txt")
+                        c.hansa("merge", tid)
+                        c.assertEqual(c.git_out("for-each-ref", "refs/remotes"), "")
+                        r = ask(c, expected)
+                        c.assertIsNone(r["since_release"])
+                        c.assertTrue({initial, before} <= {x["sha"] for x in r["commits"]})
+                    elif row == 7:
+                        c.assertTrue(c.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+                        before = release.releases_file(c.desk).read_bytes()
+                        events = c.desk.events_path.read_bytes()
+                        told = c.refused("release", "a", "prod")
+                        c.assertIn("1 direct commit(s)", told)
+                        c.assertIn(direct[:10], told)
+                        c.assertIn(subject, told)
+                        c.assertIn('--direct "<why>"', told)
+                        c.assertEqual(release.releases_file(c.desk).read_bytes(), before)
+                        c.assertEqual(c.desk.events_path.read_bytes(), events)
+                        for i in range(11):
+                            c.commit_in_repo(f"hold-{i}.txt", "hold\n", f"Held correction {i}")
+                        told = c.refused("release", "a", "prod")
+                        c.assertIn("12 direct commit(s)", told)
+                        outgoing, _ = release.outgoing(c.repo, initial, c.git_out("rev-parse", "HEAD"))
+                        for x in outgoing[:10]:
+                            c.assertIn(x["sha"][:10], told)
+                            c.assertIn(x["subject"], told)
+                        for x in outgoing[10:]:
+                            c.assertNotIn(x["subject"], told)
+                        c.assertIn('--direct "<why>"', told)
+                        c.assertEqual(release.releases_file(c.desk).read_bytes(), before)
+                        c.assertEqual(c.desk.events_path.read_bytes(), events)
+                    elif row in (8, 9):
+                        policy = "hold" if row == 8 else "record"
+                        c.assertEqual(c.desk.settings()["release_direct"], "record")
+                        c.assertTrue(c.page_save(lambda s: s.update(release_direct=policy,
+                            alert={"command": "true"}, releases_without_asking=[{"lane": "a", "target": "prod"}]))["ok"])
+                        c.hansa("release", "a", "prod", *(["--direct", "fix"] if row == 8 else []))
+                        r = release.releases(c.desk)[-1]
+                        c.assertEqual(r["direct"], [{"sha": direct, "subject": subject}])
+                        c.assertEqual(r["direct_count"], 1)
+                        if row == 8:
+                            c.assertEqual((r["state"], r["direct_reason"], r["direct_hold"]), ("waiting", "fix", True))
+                            c.assertFalse(r.get("without_asking"))
+                            c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                            d = Dispatcher(c.desk)
+                            d.tick()
+                            c.assertEqual(release.get(c.desk, r["id"])["state"], "waiting")
+                            for language, wait in (("en", "Direct commits require your yes even when the target is ticked"),
+                                                   ("zh", "这些直接提交须等你点头，即使发布目标已勾选")):
+                                text = page(c, language=language)
+                                c.assertIn("fix", text)
+                                c.assertIn(wait, text)
+                            c.assertIn("reason for direct commits: fix", c.hansa("release"))
+                            waiting = [x for x in alert.queued(c.desk) if x["kind"] == "release_waiting"]
+                            c.assertTrue(waiting)
+                            text = alert.text_of(c.desk, waiting)
+                            c.assertIn("1 direct commit(s)", text)
+                            c.assertNotIn(subject, text)
+                            c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                        else:
+                            c.assertEqual((r["state"], r["without_asking"]), ("approved", True))
+                            c.assertFalse(any(x["kind"] == "release_waiting" for x in alert.queued(c.desk)))
+                            d = Dispatcher(c.desk)
+                        c.assertEqual(c.settle_release(d, r["id"])["state"], "done")
+                        for text in (c.hansa("release"), page(c)):
+                            c.assertIn(subject, text)  # also shown after the release goes out
+                    elif row == 10:
+                        d, tid = task(c, "only-task.txt")
+                        c.hansa("merge", tid)
+                        before = release.releases_file(c.desk).read_bytes()
+                        for policy in ("record", "hold"):
+                            c.assertTrue(c.page_save(lambda s: s.update(release_direct=policy))["ok"])
+                            told = c.refused("release", "a", "prod", "--direct", "fix")
+                            c.assertIn("no direct commits", told)
+                            c.assertEqual(release.releases_file(c.desk).read_bytes(), before)
+                    elif row == 11:
+                        before = c.desk.settings_path.read_bytes()
+                        s = c.desk.settings()
+                        s["release_direct"] = "hold"
+                        with c.assertRaises(SystemExit) as refused:
+                            cli._save(c.desk, s)
+                        c.assertIn("release_direct is the principal's", str(refused.exception))
+                        c.assertIn("release_direct is the principal's", " ".join(c.desk.save_settings(s)))
+                        c.assertEqual(c.desk.settings_path.read_bytes(), before)
+                        for language in ("en", "zh"):
+                            shown = page(c, "direct-setting", language)
+                            c.assertEqual(shown["before"], "record")
+                            c.assertIn("record", shown["text"])
+                            c.assertIn("hold", shown["text"])
+                            c.assertEqual(shown["posted"]["settings"]["release_direct"], "hold")
+                            c.assertEqual(save_from_page(c.desk, shown["posted"]), {"ok": True, "problems": []})
+                            c.assertTrue(c.page_save(lambda s: s.update(release_direct="record"))["ok"])
+                        bad = c.page_save(lambda s: s.update(release_direct="skip"))
+                        c.assertFalse(bad["ok"])
+                        c.assertIn("release_direct must be record or hold", bad["problems"])
+                    elif row == 12:
+                        r = release.ask(c.desk, "a", target="prod")
+                        for key in ("direct", "direct_count", "direct_reason", "direct_hold"):
+                            r.pop(key, None)
+                        release._write(c.desk, [r])  # as the older version saved the request
+                        before = release.releases_file(c.desk).read_bytes()
+                        c.assertTrue(c.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+                        for state in ("waiting", "done"):
+                            r["state"] = state
+                            release._write(c.desk, [r])
+                            shown = views.status(c.desk)["releases"][0]
+                            c.assertNotIn("direct_count", shown)
+                            c.assertNotIn("direct commit", c.hansa("release"))
+                            c.assertNotIn("direct commit", page(c))
+                            c.assertNotIn("直接提交", page(c, language="zh"))
+                        r["state"] = "waiting"
+                        release._write(c.desk, [r])
+                        c.assertEqual(release.releases_file(c.desk).read_bytes(), before)
+                        c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                finally:
+                    c.doCleanups()
+
     def test_release_files_globs_match_nested_poms_and_are_kept_relative(self):
         from hansa.desk import release_files_in, validate
         files = ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "pom.xml.bak", "core/src/Main.java", "build.sh",

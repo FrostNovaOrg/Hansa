@@ -17,7 +17,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
   your session, in a clean clone or anywhere else: that runs the workers' code with nothing around
   it, before a release too.
 - Edit code in the lanes' repositories (code changes go through workers, so each gets a branch, the
-  lane's check and a merge), `lanes/<lane>/brief.md` (use `hansa lane brief`) or the desk's
+  lane's check and a merge; a commit made there directly is shown to the principal with the release that sends it), `lanes/<lane>/brief.md` (use `hansa lane brief`) or the desk's
   `settings.json` (ask with `hansa ask`).
 - Guess a release code, or ask the principal to send it anywhere else: it travels only in their alert.
 - Ask for the page's address or its token: it approves releases and is the principal's alone.

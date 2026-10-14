@@ -14,7 +14,8 @@ release_forbidden words; a hit refuses it (the last net: hansa add refuses a tit
 whose commits or merge commit hold one, run.words_in_merge). The principal answers on the page (Release, or Refuse with a
 reason), or says in the conversation the one-time code their alert carried, which the coordinator passes on
 (hansa release yes|no ID CODE: see answer_by_code); a target on the principal's releases_without_asking list needs no answer while it is what the list
-recorded when the page saved it, and while the desk is not paused. hansa serve runs an approved
+recorded when the page saved it, while the desk is not paused and its direct commits do not require the yes.
+hansa serve runs an approved
 release in the lane's repository, as the desk's account, outside the sandbox, with hansa's own environment (not
 the lane's env) and the target's time limit (else the lane's timeout_min), and only while the base branch and the
 command line are still what the principal saw, and the target it must follow sent out that commit: otherwise the
@@ -400,6 +401,41 @@ def outgoing(repo, since: str, commit: str) -> tuple:
     return commits, sorted({x for x in names.splitlines() if x})
 
 
+def hansa_merges(desk: Desk, s: dict, a: dict) -> set:
+    """Read tasks only while asking: landings in this repository and base, from every lane."""
+    found = set()
+    for m in desk.tasks():
+        if not m.get("merge_commit"):
+            continue
+        ln = s["lanes"].get(m.get("lane"), {})
+        repo = m.get("merge_repo") or m.get("repo") or ln.get("repo")
+        base = m.get("merge_base") or ln.get("base")
+        if repo and repo_key(repo) == repo_key(a["repo"]) and (base or "main") == a["base"]:
+            found.add(m["merge_commit"])
+    return found
+
+
+def direct_commits(repo, since: str, commit: str, commits: list, merges: set) -> list:
+    """Outgoing first-parent commits other than hansa landings, and what their merges brought in."""
+    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *_range(since, commit))
+    line = [row.split() for row in rows.splitlines()]
+    if not since:
+        oldest = [i for i, row in enumerate(line) if row[0] in merges]
+        if oldest:
+            line = line[:oldest[-1] + 1]  # before hansa's first landing is the repository's earlier history
+    direct = set()
+    for row in line:
+        sha, *parents = row
+        if sha in merges:
+            continue
+        direct.add(sha)
+        if len(parents) > 1:
+            # Subtract only this merge's first parent, never all the ancestors of a later hansa merge:
+            # those can include direct commits already on the base.
+            direct.update(_git_bytes(repo, "rev-list", sha, f"^{parents[0]}", "--").splitlines())
+    return [c for c in commits if c["sha"] in direct]
+
+
 def _added(lines):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
@@ -684,17 +720,21 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
             "since": since, "fixed": bool(targets[target].get("fixed"))}
 
 
-def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, target: str | None = None) -> dict:
+def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, target: str | None = None,
+        direct: str | None = None) -> dict:
     """Record a request for a release of the lane's base branch as it is now, by one of its release targets (None:
     its only one). Returns it; raises SystemExit, with nothing recorded, when it cannot be asked, and with the
     request recorded as forbidden on a forbidden word. What goes out is read and scanned without the desk lock
     (it can take long on a long history), then recorded under it only if it is still what goes out: otherwise it
     is read again."""
+    if direct is not None and not direct.strip():
+        raise SystemExit('hansa: --direct needs a reason: --direct "<why>". Nothing was asked')
     scanned = None
     for _ in range(SCAN_TRIES):
         with desk.lock():
             s = desk.settings()
             a = _askable(desk, s, lane, target)
+            merges = hansa_merges(desk, s, a)
             words = lane_words(s, lane)
             mailboxes = s.get("release_mailboxes", False)
             mailbox_allow = s.get("release_mailbox_allow") or []
@@ -704,15 +744,16 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
             except RuntimeError as e:
                 raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). "
                                  "Nothing was asked")
-            if scanned and scanned[0] == (key, a["target"]):
-                r = _record(desk, s, lane, a, key, scanned[1:], note, by, session)
+            if scanned and scanned[0] == (key, a["target"], merges):
+                r = _record(desk, s, lane, a, key, scanned[1:], note, by, session, direct)
                 break
         try:  # without the lock: the server's round, the page and other commands go on meanwhile
             commits, files = outgoing(a["repo"], a["since"], a["commit"])
+            directs = direct_commits(a["repo"], a["since"], a["commit"], commits, merges)
             hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow)
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
-        scanned = ((key, a["target"]), commits, files, hits, checked)
+        scanned = ((key, a["target"], merges), commits, files, hits, checked, directs)
     else:
         raise SystemExit(f"hansa: what goes out from lane {lane} kept changing while it was read (its base branch "
                          "moving, say); ask again in a moment. Nothing was asked")
@@ -728,18 +769,30 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
 
 
 def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, note: str, by: str,
-            session) -> dict:
+            session, direct: str | None) -> dict:
     """Under the desk lock: write the request, from what was read and scanned with this key."""
-    commits, files, hits, checked = scanned
+    commits, files, hits, checked, directs = scanned
+    if direct is not None and not directs:
+        raise SystemExit("hansa: --direct was given, but this release has no direct commits. Nothing was asked")
+    held = bool(directs) and s.get("release_direct", "record") == "hold"
+    if held and direct is None:
+        names = "\n".join(f"  {c['sha'][:10]} {c['subject']}" for c in directs[:10])
+        raise SystemExit(desk.redact(
+            f"hansa: this release holds {len(directs)} direct commit(s) (the first 10 at most):\n{names}\n"
+            f'The principal requires their yes for direct commits; ask with hansa release {lane} {a["target"]} '
+            '--direct "<why>". Nothing was asked'))
     target, command, prev, since = a["target"], a["command"], a["prev"], a["since"]
     rs = releases(desk)
-    listed = lane_listed(s, lane, target)
+    listed = lane_listed(s, lane, target) and not held
     r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
          "repo": repo_key(a["repo"]), "base": a["base"], "commit": a["commit"], "command": command,
          **outside.inspect(command, a["repo"]),
          **({"fixed": True} if a["fixed"] else {}), "note": desk.redact(note.strip()), "asked": now(),
          "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
          "count": len(commits), "checked": checked, "scanned": key, "commits": commits[:MOST_COMMITS],
+         "direct": directs[:MOST_COMMITS], "direct_count": len(directs),
+         **({"direct_reason": desk.redact(direct.strip())} if direct is not None else {}),
+         **({"direct_hold": True} if held else {}),
          "files": files[:MOST_FILES], "files_count": len(files), "named": named_files(command, files[:MOST_FILES]),
          "state": "forbidden" if hits else "approved" if listed else "waiting",
          **({"hits": hits} if hits else {}), **({"without_asking": True, "answered": now()} if listed and not hits
@@ -1571,6 +1624,21 @@ def checked_text(r: dict) -> str:
     return (f"{n} outgoing commit(s) checked for forbidden words" + (f" (the first {shown} shown)" if shown < n else ""))
 
 
+def direct_lines(r: dict) -> list:
+    """Direct commits and the recorded reason; older requests have neither."""
+    n = r.get("direct_count", 0)
+    if not n:
+        return []
+    commits = r.get("direct") or []
+    out = [f"{n} direct commit(s)" + (f" (the first {len(commits)} shown)" if len(commits) < n else "")]
+    out += [f"  {c['sha'][:10]} {c['subject']}" for c in commits]
+    if r.get("direct_reason"):
+        out.append(f"reason for direct commits: {r['direct_reason']}")
+    if r.get("direct_hold") and r.get("state") == "waiting":
+        out.append("direct commits require the principal's yes even when the target is ticked")
+    return out
+
+
 def runs_text(t: dict, zh: bool = False) -> str:
     """Which way a target (or a release of it) runs, in words."""
     if t.get("fixed"):
@@ -1602,6 +1670,7 @@ def list_text(desk: Desk) -> str:
             out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
             out.append(f"      {checked_text(r)}")
             out += ["      " + x for x in outside.lines(r)]
+            out += ["      " + x for x in direct_lines(r)]
             if r.get("state") == "forbidden":
                 out += [f"      {x}" for x in hits_text(r.get("hits", [])).splitlines()]
             if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
@@ -1669,6 +1738,7 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
                                      "named", "hits", "ended", "without_asking", "since_release", "fixed",
                                      "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel",
                                      "outside", "outside_folders")}
+        row.update({k: r[k] for k in ("direct", "direct_count", "direct_reason", "direct_hold") if k in r})
         c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash
         row["code_sent"] = c.get("sent") if code_live(r) else None
         waits = r.get("state") == "waiting"
