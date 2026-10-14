@@ -18204,10 +18204,12 @@ class DeskTest(unittest.TestCase):
     def test_the_verification_tells_tests_for_a_defect_from_coverage_tests(self):
         from hansa.run import VERIFY_TASK
         text = " ".join(VERIFY_TASK.split())
-        self.assertIn("Each defect the task names needs a test that fails with the code undone", text)
-        self.assertIn("A test the task asks for to cover behaviour that already worked (coverage) may pass either "
-                      "way: judge it on whether it tests what its name says", text)
-        self.assertIn("a test whose name promises one case and tests another does, coverage or not", text)
+        for words in ("Each defect the task names", "a test that fails with the code undone",
+                      "behaviour that already worked (coverage)", "may pass either way",
+                      "whether it tests what its name says", "name promises one case and tests another",
+                      "coverage or not", "undo each part the task asks for, in turn",
+                      "run the tests again", "each part no test fails without", "each part no test watches"):
+            self.assertIn(words, text)
         self.assertIn("VERDICT: does not hold", text)
 
     def test_retry_replaces_the_original(self):

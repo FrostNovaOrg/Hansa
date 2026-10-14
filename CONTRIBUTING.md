@@ -2,7 +2,7 @@
 
 - Standard library only.
 - Change a task through the desk (`Desk.change`, under the desk lock); the event log is append-only.
-- `hansa/card.md` and `hansa help` are the coordinator's interface: when a change alters what the coordinator can rely on, the card or the topic of `hansa help` that holds it says so. Nobody should need to read the code to use hansa.
+- `hansa/card.md` and `hansa help` are the coordinator's interface. A change that alters what the coordinator can rely on is stated in the `hansa help` topic that holds it; it changes the card only when the coordinator must follow it on every turn, as the bullet below says. Most changes leave the card as it is. Nobody should need to read the code to use hansa.
 - `README.md` is the front page: what hansa is, how to start, where to read more. Keep it short. The details of how hansa behaves go in the matching file under `docs/` (the sandbox, releases and alerts, how a task runs, a Linux server, ...), linked from the README's Documentation table.
 - The coordinator carries the card whole on every turn, so it keeps what the coordinator follows every turn; the detail lives once in `docs/`, reached by `hansa help <topic>`, with a pointer in the card (`More: hansa help TOPIC`). A change to a fact that both state changes both, in the same commit.
 - A new check or rule in hansa says, where it is documented, which kind of problem it guards against and when it may be removed. A check that would need a check of its own belongs in the tests instead.

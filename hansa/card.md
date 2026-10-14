@@ -135,32 +135,32 @@ task's doing and cannot be run again, and say why. If the setup failed, the work
 retry. More: `hansa help check-output`.
 
 ## Checking before you merge
-The lane's check runs on every task that changed something; `hansa diff <id> --stat` shows what the
-change touches:
+The lane's check runs on every changed task; `hansa diff <id> --stat` shows the changes:
 - Text or documentation only: the check is enough; read the diff yourself.
-- Code or tests: `hansa verify <id>` first. A worker runs the change rather than reading it: it undoes
-  the code to see the new tests fail, runs what the task is about, tries edge cases. Each defect the
-  task names needs a test that fails on the old code; coverage tests the task asked for may pass on
-  both, and are judged on whether they test what their names say. Its verdict (holds, does not hold,
+- Code or tests: `hansa verify <id>` first. A worker runs the change: it undoes the code to see new
+  tests fail, runs what the task is about, tries edge cases. Each named defect needs a test that fails
+  on old code; requested coverage tests may pass on both, judged on whether they test what their
+  names say. Its verdict (holds, does not hold,
   unsure) shows in `hansa show <id>`; hansa will not merge while it runs, nor after "does not hold"
   unless you say `--despite-check`.
-- `--lane L` verifies on another lane of the same repository: another model is a stronger check than
-  the same model; use it when the task's lane uses a provider new to the desk, or is busy.
+- `--lane L` verifies on another lane of the same repository: another model is stronger than the
+  same model; use it if the task's provider is new to the desk or its lane is busy.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and also have the
   `reviewer` helper read the change.
 
 ## Merging
-- When the base has not moved since the task was made and the lane has no `merge_check`, `hansa
-  merge` merges at once. A lane without a check has its tasks merged untested: give it one with
+- If the base has not moved since the task was made and the lane has no `merge_check`, `hansa merge`
+  merges at once. Without a check, tasks merge untested: give the lane one with
   `hansa lane set L check "<command>"`.
-- When the base has moved and the lane has a check, the task becomes `merging`: hansa merges it onto
-  the base as it is then, runs the setup and the merge check there, and moves the base to exactly
-  that merge commit if it passes. You are told how it ended; `hansa cancel <id>` stops it and puts
-  the task back in review. `--recheck` goes the same way whether or not the base moved.
-- `hansa lane set L merge_check "<command>"` (limit: `merge_timeout_min`) is for what is too slow to
-  run after every task; it runs before every merge of a task that changed something. Try it with
-  `hansa lane try L --merge-check`. For long merge checks and busy lanes, a merge lane:
+- If the base moved and the lane has a check, the task becomes `merging`: hansa merges onto the
+  current base, runs the setup and merge check there, and moves the base to that exact merge commit
+  if it passes. You are told how it ended; `hansa cancel <id>` stops it and returns the task to review.
+  `--recheck` does the same even if the base has not moved.
+- `hansa lane set L merge_check "<command>"` (limit: `merge_timeout_min`) is for checks too slow to
+  run after every task; it runs before every merge of a changed task. Try `hansa lane try L --merge-check`.
+  For long merge checks and busy lanes, a merge lane:
   `hansa lane add m --like a`, its own caches, `hansa lane set m merge_lane true`.
+- Keep the lane's check quick and the whole suite in the merge check; when either grows slow, a task splits the project's tests or runs them in parallel.
 - A conflict lists each conflicting file and the lines where the sides meet. Settle it with
   `hansa retry <id> --update "<how to settle it>"`; redo the whole change with `--fresh` only when
   the old work is no use.
