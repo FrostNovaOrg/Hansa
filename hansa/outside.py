@@ -43,7 +43,7 @@ def _paths(command: str):
                 output = True
                 continue
             # Options and assignments can hold a path after '='. No variable but HOME is read.
-            values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else word.split("=")
+            values = word.split("=")[1:] if "=" in word else [word]
             for value in values:
                 value = value.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
                 if "$" in value or "`" in value or (value.startswith("~") and not value.startswith("~/")):

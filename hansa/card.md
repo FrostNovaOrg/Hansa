@@ -141,9 +141,8 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
 - Code or tests: `hansa verify <id>` first. A worker runs the change: it undoes the code to see new
   tests fail, runs what the task is about, tries edge cases. Each named defect needs a test that fails
   on old code; requested coverage tests may pass on both, judged on whether they test what their
-  names say. Its verdict (holds, does not hold,
-  unsure) shows in `hansa show <id>`; hansa will not merge while it runs, nor after "does not hold"
-  unless you say `--despite-check`.
+  names say. Its verdict (holds, does not hold, unsure) shows in `hansa show <id>`; hansa will not merge
+  while it runs, nor after "does not hold" unless you say `--despite-check`.
 - `--lane L` verifies on another lane of the same repository: another model is stronger than the
   same model; use it if the task's provider is new to the desk or its lane is busy.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and also have the
@@ -161,7 +160,8 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   run after every task; it runs before every merge of a changed task. Try `hansa lane try L --merge-check`.
   For long merge checks and busy lanes, a merge lane:
   `hansa lane add m --like a`, its own caches, `hansa lane set m merge_lane true`.
-- Keep the lane's check quick and the whole suite in the merge check; when either grows slow, a task splits the project's tests or runs them in parallel.
+- Keep the lane's check quick and the whole suite in the merge check; when either grows slow, a task
+  splits the project's tests or runs them in parallel.
 - A conflict lists each conflicting file and the lines where the sides meet. Settle it with
   `hansa retry <id> --update "<how to settle it>"`; redo the whole change with `--fresh` only when
   the old work is no use.
