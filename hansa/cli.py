@@ -796,7 +796,6 @@ def cmd_retry(a):
 
 def _retry(desk: Desk, a) -> None:
     m = desk.meta(a.id)
-    _work_lane(desk.settings(), m.get("lane"))
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification; send back the task it checked: hansa retry {m.get('parent')} \"...\"")
     if m["state"] in ("queued", "running", "merging"):
@@ -805,11 +804,31 @@ def _retry(desk: Desk, a) -> None:
     if a.update and a.fresh:
         raise SystemExit("hansa: --update continues from the previous attempt and --fresh starts from the base; "
                          "choose one. Nothing was queued")
+    lanes = desk.settings()["lanes"]
+    own = lanes.get(m.get("lane"))
+    lane = a.lane if a.lane is not None else m.get("lane", "")
+    again = f"; nothing was queued. Give the work again as a new task: hansa add --lane {a.lane or 'L'}"
+    if own is None and (m.get("lane") or a.lane is not None):
+        raise SystemExit(f"hansa: {a.id}'s lane {m.get('lane') or '(none)'} is no longer on the desk" + again)
+    if own and m.get("repo") and not _same_repo(own["repo"], m["repo"]):
+        raise SystemExit(f"hansa: {a.id}'s lane {m['lane']} is now on {own['repo']}, not on {m['repo']}, "
+                         "where the task ran" + again)
+    _work_lane(desk.settings(), m.get("lane"))
+    if a.lane is not None:
+        if lane not in lanes:
+            raise SystemExit(f"hansa: there is no lane {lane}; nothing was queued")
+        _work_lane(desk.settings(), lane)
+        if not _same_repo(lanes[lane]["repo"], own["repo"]):
+            raise SystemExit(f"hansa: lane {lane} is on another repository ({lanes[lane]['repo']}), not on "
+                             f"{own['repo']}, the repository of {a.id}'s lane {m['lane']}; nothing was queued")
+        if lanes[lane].get("base", "main") != own.get("base", "main"):
+            raise SystemExit(f"hansa: lane {lane} merges into {lanes[lane].get('base', 'main')}, not "
+                             f"{own.get('base', 'main')}, the base branch of {a.id}'s lane {m['lane']}; "
+                             "nothing was queued")
     if a.update and not m.get("head"):
         raise SystemExit(f"hansa: {a.id} has no branch to bring up to date; start over with hansa retry {a.id} --fresh "
                          f"\"...\". Nothing was queued")
     if not a.fresh and m.get("head") and m.get("kind") != "verify":  # it continues from the recorded commit
-        own = desk.settings()["lanes"].get(m.get("lane"))
         held = branch_holds(own["repo"], m) if own else ""
         if held:
             raise SystemExit(f"hansa: {held}; nothing was queued. Start over from the base: hansa retry {a.id} "
@@ -833,10 +852,10 @@ def _retry(desk: Desk, a) -> None:
     if a.browser and not desk.settings().get("browser"):
         raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued. "
                          + see_more("browser"))
-    opts = {"lane": m.get("lane", ""), "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
+    opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
             "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser"),
             **notify.recorded(notify.session_here())}
-    base = (desk.settings()["lanes"].get(m.get("lane")) or {}).get("base") or "main"
+    base = (own or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
         opts.update(start_from=m["head"], update=True)
         text += (f"\nYou start from the earlier task's last commit ({m['head'][:10]}), with {base} as it is now "
@@ -849,7 +868,8 @@ def _retry(desk: Desk, a) -> None:
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
-    print(f"{tid} queued as a follow-up to {a.id}" + (" from the base branch" if a.fresh else
+    print(f"{tid} queued as a follow-up to {a.id}" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
+          + (" from the base branch" if a.fresh else
                                                       f", with the current {base} merged into its branch when it starts "
                                                       f"(a conflict is left for the worker to settle)" if a.update else "")
           + (f". {_wait_for(desk, tid)}" if notify.hears_of(desk, tid) else "") + _waits(desk, tid))
@@ -2814,7 +2834,11 @@ def main(argv=None):
                      "verdict, whatever the verdict was. Earlier notes are not carried, so repeat in this note what "
                      "still holds of them. The follow-up replaces the earlier task: the earlier "
                      "task is replaced at once (its verification, if one is open, closed), and the follow-up is the "
-                     "one to review and merge.")
+                     "one to review and merge. Its own lane must still be on the desk and, when recorded, on the "
+                     "repository where it ran; otherwise give the work again with hansa add --lane L.")
+    p.add_argument("--lane", metavar="L", help="queue the follow-up on this work lane on the same repository "
+                   "and base branch as the task's own lane, for example when that lane is busy; the task's "
+                   "start, text, effort, model and browser are carried as usual")
     p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the earlier task")
     p.add_argument("--update", action="store_true", help="continue from the earlier task with the base as it is "

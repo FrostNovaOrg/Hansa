@@ -18319,6 +18319,167 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(m["id"], [r["id"] for r in views.status(self.desk)["review"]])
         self.assertEqual(self.desk.meta(old["replaced_by"])["parent"], m["id"])
 
+    def test_retry_lane_preserves_the_start_and_merges_for_plain_update_and_fresh(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        d = Dispatcher(self.desk)
+        for target in ("b", "a", None):  # rows 1, 2, 7 and 8: the start is independent of the lane
+            for mode in ((), ("--update",), ("--fresh",)):
+                with self.subTest(lane=target, mode=mode):
+                    m = self.settle(d, self.desk.new_task("Add hello.txt", lane="a"))
+                    self.assertEqual(m["state"], "done", m)
+                    vid = self.ended(m["id"], "done", "Previous report", "holds", "Verification report")
+                    (self.repo / "README.md").write_text(f"base after {m['id']}\n")
+                    sh("git", "add", "README.md", cwd=self.repo)
+                    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "advance base",
+                       cwd=self.repo)
+                    tip = self.git_out("rev-parse", "main")
+                    started = self.tmp / f"start-{m['id']}"
+                    s = self.desk.settings()
+                    s["lanes"][target or "a"]["setup"] = f"git rev-parse HEAD > {shlex.quote(str(started))}"
+                    self.assertEqual(self.desk.save_settings(s), [])
+                    out = self.hansa("retry", m["id"], *(('--lane', target) if target else ()), *mode, "carry on")
+                    tid = out.split()[0]
+                    queued = self.desk.meta(tid)
+                    self.assertEqual((queued["lane"], queued["parent"]), (target or "a", m["id"]))
+                    self.assertEqual("on lane b" in out, target == "b")
+                    self.assertNotIn("on lane a", out)  # the old printed line for the own lane
+                    self.assertEqual(self.desk.meta(m["id"])["state"], "replaced")
+                    self.assertIn(f"{m['id']} was replaced by {tid}", self.desk.meta(vid)["closed"])
+                    if mode == ("--fresh",):
+                        self.assertNotIn("start_from", queued)
+                    else:
+                        self.assertEqual(queued["start_from"], m["head"])
+                    follow = self.settle(d, tid)
+                    self.assertEqual(follow["state"], "done", follow)
+                    start = started.read_text().strip()
+                    if mode == ("--update",):
+                        for ancestor in (m["head"], tip):
+                            sh("git", "merge-base", "--is-ancestor", ancestor, start, cwd=self.repo)
+                        self.assertEqual(follow["base"], tip)
+                    else:
+                        self.assertEqual(start, tip if mode else m["head"])
+                        self.assertEqual(follow["base"], tip if mode else m["base"])
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+                    self.assertEqual((self.repo / "hello.txt").read_text(), f"hello from {tid}\n")
+
+    def test_retry_lane_carries_the_same_text_effort_model_and_browser(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.desk.new_task("Original task", lane="a", effort="high", model="earlier-model", browser=True)
+        self.ended(tid, "failed", "Earlier report", "does not hold", "Verification report")
+        self.desk.update(tid, check={"command": "check-it", "ok": True})
+        for effort in ((), ("--effort", "low")):
+            with self.subTest(effort=effort):
+                # Two retries of identical input: only their queued lane differs.
+                own = self.hansa("retry", tid, *effort, "the same note").split()[0]
+                self.desk.update(tid, state="failed")
+                other = self.hansa("retry", tid, "--lane", "b", *effort, "the same note").split()[0]
+                self.assertEqual((self.desk.tasks_dir / own / "task.md").read_text(),
+                                 (self.desk.tasks_dir / other / "task.md").read_text())
+                for field, expected in (("effort", "low" if effort else "high"), ("model", "earlier-model"),
+                                        ("browser", True)):
+                    self.assertEqual(self.desk.meta(own)[field], expected)
+                    self.assertEqual(self.desk.meta(other)[field], expected)
+                self.desk.update(tid, state="failed")
+
+    def assert_retry_lane_refused_unchanged(self, tid, args, words):
+        records = {p: p.read_bytes() for p in self.desk.tasks_dir.glob("*/meta.json")}
+        events = self.desk.events_path.read_bytes()
+        with self.assertRaises(SystemExit) as caught:
+            self.hansa("retry", tid, *args, "carry on")
+        for word in (*words, "nothing was queued"):
+            self.assertIn(word, str(caught.exception))
+        self.assertEqual({p: p.read_bytes() for p in self.desk.tasks_dir.glob("*/meta.json")}, records)
+        self.assertEqual(self.desk.events_path.read_bytes(), events)
+
+    def test_retry_lane_refuses_another_repository_merge_lane_missing_lane_or_another_base(self):
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt", lane="a"))
+        self.ended(m["id"], "done", "Earlier report", "holds", "Verification report")
+        other = self.tmp / "other"
+        sh("git", "clone", "-q", str(self.repo), str(other), cwd=self.tmp)
+        self.hansa("lane", "add", "b", "--repo", str(other))
+        self.hansa("lane", "add", "c", "--like", "a", "--merge-lane", "true")
+        sh("git", "branch", "dev", cwd=self.repo)
+        self.hansa("lane", "add", "d", "--like", "a", "--base", "dev")
+        for lane, why in (("b", ("another repository", str(other), str(self.repo))),
+                          ("c", ("merge lane",)), ("missing", ("no lane missing",)),
+                          ("d", ("base branch", "dev", "main"))):
+            for mode in ((), ("--fresh",), ("--update",)):
+                with self.subTest(lane=lane, mode=mode):
+                    self.assert_retry_lane_refused_unchanged(m["id"], ("--lane", lane, *mode), why)
+
+    def test_retry_refuses_a_removed_or_recreated_own_lane_even_when_fresh_or_on_another_lane(self):
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt", lane="a"))
+        self.ended(m["id"], "done", "Earlier report", "holds", "Verification report")
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        own = s["lanes"].pop("a")
+        self.assertEqual(self.desk.save_settings(s), [])
+        for args in ((), ("--fresh",), ("--lane", "b")):
+            with self.subTest(removed=True, args=args):
+                suggestion = "hansa add --lane b" if args == ("--lane", "b") else "hansa add --lane L"
+                self.assert_retry_lane_refused_unchanged(m["id"], args, ("no longer on the desk", suggestion))
+        other = self.tmp / "other"
+        sh("git", "clone", "-q", str(self.repo), str(other), cwd=self.tmp)
+        s["lanes"]["a"] = {**own, "repo": str(other.resolve())}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for args in ((), ("--fresh",), ("--lane", "b")):
+            with self.subTest(removed=False, args=args):
+                suggestion = "hansa add --lane b" if args == ("--lane", "b") else "hansa add --lane L"
+                self.assert_retry_lane_refused_unchanged(m["id"], args, ("now on", str(other), str(self.repo), suggestion))
+
+    def test_retry_lane_starts_a_failed_tasks_follow_up_while_its_own_lane_is_busy(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        failed = self.desk.new_task("Add hello.txt", lane="a")
+        self.ended(failed, "failed", "Try again")
+        ready, release = self.tmp / "busy-ready", self.tmp / "busy-release"
+        gate = self.tmp / "gate.py"
+        gate.write_text("from pathlib import Path\nimport time\n"
+                        f"Path({str(ready)!r}).touch()\n"
+                        f"while not Path({str(release)!r}).exists(): time.sleep(.05)\n")
+        self.addCleanup(release.touch)
+        s = self.desk.settings()
+        s["concurrency"] = 2
+        s["lanes"]["a"]["setup"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(gate))}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        busy = self.desk.new_task("Add hello.txt while busy", lane="a")
+        d = Dispatcher(self.desk)
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and time.monotonic() < deadline:
+                d.tick()
+                time.sleep(.05)
+            self.assertTrue(ready.exists(), self.desk.meta(busy))
+            out = self.hansa("retry", failed, "--lane", "b", "carry on")
+            follow = self.settle(d, out.split()[0])
+            self.assertEqual((follow["state"], follow["lane"]), ("done", "b"), follow)
+            self.assertEqual(self.desk.meta(busy)["state"], "running")
+            self.assertFalse(release.exists())
+        finally:
+            release.touch()
+            self.assertEqual(self.settle(d, busy)["state"], "done")
+
+    def test_retry_without_a_lane_keeps_unassigned_cancelled_tasks_but_refuses_a_lane_override(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.desk.new_task("Never started")
+        self.hansa("cancel", tid)
+        retry = self.hansa("retry", tid, "carry on").split()[0]
+        self.assertEqual((self.desk.meta(retry)["state"], self.desk.meta(retry)["lane"]), ("queued", ""))
+        self.assert_retry_lane_refused_unchanged(tid, ("--lane", "b"), ("(none)", "hansa add --lane b"))
+
+    def test_retry_lane_accepts_legacy_records_and_compares_the_current_own_base(self):
+        tid = self.desk.new_task("Legacy task", lane="a")
+        self.ended(tid, "failed", "Earlier report")
+        self.desk.change(tid, lambda m: {"repo": None})  # a record predating repository recording
+        other = self.tmp / "other"
+        sh("git", "clone", "-q", str(self.repo), str(other), cwd=self.tmp)
+        sh("git", "branch", "dev", cwd=other)
+        s = self.desk.settings()
+        s["lanes"]["a"].update(repo=str(other.resolve()), base="dev")
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("lane", "add", "b", "--like", "a")
+        out = self.hansa("retry", tid, "--lane", "b", "--fresh", "carry on")
+        self.assertEqual(self.desk.meta(out.split()[0])["lane"], "b")
+
     def test_a_retry_gives_its_worker_the_latest_verification_report_whatever_its_verdict(self):
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]

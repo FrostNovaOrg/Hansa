@@ -249,6 +249,11 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
 
 ### Sending a task back
 
+`--lane L` sends the follow-up to a work lane on the same repository and current
+base branch as the task's own lane; that own lane must still be on the desk and,
+if the task recorded its repository, still on that repository, or give the work
+again with `hansa add --lane L`.
+
 `hansa retry ID "<what to change>"` queues a follow-up with a new id from the
 earlier task's last commit; the earlier task becomes replaced. The follow-up's worker gets the
 original task, one line per earlier round (its id, how it ended, the start of
