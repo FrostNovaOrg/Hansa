@@ -3573,6 +3573,8 @@ def conflict_places(cwd: Path, files: list, most_files: int = 10, most_lines: in
                         if x.startswith(">>>>>>>") and top is not None:
                             blocks.append((top, n, shown))
                             top = None
+        except FileNotFoundError:
+            pass  # one side deleted or renamed it
         except OSError:
             out.append(f"  {f}: could not look into it")
             continue

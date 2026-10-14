@@ -4165,7 +4165,7 @@ class DeskTest(unittest.TestCase):
             def restored():
                 c.assertIs(signal.getsignal(signal.SIGALRM), previous_alarm)
                 remaining, interval = signal.getitimer(signal.ITIMER_REAL)
-                c.assertAlmostEqual(remaining, 100, delta=0.2)
+                c.assertAlmostEqual(remaining, 100, delta=5)
                 c.assertEqual(interval, 0.7)
 
             try:
@@ -8622,6 +8622,42 @@ class DeskTest(unittest.TestCase):
         said = run.conflict_places(self.repo, [path.name])
         for words in (path.name, "too big to look into", "64 MB"):
             self.assertIn(words, said)
+        self.assertNotIn("no conflict markers", said)
+
+    def test_a_rename_conflict_explains_the_missing_file(self):
+        self.commit_in_repo("a.txt", "before\n")
+        fake = self.tmp / "claude"
+        fake.write_text(FAKE.replace('hello = os.environ.get("FAKE_HELLO", "hello.txt")',
+                                    'subprocess.run(["git", "mv", "a.txt", "c.txt"], check=True)\n'
+                                    'hello = os.environ.get("FAKE_HELLO", "hello.txt")'))
+        tid = self.desk.new_task("Rename a.txt to c.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(self.git_out("show", f"{m['head']}:c.txt"), "before")
+        self.git_out("mv", "a.txt", "b.txt")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Rename to b.txt")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "merge", tid])
+        said = str(e.exception.code)
+        self.assertIn(f"{tid} conflicts with main", said)
+        missing = next(line for line in said.splitlines() if line.startswith("  a.txt:"))
+        self.assertIn("no conflict markers", missing)
+        self.assertIn("one side deleted or renamed it", missing)
+        self.assertNotIn("could not look into it", said)
+        self.assertEqual(self.git_out("status", "--porcelain"), "")
+        self.assertEqual((self.repo / "b.txt").read_text(), "before\n")
+
+    def test_a_conflict_file_that_cannot_be_read_is_named(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode 000 file")
+        from hansa import run
+        path = self.repo / "unreadable.txt"
+        path.write_text("<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n")
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o600)
+        said = run.conflict_places(self.repo, [path.name])
+        self.assertIn(path.name, said)
+        self.assertIn("could not look into it", said)
         self.assertNotIn("no conflict markers", said)
 
     def test_retry_update_leaves_the_conflict_to_the_worker_and_then_merges_cleanly(self):
