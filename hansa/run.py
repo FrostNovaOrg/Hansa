@@ -4723,7 +4723,7 @@ def check_retry_reason(result: dict) -> str:
     if not n:  # a retry recorded by an older hansa, before the count was required
         return "its first run failed"
     return (f"it failed while the system's out-of-memory killer killed {n} "
-            f"{'process' if n == 1 else 'processes'} on this machine, so hansa runs it once more")
+            f"{'process' if n == 1 else 'processes'} on this machine")
 
 
 def exit_text(result: dict) -> str:
@@ -5108,6 +5108,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     raw = desk.raw_dir(tid)
     for f in ("merge-check.exit", "merge-setup.log.done", *MERGE_FILES):
         (raw / f).unlink(missing_ok=True)
+    (raw / "merge-check.err").touch()  # publish an empty error over the previous run's setup failure
     token = f"hansa-merge-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
     with desk.lock():  # a cancel lands before this (no check) or after it (the check is stopped)
         m = desk.meta(tid)
@@ -5229,7 +5230,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
-    stopped = mc.get("cancel") or mc.get("timed_out") or changed or setup
+    stopped = mc.get("cancel") or mc.get("timed_out") or changed
     if check_killed(result, stopped):
         if not result.get("retried"):
             result["note"] = check_retry_reason(result)

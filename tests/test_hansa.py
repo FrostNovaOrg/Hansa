@@ -9883,23 +9883,59 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("setup_oom_kills", m["merge_check_result"])
             self.assertIn("merge check: the system's out-of-memory killer killed 3 processes", views.show_text(desk, tid))
 
-    def test_a_merge_setups_own_stops_are_not_missing_exit_system_kills(self):
+    def test_merge_setup_failures_retry_only_with_a_rising_count_and_no_git_guard_stop(self):
         with self.oom_counter() as vmstat:
-            for guarded in (False, True):
-                with self.subTest(guarded=guarded):
+            for mode in ("once", "twice", "unchanged", "guarded"):
+                with self.subTest(mode=mode):
                     vmstat.write_text("oom_kill 10\n")
-                    d, desk, tid, root = self.oom_check_task(f"setup-stop-{guarded}", "pass", vmstat, True)
+                    d, desk, tid, root = self.oom_check_task(f"setup-failure-{mode}", "pass", vmstat, True)
                     s = desk.settings()
-                    bump = shlex.join([sys.executable, "-c", f"from pathlib import Path; Path({str(vmstat)!r}).write_text('oom_kill 1000\\n')"])
-                    s["lanes"]["m"]["setup"] = bump + "; " + ("echo 'gitdir: /elsewhere' > .git" if guarded else "exit 23")
+                    script = root / "setup.py"
+                    script.write_text(textwrap.dedent(f"""\
+                        from pathlib import Path
+                        count = Path({str(root / 'setup-count')!r})
+                        n = int(count.read_text()) + 1 if count.exists() else 1
+                        count.write_text(str(n))
+                        print('setup output from run', n, flush=True)
+                        mode = {mode!r}
+                        if mode == 'once' and n == 2:
+                            raise SystemExit(0)
+                        if mode != 'unchanged':
+                            counter = Path({str(vmstat)!r})
+                            value = int(counter.read_text().split('oom_kill ')[1].split()[0])
+                            counter.write_text('oom_kill ' + str(value + n) + '\\n')
+                        if mode == 'guarded':
+                            Path('.git').write_text('gitdir: /elsewhere\\n')
+                        else:
+                            raise SystemExit(23)
+                        """))
+                    s["lanes"]["m"]["setup"] = shlex.join([sys.executable, str(script)])
                     self.assertEqual(desk.save_settings(s), [])
-                    self.soon(lambda: (d.tick(), tid in d.merge_procs)[1])
-                    d.merge_procs[tid].wait(timeout=15)
                     m = self.oom_settle(d, desk, tid)
-                    self.assertEqual(m["state"], "done")
-                    self.assertFalse(m["merge_check_result"]["ok"])
-                    self.assertNotIn("retried", m["merge_check_result"])
-                    self.assertFalse((root / "count").exists())  # the check never ran
+                    result = m["merge_check_result"]
+                    self.assertEqual(m["state"], "merged" if mode == "once" else "done", m)
+                    self.assertEqual(result["ok"], mode == "once")
+                    self.assertEqual((root / "setup-count").read_text(), "2" if mode in ("once", "twice") else "1")
+                    if mode in ("once", "twice"):
+                        self.assertEqual(result["retried"]["oom_kills"], 1)
+                        shown = views.check_output_text(desk, tid)
+                        self.assertIn("ran again once", shown)
+                        self.assertIn("setup output from run 1", shown)
+                        if mode == "twice":
+                            self.assertEqual(result["oom_kills"], 2)
+                            for words in ("failed twice", "short of memory", "hansa concurrency"):
+                                self.assertIn(words, shown)
+                        else:
+                            self.assertEqual((root / "count").read_text(), "1")
+                    else:
+                        self.assertNotIn("retried", result)
+                        if mode == "unchanged":
+                            self.assertNotIn("oom_kills", result)
+                            self.assertIn("setup failed (exit 23)", result["note"])
+                        else:
+                            self.assertEqual(result["oom_kills"], 1)
+                    if mode != "once":
+                        self.assertFalse((root / "count").exists())  # the check never ran
 
     def test_hansas_check_stops_never_retry_a_sigkill(self):
         # Rows 6 and 7: exercise the real cancel and timeout paths, forcing their escalation to SIGKILL.
@@ -10102,7 +10138,7 @@ class DeskTest(unittest.TestCase):
                         self.assertNotIn("retried", result)
                         self.assertEqual((root / "count").read_text(), "1")
 
-    def test_a_cancel_between_the_oom_failure_and_its_rerun_does_not_claim_it_ran_again(self):
+    def test_a_cancel_between_the_oom_failure_and_its_rerun_shows_only_what_happened(self):
         # Row 14: deliberately leave the rerun queued, then cancel through the CLI.
         from hansa import run
         with self.oom_counter() as vmstat:
@@ -10117,6 +10153,7 @@ class DeskTest(unittest.TestCase):
                     self.assertIn("exit 137", before)
                     self.assertIn("last output from run 1", before)
                     self.assertNotIn("ran again", before)
+                    self.assertNotIn("runs it once more", before)
                     with contextlib.redirect_stdout(io.StringIO()):
                         main(["--desk", str(desk.root), "cancel", tid])
                     m = self.oom_settle(d, desk, tid)
@@ -10126,6 +10163,19 @@ class DeskTest(unittest.TestCase):
                     self.assertNotIn("ran again", shown)
                     self.assertIn("last output from run 1", shown)
                     self.assertIn("exit 137", shown)
+                    first = m["merge_check_result" if merge else "check"]
+                    facts = "it failed while the system's out-of-memory killer killed 1 process on this machine"
+                    self.assertEqual(first["note"], facts)
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        main(["--desk", str(desk.root), "wait", tid, "--timeout", "0"])
+                    self.assertIn(facts, views.show_text(desk, tid))
+                    for display in (shown, views.show_text(desk, tid),
+                                    views.status_text(views.status(desk)), output.getvalue()):
+                        if merge:
+                            self.assertIn(facts, display)
+                        self.assertNotIn("runs it once more", display)
+                        self.assertNotIn("ran again", display)
 
     def test_removing_a_check_before_its_oom_rerun_keeps_the_first_run_without_claiming_a_rerun(self):
         from hansa import run
@@ -10145,6 +10195,28 @@ class DeskTest(unittest.TestCase):
                     shown = views.check_output_text(desk, tid)
                     for words in ("last output from run 1", "exit 137", "1 process on this machine"):
                         self.assertIn(words, shown)
+                    self.assertNotIn("ran again", shown)
+                    self.assertNotIn("runs it once more", shown)
+
+    def test_an_oom_rerun_that_cannot_start_keeps_only_the_first_runs_facts(self):
+        from hansa import run
+        with self.oom_counter() as vmstat:
+            for merge in (False, True):
+                with self.subTest(merge=merge):
+                    d, desk, tid, root = self.oom_check_task(f"refused-rerun-{merge}", "kill-once", vmstat, merge)
+                    self.oom_started_check(d, desk, tid, merge).wait(timeout=15)
+                    (run.finish_merge_check if merge else run.finish_check)(desk, tid)
+                    del (d.merge_procs if merge else d.procs)[tid]
+                    with unittest.mock.patch.object(run, "start_merge_check" if merge else "start_check",
+                                                    side_effect=OSError("refused start")):
+                        m = self.oom_settle(d, desk, tid)
+                    self.assertEqual(m["state"], "done" if merge else "failed")
+                    self.assertEqual((root / "count").read_text(), "1")
+                    self.assertIn("refused start", views.show_text(desk, tid))
+                    shown = views.check_output_text(desk, tid)
+                    for words in ("last output from run 1", "exit 137", "1 process on this machine"):
+                        self.assertIn(words, shown)
+                    self.assertNotIn("runs it once more", shown)
                     self.assertNotIn("ran again", shown)
 
     def test_cancelled_merge_check_keeps_alphas_review_result_notices_show_status_wait_and_page(self):
