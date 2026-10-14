@@ -43,6 +43,8 @@ import time
 import unicodedata
 from pathlib import Path
 
+from . import outside
+
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 ANSWER_WORDS = ("yes", "no")  # hansa release yes|no ID CODE is an answer, so no lane takes these names
 
@@ -93,13 +95,14 @@ HIDDEN_BY = "workers_may_not_read_added"
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
            "ask", "sandbox_held", "disk_low")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
-# it: {lane, target, repo, base, command, after, fixed?} (after: the target it must follow, "" for none; fixed: "yes"
+# it: {lane, target, repo, base, command, after, fixed?, outside?} (outside: named outside files and hashes;
+# after: the target it must follow, "" for none; fixed: "yes"
 # for a target that runs from a fixed checkout, left out for one that runs in the repository); a target goes out without asking only while it still has
 # all of them. An entry saved before targets had names holds {lane, repo, base, release}: the lane's unnamed target
 # and its command; an entry without after or fixed counts only for a target that must follow none and runs in the
 # repository
 LISTED_AS = ("repo", "base", "command", "after", "fixed")
-LISTED_KEYS = ("lane", "target", *LISTED_AS, "release")
+LISTED_KEYS = ("lane", "target", *LISTED_AS, "release", "outside")
 MAX_TARGETS = 20  # named release targets on one lane
 MAX_RELEASE_FILES = 100  # paths or globs on one lane's release_files
 TARGET_FIELDS = ("command", "timeout_min", "after", "fixed")
@@ -1354,19 +1357,25 @@ def _listed_ok(x) -> bool:
     return (isinstance(x, dict) and set(x) <= set(LISTED_KEYS) and isinstance(x.get("lane"), str)
             and bool(NAME.match(x["lane"])) and isinstance(x.get("target", ""), str)
             and (x.get("target", "") == "" or bool(NAME.match(x["target"])))
-            and all(isinstance(x.get(k, ""), str) and len(x.get(k, "")) <= 4000 for k in (*LISTED_AS, "release")))
+            and all(isinstance(x.get(k, ""), str) and len(x.get(k, "")) <= 4000 for k in (*LISTED_AS, "release"))
+            and isinstance(x.get("outside", []), list)
+            and all(isinstance(f, dict) and set(f) <= {"path", "sha256", "why", "why_zh"}
+                    and isinstance(f.get("path"), str) and all(isinstance(v, str) for v in f.values())
+                    for f in x.get("outside", [])))
 
 
 def listed_as(ln: dict | None, target: str = "") -> dict:
     """What the principal's list of releases without asking records of a lane's release target when the page saves
-    it: the lane's repository and base branch, and the target's command and the target it must follow ('' for none;
-    all empty when there is no such lane)."""
+    it: the lane's repository and base branch, the target's command and outside files, and the target it must follow
+    ('' for none; all empty when there is no such lane)."""
     if not isinstance(ln, dict) or not isinstance(ln.get("repo"), str):
         return {"repo": "", "base": "", "command": "", "after": ""}
     t = lane_targets(ln).get(target or "default", {})
+    files = outside.inspect(t.get("command") or "", ln["repo"])["outside"]
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
             "command": str(t.get("command") or ""), "after": str(t.get("after") or ""),
-            **({"fixed": "yes"} if t.get("fixed") else {})}
+            **({"fixed": "yes"} if t.get("fixed") else {}),
+            **({"outside": files} if files else {})}
 
 
 def listed_key(entry) -> tuple:
@@ -1440,7 +1449,14 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
                                     ("fixed", ("way it runs (--fixed)", "运行方式（--fixed）")))
                if then.get(k, "") != now_as.get(k, "")]
     if not changed:
-        return ""
+        files = now_as.get("outside", [])
+        if "outside" not in entry and any(f.get("sha256") for f in files):
+            path = next(f["path"] for f in files if f.get("sha256"))
+            return (f"清单没有记录仓库外的文件 {path}；请重新勾选" if zh else
+                    f"the list did not record the outside file {path}; tick the target again")
+        path = outside.changed(entry.get("outside", []), files)
+        return ((f"保存清单之后仓库外的文件 {path} 变了" if zh else
+                 f"outside file {path} changed since the list was saved") if path else "")
     return (f"保存清单之后它的{'和'.join(w[1] for w in changed)}变了" if zh else
             f"its {' and '.join(w[0] for w in changed)} changed since the list was saved")
 
@@ -3005,4 +3021,7 @@ def public_settings(desk: Desk) -> dict:
                  for lane, target in [listed_key(x)]]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
-            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s)}
+            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s),
+            "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",
+                                             desk.root / "secrets", fingerprint=False,
+                                             directory=desk.root / "secrets" / "alert-runs" / "run")["outside"]}
