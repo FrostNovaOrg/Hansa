@@ -1,6 +1,7 @@
 # Contributing
 
 - Standard library only.
+- `CHANGELOG.md` is merged with git's union driver (`.gitattributes`), so two changes to the same lines both survive a merge without a conflict. Add entries at the top of their section, and read the section after a merge that touched an existing entry.
 - Change a task through the desk (`Desk.change`, under the desk lock); the event log is append-only.
 - `hansa/card.md` and `hansa help` are the coordinator's interface. A change that alters what the coordinator can rely on is stated in the `hansa help` topic that holds it; it changes the card only when the coordinator must follow it on every turn, as the bullet below says. Most changes leave the card as it is. Nobody should need to read the code to use hansa.
 - `README.md` is the front page: what hansa is, how to start, where to read more. Keep it short. The details of how hansa behaves go in the matching file under `docs/` (the sandbox, releases and alerts, how a task runs, a Linux server, ...), linked from the README's Documentation table.

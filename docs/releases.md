@@ -304,7 +304,10 @@ in its words, inside quotes too, for absolute paths, `~/`, `$HOME/` or
 HOME and following links. This includes a relative path such as
 `./deploy.sh` or `deploy.sh` in `bash deploy.sh` through a repository link
 to an outside file or folder; an outside link back into the repository is
-not named. Words split on `=`, not `:`: `--config=~/x` and `env V=~/x`
+not named. The part before the first `=` is a name, not a path, unless the
+word starts like a path (`/`, `~/`, `$HOME/`, `${HOME}/`, `./` or `../`), so
+`deploy.sh=1` names nothing while `~/ops/deploy=v2.sh` is taken whole.
+Words split on `=`, not `:`: `--config=~/x` and `env V=~/x`
 name `~/x`, while remote paths such as `host:/etc/hosts` and
 `PATH=/usr/bin:/bin` name nothing. Words are split with `shlex`, falling
 back to splitting on spaces when it cannot split the line. Comments,

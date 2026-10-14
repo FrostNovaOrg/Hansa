@@ -3547,31 +3547,43 @@ def conflicted_files(run) -> list:
         return []
 
 
+CONFLICT_FILE_BYTES = 64 * 1024 * 1024
+
+
 def conflict_places(cwd: Path, files: list, most_files: int = 10, most_lines: int = 16) -> str:
     """Where the two sides of a failed merge meet, read from its files before the merge is aborted: for each
     file, the lines of each conflict with their numbers."""
     out = []
     for f in files[:most_files]:
         p = Path(cwd) / f
+        blocks, top, shown = [], None, []
         try:  # a link is not followed: what it points to is not the change's
-            text = p.read_bytes()[:1_000_000].decode("utf-8", "replace").splitlines() \
-                if stat.S_ISREG(os.lstat(p).st_mode) else []
+            info = os.lstat(p)
+            if stat.S_ISREG(info.st_mode):
+                if info.st_size > CONFLICT_FILE_BYTES:
+                    out.append(f"  {f}: too big to look into (over 64 MB)")
+                    continue
+                with p.open("r", encoding="utf-8", errors="replace") as text:
+                    for n, x in enumerate(text, 1):
+                        x = x.rstrip("\r\n")
+                        if x.startswith("<<<<<<<") and top is None:
+                            top, shown = n, []
+                        if top is not None and len(shown) < most_lines:
+                            shown.append((n, x[:160]))
+                        if x.startswith(">>>>>>>") and top is not None:
+                            blocks.append((top, n, shown))
+                            top = None
+        except FileNotFoundError:
+            pass  # one side deleted or renamed it
         except OSError:
-            text = []
-        blocks, top = [], None
-        for n, x in enumerate(text, 1):
-            if x.startswith("<<<<<<<") and top is None:
-                top = n
-            elif x.startswith(">>>>>>>") and top is not None:
-                blocks.append((top, n))
-                top = None
+            out.append(f"  {f}: could not look into it")
+            continue
         if not blocks:
             out.append(f"  {f}: no conflict markers in it (one side deleted or renamed it, or it is not text)")
-        for a, b in blocks:
+        for a, b, shown in blocks:
             out.append(f"  {f}, lines {a}-{b}:")
-            shown = list(enumerate(text[a - 1:b], a))
-            if len(shown) > most_lines:
-                shown = shown[:most_lines - 1] + [(None, f"... {len(shown) - most_lines + 1} more lines")]
+            if b - a + 1 > most_lines:
+                shown = shown[:most_lines - 1] + [(None, f"... {b - a - most_lines + 2} more lines")]
             out += [f"    {'' if n is None else n:>5}  {x[:160]}" for n, x in shown]
     if len(files) > most_files:
         out.append(f"  and {len(files) - most_files} more file(s): {', '.join(files[most_files:])}")

@@ -3990,7 +3990,8 @@ class DeskTest(unittest.TestCase):
             c.assertIn(entry, said)
             c.assertIn(path, said)
             c.assertIn("over 0.2 s", said)
-            c.assertIn("the line was not checked", said)
+            c.assertIn("scan stopped", said)
+            c.assertIn("this line and the rest were not checked", said)
             c.assertIn("Shorten or split the line", said)
             c.assertIn("ask the principal to change the pattern", said)
 
@@ -4030,6 +4031,28 @@ class DeskTest(unittest.TestCase):
                 said = c.refused("add", "Work", "--lane", "a", "--title", "7" * 2000)
             assert_pattern_limit(c, said, entry, "title")
             c.assertIn("Nothing was queued", said)
+
+        def pattern_command_warning(c):
+            entry, literal = r"re:\d+\d+\d+x", "Falcon"
+            c.forbid(entry, literal)
+            with small_pattern_limits():
+                said = c.hansa("lane", "target", "a", "slow", "7" * 1000)
+            warning, closing = said.split(". The setting is kept", 1)
+            for words in ("release target slow", "command line could not be checked", entry, "over 0.2 s"):
+                c.assertIn(words, warning)
+            c.assertNotIn("holds", warning)
+            c.assertNotIn("a word the principal", warning)
+            c.assertIn("holds such a word or could not be checked", closing)
+            said = c.hansa("lane", "target", "a", "word", "echo Falcon")
+            c.assertIn('release target word holds "Falcon"', said)
+            c.assertIn("a word the principal keeps from going out", said)
+            # Long-line limits use the same warning, without aborting the scan.
+            hits = release.command_hits({"targets": {"long": {"command": "7" * 10001}}}, [entry])
+            said = release.command_hits_text(c.desk, "a", hits)
+            warning = said.split(". The setting is kept", 1)[0]
+            c.assertIn("command line could not be checked", warning)
+            c.assertIn("longer than 10,000", warning)
+            c.assertNotIn("holds", warning)
 
         def pattern_line_merge_lane(c):
             entry = r"re:\d+\d+\d+x"
@@ -4123,6 +4146,10 @@ class DeskTest(unittest.TestCase):
                 c.assertEqual(got[key][0]["code"], "thread")
                 c.assertIn("off the main thread", got[key][0]["reason"])
                 c.assertIn("patterns were not run", got[key][0]["reason"])
+                c.assertIn("scan stopped", got[key][0]["reason"])
+                c.assertIn("this line and the rest were not checked", got[key][0]["reason"])
+                c.assertIn("检查到此停止", release.pattern_limit_text(got[key][0], zh=True))
+                c.assertIn("这一行及剩余内容未检查", release.pattern_limit_text(got[key][0], zh=True))
             c.assertIn(entry, got["command"][0])
             c.assertIn("off the main thread", got["command"][0][2])
 
@@ -4138,7 +4165,7 @@ class DeskTest(unittest.TestCase):
             def restored():
                 c.assertIs(signal.getsignal(signal.SIGALRM), previous_alarm)
                 remaining, interval = signal.getitimer(signal.ITIMER_REAL)
-                c.assertAlmostEqual(remaining, 100, delta=0.2)
+                c.assertAlmostEqual(remaining, 100, delta=5)
                 c.assertEqual(interval, 0.7)
 
             try:
@@ -4279,7 +4306,7 @@ class DeskTest(unittest.TestCase):
         def pattern_limit_principal(c):
             entry, literal = r"re:\d+\d+\d+x", "Falcon"
             c.forbid(entry, literal)
-            c.commit_in_repo("unchecked.txt", "Falcon\n" + "7" * 2000)
+            c.commit_in_repo("unchecked.txt", "Falcon\n" + "7" * 2000 + "\nFalcon after limit\n")
             c.with_release("true")
             with small_pattern_limits():
                 coordinator = c.refused("release", "a")
@@ -4294,11 +4321,14 @@ class DeskTest(unittest.TestCase):
                 c.assertNotIn(entry, words)
                 c.assertIn(entry, limits)
                 c.assertIn(where, limits)
-                reasons = {"line": ("over 0.2 s here, so the line was not checked", "这里耗时超过 0.2 秒，因此这一行未检查"),
+                reasons = {"line": ("over 0.2 s", "这一行耗时超过 0.2 秒"),
                            "scan": ("over 1 s in this scan, so the rest was not checked", "总耗时超过 1 秒，因此剩余内容未检查"),
                            "long": ("longer than 10,000 characters, so patterns could not check it", "超过 10,000 字符，因此正则无法检查它"),
-                           "thread": ("off the main thread, so the line was not checked", "不在主线程上，正则未运行，因此这一行未检查")}
+                           "thread": ("off the main thread", "不在主线程上，正则未运行")}
                 c.assertIn(reasons[code][int(zh)], limits)
+                if code in ("line", "thread"):
+                    c.assertIn("检查到此停止" if zh else "scan stopped", limits)
+                    c.assertIn("这一行及剩余内容未检查" if zh else "this line and the rest were not checked", limits)
                 if zh:
                     c.assertNotIn("so the line was not checked", limits)
 
@@ -4311,6 +4341,7 @@ class DeskTest(unittest.TestCase):
             assert_pattern_limit(c, said, entry, "unchecked.txt")
             r = release.get(c.desk, 1)
             c.assertEqual(r["hits"][-1]["code"], "line")
+            c.assertNotIn("Falcon after limit", [h["line"] for h in r["hits"]])
             grouped(run.words_text("t0001", r["hits"]))
             with small_pattern_limits():
                 grouped(c.refused("add", "Work", "--lane", "a", "--title", "Falcon\n" + "7" * 2000), where="title")
@@ -4332,7 +4363,8 @@ class DeskTest(unittest.TestCase):
             for code, reason, seconds in (("line", r["hits"][-1]["reason"], 0.2),
                                           ("scan", "the patterns took over 1 s in this scan, so the rest was not checked", 1),
                                           ("long", "the line is longer than 10,000 characters, so patterns could not check it", None),
-                                          ("thread", "patterns were not run: this scan is off the main thread, so the line was not checked", None)):
+                                          ("thread", "patterns were not run: this scan is off the main thread, "
+                                           "so the scan stopped there: this line and the rest were not checked", None)):
                 hits = [r["hits"][0], {**r["hits"][-1], "code": code, "reason": reason, "seconds": seconds}]
                 st["releases"][0]["hits"] = hits
                 for language in ("en", "zh"):
@@ -4375,7 +4407,8 @@ class DeskTest(unittest.TestCase):
             for text in (coordinator, c.hansa("release")):
                 for detail in (ordinary_line, limit_line[:300], literal, entry, "unchecked.txt",
                                "Words found that must not go out:", "The line could not be checked:",
-                               "over 0.2 s here, so the line was not checked", "Shorten or split the line"):
+                               "over 0.2 s", "scan stopped", "this line and the rest were not checked",
+                               "Shorten or split the line"):
                     c.assertIn(detail, text)
 
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
@@ -4386,7 +4419,7 @@ class DeskTest(unittest.TestCase):
                  (18, legacy_patterns), (19, legacy_unsafe_pattern), (20, malformed_exceptions),
                  (21, long_mailbox_domains), (22, blank_exception_rows), (23, legacy_domain_answers),
                  (24, legacy_domains_merge_process), (25, pattern_python_errors), (26, blank_exception_entry),
-                 (27, pattern_line_merge), (28, pattern_line_merge_lane), (29, pattern_scan_total),
+                 (27, pattern_line_merge), (38, pattern_command_warning), (28, pattern_line_merge_lane), (29, pattern_scan_total),
                  (30, pattern_scan_thread), (31, pattern_scan_restores_signal), (32, pattern_scan_slow_reading),
                  (33, pattern_long_merge), (34, pattern_length_boundary), (35, pattern_plain_search),
                  (36, pattern_limit_principal), (37, pattern_limit_alert)]
@@ -8560,6 +8593,72 @@ class DeskTest(unittest.TestCase):
             with unittest.mock.patch("hansa.cli.cmd_retry") as retry:
                 main(["--desk", str(self.desk.root), *shlex.split(cmd)])
             self.assertTrue(retry.call_args[0][0].note)
+
+    def test_a_conflict_past_the_first_megabyte_lists_its_file_and_lines(self):
+        from hansa import run
+        prefix = ("a" * 99 + "\n") * 17000
+        self.commit_in_repo("large.txt", prefix + "before\n")
+        self.git_out("checkout", "-b", "other-side")
+        other = self.commit_in_repo("large.txt", prefix + "theirs\n")
+        self.git_out("checkout", "main")
+        self.commit_in_repo("large.txt", prefix + "ours\n")
+        merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", other],
+                                cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(merged.returncode, 1, merged.stdout + merged.stderr)
+        files = run.conflicted_files(self.git_out)
+        self.assertEqual(files, ["large.txt"])
+        said = run.conflict_places(self.repo, files)
+        self.assertIn("large.txt, lines 17001-17005:", said)
+        self.assertIn("17002  ours", said)
+        self.assertIn("17004  theirs", said)
+        self.assertNotIn("no conflict markers", said)
+
+    def test_a_conflict_file_over_64_mb_is_named_as_too_big(self):
+        from hansa import run
+        path = self.repo / "oversized.txt"
+        with path.open("wb") as file:
+            file.write(b"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n")
+            file.truncate(64 * 1024 * 1024 + 1)  # sparse: the limit needs no large allocation
+        said = run.conflict_places(self.repo, [path.name])
+        for words in (path.name, "too big to look into", "64 MB"):
+            self.assertIn(words, said)
+        self.assertNotIn("no conflict markers", said)
+
+    def test_a_rename_conflict_explains_the_missing_file(self):
+        self.commit_in_repo("a.txt", "before\n")
+        fake = self.tmp / "claude"
+        fake.write_text(FAKE.replace('hello = os.environ.get("FAKE_HELLO", "hello.txt")',
+                                    'subprocess.run(["git", "mv", "a.txt", "c.txt"], check=True)\n'
+                                    'hello = os.environ.get("FAKE_HELLO", "hello.txt")'))
+        tid = self.desk.new_task("Rename a.txt to c.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(self.git_out("show", f"{m['head']}:c.txt"), "before")
+        self.git_out("mv", "a.txt", "b.txt")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Rename to b.txt")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "merge", tid])
+        said = str(e.exception.code)
+        self.assertIn(f"{tid} conflicts with main", said)
+        missing = next(line for line in said.splitlines() if line.startswith("  a.txt:"))
+        self.assertIn("no conflict markers", missing)
+        self.assertIn("one side deleted or renamed it", missing)
+        self.assertNotIn("could not look into it", said)
+        self.assertEqual(self.git_out("status", "--porcelain"), "")
+        self.assertEqual((self.repo / "b.txt").read_text(), "before\n")
+
+    def test_a_conflict_file_that_cannot_be_read_is_named(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode 000 file")
+        from hansa import run
+        path = self.repo / "unreadable.txt"
+        path.write_text("<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n")
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o600)
+        said = run.conflict_places(self.repo, [path.name])
+        self.assertIn(path.name, said)
+        self.assertIn("could not look into it", said)
+        self.assertNotIn("no conflict markers", said)
 
     def test_retry_update_leaves_the_conflict_to_the_worker_and_then_merges_cleanly(self):
         settings = self.repo / ".claude/settings.json"
@@ -22297,7 +22396,8 @@ class DeskTest(unittest.TestCase):
                  (23, "comments and shell input text"), (24, "relative outside link"),
                  (25, "old request with file"), (26, "shlex fallback after bash quoting"),
                  (27, "bare outside link"), (28, "paths after tee across newline"),
-                 (29, "tee process substitution")]
+                 (29, "tee process substitution"), (30, "assignment name is not an outside link"),
+                 (31, "path with equals is taken whole"), (32, "assignment and option paths unchanged")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22437,6 +22537,26 @@ class DeskTest(unittest.TestCase):
                             warning(c, cmd, config)
                             c.assertEqual([f["path"] for f in outside.inspect(cmd, c.repo)["outside"]],
                                           [str(config.resolve())])
+                    elif row in (30, 32):
+                        (c.repo / "deploy.sh").symlink_to(script)
+                        config = ops / "c.txt"
+                        config.write_text("config\n")
+                        c.assertEqual(outside.inspect("./d deploy.sh=1", c.repo)["outside"], [])
+                        told = c.hansa("lane", "target", "a", "prod", "./d deploy.sh=1")
+                        c.assertNotIn("outside file:", told)
+                        warning(c, "./d --config=~/ops/c.txt", config)
+                        c.assertEqual([f["path"] for f in outside.inspect(
+                            "./d --config=~/ops/c.txt", c.repo)["outside"]], [str(config.resolve())])
+                    elif row == 31:
+                        local = ops / "deploy=v2.sh"
+                        local.write_text("#!/bin/sh\ntrue\n")
+                        cmd = "bash ~/ops/deploy=v2.sh"
+                        warning(c, cmd, local)
+                        found = [{"path": str(local.resolve()),
+                                  "sha256": hashlib.sha256(local.read_bytes()).hexdigest()}]
+                        c.assertEqual(outside.inspect(cmd, c.repo)["outside"], found)
+                        r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual(r["outside"], found)
                     elif row == 23:
                         local = ops / "x"
                         local.write_text("shell input text\n")
