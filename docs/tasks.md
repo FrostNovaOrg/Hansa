@@ -55,7 +55,8 @@ reported, if anything, is not kept: the next run's report replaces it. A second 
 machine may be short of memory, so fewer runs at once may help (`hansa concurrency`).
 On Linux, the run's record, `hansa show` and its end notice give any rise in the kernel's `oom_kill`
 count while it ran, including both runs' known counts after two kills. This counts processes killed on the
-whole machine, not just this task; a missing or unreadable count changes nothing. Setups have their own count.
+whole machine, not just this task; a missing or unreadable count changes nothing. A setup is covered by the
+run it belongs to; design sessions run only on macOS and have no count.
 
 ### Retries after a dropped connection
 
@@ -108,12 +109,17 @@ lines. Its first line says which of the two follow and how to print each whole: 
 `hansa show ID --merge-check-log` print one output whole, keys removed, under a line that names it, its length
 and its file.
 For setups and checks, a command killed by a signal exits with 128 plus the signal number on both Linux
-and macOS. A check or merge check killed by the system runs again once: exit 137, -9 or no exit code,
-or a failing check during which Linux's `oom_kill` count rose. A passing check keeps its count and passes.
-Cancellation, time ceilings and other stops made by hansa never cause this retry. The rerun gets the lane's
-full time ceiling; a merge check keeps its place in line and merges if it passes. `hansa show ID --check`
-gives the reason, exit and last lines of the killed run. Killed twice, it fails with a memory hint and
-`hansa concurrency`. Lane tries are requested by hand and releases never restart: both only keep the count.
+and macOS. On Linux, a failed check or merge check runs once more only when hansa could read `oom_kill`
+at both ends and its count rose, and hansa did not stop the run itself. Any failing exit, or no exit code,
+can qualify; exit 137 or a missing exit alone cannot. Without a readable, rising count it ends as before.
+A passing check keeps its count and passes. Cancellation, time ceilings and other stops made by hansa
+never cause this retry. The rerun gets the lane's full time ceiling; a merge check keeps its place in line
+and merges if it passes. `hansa show ID --check` gives the first run's exit, last lines and the machine-wide
+evidence, and says it ran again only after the rerun starts. The first run stays recorded if the base then
+moves and another merge check runs. If the rerun fails while the count rises again, it says "failed twice
+while the out-of-memory killer ran" with both counts and a memory hint (`hansa concurrency`); a rerun
+that fails without a rising count ends as an ordinary failed check. Lane tries are requested by hand and
+releases never restart: both only keep the count.
 
 ## Effort
 

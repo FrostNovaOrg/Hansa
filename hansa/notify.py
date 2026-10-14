@@ -227,7 +227,7 @@ def _item(desk: Desk, e: dict):
     if kind in ("task_finished", "task_checked", "task_not_started", "merge_check_ended", "task_merged"):
         if kind == "task_finished" and e.get("state") in ("checking", "queued"):  # not ended yet / moved on
             return None
-        if kind == "merge_check_ended" and e.get("note") in ("cancelled", "stopped on request"):  # the coordinator cancelled it
+        if kind == "merge_check_ended" and e.get("note") == "cancelled":  # the coordinator cancelled it
             return None
         if kind == "task_merged" and not e.get("merge_checked") and not e.get("waited"):  # the coordinator saw it
             return None

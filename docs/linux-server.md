@@ -146,14 +146,19 @@ so hansa says it could not start as before. This does not choose among the
 workers; systemd-oomd, where it runs, picks by other rules.
 
 hansa reads `oom_kill` in `/proc/vmstat` outside the sandbox at each run's start and end (Linux 4.13+).
-Workers, verifications, design sessions, setups, checks, merge checks, lane tries and releases keep a positive
+Workers, verifications, checks, merge checks, lane tries and releases keep a positive
 difference on their records; `hansa show` and end notices say how many processes the kernel killed while
 the run ran. This is the whole machine's count, so another run can account for it. macOS, a missing or
 unreadable file, or a file without `oom_kill` leaves no count and does not interrupt the run.
+Setups belong to those runs and are covered by their counts; design sessions run only on macOS.
 
-A failing check during which the count rose, or a check with exit 137, -9 or no exit code, runs once more
-unless hansa stopped it itself. The rerun has a fresh time ceiling; a merge check stays first in line.
-`hansa show ID --check` keeps the killed run's exit and last lines. A second kill fails with a memory hint:
-fewer runs at once may help (`hansa concurrency`). Workers and verifications also retry one system kill;
-lane tries and releases only record the count. The count detects a killed test child even when its check
-shell exits 1. It is diagnostic evidence, not proof that this particular run exhausted memory.
+A failed check or merge check runs once more only with a readable Linux count that rose while it ran,
+and only if hansa did not stop it itself. Exit 137 or no exit code alone does not qualify: its command
+may have killed itself, or its exit file could not be written. The rerun has the lane's full time ceiling;
+a merge check stays first in line. `hansa show ID --check` keeps the first run's exit and last lines, even
+if the base moves after the rerun, and states the count's evidence without claiming this run was killed.
+If the rerun fails with another rising count, both counts appear with a memory hint: fewer runs at once
+may help (`hansa concurrency`). Without a second rise it ends as an ordinary failed check. Workers and
+verifications still retry one system kill; lane tries and releases only record the count. This rule
+covers a killed test child whose check shell exits 1, while leaving unrelated failures alone when the
+count stays unchanged. The count covers the whole machine and cannot identify which run was killed.

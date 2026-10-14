@@ -832,11 +832,17 @@ CHECK_LOG_TAIL = 20  # the last lines of each log hansa show ID --check gives
 
 
 def check_end_lines(record: dict, what: str) -> list:
+    from .run import check_retry_reason, exit_text
     out = oom_lines(record, what)
-    first = record.get("retried")
+    first = record.get("retried") or (record if record.get("rerun_started") else None)
     if first:
-        out += [f"{what} ran again once because its first run was killed by the system (exit {first.get('exit')}); "
+        out += [f"{what} ran again once: {check_retry_reason(first)} ({exit_text(first)}); "
                 "its last lines:", *["  " + x for x in first.get("tail", [])]]
+    else:
+        first = record.get("previous") or record
+        if first.get("oom_kills") and first.get("note") == check_retry_reason(first):
+            out += [f"{what}'s first run: {check_retry_reason(first)} ({exit_text(first)}); its last lines:",
+                    *["  " + x for x in first.get("tail", [])]]
     return out
 
 
