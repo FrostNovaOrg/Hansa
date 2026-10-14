@@ -27791,6 +27791,249 @@ class ParallelRunnerTest(unittest.TestCase):
                 started = sorted(names, key=lambda name: int((self.tmp / name).read_text()))
                 self.assertEqual(started if jobs == "1" else started[:1], expected)
 
+    def wait_for_records(self, paths, proc=None):
+        end = time.monotonic() + 20
+        while not all(path.exists() and path.read_text() for path in paths):
+            if proc is not None and proc.poll() is not None:
+                self.fail(proc.communicate()[0])
+            self.assertLess(time.monotonic(), end, "processes did not reach the requested state")
+            time.sleep(0.02)
+
+    def assert_processes_stopped(self, paths):
+        from hansa.run import alive, _state
+        pids = [int(path.read_text()) for path in paths]
+        end = time.monotonic() + 10
+        running = lambda: [pid for pid in pids if alive(pid) and _state(pid) != "Z"]
+        while running() and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertEqual(running(), [], "workers or children were left running")
+
+    def clean_up_processes(self, proc, paths):
+        # Also clean up after a broken runner, so a failed regression leaves no sleepers.
+        for path in paths:
+            if path.exists() and path.read_text():
+                try:
+                    os.killpg(int(path.read_text()), signal.SIGKILL)
+                except OSError:
+                    pass
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate(timeout=20)
+
+    def test_10_death_in_final_fixtures_reports_the_last_test_without_counting_it_twice(self):
+        for fixture, ending in (("tearDownModule", "sys.exit(0)"),
+                                ("tearDownModule", "os.kill(os.getpid(), signal.SIGKILL)"),
+                                ("tearDownClass", "sys.exit(0)")):
+            for jobs in (1, 2):
+                with self.subTest(fixture=fixture, ending=ending, jobs=jobs):
+                    source = "import os, signal, sys, unittest\n"
+                    if fixture == "tearDownModule":
+                        source += f"def tearDownModule(): {ending}\n"
+                    source += "class Case(unittest.TestCase):\n"
+                    if fixture == "tearDownClass":
+                        source += f"    @classmethod\n    def tearDownClass(cls): {ending}\n"
+                    source += "    def test_a(self): pass\n    def test_b(self): pass\n"
+                    self.module(source)
+                    r = self.run_sample("--jobs", str(jobs))
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+                    self.assertIn("Ran 2 tests", r.stdout)
+                    self.assertIn(f"FAILED (errors={jobs})", r.stdout)
+                    names = ["test_b"] if jobs == 1 else ["test_a", "test_b"]
+                    self.assertCountEqual(re.findall(r"ERROR: (test_\w+)", r.stdout), names)
+                    status = -signal.SIGKILL if "SIGKILL" in ending else 0
+                    self.assertEqual(r.stdout.count(f"worker exited with status {status}"), jobs)
+                    self.assertEqual(r.stdout.count("=" * 70 + "\nERROR:"), jobs)
+                    self.assertEqual(r.stdout.count("-" * 70 + "\nRuntimeError:"), jobs)
+                    self.assertNotIn("Traceback (most recent call last):", r.stdout)
+                    log = r.stdout + "\n" + "\n".join("later output" for _ in range(20))
+                    lifted = "\n".join(views.failed_check_lines(log, [], "t0001"))
+                    self.assertCountEqual(re.findall(r"ERROR: (test_\w+)", lifted), names)
+
+    def test_11_signals_during_final_teardown_report_without_adding_tests_and_stop_every_process(self):
+        self.module('''
+            import os, subprocess, sys, time, unittest
+            from pathlib import Path
+            def tearDownModule():
+                name = str(os.getpid())
+                subprocess.Popen([sys.executable, "-c", "import os, time; from pathlib import Path; "
+                    "Path('child-" + name + "').write_text(str(os.getpid())); time.sleep(120)"])
+                Path("worker-" + name).write_text(name)
+                time.sleep(120)
+            class Case(unittest.TestCase):
+                def test_a(self): pass
+                def test_b(self): pass
+        ''')
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig):
+                for path in self.tmp.glob("*-*"):
+                    path.unlink()
+                proc = subprocess.Popen(self.command("--jobs", "2"), cwd=self.tmp, env=self.env,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                try:
+                    end = time.monotonic() + 20
+                    while len(list(self.tmp.glob("worker-*"))) < 2:
+                        if proc.poll() is not None:
+                            self.fail(proc.communicate()[0])
+                        self.assertLess(time.monotonic(), end, "workers did not reach teardown")
+                        time.sleep(0.02)
+                    workers = list(self.tmp.glob("worker-*"))
+                    children = [self.tmp / ("child-" + path.name[7:]) for path in workers]
+                    self.wait_for_records(workers + children, proc)
+                    proc.send_signal(sig)
+                    output = proc.communicate(timeout=20)[0]
+                    self.assertNotEqual(proc.returncode, 0, output)
+                    self.assertIn("=" * 70 + "\nERROR: interrupted runner\n" + "-" * 70, output)
+                    self.assertIn(signal.Signals(sig).name, output)
+                    self.assertIn("Ran 2 tests", output)
+                    self.assertIn("FAILED (errors=1)", output)
+                    self.assertNotIn("Traceback (most recent call last):", output)
+                    self.assert_processes_stopped(workers + children)
+                finally:
+                    self.clean_up_processes(proc, list(self.tmp.glob("worker-*")))
+
+    def test_12_cleanup_continues_after_a_signal_refusal_and_a_wait_timeout(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("parallel_cleanup_sample", self.runner)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        workers = []
+        paths = []
+        try:
+            for number in range(3):
+                path = self.tmp / f"worker-{number}"
+                paths.append(path)
+                process = subprocess.Popen([sys.executable, "-c",
+                    "import os, sys, time; from pathlib import Path; "
+                    "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(120)", str(path)],
+                    start_new_session=True)
+                workers.append(types.SimpleNamespace(process=process, stop_guard=lambda: None))
+            self.wait_for_records(paths)
+            killpg = os.killpg
+
+            def refuse_first(group, sig):
+                if group == workers[0].process.pid:
+                    raise PermissionError("signal refused")
+                killpg(group, sig)
+
+            with unittest.mock.patch.object(runner.os, "killpg", side_effect=refuse_first), \
+                    unittest.mock.patch.object(workers[0].process, "wait",
+                                               side_effect=subprocess.TimeoutExpired("sleep", 10)):
+                runner.stop_workers(workers)
+            self.assert_processes_stopped(paths[1:])
+            self.assertTrue(all(w.process.returncode is not None for w in workers[1:]))
+        finally:
+            for w in workers:
+                try:
+                    os.killpg(w.process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                w.process.wait(timeout=20)
+
+    def test_13_killing_the_runner_group_stops_workers_and_children_without_waiting_for_tests(self):
+        self.module('''
+            import os, subprocess, sys, time, unittest
+            from pathlib import Path
+            class Case(unittest.TestCase):
+                def sleep_with_child(self):
+                    name = self._testMethodName
+                    subprocess.Popen([sys.executable, "-c", "import os, time; from pathlib import Path; "
+                        "Path('child-" + name + "').write_text(str(os.getpid())); time.sleep(120)"])
+                    Path("worker-" + name).write_text(str(os.getpid()))
+                    time.sleep(120)
+                test_a = test_b = sleep_with_child
+        ''')
+        paths = [self.tmp / f"{role}-test_{name}" for role in ("worker", "child") for name in "ab"]
+        proc = subprocess.Popen(self.command("--jobs", "2"), cwd=self.tmp, env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        try:
+            self.wait_for_records(paths, proc)
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=20)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assert_processes_stopped(paths)
+        finally:
+            self.clean_up_processes(proc, paths[:2])
+
+    def test_14_forked_and_invalid_replies_report_one_error_and_replace_the_worker(self):
+        self.module('''
+            import inspect, json, os, time, unittest
+            from pathlib import Path
+            class Case(unittest.TestCase):
+                def test_a_first(self):
+                    mode = os.environ["REPLY_MODE"]
+                    Path("worker").write_text(str(os.getpid()))
+                    if mode in ("fork", "late_fork"):
+                        if os.fork() == 0:
+                            Path("child").write_text(str(os.getpid()))
+                            if mode == "late_fork":
+                                end = time.monotonic() + 20
+                                while not Path("after").exists() and time.monotonic() < end:
+                                    time.sleep(0.02)
+                            return
+                        if mode == "fork": time.sleep(120)
+                        return
+                    if Path("sent").exists(): return
+                    Path("sent").touch()
+                    frame = inspect.currentframe()
+                    while "replies" not in frame.f_locals: frame = frame.f_back
+                    data = dict(kind="done", pid=os.getpid(), index=0, count=1, progress=".", seconds=0.01,
+                                failures=[], errors=[], skipped=[], expectedFailures=[], unexpectedSuccesses=[])
+                    if mode == "wrong_test": data["index"] = 1
+                    if mode == "bad_result": data["errors"] = None
+                    frame.f_locals["replies"].write(("not json" if mode == "unreadable" else json.dumps(data)) + "\\n")
+                    frame.f_locals["replies"].flush()
+                    time.sleep(120)
+                def test_b_after(self):
+                    already_started = Path("after").exists()
+                    Path("after").write_text("ran")
+                    if os.environ["REPLY_MODE"] == "late_fork" and not already_started: time.sleep(120)
+                def test_c_after(self): Path("second").write_text("ran")
+                def test_d_after(self): Path("last").write_text("ran")
+        ''')
+        for mode in ("fork", "late_fork", "unreadable", "bad_result", "wrong_test"):
+            with self.subTest(mode=mode):
+                for name in ("worker", "child", "sent", "after", "second", "last"):
+                    (self.tmp / name).unlink(missing_ok=True)
+                proc = subprocess.Popen(self.command("--jobs", "1"), cwd=self.tmp,
+                                        env=dict(self.env, REPLY_MODE=mode), stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True)
+                try:
+                    output = proc.communicate(timeout=40)[0]
+                    self.assertNotEqual(proc.returncode, 0, output)
+                    name = "test_b_after" if mode == "wrong_test" else "test_a_first"
+                    self.assertRegex(output, rf"ERROR: {name} \(parallel_sample\.Case(?:\.{name})?\)")
+                    self.assertIn("Ran 4 tests", output)
+                    self.assertIn("FAILED (errors=1)", output)
+                    self.assertNotIn("Traceback (most recent call last):", output)
+                    self.assertEqual([(self.tmp / name).read_text() for name in ("after", "second", "last")],
+                                     ["ran", "ran", "ran"])
+                    self.assert_processes_stopped([self.tmp / "worker"] +
+                                                  ([self.tmp / "child"] if mode in ("fork", "late_fork") else []))
+                finally:
+                    self.clean_up_processes(proc, [self.tmp / "worker"])
+
+    def test_15_unreadable_sources_start_after_both_readable_tests(self):
+        self.module('''
+            import time, unittest
+            from pathlib import Path
+            class Case(unittest.TestCase):
+                def test_b_readable(self):
+                    Path(self._testMethodName).write_text("started")
+                    end = time.monotonic() + 20
+                    while not all(Path(name).exists() for name in ("test_b_readable", "test_c_readable")):
+                        self.assertLess(time.monotonic(), end, "readable tests did not start together")
+                        time.sleep(0.02)
+                test_c_readable = test_b_readable
+            exec("def test_a_unreadable(self):\\n"
+                 "    self.assertTrue(all(Path(name).exists() for name in ('test_b_readable', 'test_c_readable')))\\n",
+                 globals())
+            Case.test_a_unreadable = test_a_unreadable
+        ''')
+        r = self.run_sample("--jobs", "2")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("Ran 3 tests", r.stdout)
+
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
