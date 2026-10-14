@@ -328,7 +328,8 @@ def _release_item(desk: Desk, e: dict):
             line = (f"{head} check FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                     + (f": {e.get('problem')}" if e.get("problem") else "")
                     + (f" · last lines: {tail}" if tail else "")
-                    + " · merges since its last passing run: " + release.merges_text(r["after_merge"]["since_pass"])
+                    + " · merges since its last passing run: " + release.merges_text(
+                        r["after_merge"]["since_pass"], r["after_merge"].get("since_pass_count"))
                     + " · next: hansa release; make a task to fix what failed, then this target runs again after "
                     "that task's merge")
         if e.get("stop_late"):

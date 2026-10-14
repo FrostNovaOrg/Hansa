@@ -68,6 +68,7 @@ OPEN = ("waiting", "approved", "starting", "running")
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
 MOST_FILES = 500
 MOST_HITS = 20
+MOST_MERGES = 10  # newest landings named in an automatic request (the boundary and counts cover all)
 SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the time it is recorded
 PATTERN_LINE_LIMIT = 2.0  # seconds on one line, across its patterns; not a setting
 PATTERN_SCAN_LIMIT = 60.0  # seconds matching patterns in one scan; end a stall, not pace ordinary releases
@@ -756,7 +757,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
             if scanned and scanned[0] == (key, a["target"], merges, automatic):
                 if automatic:
                     a["after_merge"] = automatic
-                    note = "Asked by hansa after merges: " + merges_text(automatic["merges"])
+                    note = "Asked by hansa after merges: " + merges_text(automatic["merges"], automatic["merges_count"])
                     by = "hansa"
                 r = _record(desk, s, lane, a, key, scanned[1:], note, by, session, direct)
                 break
@@ -1433,14 +1434,16 @@ def _recover(desk: Desk, r: dict) -> None:
     finish(desk, r["id"])
 
 
-def merges_text(merges: list) -> str:
+def merges_text(merges: list, count: int | None = None) -> str:
     """The tasks a run covers, named even if their lane later moves or disappears."""
-    return "; ".join(f"{m['id']} ({m.get('title', '')})" for m in merges)
+    names = "; ".join(f"{m['id']} ({m.get('title', '')})" for m in merges)
+    return names + (f"; and {count - len(merges)} more" if count is not None and count > len(merges) else "")
 
 
 def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -> dict | None:
     """Use the round's records first: only settled, unconsumed landings merit looking at a tick or at git.
-    The request's boundary is its merges, not its end: a merge during a fixed run remains for the next run."""
+    Automatic requests consume their batch however they end; completed manual runs cover earlier landings.
+    The boundary is at the ask, not the end: a merge during a fixed run remains for the next run."""
     ln = s["lanes"].get(lane) or {}
     t = lane_targets(ln).get(target) or {}
     delay = t.get("after_merge_min")
@@ -1451,7 +1454,9 @@ def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -
     if any(r.get("state") in OPEN for r in target_runs):
         return None
     own = [r for r in target_runs if r.get("repo") == repo and r.get("base") == base]
-    through = max(((r.get("after_merge") or {}).get("through", 0) for r in own), default=0)
+    through = max(((r.get("after_merge") or {}).get("through", 0)
+                   or ((r.get("asked") or 0) if r.get("state") in ("done", "failed") else 0)
+                   for r in own), default=0)
     passed = [r for r in own if r.get("state") == "done"]
     last_pass = passed[-1] if passed else {}
     pass_through = ((last_pass.get("after_merge") or {}).get("through")
@@ -1471,8 +1476,9 @@ def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -
     fresh = [m for m in merges if m["merged"] > through]
     if not fresh or now() - fresh[-1]["merged"] < 60 * delay:
         return None
-    return {"through": fresh[-1]["merged"], "merges": fresh,
-            "since_pass": [m for m in merges if m["merged"] > pass_through]}
+    since_pass = [m for m in merges if m["merged"] > pass_through]
+    return {"through": fresh[-1]["merged"], "merges": fresh[-MOST_MERGES:], "merges_count": len(fresh),
+            "since_pass": since_pass[-MOST_MERGES:], "since_pass_count": len(since_pass)}
 
 
 def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
@@ -1493,6 +1499,7 @@ def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
                 continue
             held = False
             if not lane_listed(s, lane, target):
+                held = True  # outside files are fingerprinted again only for a new batch or settings
                 why = "the principal's tick no longer counts" if any(
                     listed_key(e) == (lane, target) for e in s.get("releases_without_asking") or []) else \
                     "this target needs the principal's tick"
@@ -1501,14 +1508,14 @@ def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
                     ask(desk, lane, target=target, after_merge=True)
                 except SystemExit as e:
                     why = str(e)
-                    held = '--direct "<why>"' in why
+                    held = '--direct "<why>"' in why or "tick no longer counts" in why
                 else:
                     desk.after_merge_waits.pop((lane, target), None)
                     continue
             desk.after_merge_waits[lane, target] = (signature, held)
             if previous != (signature, held):
                 desk.event("release_after_merge_waits", lane=lane, target=target, why=why,
-                           merges=merges_text(batch["merges"]))
+                           merges=merges_text(batch["merges"], batch["merges_count"]))
 
 
 def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None) -> None:
