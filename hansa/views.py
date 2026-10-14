@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import statistics
 import sys
 import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
-                   read_split, write_json, PROJECT_FILE, PROJECT_LONG)
+                   read_split, release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
@@ -1297,6 +1298,78 @@ def web_lines(allow: list) -> list:
             *(["    WebSearch: sends search queries out of the machine"] if search else [])]
 
 
+def lane_check_times(tasks: list, ln: dict, merge_tasks: list) -> list:
+    """Completed task checks and relevant merge checks; read only by explain lane."""
+    out = []
+    for label, field, records in (("task check", "check", tasks),
+                                  ("merge check", "merge_check_result", merge_tasks)):
+        if field == "check":
+            if ln.get("merge_lane"):
+                continue
+            if not ln.get("check"):
+                out.append("  task check times: no check")
+                continue
+        runs = []
+        for m in records:
+            r = m.get(field) or {}
+            note = r.get("note") or ""
+            if (r.get("ok") not in (True, False) or r.get("could_not_run") or r.get("waited")
+                    or r.get("exit") is None or r["exit"] < 0 or r.get("seconds") is None
+                    or any(x in note for x in ("stopped", "cancelled", "interrupted", "could not run",
+                                               "check did not run"))):
+                continue
+            ended = r.get("at") if field == "merge_check_result" else (
+                m.get("check_started", 0) + r["seconds"])
+            runs.append((ended or 0, r["seconds"] / 60))
+        minutes = [v for _, v in sorted(runs, key=lambda x: x[0], reverse=True)[:8]]
+        if len(minutes) < 2:
+            out.append(f"  {label} times: not enough runs yet")
+            continue
+        latest = minutes[:5]
+        out.append(f"  {label} times (minutes, newest first): {', '.join(f'{v:.2f}' for v in latest)};"
+                   f" median {statistics.median(latest):.2f}")
+        if len(minutes) == 8:
+            recent, before = statistics.mean(minutes[:3]), statistics.mean(minutes[3:8])
+            if recent > before and recent >= 1.5 * before:
+                increase = f"{recent / before:.1f} times" if before else f"up {recent:.2f} minutes from zero"
+                out.append(f"  {label} is slower: last 3 average {recent:.2f} minutes, the 5 before"
+                           f" {before:.2f} minutes ({increase}). Add a task to split the project's"
+                           " tests or run them in parallel; use the merge check for what is slow"
+                           " (hansa help merge-check).")
+    return out
+
+
+def lane_check_repetition(ln: dict, merge_command: str) -> list:
+    check = " ".join((ln.get("check") or "").split())
+    merge = " ".join(merge_command.split())
+    if check and merge and check in merge:
+        return ["  the merge check repeats the lane's check: every merge runs the lane's check again, in the"
+                " merge check. Use the lane's check for the quick tests and the merge check for the whole suite."]
+    return []
+
+
+def lane_release_counts(tasks: list, ln: dict) -> list:
+    if not ln.get("release_files"):
+        return []
+    from .cli import _release_files_touched  # cli imports views; use merge's check when explain is called
+    since = time.time() - 14 * 86400
+    recent = [m for m in tasks if m.get("state") == "merged" and m.get("merged", 0) >= since]
+    try:
+        touched = [_release_files_touched(Path(ln["repo"]).expanduser(), m, ln) for m in recent]
+    except (OSError, RuntimeError) as error:
+        reason = (error.strerror or "repository unavailable") if isinstance(error, OSError) else "git failed"
+        return [f"  release_files counts could not be read: {reason}."]
+    counts = [(p, sum(bool(release_files_in(files, [p])) for files in touched))
+              for p in ln.get("release_files") or []]
+    counts = sorted(((p, n) for p, n in counts if n), key=lambda x: (-x[1], x[0]))
+    if not counts:
+        return []
+    return ["  release_files matches (tasks merged in the last 14 days, requiring verification): "
+            + ", ".join(f"{p}: {n}" for p, n in counts),
+            *(["  release_files lists only what a release runs outside the sandbox; an entry that 3 or more tasks"
+               " touch may be wider than that (hansa help release-files)."] if counts[0][1] >= 3 else [])]
+
+
 def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False) -> str:
     """hansa explain. whole (--all): for a lane, the built-in list of what workers may not read, name by name."""
     s = desk.settings()
@@ -1314,6 +1387,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         separate = check_name != name
         served = ([n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
                   if ln.get("merge_lane") else [])
+        all_tasks = [m for m in desk.tasks() if m.get("kind") != "verify"]
+        tasks = [m for m in all_tasks if m.get("lane") == name]
+        merge_tasks = ([m for m in all_tasks if (m.get("merge_check_result") or {}).get("lane") == name]
+                       if ln.get("merge_lane") else tasks)
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
@@ -1355,6 +1432,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                f" · stopped at {merge_minutes(ln)} minutes"] if own_merge_check(ln) else
               [f"  merge check before merging: the check, stopped at {merge_minutes(ln)} minutes"]
               if ln.get("check") and ln.get("merge_timeout_min") else []),
+            *lane_check_times(tasks, ln, merge_tasks),
+            *lane_check_repetition(ln, merge_command(check_lane) if separate or own_merge_check(ln) else ""),
             "  setup before each merge check: " + (ln.get("setup") or "none") if ln.get("merge_lane") else
             "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts,"
                                              " in the lane's sandbox, so one that downloads needs its registry on"
@@ -1397,6 +1476,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *(["    runs leave the ignored ones out; the coordinator removes them with: "
                + allow_fix(name, ln.get("allow", []))] if any(map(refused_rule, ln.get("allow", []))) else []),
             *release.lane_lines(desk, name, ln),
+            *lane_release_counts(tasks, ln),
             f"  {len(set(release.lane_exceptions(s, name)) & set(s.get('release_forbidden') or []))} "
             "forbidden entry/entries excepted on this lane (the principal's, on the page)",
             *[f"  {f} (the form of the {what}): {json.dumps(ln[f], ensure_ascii=False)}"

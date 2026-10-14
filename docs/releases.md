@@ -255,6 +255,11 @@ touching one of them until a verification of that change holds (`hansa
 verify ID`), naming the files; `--despite-check` does not let it through,
 nor does anything else. `hansa explain lane L` shows the list, and advises
 one for a lane with release targets and none.
+`hansa explain lane L` also derives recent check times and slowdowns (a merge
+lane shows the merge checks it ran for all lanes it serves), check commands
+repeated by the actual merge command, and counts of merged tasks touching each
+`release_files` entry in the last 14 days, including renamed-away files, from
+existing records and git when asked, never in an idle round.
 
 A command can also name a file outside the lane's repository: hansa looks
 in its words, inside quotes too, for absolute paths, `~/`, `$HOME/` or

@@ -22039,6 +22039,207 @@ class DeskTest(unittest.TestCase):
         said = self.refused("release", "a", "test")  # and refused at release time, as before
         self.assertIn("release command: ./install.sh /home/maplebox/test", said)
 
+    def test_explain_lane_reports_check_times_repetition_and_release_file_matches(self):
+        rows = [
+            (1, [60] * 5 + [100] * 3, "check"),
+            (2, [60] * 5 + [70] * 3, "check"),
+            (3, [60], "check"),
+            (4, [60, 120], "check"),
+            (5, [60] * 5 + [100] * 3, "merge_check_result"),
+            (6, [], "check"),
+            (7, [], "check"),
+            (8, [], "check"),
+            (9, [], "check"),
+            (10, [], "check"),
+            (11, [], "check"),
+            (12, [60, 120], "merge_check_result"),
+            (13, [], "check"),
+            (14, [], "check"),
+        ]
+        fixed_now = time.time()
+        for row, seconds, field in rows:
+            with self.subTest(row=row):
+                desk = init_desk(self.tmp / f"explain-{row}", str(self.repo), "a")
+                s = desk.settings()
+                ln = s["lanes"]["a"]
+                ln.update(check="make lint", merge_check="make test-all")
+                if row in (5, 9, 10, 12):
+                    s["lanes"]["m"] = {**ln, "merge_lane": True}
+                if row == 9:
+                    ln["merge_check"] = "make lint && make all"
+                    s["lanes"]["m"]["merge_check"] = "make test"
+                if row == 10:
+                    ln.pop("merge_check")
+                    s["lanes"]["m"]["merge_check"] = " make   lint && make all "
+                if row == 12:
+                    s["lanes"]["b"] = dict(ln)
+                    s["lanes"]["m"].pop("check")
+                if row == 13:
+                    ln.pop("check")
+                if row == 6:
+                    ln["merge_check"] = " make   lint  && make test-all "
+                if row == 8:
+                    ln["release_files"] = ["pom.xml", "tools/**"]  # count order, not settings order
+                if row in (11, 14):
+                    ln["release_files"] = ["tools/**"]
+                self.assertEqual(desk.save_settings(s), [])
+
+                def record(duration, index, **changes):
+                    ended = fixed_now - 10000 + index * 200
+                    result = {"command": "make lint" if field == "check" else "make test-all",
+                              "ok": index % 2 == 0, "exit": 0 if index % 2 == 0 else 1,
+                              "note": "", "seconds": duration}
+                    if field == "merge_check_result":
+                        result.update(at=ended, lane="m" if index % 2 else "a")
+                    result.update(changes)
+                    if row == 12:
+                        result["lane"] = "m"
+                    tid = desk.new_task(f"Run {index}", lane="b" if row == 12 and index else "a")
+                    desk.update(tid, state="done", check_started=ended - duration, **{field: result})
+                    if row == 4:
+                        desk.update(tid, merge_check_result={**result, "at": ended})
+
+                # Record out of chronological order so task ids cannot determine newest first.
+                for i in reversed(range(len(seconds))):
+                    record(seconds[i], i)
+                if row == 4:
+                    for i, change in enumerate((
+                        {"ok": False, "exit": 143, "note": "stopped on request"},
+                        {"ok": False, "exit": 143, "note": "stopped at the lane's time ceiling"},
+                        {"ok": False, "exit": None, "note": "cancelled"},
+                        {"ok": None, "exit": None, "could_not_run": True, "note": "could not run: no srt"},
+                        {"ok": False, "exit": None, "note": "the check was interrupted"},
+                        {"ok": False, "exit": 1, "note": "the lane's setup failed (exit 1), so the check did not run"},
+                    ), 10):
+                        record(999, i, **change)
+                if row in (1, 4, 5):
+                    # Other lanes and verifications do not supply this lane's task checks.
+                    other = desk.new_task("Other lane", lane="b")
+                    verify = desk.new_task("Verification", lane="a", kind="verify")
+                    for tid in (other, verify):
+                        desk.update(tid, check_started=fixed_now, **{field: {
+                            "ok": True, "exit": 0, "seconds": 999, "at": fixed_now}})
+                if row == 8:
+                    for i, (days, files, state, lane) in enumerate([
+                        (1, ["tools/a.sh", "tools/b.sh"], "merged", "a"),
+                        (2, ["tools/nested/c.sh"], "merged", "a"),
+                        (3, ["tools/d.sh"], "merged", "a"),
+                        (4, ["tools/e.sh"], "merged", "a"),
+                        (5, ["pom.xml"], "merged", "a"),
+                        (15, ["tools/old.sh"], "merged", "a"),
+                        (1, ["tools/unmerged.sh"], "done", "a"),
+                        (1, ["tools/other.sh"], "merged", "b"),
+                    ]):
+                        tid = desk.new_task(f"Release file change {i}", lane=lane)
+                        desk.update(tid, state=state, merged=fixed_now - days * 86400, files=files)
+                if row == 11:
+                    # Rename detection records only the destination; merge's --no-renames sees both paths.
+                    (self.repo / "tools").mkdir()
+                    (self.repo / "tools" / "x.sh").write_text("echo release\n")
+                    sh("git", "add", "tools/x.sh", cwd=self.repo)
+                    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Release tool",
+                       cwd=self.repo)
+                    base = self.git_out("rev-parse", "HEAD")
+                    sh("git", "mv", "tools/x.sh", "x.sh", cwd=self.repo)
+                    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Move tool",
+                       cwd=self.repo)
+                    head = self.git_out("rev-parse", "HEAD")
+                    files = self.git_out("diff", "--name-only", "--find-renames", base, head).splitlines()
+                    self.assertEqual(files, ["x.sh"])
+                    tid = desk.new_task("Move release tool", lane="a")
+                    desk.update(tid, state="merged", merged=fixed_now - 86400, base=base, head=head, files=files)
+                    from hansa.cli import _release_files_touched
+                    self.assertEqual(_release_files_touched(self.repo, desk.meta(tid), ln), ["tools/x.sh"])
+                if row == 12:
+                    # A check on another execution lane and a verification do not supply m's timings.
+                    for lane, kind, ran_on in (("a", "task", "a"), ("b", "verify", "m")):
+                        tid = desk.new_task("Not m's task merge check", lane=lane, kind=kind)
+                        desk.update(tid, merge_check_result={"ok": True, "exit": 0, "seconds": 999,
+                                                             "at": fixed_now, "lane": ran_on})
+                if row == 14:
+                    tid = desk.new_task("Release tool change", lane="a")
+                    desk.update(tid, state="merged", merged=fixed_now - 86400,
+                                base=self.git_out("rev-parse", "HEAD"), head=self.git_out("rev-parse", "HEAD"),
+                                files=["tools/x.sh"])
+                    self.repo.rename(self.tmp / "moved-repo")
+
+                def explain():
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out), unittest.mock.patch("hansa.views.time.time", return_value=fixed_now):
+                        main(["--desk", str(desk.root), "explain", "lane", "m" if row == 12 else "a"])
+                    return out.getvalue()
+
+                # Explaining derives the facts without changing the desk or adding any record.
+                before = {p: p.read_bytes() for p in desk.root.rglob("*") if p.is_file()}
+                shown = explain()
+                self.assertEqual({p: p.read_bytes() for p in desk.root.rglob("*") if p.is_file()}, before)
+                label = "merge check" if row == 5 else "task check"
+                times = f"  {label} times (minutes, newest first): "
+                if row in (1, 5):
+                    self.assertIn(times + "1.67, 1.67, 1.67, 1.00, 1.00; median 1.67", shown)
+                    self.assertIn(f"{label} is slower: last 3 average 1.67 minutes, the 5 before"
+                                  " 1.00 minutes (1.7 times)", shown)
+                    self.assertIn("Add a task to split the project's tests or run them in parallel", shown)
+                    self.assertIn("use the merge check for what is slow (hansa help merge-check)", shown)
+                elif row == 2:
+                    self.assertIn(times + "1.17, 1.17, 1.17, 1.00, 1.00; median 1.17", shown)
+                    self.assertNotIn("is slower", shown)
+                elif row == 3:
+                    self.assertIn("task check times: not enough runs yet", shown)
+                    self.assertNotIn(times, shown)
+                elif row == 4:
+                    self.assertIn(times + "2.00, 1.00; median 1.50", shown)
+                    self.assertIn("merge check times (minutes, newest first): 2.00, 1.00; median 1.50", shown)
+                    self.assertNotIn("16.65", shown)
+                elif row == 6:
+                    self.assertIn("the merge check repeats the lane's check: every merge runs the lane's check again", shown)
+                    self.assertIn("Use the lane's check for the quick tests and the merge check for the whole suite", shown)
+                    # Equality also counts, with whitespace collapsed.
+                    s["lanes"]["a"]["merge_check"] = "  make   lint "
+                    self.assertEqual(desk.save_settings(s), [])
+                    self.assertIn("the merge check repeats the lane's check", explain())
+                elif row == 7:
+                    self.assertNotIn("repeats the lane's check", shown)
+                    # Positive control: the detector must exist, then remain silent again for unrelated commands.
+                    s["lanes"]["a"]["merge_check"] = "make lint && make test-all"
+                    self.assertEqual(desk.save_settings(s), [])
+                    self.assertIn("repeats the lane's check", explain())
+                    ln["merge_check"] = "make test-all"
+                    self.assertEqual(desk.save_settings(s), [])
+                    self.assertNotIn("repeats the lane's check", explain())
+                elif row == 8:
+                    self.assertIn("release_files matches (tasks merged in the last 14 days, requiring verification): "
+                                  "tools/**: 4, pom.xml: 1", shown)
+                    self.assertIn("release_files lists only what a release runs outside the sandbox", shown)
+                    self.assertIn("an entry that 3 or more tasks touch may be wider than that (hansa help release-files)", shown)
+                elif row == 9:
+                    self.assertIn("merge check before merging: make test; in lane m's", shown)
+                    self.assertNotIn("repeats the lane's check", shown)
+                elif row == 10:
+                    self.assertIn("in lane m's", shown)
+                    self.assertIn("the merge check repeats the lane's check: every merge runs the lane's check again", shown)
+                    self.assertIn("Use the lane's check for the quick tests and the merge check for the whole suite", shown)
+                elif row == 11:
+                    self.assertIn("release_files matches (tasks merged in the last 14 days, requiring verification): "
+                                  "tools/**: 1", shown)
+                    self.assertNotIn("an entry that 3 or more tasks touch", shown)
+                elif row == 12:
+                    self.assertIn("merge check times (minutes, newest first): 2.00, 1.00; median 1.50", shown)
+                    self.assertNotIn("task check", shown)
+                    self.assertNotIn("16.65", shown)
+                elif row == 13:
+                    self.assertIn("check after each task: none", shown)
+                    self.assertIn("task check times: no check", shown)
+                    self.assertNotIn("task check times: not enough runs yet", shown)
+                elif row == 14:
+                    self.assertIn("check after each task: make lint", shown)
+                    self.assertIn("task check times: not enough runs yet", shown)
+                    self.assertIn("merge check times: not enough runs yet", shown)
+                    self.assertEqual([line for line in shown.splitlines() if "counts could not be read" in line],
+                                     ["  release_files counts could not be read: No such file or directory."])
+                    self.assertNotIn("release_files matches", shown)
+                    self.assertIn("  standing instructions:", shown)
+
     @unittest.skipUnless(shutil.which("node"), "needs node to check outside files on the page")
     def test_outside_release_files_cases(self):
         from hansa import outside, release
