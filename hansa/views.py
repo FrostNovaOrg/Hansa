@@ -1298,12 +1298,19 @@ def web_lines(allow: list) -> list:
             *(["    WebSearch: sends search queries out of the machine"] if search else [])]
 
 
-def lane_check_times(tasks: list) -> list:
-    """Completed checks kept on this lane's tasks; read only by explain lane."""
+def lane_check_times(tasks: list, ln: dict, merge_tasks: list) -> list:
+    """Completed task checks and relevant merge checks; read only by explain lane."""
     out = []
-    for label, field in (("task check", "check"), ("merge check", "merge_check_result")):
+    for label, field, records in (("task check", "check", tasks),
+                                  ("merge check", "merge_check_result", merge_tasks)):
+        if field == "check":
+            if ln.get("merge_lane"):
+                continue
+            if not ln.get("check"):
+                out.append("  task check times: no check")
+                continue
         runs = []
-        for m in tasks:
+        for m in records:
             r = m.get(field) or {}
             note = r.get("note") or ""
             if (r.get("ok") not in (True, False) or r.get("could_not_run") or r.get("waited")
@@ -1332,9 +1339,9 @@ def lane_check_times(tasks: list) -> list:
     return out
 
 
-def lane_check_repetition(ln: dict) -> list:
+def lane_check_repetition(ln: dict, merge_command: str) -> list:
     check = " ".join((ln.get("check") or "").split())
-    merge = " ".join((ln.get("merge_check") or "").split())
+    merge = " ".join(merge_command.split())
     if check and merge and check in merge:
         return ["  the merge check repeats the lane's check: every merge runs the lane's check again, in the"
                 " merge check. Use the lane's check for the quick tests and the merge check for the whole suite."]
@@ -1342,9 +1349,13 @@ def lane_check_repetition(ln: dict) -> list:
 
 
 def lane_release_counts(tasks: list, ln: dict) -> list:
+    if not ln.get("release_files"):
+        return []
+    from .cli import _release_files_touched  # cli imports views; use merge's check when explain is called
     since = time.time() - 14 * 86400
     recent = [m for m in tasks if m.get("state") == "merged" and m.get("merged", 0) >= since]
-    counts = [(p, sum(bool(release_files_in(m.get("files") or [], [p])) for m in recent))
+    touched = [_release_files_touched(Path(ln["repo"]).expanduser(), m, ln) for m in recent]
+    counts = [(p, sum(bool(release_files_in(files, [p])) for files in touched))
               for p in ln.get("release_files") or []]
     counts = sorted(((p, n) for p, n in counts if n), key=lambda x: (-x[1], x[0]))
     if not counts:
@@ -1372,7 +1383,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         separate = check_name != name
         served = ([n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
                   if ln.get("merge_lane") else [])
-        tasks = [m for m in desk.tasks() if m.get("lane") == name and m.get("kind") != "verify"]
+        all_tasks = [m for m in desk.tasks() if m.get("kind") != "verify"]
+        tasks = [m for m in all_tasks if m.get("lane") == name]
+        merge_tasks = ([m for m in all_tasks if (m.get("merge_check_result") or {}).get("lane") == name]
+                       if ln.get("merge_lane") else tasks)
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
@@ -1414,8 +1428,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                f" · stopped at {merge_minutes(ln)} minutes"] if own_merge_check(ln) else
               [f"  merge check before merging: the check, stopped at {merge_minutes(ln)} minutes"]
               if ln.get("check") and ln.get("merge_timeout_min") else []),
-            *lane_check_times(tasks),
-            *lane_check_repetition(ln),
+            *lane_check_times(tasks, ln, merge_tasks),
+            *lane_check_repetition(ln, merge_command(check_lane) if separate or own_merge_check(ln) else ""),
             "  setup before each merge check: " + (ln.get("setup") or "none") if ln.get("merge_lane") else
             "  setup before each task: " + (f"{ln['setup']} (hansa runs it in the worktree before the worker starts,"
                                              " in the lane's sandbox, so one that downloads needs its registry on"
