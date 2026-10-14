@@ -5,6 +5,21 @@ from the page. The coordinator's side of it is in [hansa/card.md](../hansa/card.
 
 ## How a release goes out
 
+For checks that need another machine, system or the project's CI, the coordinator can set
+`hansa lane target L NAME --after-merge MINUTES` (1–1440; `none` turns it off), refused on a target
+with `--after`: the setting is kept without the principal's tick, but only a target whose tick still
+counts runs by itself. After a task lands in that repository and base branch, from any lane and by
+any hansa merge, hansa waits MINUTES after the last such merge and until no task of that repository
+is merging, then asks the ordinary release, marked as asked by hansa after merges and naming them.
+It checks forbidden words and outside files, waits for resume and free space over the floor, and
+voids the request if its tick no longer counts; with `release_direct: hold`, outgoing direct commits
+prevent the ask and tell the coordinator to ask by hand with `--direct "<why>"`. One run per target
+covers a batch; merges during it make one more run after it ends, and no new merges mean no new
+request or git/file reads for scheduling. `hansa lane target L` and `hansa explain lane L` show the
+setting and tick. A failed run reaches the coordinator as a failed check, naming the target and
+merges since its last passing run: make a task to fix what failed, and the target runs again after
+its merge. Only failure alerts the principal.
+
 The request lists direct commits among its outgoing commits, with their count (at most 200 SHAs and
 subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in
 this repository and base, from any lane, and what it brought in are not direct. Every other commit
