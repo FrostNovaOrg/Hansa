@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import shlex
 import stat
 from pathlib import Path
@@ -43,15 +42,15 @@ def _paths(command: str):
             if spelling in (">", ">>", ">|", "&>", "&>>", ">&"):
                 output = True
                 continue
-            # Options and remote arguments can hold a path after '=' or ':'. No variable but HOME is read.
-            values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else re.split(r"[=:]", word)
+            # Options and assignments can hold a path after '='. No variable but HOME is read.
+            values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else word.split("=")
             for value in values:
                 value = value.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
                 if "$" in value or "`" in value or (value.startswith("~") and not value.startswith("~/")):
                     continue
                 p = Path(value).expanduser()
-                if p.is_absolute() or ".." in p.parts:
-                    yield p
+                # Bare names can be repository links leading outside too; inspect resolves them.
+                yield p
             if word != line and any(c.isspace() or c in "'\"" for c in word):
                 pending.append(word)
 

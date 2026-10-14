@@ -784,7 +784,12 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"lane {r['lane']}'s repository or base branch changed since it was asked",
                 f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了")
-    path = outside.changed(r.get("outside", []), outside.inspect(r.get("command") or "", ln["repo"])["outside"])
+    files = outside.inspect(r.get("command") or "", ln["repo"])["outside"]
+    if "outside" not in r and files:
+        path = files[0]["path"]
+        return (f"the request did not record the outside file {path}; ask again",
+                f"请求没有记录仓库外的文件 {path}；请重新请求")
+    path = outside.changed(r.get("outside", []), files)
     if path:
         return (f"outside file {path} changed since the release was asked",
                 f"仓库外的文件 {path} 在请求发布之后变了")
