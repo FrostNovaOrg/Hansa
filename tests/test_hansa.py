@@ -22952,6 +22952,7 @@ class DeskTest(unittest.TestCase):
 
     def test_after_merge_release_cases(self):
         from hansa import alert, release
+        from hansa.desk import validate
 
         cases = [(1, "two merges settle into one run"), (2, "the principal's tick gates the setting"),
                  (3, "idle rounds consume no new work"), (4, "merges during a run make one more run"),
@@ -22960,7 +22961,12 @@ class DeskTest(unittest.TestCase):
                  (9, "all hansa landings from other lanes count"), (10, "ordered targets refuse the setting"),
                  (11, "none turns it off"), (12, "direct hold needs a human reason"),
                  (13, "completed manual runs cover earlier merges"), (14, "manual direct runs cover their batch"),
-                 (15, "only ten newest merges are named with full counts"), (16, "held ticks wait for a change")]
+                 (15, "only ten newest merges are named with full counts"), (16, "held ticks wait for a change"),
+                 (17, "invalid hand-edited delays are off"), (18, "invalid target limits use the lane's"),
+                 (19, "paused automatic requests fingerprint once a round"),
+                 (20, "a tick lost during the ask holds until a change"),
+                 (21, "wait notices name ten merges and count the rest"),
+                 (22, "none refuses an after-merge option")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22971,25 +22977,35 @@ class DeskTest(unittest.TestCase):
                 try:
                     with unittest.mock.patch.object(release, "now", side_effect=lambda: clock[0]):
                         command = ('while [ ! -f "$HANSA_RELEASE_REPO/proceed" ]; do sleep 0.02; done; echo checked'
-                                   if row == 4 else 'test -f fixed.txt || { echo broken; exit 7; }'
+                                   if row in (4, 18) else 'test -f fixed.txt || { echo broken; exit 7; }'
                                    if row == 5 else "echo broken; exit 7" if row == 15 else "echo checked")
-                        if row == 16:
+                        if row in (16, 19, 20):
                             script = c.tmp / "check.sh"
                             script.write_text("echo checked\n")
                             command = "sh " + shlex.quote(str(script))
                         c.hansa("lane", "target", "a", "linux", command, *(["--fixed"] if row == 4 else []))
-                        if row != 2:
+                        if row not in (2, 21):
                             c.tick_targets("linux")
                         def enable():
                             said = c.hansa("lane", "target", "a", "linux", "--after-merge", "1")
                             c.assertEqual(c.desk.settings()["lanes"]["a"]["targets"]["linux"]["after_merge_min"], 1)
-                            c.assertIn("ticked by the principal" if row != 2 else "needs the principal's tick", said)
+                            c.assertIn("needs the principal's tick" if row in (2, 21) else "ticked by the principal", said)
                             for shown in (c.hansa("lane", "target", "a"), c.hansa("explain", "lane", "a")):
                                 c.assertIn("after merges: 1 min", shown)
 
                         if row not in (13, 15):
                             enable()
                         d = Dispatcher(c.desk)
+
+                        if row == 22:
+                            before = c.desk.settings_path.read_bytes()
+                            events = c.desk.events_path.read_bytes()
+                            told = c.refused("lane", "target", "a", "linux", "none", "--after-merge", "5")
+                            for word in ("none", "--after-merge", "Nothing was changed"):
+                                c.assertIn(word, told)
+                            c.assertEqual(c.desk.settings_path.read_bytes(), before)
+                            c.assertEqual(c.desk.events_path.read_bytes(), events)
+                            continue
 
                         def land(name="work.txt", lane="a"):
                             clock[0] += 3
@@ -23304,6 +23320,100 @@ class DeskTest(unittest.TestCase):
                             d.tick()
                             ran([first, second])
                             c.assertEqual(len(c.events("release_asked")), 1)
+                        elif row == 17:
+                            c.hansa("lane", "target", "a", "other", "echo checked")
+                            c.tick_targets("linux", "other")
+                            for value in ("5", [5], True, 0.5):
+                                with self.subTest(after_merge_min=value):
+                                    r = release.ask(c.desk, "a", target="other")
+                                    c.assertEqual(r["state"], "approved")
+                                    s = c.desk.settings()
+                                    s["lanes"]["a"]["targets"]["linux"]["after_merge_min"] = value
+                                    c.assertTrue(any("after_merge_min" in p for p in validate(s)))
+                                    write_json(c.desk.settings_path, s)  # bypass save validation
+                                    ready()
+                                    c.assertEqual(release.get(c.desk, r["id"])["state"], "running")
+                                    c.assertEqual(c.settle_release(d, r["id"], timeout=30)["state"], "done")
+                                    c.assertTrue(all(x["target"] == "other" for x in release.releases(c.desk)))
+                                    c.assertEqual(c.events("release_after_merge_waits"), [])
+                        elif row == 18:
+                            c.hansa("lane", "set", "a", "timeout_min", "1")
+                            c.hansa("lane", "target", "a", "linux", "--minutes", "2")
+                            ready()
+                            c.assertEqual(release.get(c.desk, 1)["state"], "running")
+                            s = c.desk.settings()
+                            s["lanes"]["a"]["targets"]["linux"]["timeout_min"] = "5"
+                            c.assertTrue(any("timeout_min" in p for p in validate(s)))
+                            write_json(c.desk.settings_path, s)
+                            # Between the lane's limit and the valid target limit: only the lane's stops it.
+                            release.change(c.desk, 1, lambda r: {"started": time.time() - 90})
+                            d.tick()
+                            r = release.get(c.desk, 1)
+                            c.assertTrue(r["timed_out"])
+                            c.assertEqual((r["limit_min"], r["limit_of"]), (1, "the lane's"))
+                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "failed")
+                        elif row == 19:
+                            c.hansa("pause", "reviewing")
+                            ready()
+                            r = release.get(c.desk, 1)
+                            c.assertEqual(r["state"], "approved")
+                            c.assertTrue(r["after_merge"])
+                            c.assertTrue(r["without_asking"])
+                            c.assertEqual(r["outside"][0]["path"], str(script.resolve()))
+                            for _ in range(3):
+                                with unittest.mock.patch.object(release.outside, "inspect",
+                                                                wraps=release.outside.inspect) as inspected:
+                                    d.tick()
+                                c.assertEqual(sum(call.kwargs.get("fingerprint", True)
+                                                  for call in inspected.call_args_list), 1)
+                                c.assertEqual(release.get(c.desk, 1)["state"], "approved")
+                            c.assertEqual(c.events("release_started"), [])
+                        elif row == 20:
+                            ask = release.ask
+
+                            def lose_tick(*args, **kwargs):
+                                script.write_text("echo checked # changed between check and ask\n")
+                                return ask(*args, **kwargs)
+
+                            with unittest.mock.patch.object(release, "ask", side_effect=lose_tick) as asks:
+                                ready()
+                                c.assertEqual(asks.call_count, 1)
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.assertEqual(c.events("release_asked"), [])
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 1)
+                            for word in ("tick no longer counts", first):
+                                c.assertIn(word, heard("release_after_merge_waits"))
+                            with unittest.mock.patch.object(release, "ask", wraps=ask) as asks, \
+                                    unittest.mock.patch.object(release.outside, "inspect",
+                                                              side_effect=AssertionError("held files")):
+                                for _ in range(3):
+                                    ready()
+                                c.assertEqual(asks.call_count, 0)
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 1)
+                            second = recorded_land()
+                            ready()
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 2)
+                            c.hansa("lane", "set", "a", "note", "Reviewing the tick")
+                            d.tick()
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 3)
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.tick_targets("linux")
+                            d.tick()
+                            ran([first, second])
+                        elif row == 21:
+                            ids = [first] + [recorded_land() for _ in range(11)]
+                            ready()
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 1)
+                            told = heard("release_after_merge_waits")
+                            for word in ("linux", "needs the principal's tick", "and 2 more"):
+                                c.assertIn(word, told)
+                            for tid in ids[-10:]:
+                                c.assertIn(tid, told)
+                                c.assertIn(c.desk.meta(tid)["title"], told)
+                            for tid in ids[:-10]:
+                                c.assertNotIn(tid, told)
+                                c.assertNotIn(c.desk.meta(tid)["title"], told)
                 finally:
                     gate.touch()  # release a gated command even if an assertion failed; cleanups wait for it
                     c.doCleanups()

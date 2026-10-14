@@ -58,7 +58,7 @@ import uuid
 from pathlib import Path
 
 from . import outside, without_session
-from .desk import (WRITE_FILE, Desk, forbidden_exceptions_ok, forbidden_pattern, lane_targets, listed_key,
+from .desk import (WRITE_FILE, Desk, _is_int, forbidden_exceptions_ok, forbidden_pattern, lane_targets, listed_key,
                    listed_mismatch, now, read_json, target_name, write_json, write_text)
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   run_running, save_stopped, serve_step, recording_start, retry_start_failure,
@@ -303,7 +303,7 @@ def minutes(s: dict, r: dict) -> tuple:
     the lane's timeout_min."""
     ln = s["lanes"].get(r.get("lane")) or {}
     own = (lane_targets(ln).get(r.get("target") or "") or {}).get("timeout_min")
-    if own:
+    if _is_int(own, 1, 1440):
         return own, f"target {r.get('target')}'s"
     return ln.get("timeout_min", 240), "the lane's"
 
@@ -1225,11 +1225,12 @@ def _not_ready(desk: Desk, s: dict, r: dict) -> tuple | None:
     rid, target = r["id"], r.get("target") or ""
     if r.get("after_merge"):
         t = lane_targets(s["lanes"].get(r["lane"])).get(target) or {}
-        if not t.get("after_merge_min") or t.get("after"):
+        if not _is_int(t.get("after_merge_min"), 1, 1440) or t.get("after"):
             return ("runs after merges were turned off for this target", "此目标已关闭合并后自动运行")
         if not lane_listed(s, r["lane"], target):
             return ("the principal's tick no longer counts for this target", "此目标的负责人勾选已不再有效")
-    if r.get("without_asking") and not lane_listed(s, r["lane"], target):  # off the list, or changed
+    if r.get("without_asking") and not r.get("after_merge") and not lane_listed(s, r["lane"], target):
+        # Automatic requests already checked their tick above; fingerprint outside files once.
         change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
         desk.event("release_waits", id=rid, lane=r["lane"], target=target,
                    why="the target is no longer on the principal's list of releases without asking, or no longer "
@@ -1447,7 +1448,7 @@ def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -
     ln = s["lanes"].get(lane) or {}
     t = lane_targets(ln).get(target) or {}
     delay = t.get("after_merge_min")
-    if not delay or t.get("after"):
+    if not _is_int(delay, 1, 1440) or t.get("after"):
         return None
     repo, base = repo_key(ln["repo"]), ln.get("base") or "main"
     target_runs = [r for r in rs if r.get("lane") == lane and r.get("target") == target]
