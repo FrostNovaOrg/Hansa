@@ -11,6 +11,48 @@ from pathlib import Path
 MAX_BYTES = 16 * 1024 * 1024
 
 
+def _words(line: str):
+    """Shell words and their spelling, leaving comments and heredoc bodies unread."""
+    token = re.compile(r'''(?:[^\s;&|()<>'"\\]+|\\.|'[^']*'|"(?:\\.|[^"\\])*")+|<<-|[;&|()<>]+''', re.S)
+    at, marker, documents = 0, None, []
+    while at < len(line):
+        if line[at].isspace():
+            if line[at] == "\n":
+                yield "\n", "\n"
+                at += 1
+                for end, tabs in documents:
+                    while at < len(line):
+                        stop = line.find("\n", at)
+                        stop = len(line) if stop < 0 else stop
+                        body = line[at:stop]
+                        at = min(stop + 1, len(line))
+                        if (body.lstrip("\t") if tabs else body) == end:
+                            break
+                documents.clear()
+            else:
+                at += 1
+            continue
+        if line[at] == "#":
+            stop = line.find("\n", at)
+            at = len(line) if stop < 0 else stop
+            continue
+        match = token.match(line, at)
+        if not match:
+            return  # An unfinished quoted word is not a file name.
+        spelling = match.group()
+        at = match.end()
+        try:
+            word = shlex.split(spelling, posix=True)[0]
+        except (ValueError, IndexError):
+            word = spelling
+        if marker is not None:
+            documents.append((word, marker == "<<-"))
+            marker = None
+        elif spelling in ("<<", "<<-"):
+            marker = spelling
+        yield word, spelling
+
+
 def _paths(command: str):
     """Read quoted words too, including a shell command passed as one word to bash -c."""
     pending, seen = [command], set()
@@ -19,38 +61,34 @@ def _paths(command: str):
         if line in seen:
             continue
         seen.add(line)
-        try:
-            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
-            lex.whitespace_split = True
-            lex.commenters = ""
-            words = []
-            while True:
-                # Keep the spelling too: a quoted or escaped '>' is an argument, not a redirection.
-                # shlex reads one character ahead and holds it in _pushback_chars.
-                start = lex.instream.tell() - len(lex._pushback_chars)
-                word = lex.get_token()
-                if word is None:
-                    break
-                end = lex.instream.tell() - len(lex._pushback_chars)
-                words.append((word, line[start:end].strip()))
-        except ValueError:
-            words = [(word, word) for word in line.split()]
-        output = False
-        for word, spelling in words:
-            if output:
-                output = False
+        skip, input_file, first, tee = False, False, True, False
+        for word, spelling in _words(line):
+            if spelling == "\n" or (spelling and all(c in ";&|()" for c in spelling)):
+                skip, input_file, first, tee = False, False, True, False
                 continue
-            if spelling in (">", ">>", ">|", "&>", "&>>", ">&"):
-                output = True
+            if skip:
+                skip = False
                 continue
-            # Options and remote arguments can hold a path after '=' or ':'. No variable but HOME is read.
-            values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else re.split(r"[=:]", word)
+            if spelling in (">", ">>", ">|", "&>", "&>>", ">&", "<<<", "<<", "<<-"):
+                skip = True
+                continue
+            if spelling == "<":
+                input_file = True
+                continue
+            if input_file:
+                input_file = False
+            elif first and not re.match(r"[A-Za-z_][A-Za-z_0-9]*=", word) and not word.isdigit():
+                first, tee = False, Path(word).name == "tee"
+            elif tee:
+                continue
+            # Options and assignments can hold a path after '='. No variable but HOME is read.
+            values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else word.split("=")
             for value in values:
                 value = value.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
                 if "$" in value or "`" in value or (value.startswith("~") and not value.startswith("~/")):
                     continue
                 p = Path(value).expanduser()
-                if p.is_absolute() or ".." in p.parts:
+                if p.is_absolute() or len(p.parts) > 1 or value.startswith("./") or ".." in p.parts:
                     yield p
             if word != line and any(c.isspace() or c in "'\"" for c in word):
                 pending.append(word)

@@ -22069,6 +22069,12 @@ class DeskTest(unittest.TestCase):
             c.assertEqual(c.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "prod"}])),
                           {"ok": True, "problems": []})
 
+        def settings_once(c):
+            with unittest.mock.patch.object(outside, "inspect", wraps=outside.inspect) as inspected:
+                shown = public_settings(c.desk)
+            c.assertEqual(sum(call.kwargs.get("fingerprint", True) for call in inspected.call_args_list), 1)
+            return shown
+
         def warning(c, command, file):
             told = c.hansa("lane", "target", "a", "prod", command)
             c.assertIn("outside file: " + str(file.resolve()), told)
@@ -22085,7 +22091,10 @@ class DeskTest(unittest.TestCase):
                  (10, "old tick with file"), (11, "old tick without file"), (12, "cannot fingerprint"),
                  (13, "explain and target list"), (14, "alert setting"), (15, "idle reads no file"),
                  (16, "output redirections"), (17, "input redirection"),
-                 (18, "recorded fingerprint becomes unavailable"), (19, "new unfingerprintable file")]
+                 (18, "recorded fingerprint becomes unavailable"), (19, "new unfingerprintable file"),
+                 (20, "tee outputs"), (21, "remote paths and PATH"), (22, "equals paths"),
+                 (23, "comments and shell input text"), (24, "relative outside link"),
+                 (25, "old request with file")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22192,6 +22201,75 @@ class DeskTest(unittest.TestCase):
                         answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
                         c.assertFalse(answer["ok"])
                         c.assertIn(path, answer["void"])
+                    elif row == 20:
+                        log = ops / "x.log"
+                        log.write_text("before\n")
+                        for cmd in ("./d | tee -a ~/ops/x.log", "./d | /usr/bin/tee -- ~/ops/x.log"):
+                            told = c.hansa("lane", "target", "a", "prod", cmd)
+                            c.assertNotIn("outside file:", told)
+                            r = release.ask(c.desk, "a", target="prod")
+                            c.assertEqual(r["outside"], [])
+                            log.write_text("after ask\n")
+                            c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                            tick(c)
+                            log.write_text("after tick\n")
+                            c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                            c.assertEqual(public_settings(c.desk)["release_unmatched"], [])
+                            c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                            release.void(c.desk, r["id"], "end this fixture", ("approved",))
+                        c.assertEqual([f["path"] for f in outside.inspect(
+                            "tee -a ~/ops/x.log < ~/ops/deploy.sh", c.repo)["outside"]], [path])
+                    elif row == 21:
+                        local = ops / "x"
+                        local.write_text("local input\n")
+                        for cmd, expect in (("scp ~/ops/x host:/etc/hosts", [str(local.resolve())]),
+                                            ("rsync . host:/tmp", []), ("PATH=/usr/bin:/bin ./d", [])):
+                            found = outside.inspect(cmd, c.repo)
+                            c.assertEqual([f["path"] for f in found["outside"]], expect)
+                            c.assertEqual(found["outside_folders"], [])
+                    elif row == 22:
+                        config = ops / "c.txt"
+                        config.write_text("config\n")
+                        for cmd in ("./d --config=~/ops/c.txt", "env V=~/ops/c.txt ./d"):
+                            warning(c, cmd, config)
+                            c.assertEqual([f["path"] for f in outside.inspect(cmd, c.repo)["outside"]],
+                                          [str(config.resolve())])
+                    elif row == 23:
+                        local = ops / "x"
+                        local.write_text("not an argument\n")
+                        for cmd in ("./d # ~/ops/x", "./d # unmatched ' ~/ops/x", "cat <<< ~/ops/x",
+                                    "cat <<EOF\n~/ops/x\nEOF\n", "cat <<'EOF'\n~/ops/x ' >\nEOF\n",
+                                    "cat <<-EOF\n\t~/ops/x\n\tEOF\n",
+                                    "cat <<A <<B\n~/ops/x\nA\n~/ops/x\nB\n"):
+                            c.assertEqual(outside.inspect(cmd, c.repo), {"outside": [], "outside_folders": []}, cmd)
+                        # Quoted and interior # characters remain arguments; commands after the marker count.
+                        for cmd in ("./d '#' ~/ops/x", "./d word#literal ~/ops/x", "cat <<EOF\nignored\nEOF\ncat ~/ops/x",
+                                    "./d # ~/ops/deploy.sh\ncat ~/ops/x"):
+                            c.assertEqual([f["path"] for f in outside.inspect(cmd, c.repo)["outside"]],
+                                          [str(local.resolve())], cmd)
+                    elif row == 24:
+                        (c.repo / "deploy.sh").symlink_to(script)
+                        warning(c, "./deploy.sh", script)
+                        (c.repo / "ops").symlink_to(ops, target_is_directory=True)
+                        c.assertEqual(outside.inspect("cd ./ops", c.repo)["outside_folders"], [folder])
+                        r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual(r["outside"], [{"path": path, "sha256": digest}])
+                        script.write_text("changed linked script\n")
+                        answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                        c.assertFalse(answer["ok"])
+                        c.assertIn(path, answer["void"])
+                        c.assertEqual(release.get(c.desk, r["id"])["state"], "void")
+                    elif row == 25:
+                        c.with_targets(prod=command)
+                        r = release.ask(c.desk, "a", target="prod")
+                        r.pop("outside")
+                        release._write(c.desk, [r])
+                        c.assertIn("请求没有记录", release.stale(c.desk, c.desk.settings(), r, True))
+                        answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                        c.assertFalse(answer["ok"])
+                        c.assertIn("request did not record the outside file " + path, answer["void"])
+                        c.assertNotIn("changed", answer["void"])
+                        c.assertEqual(release.get(c.desk, r["id"])["state"], "void")
                     else:
                         c.with_targets(prod=command)
                         if row == 5:
@@ -22246,7 +22324,7 @@ class DeskTest(unittest.TestCase):
                             if row == 11:
                                 c.assertEqual(public_settings(c.desk)["release_unmatched"], [])
                             else:
-                                [mismatch] = public_settings(c.desk)["release_unmatched"]
+                                [mismatch] = settings_once(c)["release_unmatched"]
                                 c.assertIn(path, mismatch["why"])
                                 c.assertIn(path, page(c, "settings-problems"))
                                 c.assertIn(path, page(c, "settings-problems", "zh"))
@@ -22319,7 +22397,7 @@ class DeskTest(unittest.TestCase):
                                     patch = unittest.mock.patch.object(Path, "open", unreadable) if kind == "unreadable" else contextlib.nullcontext()
                                     with patch:
                                         c.assertFalse(release.lane_listed(c.desk.settings(), "a", "prod"))
-                                        [mismatch] = public_settings(c.desk)["release_unmatched"]
+                                        [mismatch] = settings_once(c)["release_unmatched"]
                                         c.assertIn(path, mismatch["why"])
                                         c.assertIn(path, page(c, "settings-problems"))
                                         c.assertIn(path, views.status(c.desk)["releases"][0]["moved"])

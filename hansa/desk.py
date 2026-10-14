@@ -1419,7 +1419,7 @@ def stamp_alert(given, before) -> object:
     return {"command": cmd, "by": "page", "at": now()}
 
 
-def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
+def listed_mismatch(s: dict, entry, zh: bool = False, now_as: dict | None = None) -> str:
     """'' while a release target on the principal's list of releases without asking is what it was when the page
     saved the list; otherwise what is no longer so (zh: in Chinese, for the page)."""
     lane, target = listed_key(entry)
@@ -1440,7 +1440,8 @@ def listed_mismatch(s: dict, entry, zh: bool = False) -> str:
                 "the list was saved before hansa recorded each lane's repository, base branch and release command")
     if not entry.get("repo"):
         return f"保存清单时工作线 {lane} 还不在桌面上" if zh else f"lane {lane} was not on the desk when the list was saved"
-    now_as = listed_as(ln, target)
+    if now_as is None:
+        now_as = listed_as(ln, target)
     # an entry saved without after (before hansa recorded it) stands for a target that must follow none
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
@@ -3014,11 +3015,12 @@ def public_settings(desk: Desk) -> dict:
     # their releases wait for the yes until the list is saved again
     listed = s.get("releases_without_asking") if isinstance(s.get("releases_without_asking"), list) else []
     # gone: a target no lane has now, which the page shows among the ticks with what it was, to be unticked
-    unmatched = [{"lane": lane, "target": target, "why": why, "why_zh": listed_mismatch(s, x, True),
+    unmatched = [{"lane": lane, "target": target, "why": why, "why_zh": listed_mismatch(s, x, True, observed),
                   "gone": target not in lane_targets(s.get("lanes", {}).get(lane)),
                   "was": str(x.get("command", x.get("release", ""))) if isinstance(x, dict) else ""}
-                 for x in listed if isinstance(x, (str, dict)) for why in [listed_mismatch(s, x)] if why
-                 for lane, target in [listed_key(x)]]
+                 for x in listed if isinstance(x, (str, dict)) for lane, target in [listed_key(x)]
+                 for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
+                 for why in [listed_mismatch(s, x, now_as=observed)] if why]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s),
