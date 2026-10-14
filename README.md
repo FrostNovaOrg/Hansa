@@ -301,7 +301,8 @@ fix that.
 hansa is developed with hansa: the `tNNNN: <title>` and `Merge tNNNN: <title>` commits in its history are a
 desk's task commits and merges.
 
-`python3 -m unittest tests.test_hansa` (uses a stand-in for `claude`; no model is called).
+`python3 tests/run_parallel.py` runs the suite faster across processes;
+`python3 -m unittest tests.test_hansa` still works (both use a stand-in for `claude`; no model is called).
 Before each push the maintainers run the whole suite on macOS and on Linux. Every push to `alpha` or `main`
 runs, on GitHub's Ubuntu machine, the tests a sandboxed run cannot (those that listen on the loopback or make a
 Unix socket); every pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest. Only a run
