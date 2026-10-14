@@ -4981,6 +4981,7 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+                        merge_repo=str(Path(repo).resolve()), merge_base=name,
                         merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None,
                         merge_message_note=message_fallback(lane, m["lane"], "merge_message") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
@@ -5176,6 +5177,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
             return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
                                                                               "nothing was merged"})
         m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
+                        merge_repo=str(Path(repo).resolve()), merge_base=name,
                         merge_check_result=result, unverified=unverified_note(desk, m) or None,
                         merge_message_note=result.get("message_note") or mc.get("message_note") or None)
         close_verification(desk, m, f"closed: {tid} was merged")

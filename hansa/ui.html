@@ -140,6 +140,9 @@ const T = ZH ? {
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼", releaseUnchecked:"这一行无法检查",
   releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
   releaseOutside:"仓库外的文件", releaseOutsideFolder:"命令运行所在的仓库外文件夹（不记录指纹）", outsideUnhashed:"未记录指纹",
+  releaseDirectCommits:(n, shown) => `直接提交：${n} 个` + (shown < n ? `（列出前 ${shown} 个）` : ""),
+  releaseDirectReason:"直接提交的原因", releaseDirectWait:"这些直接提交须等你点头，即使发布目标已勾选",
+  releaseDirect:"基础分支上的直接提交（只由你在此保存）", releaseDirectRecord:"record：记录，按目标的勾选发布（默认）", releaseDirectHold:'hold：须用 --direct "原因" 请求，即使目标已勾选也等你点头',
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
@@ -229,6 +232,9 @@ const T = ZH ? {
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out", releaseUnchecked:"The line could not be checked",
   releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
   releaseOutside:"outside file", releaseOutsideFolder:"outside folder the command runs in (no fingerprint)", outsideUnhashed:"not fingerprinted",
+  releaseDirectCommits:(n, shown) => `${n} direct commit(s)` + (shown < n ? ` (the first ${shown} shown)` : ""),
+  releaseDirectReason:"reason for direct commits", releaseDirectWait:"Direct commits require your yes even when the target is ticked",
+  releaseDirect:"Direct commits on the base branch (saved here by you only)", releaseDirectRecord:"record: record them and follow the target's tick (default)", releaseDirectHold:'hold: require --direct "<why>" and your yes even for a ticked target',
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
@@ -416,7 +422,11 @@ function releaseBlock(r) {
 function releaseOutside(r) {
   return h("div", {class:"mono"}, (r.outside || []).map(f => h("div", {class:"warn"}, `${T.releaseOutside}: ${f.path}`,
     f.sha256 ? ` · sha256 ${f.sha256}` : f.why ? ` · ${T.outsideUnhashed}: ${(ZH && f.why_zh) || f.why}` : "")),
-    (r.outside_folders || []).map(p => h("div", {class:"warn"}, `${T.releaseOutsideFolder}: ${p}`)));
+    (r.outside_folders || []).map(p => h("div", {class:"warn"}, `${T.releaseOutsideFolder}: ${p}`)),
+    r.direct_count ? h("div", {class:"warn"}, T.releaseDirectCommits(r.direct_count, (r.direct || []).length),
+      (r.direct || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`)),
+      r.direct_reason ? h("div", {}, `${T.releaseDirectReason}: ${r.direct_reason}`) : null,
+      r.direct_hold && r.state === "waiting" ? h("div", {}, T.releaseDirectWait) : null) : null);
 }
 function releaseStop(r) {
   if (!["approved", "starting", "running"].includes(r.state) || r.stop_asked) return null;
@@ -639,6 +649,7 @@ function renderSettings(problems) {
         h("ul", {}, RELEASE_UNMATCHED.filter(u => !u.gone).map(u => h("li", {class:"bad"}, `${u.lane}${u.target ? ` · ${T.releaseTarget} ${u.target}` : ""}: ${(ZH && u.why_zh) || u.why}`))),
         h("button", {onclick: e => { S.releases_without_asking = (S.releases_without_asking || []).map(listedKey).map(([lane, target]) => ({lane, target}));
           e.target.disabled = true; }}, T.releaseTakeBack))] : []),
+      T.releaseDirect, pick(S, "release_direct", ["record", "hold"], [T.releaseDirectRecord, T.releaseDirectHold]),
       T.releaseForbidden, h("textarea", {placeholder:"internal-only", onchange:() => renderSettings(), oninput: e => {
         S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.release_forbidden || []).join("\n")),
       T.releaseForbiddenExcept, forbiddenExceptions(),

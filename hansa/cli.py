@@ -661,6 +661,7 @@ def cmd_merge(a):
         note = unverified_note(desk, m)  # before its verification is closed
         said = message_fallback(lane, m["lane"], "merge_message")
         desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+                    merge_repo=release.repo_key(repo), merge_base=base,
                     unverified=note or None, merge_message_note=said or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
@@ -1192,7 +1193,7 @@ def cmd_release(a):
     if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
         target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
     r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
-                    session=notify.session_here(), target=target)
+                    session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
             + (f" by target {r['target']}" if r.get("target") else "") + ", "
@@ -1201,6 +1202,7 @@ def cmd_release(a):
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
     head += "".join("\n" + x for x in release.outside.lines(r))
+    head += "".join("\n" + x for x in release.direct_lines(r))
     if r["state"] == "forbidden":
         mailbox = release.mailbox_refusal(r["hits"])
         if mailbox:
@@ -2838,7 +2840,8 @@ def main(argv=None):
                      "of any of those commits, refuses it. A target that must follow another (--after) is asked only "
                      "for a commit the other one already sent out. It waits for the principal's yes on the web page "
                      "(unless the principal lists that target as released without asking and the desk is not "
-                     "paused; a tick stops counting when the lane's repository or base branch, or the target's "
+                     "paused, and direct commits do not require their yes; a tick stops counting when the lane's "
+                     "repository or base branch, or the target's "
                      "command, --after or --fixed, changes, not when only --minutes does); then hansa serve runs the "
                      "command, as the desk's account, outside the sandbox, with hansa's environment and the target's "
                      "minutes (else the lane's) as its limit, and only while the base branch and the command are what "
@@ -2851,7 +2854,10 @@ def main(argv=None):
                      "page and hansa serve go on meanwhile), each commit's own change once (a merge's: only what it "
                      "adds beyond its parents); hansa serve checks again at the start only when the commit, the "
                      "starting point, the words or the command changed since. hansa release alone lists the open and "
-                     "recent releases. Only the coordinator asks. hansa release --stop ID [reason] calls one off: one "
+                     "recent releases, including direct base commits and hand merges. The principal's release_direct "
+                     "setting defaults to record; hold requires --direct \"<why>\" and their yes for these commits, "
+                     "even for a ticked target. --direct with no direct commits is refused. Only the coordinator asks. "
+                     "hansa release --stop ID [reason] calls one off: one "
                      "waiting for the principal or approved and waiting its turn is closed as stopped; a running one "
                      f"gets TERM to its command's whole process group, then KILL {release.STOP_GRACE} seconds later to "
                      "what still runs, and is recorded as stopped, with who stopped it and why, its output so far kept "
@@ -2874,6 +2880,9 @@ def main(argv=None):
                 + see_more("release-flow", "forbidden-words", "alerts"))
     p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
+    p.add_argument("--direct", metavar="WHY", help="record why direct base commits go out; required when the "
+                   "principal's release_direct setting is hold, then waits for their yes even for a ticked target; "
+                   "refused when there are no direct commits")
     p.add_argument("lane", nargs="?")
     p.add_argument("note", nargs="*")
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "

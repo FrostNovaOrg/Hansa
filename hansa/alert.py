@@ -173,6 +173,8 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
     at = f"{r.get('base')} at {str(r.get('commit') or '')[:10]}"
     rest = (f"{r.get('count', 0)} commit(s), command: {r.get('command')}"
             + (f"; note: {r['note']}" if r.get("note") else ""))
+    if waiting and r.get("direct_count"):
+        rest = f"{r['direct_count']} direct commit(s), " + rest
     if waiting and code:  # the code and what to do with it first: a phone shows the first hundred characters or so,
         # and no cut of a long text takes it
         return (f"release #{r['id']} (lane {r.get('lane')}, target {target or '(unnamed)'}) · code {code}: to release "

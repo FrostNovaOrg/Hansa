@@ -87,7 +87,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "alert", "coordinator_compact", "coordinator_alert")
+                  "release_direct", "alert", "coordinator_compact", "coordinator_alert")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -298,6 +298,8 @@ def default_settings() -> dict:
         # repository, base branch, command and after waits for the yes. The principal's, on the page; empty: every
         # release waits for the yes.
         "releases_without_asking": [],
+        # Direct base commits: record them, or require a reason and the principal's yes, even for a ticked target.
+        "release_direct": "record",
         # Words or phrases no release may send out (any case): a hit in the lines the outgoing commits add, the
         # files they name, their messages or identities refuses the release; one in a task's title refuses hansa
         # add, and one in what a task's merge would bring in refuses the merge. The principal's, on the page.
@@ -598,7 +600,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     mailbox_key = mailbox_key or original_key
     known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
              "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
-             "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "alert", "coordinator_compact",
+             "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
              "coordinator_alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     by = s.get(HIDDEN_BY, {})
@@ -624,6 +626,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         p.append("the releases without asking must be a list of lanes and their release targets, each a lane name "
                  "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)")
     words = s.get("release_forbidden", [])
+    if s.get("release_direct", "record") not in ("record", "hold"):
+        p.append("release_direct must be record or hold")
     if not isinstance(s.get("release_mailboxes", False), bool):
         p.append(f"{mailbox_key} must be true or false")
     mailbox_allow = s.get("release_mailbox_allow", [])
