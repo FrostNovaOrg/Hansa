@@ -172,13 +172,14 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 - A lane whose release goes to a public repository should have an `identity` set, on the lane or in
   the repository's own config, and usually leaves `{task}` out of its message forms. More: `hansa
   help commits`.
-- Set a target: `hansa lane target L NAME "<command>"`, one shell command line (a push, a wait for
-  CI, a deploy script). A `--fixed` target's command sends `$HANSA_RELEASE_COMMIT`, never the base
-  branch; give it in single quotes, so the variable is read when it runs: `hansa lane target L NAME
+- Set a target: `hansa lane target L NAME "<command>"` (one shell command: push, wait for CI, deploy).
+  A `--fixed` target sends `$HANSA_RELEASE_COMMIT`, never the base branch; single-quote it so the
+  variable is read when it runs: `hansa lane target L NAME
   'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"' --fixed`. More: `hansa help release-flow`.
-- List the build files a release runs outside the sandbox (`hansa lane set L release_files "pom.xml
+- A ticked target can run by itself after merges, as a check: `hansa lane target L NAME --after-merge MINUTES`.
+- List release build files run outside the sandbox (`hansa lane set L release_files "pom.xml
   build.sh"`): `hansa merge` refuses a change touching one until `hansa verify <id>` holds, and
-  neither `--despite-check` nor anything else lets it through. More: `hansa help release-files`.
+  nothing, including `--despite-check`, bypasses this. More: `hansa help release-files`.
 - Ask: `hansa release L [TARGET] "<note>"`. A word the principal keeps from going out, in the command
   or the outgoing commits, refuses it with the places found: take them out of the history (a task) or
   of the command, or ask the principal. The same words refuse a title at `hansa add` and a task at
@@ -188,18 +189,17 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   asking. While the desk is paused only a release they said yes to runs.
 - They answer on the page, or in the conversation with the one-time code their alert carries (6
   characters, right after the desk's name: `release #1 (lane a, target staging) · code K7P3QX: ...`).
-  A plain yes in the conversation does not count: ask for the code or the page. Pass it with `hansa
+  A plain yes does not count: ask for the code or page. Pass it with `hansa
   release yes ID CODE` (or `no ID CODE [reason]`). The code is one word (dashes allowed, no spaces):
   pass `K7P 3QX` as `K7P3QX`: that is not guessing. A yes with a word too many is refused, and
   nothing is counted. After 3 wrong codes only the page answers. Without an alert command the page
   alone answers.
 - If the base branch, the command, or a file the command runs outside the repository changed since
-  the principal saw it, the release is void and says why: ask again. You are told when they answer
-  and when it ends; `hansa release` lists them.
-- The principal may have alerts (their own command, which hansa runs);
-  the coordinator does not send them. One kind, `coordinator`, tells the principal that your session
-  has not heard from hansa, waits on a dialog, or leaves a finished task waiting for review; when
-  they mention it, run `hansa status`. More: `hansa help alerts`.
+  the principal saw it, the release is void and says why: ask again. hansa tells you their answer
+  and its end; `hansa release` lists them.
+- hansa runs the principal's alert command; the coordinator does not send alerts. `coordinator`
+  alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
+  for review; when they mention it, run `hansa status`. More: `hansa help alerts`.
 
 ## Hearing from hansa
 hansa posts to your session when something needs you: a task, verification, design session, merge

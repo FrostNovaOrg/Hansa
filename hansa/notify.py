@@ -268,6 +268,10 @@ def _item(desk: Desk, e: dict):
     if kind in ("release_answered", "release_ended", "release_void", "release_forbidden",
                 "release_stopped") and not e.get("quiet"):
         return _release_item(desk, e)
+    if kind == "release_after_merge_waits":
+        return (("after-merge", e.get("lane"), e.get("target")),
+                f"lane {e.get('lane')} target {e.get('target')} after merges {e.get('merges')}: {e.get('why')}"
+                " · next: hansa explain lane " + str(e.get("lane")), None, False, None)
     if kind == "disk_low":
         return ("disk",), (f"free space is under the floor ({e.get('floor') or 0:g} GB): "
                            + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until "
@@ -320,6 +324,14 @@ def _release_item(desk: Desk, e: dict):
                 f"{head} FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                 + (f": {e.get('problem')}" if e.get("problem") else "") + (f" · last lines: {tail}" if tail else "")
                 + " · next: hansa release; fix what failed, then ask again: " + release.ask_again(r))
+        if r.get("after_merge") and not e.get("ok"):
+            line = (f"{head} check FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
+                    + (f": {e.get('problem')}" if e.get("problem") else "")
+                    + (f" · last lines: {tail}" if tail else "")
+                    + " · merges since its last passing run: " + release.merges_text(
+                        r["after_merge"]["since_pass"], r["after_merge"].get("since_pass_count"))
+                    + " · next: hansa release; make a task to fix what failed, then this target runs again after "
+                    "that task's merge")
         if e.get("stop_late"):
             line += " · the stop came after its command had ended, so it ended as its exit says"
     elif kind == "release_stopped":

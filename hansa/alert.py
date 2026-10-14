@@ -188,6 +188,11 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
 
 def from_event(desk: Desk, kind: str, fields: dict) -> None:
     """Queue the alert an event calls for, if any (Desk.event calls this)."""
+    if kind.startswith("release_"):
+        from . import release
+        r = release.get(desk, fields.get("id")) or {}
+        if r.get("after_merge") and not (kind == "release_ended" and r.get("state") == "failed"):
+            return  # these automatic checks alert the principal only on failure
     if kind == "release_asked" and fields.get("state") == "waiting" or kind == "release_waits":
         from . import release
         rid = fields.get("id")

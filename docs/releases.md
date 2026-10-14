@@ -5,24 +5,6 @@ from the page. The coordinator's side of it is in [hansa/card.md](../hansa/card.
 
 ## How a release goes out
 
-The request lists direct commits among its outgoing commits, with their count (at most 200 SHAs and
-subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in
-this repository and base, from any lane, and what it brought in are not direct. Every other commit
-on that line, and what a direct merge brought in (even a task's branch merged by hand), is direct; a
-later hansa merge does not hide an earlier direct commit. With no remote-tracking branch and no
-readable last release, history older on that line than the oldest hansa merge in the outgoing range
-is history from before hansa and is not direct. With no hansa merge in that range either, every
-outgoing commit is listed as direct: hansa cannot tell what came before it. With a remote-tracking
-branch, no such cutoff applies, even when the last release's commit is gone. Commits on
-remote-tracking branches or in the target's last release are not looked at, nor are working files
-or uncommitted changes; tasks are read for this at the ask only, never in an idle round. Only the
-principal saves `release_direct` on the page: `record` (default) lists these commits and keeps ticked
-targets going out without asking; `hold` (also used for an unknown setting value) refuses a release
-with them unless asked with `--direct "<why>"`, then records the reason and waits for the principal's
-yes even for a ticked target. The refusal names the first ten commits and their count and records
-nothing; `--direct` with no direct commits is refused. The page and `hansa release` show the recorded
-commits and reason; waiting alerts give only their count, never subjects. Older requests show as before.
-
 Releases are the last step. hansa merges into a lane's base branch and stops
 there; a lane's release command (a push, a wait for CI such as `gh run watch
 --exit-status`, a deploy script) is how the base branch goes out. A lane
@@ -30,7 +12,8 @@ that sends it out in more than one way (a push to the public repository, an
 install on a test server, an install on the production server) names its
 release targets, with `hansa lane target L NAME "<command>"
 [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
-(else the lane's `timeout_min`) and optionally another target of the lane
+(else the lane's `timeout_min`; an invalid target limit in a hand-edited settings file also uses the lane's)
+and optionally another target of the lane
 that must have sent out the same commit first. An older unnamed release
 moves to `default` if absent, taking only its tick for the same command.
 Other unnamed ticks match nothing, even if `default` has the same command.
@@ -168,6 +151,42 @@ it runs, also what leaves its process group, and what of it still runs is
 stopped at any end (a stop, the time limit, a failure, done). The principal's
 alert command is told when the coordinator stops one (`release_stopped`); the
 coordinator hears when the principal does.
+
+The request lists direct commits among its outgoing commits, with their count (at most 200 SHAs and
+subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in
+this repository and base, from any lane, and what it brought in are not direct. Every other commit
+on that line, and what a direct merge brought in (even a task's branch merged by hand), is direct; a
+later hansa merge does not hide an earlier direct commit. With no remote-tracking branch and no
+readable last release, history older on that line than the oldest hansa merge in the outgoing range
+is history from before hansa and is not direct. With no hansa merge in that range either, every
+outgoing commit is listed as direct: hansa cannot tell what came before it. With a remote-tracking
+branch, no such cutoff applies, even when the last release's commit is gone. Commits on
+remote-tracking branches or in the target's last release are not looked at, nor are working files
+or uncommitted changes; tasks are read for this at the ask only, never in an idle round. Only the
+principal saves `release_direct` on the page: `record` (default) lists these commits and keeps ticked
+targets going out without asking; `hold` (also used for an unknown setting value) refuses a release
+with them unless asked with `--direct "<why>"`, then records the reason and waits for the principal's
+yes even for a ticked target. The refusal names the first ten commits and their count and records
+nothing; `--direct` with no direct commits is refused. The page and `hansa release` show the recorded
+commits and reason; waiting alerts give only their count, never subjects. Older requests show as before.
+
+For checks that need another machine, system or the project's CI, the coordinator can set
+`hansa lane target L NAME --after-merge MINUTES` (1–1440; `none` turns it off), refused on a target
+with `--after`: an invalid `after_merge_min` in a hand-edited settings file turns it off. The setting is
+kept without the principal's tick, but only a target whose tick still
+counts runs by itself. After a task lands in that repository and base branch, from any lane and by
+any hansa merge, hansa waits MINUTES after the last such merge and until no task of that repository
+is merging, then asks the ordinary release, marked as asked by hansa after merges and naming them.
+It checks forbidden words and outside files, waits for resume and free space over the floor, and
+voids the request if its tick no longer counts; with `release_direct: hold`, outgoing direct commits
+prevent the ask and tell the coordinator to ask by hand with `--direct "<why>"`. One run per target
+covers a batch; merges during it make one more run after it ends, and no new merges mean no new
+request or git/file reads for scheduling. A run asked by hand, once passed or failed, covers the
+merges before it was asked; a target that never ran covers all merges before its first run, naming
+the 10 newest and the count of all. `hansa lane target L` and `hansa explain lane L` show the
+setting and tick. A failed run reaches the coordinator as a failed check, naming the target and
+merges since its last passing run: make a task to fix what failed, and the target runs again after
+its merge. Only failure alerts the principal.
 
 ## Forbidden words before a release
 
