@@ -22095,7 +22095,8 @@ class DeskTest(unittest.TestCase):
                  (20, "tee outputs"), (21, "remote paths and PATH"), (22, "equals paths"),
                  (23, "comments and shell input text"), (24, "relative outside link"),
                  (25, "old request with file"), (26, "shlex fallback after bash quoting"),
-                 (27, "bare outside link")]
+                 (27, "bare outside link"), (28, "paths after tee across newline"),
+                 (29, "tee process substitution")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22206,20 +22207,20 @@ class DeskTest(unittest.TestCase):
                         log = ops / "x.log"
                         log.write_text("before\n")
                         for cmd in ("./d | tee -a ~/ops/x.log", "./d | /usr/bin/tee -- ~/ops/x.log"):
-                            told = c.hansa("lane", "target", "a", "prod", cmd)
-                            c.assertNotIn("outside file:", told)
+                            warning(c, cmd, log)
                             r = release.ask(c.desk, "a", target="prod")
-                            c.assertEqual(r["outside"], [])
+                            c.assertEqual(r["outside"], [{"path": str(log.resolve()),
+                                                        "sha256": hashlib.sha256(log.read_bytes()).hexdigest()}])
                             log.write_text("after ask\n")
-                            c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                            answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                            c.assertFalse(answer["ok"])
+                            c.assertIn(str(log.resolve()), answer["void"])
                             tick(c)
                             log.write_text("after tick\n")
-                            c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
-                            c.assertEqual(public_settings(c.desk)["release_unmatched"], [])
-                            c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-                            release.void(c.desk, r["id"], "end this fixture", ("approved",))
+                            c.assertFalse(release.lane_listed(c.desk.settings(), "a", "prod"))
+                            c.assertIn(str(log.resolve()), str(public_settings(c.desk)["release_unmatched"]))
                         c.assertEqual([f["path"] for f in outside.inspect(
-                            "tee -a ~/ops/x.log < ~/ops/deploy.sh", c.repo)["outside"]], [path])
+                            "tee -a ~/ops/x.log < ~/ops/deploy.sh", c.repo)["outside"]], [str(log.resolve()), path])
                     elif row == 21:
                         local = ops / "x"
                         local.write_text("local input\n")
@@ -22289,6 +22290,15 @@ class DeskTest(unittest.TestCase):
                                       [path])
                         (c.repo / "ops").symlink_to(ops, target_is_directory=True)
                         c.assertEqual(outside.inspect("cd ops", c.repo)["outside_folders"], [folder])
+                    elif row in (28, 29):
+                        log, local = ops / "log", ops / "x"
+                        log.write_text("log\n")
+                        local.write_text("input\n")
+                        cmd = "./d | tee -a ~/ops/log\n./d2 ~/ops/x" if row == 28 else "tee >(cat ~/ops/x) ~/ops/log"
+                        expected = [str(log.resolve()), str(local.resolve())] if row == 28 else [str(local.resolve()), str(log.resolve())]
+                        found = outside.inspect(cmd, c.repo)
+                        c.assertEqual([f["path"] for f in found["outside"]], expected)
+                        c.assertEqual(found["outside_folders"], [])
                     else:
                         c.with_targets(prod=command)
                         if row == 5:

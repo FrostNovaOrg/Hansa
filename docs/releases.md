@@ -266,28 +266,27 @@ not named. Words split on `=`, not `:`: `--config=~/x` and `env V=~/x`
 name `~/x`, while remote paths such as `host:/etc/hosts` and
 `PATH=/usr/bin:/bin` name nothing. Words are split with `shlex`, falling
 back to splitting on spaces when it cannot split the line. Comments,
-here-strings and heredoc bodies are read as words too.
-Process and command substitution (`>( )`, `<( )`, `$( )`, backticks) is
-read as part of the command around it. An output redirection's destination
-(`>`, `>>`, `>|`, `&>`, `&>>`, including a descriptor number such as `2>`)
-and `tee`'s file arguments (options aside) are files the command writes,
-so they are not named or fingerprinted; an input redirection's file (`<`)
-is still looked into. `tee` run through `sudo`, `env` or `xargs` is not
-recognized, so its file is named.
-Existing regular text files (no NUL in the first 8 KB) are named when a
-target is set and recorded with their sha256 on a release request and on
-the principal's tick; no worker can change them and no verification covers
-them, so move them into the repository and list them in `release_files`. A
-recorded fingerprint must still match: a file that changes, disappears or
-can no longer be fingerprinted (over 16 MB, unreadable or now binary) has
-changed. A file not recorded must still be absent: a new one counts even
-if it cannot be fingerprinted. Such a change voids a waiting or approved
-request before the answer counts or the release starts, and a change since
-the tick was saved makes that tick stop counting; the page names the file,
-and taking changed entries back in records their new fingerprints. An
-older request or tick that did not record an outside file is void or stops
-counting too, saying it did not record the file; one with no outside file
-keeps counting. Outside folders named as where the command runs are shown
+here-strings and heredoc bodies are read as words too. Substitutions
+(`$( )`, `>( )`, `<( )`, backticks) are read as words like the rest of the
+line. An output redirection's destination (`>`, `>>`, `>|`, `&>`, `&>>`,
+`>&`, including a descriptor number such as `2>`) is not named or
+fingerprinted; an input redirection's file (`<`) is still looked into.
+A file `tee` writes is named like any other, so write logs with `>>`,
+which is left out. Existing regular text files (no NUL in the first 8
+KB) are named when a target is set and recorded with their sha256 on a
+release request and on the principal's tick; no worker can change them
+and no verification covers them, so move them into the repository and
+list them in `release_files`. A recorded fingerprint must still match: a
+file that changes, disappears or can no longer be fingerprinted (over 16
+MB, unreadable or now binary) has changed. A file not recorded must
+still be absent: a new one counts even if it cannot be fingerprinted.
+Such a change voids a waiting or approved request before the answer
+counts or the release starts, and a change since the tick was saved
+makes that tick stop counting; the page names the file, and taking
+changed entries back in records their new fingerprints. An older request
+or tick that did not record an outside file is void or stops counting
+too, saying it did not record the file; one with no outside file keeps
+counting. Outside folders named as where the command runs are shown
 without a fingerprint; files over 16 MB or unreadable are named as not
 fingerprinted, and a file recorded without a fingerprint is not compared.
 Devices, binaries, bare names found on PATH, variables other than HOME,

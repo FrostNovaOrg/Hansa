@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import shlex
 import stat
 from pathlib import Path
@@ -35,25 +34,13 @@ def _paths(command: str):
                 words.append((word, line[start:end].strip()))
         except ValueError:
             words = [(word, word) for word in line.split()]
-        skip, input_file, first, tee = False, False, True, False
+        output = False
         for word, spelling in words:
-            if spelling and all(c in ";&|()" for c in spelling):
-                skip, input_file, first, tee = False, False, True, False
-                continue
-            if skip:
-                skip = False
+            if output:
+                output = False
                 continue
             if spelling in (">", ">>", ">|", "&>", "&>>", ">&"):
-                skip = True
-                continue
-            if spelling == "<":
-                input_file = True
-                continue
-            if input_file:
-                input_file = False
-            elif first and not re.match(r"[A-Za-z_][A-Za-z_0-9]*=", word) and not word.isdigit():
-                first, tee = False, Path(word).name == "tee"
-            elif tee:
+                output = True
                 continue
             # Options and assignments can hold a path after '='. No variable but HOME is read.
             values = [word] if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) else word.split("=")
