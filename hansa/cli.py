@@ -1200,6 +1200,7 @@ def cmd_release(a):
                f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
+    head += "".join("\n" + x for x in release.outside.lines(r))
     if r["state"] == "forbidden":
         mailbox = release.mailbox_refusal(r["hits"])
         if mailbox:
@@ -2210,6 +2211,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         shown = lane_targets(ln)
         for name, t in sorted(shown.items()):
             print(_target_text(name, t, ln))
+            for line in release.outside.lines(release.outside.inspect(t.get("command") or "", ln["repo"],
+                                                                     fingerprint=False)):
+                print("  " + line)
         if not shown:
             print(f"lane {a.name} has no release target: hansa lane target {a.name} NAME \"<command>\" names one")
         return
@@ -2295,10 +2299,23 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
 
 
 def _say_forbidden(desk: Desk, name: str, ln: dict, only: str | None = None) -> None:
-    """Say at once when a release command just set holds one of the principal's forbidden words."""
+    """Say forbidden words and outside paths at once when a release target is set."""
     hits = release.command_hits(ln, release.lane_words(desk.settings(), name), only)
     if hits:
         print(release.command_hits_text(desk, name, hits))
+    for target, t in lane_targets(ln).items():
+        if only is not None and only != target:
+            continue
+        found = release.outside.inspect(t.get("command") or "", ln["repo"])
+        if not found["outside"] and not found["outside_folders"]:
+            continue
+        print(desk.redact(f"Warning: lane {name}'s release target {target} names paths outside the repository:\n"
+                         + "\n".join("  " + x for x in release.outside.lines(found))
+                         + "\nNo worker can change them, and no verification covers them. A change to a "
+                         "fingerprinted outside file voids a waiting release and unticks the target on the "
+                         "principal's list of releases without asking. Folders have no fingerprint; files recorded "
+                         "without a fingerprint do not void or untick anything. Better: move the files into "
+                         "the repository and list them in release_files. " + see_more("release-files")))
 
 
 def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:

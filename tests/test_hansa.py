@@ -22240,6 +22240,297 @@ class DeskTest(unittest.TestCase):
                     self.assertNotIn("release_files matches", shown)
                     self.assertIn("  standing instructions:", shown)
 
+    @unittest.skipUnless(shutil.which("node"), "needs node to check outside files on the page")
+    def test_outside_release_files_cases(self):
+        from hansa import outside, release
+        import hashlib
+
+        def page(c, tab, language="en"):
+            harness = c.tmp / "outside-page.js"
+            harness.write_text(c.PAGE_HARNESS.replace("  const ticks = [];", r"""
+  if (ask === "take-back") {
+    let take = null, save = null;
+    walk(ids["#tab-settings"], el => {
+      if (el.tag === "button" && el.textContent.startsWith("Take them back in")) take = el;
+      if (el.tag === "button" && el.className === "primary" && el.textContent === "Save settings") save = el;
+    });
+    if (!take || !save) throw new Error("take-back or save button missing");
+    take.on.click({target:take}); await save.on.click();
+    console.log(JSON.stringify(posted)); return;
+  }
+  const ticks = [];
+"""))
+            replies = {"/api/status": views.status(c.desk), "/api/settings": public_settings(c.desk)}
+            got = subprocess.run(["node", str(harness), str(Path(cli.__file__).with_name("ui.html")), tab, language],
+                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+            c.assertEqual(got.returncode, 0, got.stderr)
+            return json.loads(got.stdout)
+
+        def tick(c):
+            c.assertEqual(c.page_save(lambda s: s.update(releases_without_asking=[{"lane": "a", "target": "prod"}])),
+                          {"ok": True, "problems": []})
+
+        def warning(c, command, file):
+            told = c.hansa("lane", "target", "a", "prod", command)
+            c.assertIn("outside file: " + str(file.resolve()), told)
+            for point in ("No worker can change", "no verification covers", "voids a waiting release",
+                          "unticks the target", "move the files into the repository", "release_files",
+                          "More: hansa help release-files"):
+                c.assertIn(point, told)
+            c.assertEqual(c.desk.settings()["lanes"]["a"]["targets"]["prod"]["command"], command)
+            return told
+
+        cases = [(1, "warn on set"), (2, "path spellings and quotes"), (3, "excluded paths"),
+                 (4, "folder only"), (5, "record and show request"), (6, "change before answer"),
+                 (7, "change before start"), (8, "removed file"), (9, "tick and take back in"),
+                 (10, "old tick with file"), (11, "old tick without file"), (12, "cannot fingerprint"),
+                 (13, "explain and target list"), (14, "alert setting"), (15, "idle reads no file"),
+                 (16, "output redirections"), (17, "input redirection"),
+                 (18, "recorded fingerprint becomes unavailable"), (19, "new unfingerprintable file")]
+        for row, label in cases:
+            with self.subTest(row=row, case=label):
+                c = DeskTest(self._testMethodName)
+                c.setUp()
+                try:
+                    os.environ["HOME"] = str(c.tmp)
+                    ops = c.tmp / "ops"
+                    ops.mkdir()
+                    script = ops / "deploy.sh"
+                    script.write_text("#!/bin/sh\ntrue\n")
+                    script.chmod(0o755)
+                    path = str(script.resolve())
+                    folder = str(ops.resolve())
+                    command = "~/ops/deploy.sh prod"
+                    digest = hashlib.sha256(script.read_bytes()).hexdigest()
+                    if row == 1:
+                        warning(c, command, script)
+                        c.assertIn(path, c.hansa("lane", "set", "a", "release", command))
+                        c.assertIn(path, c.hansa("lane", "add", "b", "--like", "a"))
+                    elif row == 2:
+                        for cmd in (path + " prod", "$HOME/ops/deploy.sh prod", "${HOME}/ops/deploy.sh prod",
+                                    "../ops/deploy.sh prod", "bash -c '~/ops/deploy.sh'",
+                                    "bash -c 'sh ~/ops/deploy.sh prod'"):
+                            warning(c, cmd, script)
+                        link = c.repo / "link.sh"
+                        link.symlink_to(script)
+                        warning(c, str(link), script)
+                        spaced = ops / "deploy space.sh"
+                        spaced.write_text("true\n")
+                        warning(c, shlex.quote(str(spaced)), spaced)
+                        punctuated = ops / "deploy:prod=live.sh"
+                        punctuated.write_text("true\n")
+                        warning(c, shlex.quote(str(punctuated)), punctuated)
+                    elif row == 3:
+                        (c.repo / "deploy.sh").write_text("true\n")
+                        binary = ops / "binary"
+                        binary.write_bytes(b"tool\0bytes")
+                        for cmd in ("./deploy.sh", "git push origin main", "/usr/bin/env bash ./x.sh", "> /dev/null",
+                                    "ssh remote.example /not-here/deploy.sh", str(binary), "$OPS/deploy.sh",
+                                    "deploy.sh", str(c.repo / "deploy.sh")):
+                            told = c.hansa("lane", "target", "a", "prod", cmd)
+                            c.assertNotIn("outside file:", told)
+                            c.assertNotIn("outside folder", told)
+                        inside = ops / "inside.sh"
+                        inside.symlink_to(c.repo / "deploy.sh")
+                        c.assertNotIn("outside file:", c.hansa("lane", "target", "a", "prod", str(inside)))
+                    elif row == 4:
+                        told = c.hansa("lane", "target", "a", "prod", "cd ~/ops && ./deploy.sh")
+                        c.assertIn("outside folder the command runs in: " + folder, told)
+                        c.assertIn("no fingerprint", told)
+                        tick(c)
+                        r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual((r["outside"], r["outside_folders"]), ([], [folder]))
+                        script.write_text("changed\n")
+                        c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                        c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                        c.assertIn(folder, page(c, "release-hits"))
+                    elif row == 13:
+                        c.with_targets(prod=command, ops="cd ~/ops && ./deploy.sh")
+                        for told in (c.hansa("explain", "lane", "a"), c.hansa("lane", "target", "a")):
+                            c.assertIn("outside file: " + path, told)
+                            c.assertIn("outside folder the command runs in: " + folder, told)
+                    elif row == 14:
+                        for cmd, expect in (("~/ops/deploy.sh", [path]),
+                                            (str(c.desk.root / "secrets" / "alert.sh"), [])):
+                            (c.desk.root / "secrets" / "alert.sh").write_text("true\n")
+                            c.assertEqual(c.page_save(lambda s: s.update(alert={"command": cmd})),
+                                          {"ok": True, "problems": []})
+                            c.assertEqual([f["path"] for f in public_settings(c.desk)["alert_outside"]], expect)
+                            text = page(c, "settings-problems")
+                            if expect:
+                                for point in (path, "coordinator can change", "one-time release codes pass through",
+                                              "keep it under secrets/"):
+                                    c.assertIn(point, text)
+                                c.assertIn(path, page(c, "settings-problems", "zh"))
+                            else:
+                                c.assertNotIn("coordinator can change it", text)
+                    elif row == 16:
+                        log = ops / "deploy.log"
+                        log.write_text("before\n")
+                        for redirect in (">", ">>", ">|", "&>", "&>>", "2>", "2>>", "2>|"):
+                            for cmd in (f"./deploy.sh {redirect} ~/ops/deploy.log 2>&1",
+                                        f"bash -c './deploy.sh {redirect}\"~/ops/deploy.log\" 2>&1'"):
+                                told = c.hansa("lane", "target", "a", "prod", cmd)
+                                c.assertNotIn("outside file:", told)
+                                r = release.ask(c.desk, "a", target="prod")
+                                tick(c)
+                                c.assertEqual(r["outside"], [])
+                                log.write_text(log.read_text() + "after\n")
+                                c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                                c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                                release.void(c.desk, r["id"], "end this fixture", ("approved",))
+                        for literal in ("'>'", '\">>\"', r"\>"):
+                            warning(c, f"./deploy.sh {literal} ~/ops/deploy.sh", script)
+                    elif row == 17:
+                        script.rename(ops / "input.txt")
+                        script = ops / "input.txt"
+                        path = str(script.resolve())
+                        warning(c, "cat < ~/ops/input.txt", script)
+                        r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual(r["outside"], [{"path": path, "sha256": digest}])
+                        script.write_text("changed input\n")
+                        answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                        c.assertFalse(answer["ok"])
+                        c.assertIn(path, answer["void"])
+                    else:
+                        c.with_targets(prod=command)
+                        if row == 5:
+                            told = c.hansa("release", "a", "prod")
+                            r = release.get(c.desk, 1)
+                            c.assertEqual(r["outside"], [{"path": path, "sha256": digest}])
+                            c.assertEqual(r["outside_folders"], [])
+                            c.assertEqual(views.status(c.desk)["releases"][0]["outside"], r["outside"])
+                            for text in (told, c.hansa("release"), page(c, "release-hits"),
+                                         page(c, "release-hits", "zh")):
+                                c.assertIn(path, text)
+                                c.assertIn(digest, text)
+                        elif row in (6, 7, 8):
+                            r = release.ask(c.desk, "a", target="prod")
+                            if row == 7:
+                                c.assertEqual(release.answer(c.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                            if row == 8:
+                                script.unlink()
+                            else:
+                                script.write_text("#!/bin/sh\necho changed\n")
+                            if row == 7:
+                                c.assertIsNone(release.start(c.desk, r["id"]))
+                                c.assertEqual(c.events("release_started"), [])
+                            else:
+                                c.assertIn(path, views.status(c.desk)["releases"][0]["moved"])
+                                answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                                c.assertFalse(answer["ok"])
+                                c.assertIn(path, answer["void"])
+                                c.assertIn("asks again", " ".join(answer["problems"]))
+                            ended = release.get(c.desk, r["id"])
+                            c.assertEqual(ended["state"], "void")
+                            c.assertIn(path, ended["void"])
+                            # A new file explicitly named by an unchanged command also invalidates the ask.
+                            if row == 6:
+                                script.unlink()
+                                r = release.ask(c.desk, "a", target="prod")
+                                script.write_text("true\n")
+                                c.assertIn(path, release.answer(c.desk, r["id"], True, commit=r["commit"])["void"])
+                        elif row in (9, 10, 11):
+                            if row == 11:
+                                c.with_targets(prod="git push origin main")
+                            tick(c)
+                            if row == 9:
+                                c.assertEqual(c.desk.settings()["releases_without_asking"][0]["outside"],
+                                              [{"path": path, "sha256": digest}])
+                                script.write_text("true\n# new content\n")
+                            else:
+                                s = c.desk.settings()
+                                s["releases_without_asking"][0].pop("outside", None)
+                                write_json(c.desk.settings_path, s)
+                            c.assertEqual(release.lane_listed(c.desk.settings(), "a", "prod"), row == 11)
+                            if row == 11:
+                                c.assertEqual(public_settings(c.desk)["release_unmatched"], [])
+                            else:
+                                [mismatch] = public_settings(c.desk)["release_unmatched"]
+                                c.assertIn(path, mismatch["why"])
+                                c.assertIn(path, page(c, "settings-problems"))
+                                c.assertIn(path, page(c, "settings-problems", "zh"))
+                                if row == 10:
+                                    c.assertIn("list did not record", mismatch["why"])
+                                # Plain Save preserves the old tick; the page's button explicitly renews it.
+                                c.assertTrue(c.page_save(lambda s: None)["ok"])
+                                c.assertFalse(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                c.assertEqual(save_from_page(c.desk, page(c, "take-back")), {"ok": True, "problems": []})
+                                c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                c.assertEqual(c.desk.settings()["releases_without_asking"][0]["outside"][0]["sha256"],
+                                              hashlib.sha256(script.read_bytes()).hexdigest())
+                        elif row == 12:
+                            real_open = Path.open
+
+                            def unreadable(p, *args, **kwargs):
+                                if p.resolve() == script.resolve():
+                                    raise PermissionError("unreadable fixture")
+                                return real_open(p, *args, **kwargs)
+
+                            for kind in ("over 16 MB", "unreadable"):
+                                script.write_text("true\n")
+                                if kind == "over 16 MB":
+                                    script.write_bytes(b"x" * (outside.MAX_BYTES + 1))
+                                patch = unittest.mock.patch.object(Path, "open", unreadable) if kind == "unreadable" else contextlib.nullcontext()
+                                with patch:
+                                    c.assertIn("not fingerprinted: " + kind, warning(c, command, script))
+                                    tick(c)
+                                    r = release.ask(c.desk, "a", target="prod")
+                                    c.assertNotIn("sha256", r["outside"][0])
+                                    c.assertIn("not fingerprinted", page(c, "release-hits"))
+                                    c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                                script.unlink()
+                                c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                                c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                # A file recorded without a fingerprint remains exempt if it becomes readable.
+                                script.write_text("true\n")
+                                c.assertEqual(release.stale(c.desk, c.desk.settings(), r), "")
+                                c.assertTrue(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                release.void(c.desk, r["id"], "end this fixture", ("waiting", "approved"))
+                        elif row == 15:
+                            tick(c)
+                            release._write(c.desk, [{"id": 1, "lane": "a", "state": "done", "repo": str(c.repo)}])
+                            d = Dispatcher(c.desk)
+                            with unittest.mock.patch.object(outside, "inspect", side_effect=AssertionError("idle fingerprint")):
+                                d.tick()
+                                d.tick()
+                        elif row in (18, 19):
+                            real_open = Path.open
+
+                            def unreadable(p, *args, **kwargs):
+                                if p.resolve() == script.resolve():
+                                    raise PermissionError("unreadable fixture")
+                                return real_open(p, *args, **kwargs)
+
+                            kinds = ("over 16 MB", "unreadable", "binary") if row == 18 else ("over 16 MB", "unreadable")
+                            for kind in kinds:
+                                with c.subTest(kind=kind):
+                                    script.write_text("true\n")
+                                    if row == 19:
+                                        script.unlink()
+                                    c.assertTrue(c.page_save(lambda s: s.update(releases_without_asking=[]))["ok"])
+                                    r = release.ask(c.desk, "a", target="prod")
+                                    tick(c)
+                                    recorded = [{"path": path, "sha256": hashlib.sha256(b"true\n").hexdigest()}] if row == 18 else []
+                                    c.assertEqual(r["outside"], recorded)
+                                    c.assertEqual(c.desk.settings()["releases_without_asking"][0].get("outside", []), recorded)
+                                    script.write_bytes(b"x" * (outside.MAX_BYTES + 1) if kind == "over 16 MB" else
+                                                       b"now\0binary" if kind == "binary" else b"true\n")
+                                    patch = unittest.mock.patch.object(Path, "open", unreadable) if kind == "unreadable" else contextlib.nullcontext()
+                                    with patch:
+                                        c.assertFalse(release.lane_listed(c.desk.settings(), "a", "prod"))
+                                        [mismatch] = public_settings(c.desk)["release_unmatched"]
+                                        c.assertIn(path, mismatch["why"])
+                                        c.assertIn(path, page(c, "settings-problems"))
+                                        c.assertIn(path, views.status(c.desk)["releases"][0]["moved"])
+                                        answer = release.answer(c.desk, r["id"], True, commit=r["commit"])
+                                        c.assertFalse(answer["ok"])
+                                        c.assertIn(path, answer["void"])
+                                        c.assertEqual(release.get(c.desk, r["id"])["state"], "void")
+                finally:
+                    c.doCleanups()
+
     def test_release_files_globs_match_nested_poms_and_are_kept_relative(self):
         from hansa.desk import release_files_in, validate
         files = ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "pom.xml.bak", "core/src/Main.java", "build.sh",
@@ -22499,7 +22790,7 @@ class DeskTest(unittest.TestCase):
 
     def test_a_release_and_a_merge_on_one_repository_wait_for_each_other(self):
         from hansa import release
-        go = self.tmp / "go"
+        go = self.repo / "go"
         tid = self.desk.new_task("Add hello.txt")
         d = Dispatcher(self.desk)
         self.assertEqual(self.settle(d, tid)["state"], "done")
@@ -22527,9 +22818,9 @@ class DeskTest(unittest.TestCase):
         t2 = self.desk.new_task("Add more.txt")
         self.desk.update(t2, lane="a")
         os.environ["FAKE_HELLO"] = "more.txt"
-        (self.tmp / (go.name + "2")).write_text("")
+        (self.repo / (go.name + "2")).write_text("")
         self.assertEqual(self.settle(d, t2)["state"], "done")
-        (self.tmp / (go.name + "2")).unlink()
+        (self.repo / (go.name + "2")).unlink()
         self.commit_in_repo("base.txt", "moved\n")  # the base moved: the merge is checked first
         self.hansa("merge", t2)
         d.tick()
@@ -22540,7 +22831,7 @@ class DeskTest(unittest.TestCase):
             d.tick()
         self.assertEqual(release.get(self.desk, rid)["state"], "approved")
         self.assert_release_waits_for_merge_check_on_lane(rid, t2, "a")
-        (self.tmp / (go.name + "2")).write_text("")
+        (self.repo / (go.name + "2")).write_text("")
         self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
         d.tick()
         self.assertIn("main moved since it was asked", release.get(self.desk, rid)["void"])
@@ -23503,7 +23794,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_two_targets_one_listed_and_one_not(self):
         from hansa import release
-        push, test = self.tmp / "pushed.txt", self.tmp / "installed.txt"
+        push, test = self.repo / "pushed.txt", self.repo / "installed.txt"
         self.with_targets(push=f"touch {push}", test=f"touch {test}")
         self.assertEqual(sorted(self.desk.settings()["lanes"]["a"]["targets"]), ["push", "test"])
         self.assertEqual([(e["field"], e["target"]) for e in self.events("lane_command_changed")],
