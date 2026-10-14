@@ -2062,7 +2062,7 @@ def cmd_lane(a):
                                  "nothing was changed")
             command = value or "none"
             result = _lane_target(desk, argparse.Namespace(name=a.name, target="default", command=[command],
-                                                          minutes=None, after=None, fixed=None), new)
+                                                          minutes=None, after=None, fixed=None, after_merge=None), new)
             print(f"hansa lane set {a.name} release is now hansa lane target {a.name} default "
                   f"{shlex.quote(command)}; this form goes in the next release")
             return result
@@ -2202,17 +2202,19 @@ def _target_text(name: str, t: dict, ln: dict) -> str:
             f"[{t.get('timeout_min') or ln.get('timeout_min', 240)} min"
             + ("" if t.get("timeout_min") else ", the lane's") + "]"
             + (f"  after {t['after']}" if t.get("after") else "")
+            + (f"  after merges: {t['after_merge_min']} min" if t.get("after_merge_min") else "")
             + f"  ({release.runs_text(t)})")
 
 
 def _lane_target(desk: Desk, a, new: dict) -> None:
-    """hansa lane target L [NAME [COMMAND|none] [--minutes N|none] [--after T|none] [--fixed [none]]]: list, set
-    or remove a lane's named release targets."""
+    """List, set or remove a lane's named release targets, including their order and after-merge setting."""
     ln = new["lanes"][a.name]
     if not a.target:
         shown = lane_targets(ln)
         for name, t in sorted(shown.items()):
             print(_target_text(name, t, ln))
+            if t.get("after_merge_min"):
+                print("  " + release.after_merge_text(new, a.name, name))
             for line in release.outside.lines(release.outside.inspect(t.get("command") or "", ln["repo"],
                                                                      fingerprint=False)):
                 print("  " + line)
@@ -2225,8 +2227,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
     named = ln.get("targets") if isinstance(ln.get("targets"), dict) else {}
     old = named.get(a.target)
     if cmd == "none":  # the help's word for taking it out
-        if a.minutes is not None or a.after is not None or a.fixed is not None:
-            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after or --fixed. "
+        if a.minutes is not None or a.after is not None or a.fixed is not None or a.after_merge is not None:
+            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after, --fixed "
+                             "or --after-merge. "
                              "Nothing was changed. " + see_more("release-flow"))
         if old is None:
             raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; its targets: "
@@ -2268,6 +2271,15 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
             t.pop("after", None)
         else:
             t["after"] = a.after
+    if a.after_merge is not None:
+        if a.after_merge == "none":
+            t.pop("after_merge_min", None)
+        else:
+            try:
+                t["after_merge_min"] = int(a.after_merge)
+            except ValueError:
+                raise SystemExit("hansa: --after-merge takes one whole number from 1 to 1440, or none. "
+                                 "Nothing was changed. " + see_more("release-flow"))
     if a.fixed is not None:
         if a.fixed == "none":
             t.pop("fixed", None)
@@ -2289,6 +2301,8 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
               f"longer runs. Tell the principal, in the conversation, what you changed and why. Ask for a release "
               f"with: hansa release {a.name} {a.target} \"<note>\"")
     _say_forbidden(desk, a.name, ln, a.target)
+    if t.get("after_merge_min"):
+        print(release.after_merge_text(new, a.name, a.target))
     if bool((old or {}).get("fixed")) != bool(t.get("fixed")):
         print(f"It now {release.runs_text(t)}"
               + (f": its command runs in a checkout of the release's commit made for it, so it names that commit as "
@@ -3034,7 +3048,10 @@ def main(argv=None):
         "on a test server, an install on the production server. hansa lane target L lists them. hansa lane target L "
         "NAME \"<command>\" sets one (a new one, or a new command for one); --minutes N gives it its own time limit "
         "(1-1440; none: the lane's timeout_min); --after OTHER says it goes out only with a commit target OTHER of "
-        "the same lane already sent out (none: no order). Options alone change only those fields. hansa lane target "
+        "the same lane already sent out (none: no order). --after-merge MINUTES asks the target by itself after "
+        "merges settle for that many minutes (1-1440; none: off), only with the principal's tick; refused with "
+        "--after. Failed runs reach the coordinator as failed checks; only failure alerts the principal. "
+        "Options alone change only those fields. hansa lane target "
         "L NAME none takes it out. An older unnamed release is now the target default, keeping its tick. "
         "hansa lane set L release COMMAND (or none) still forwards to lane target L default until the next version. "
         "hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
@@ -3060,6 +3077,8 @@ def main(argv=None):
     q.add_argument("--minutes", metavar="N", help="its own time limit, 1-1440 (none: the lane's timeout_min)")
     q.add_argument("--after", metavar="TARGET", help="another target of the lane that must have sent out the same "
                    "commit first (none: no order)")
+    q.add_argument("--after-merge", metavar="MINUTES", help="ask this target by itself after merges have settled "
+                   "for 1-1440 minutes, only with the principal's tick; refused with --after (none: turn off)")
     q.add_argument("--fixed", nargs="?", const="yes", metavar="none", help="run from a checkout of the release's "
                    "commit made for it, holding nothing; its command names $HANSA_RELEASE_COMMIT, not the base branch "
                    "(none: run in the repository again)")

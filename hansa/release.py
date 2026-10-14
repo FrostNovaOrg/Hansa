@@ -68,6 +68,7 @@ OPEN = ("waiting", "approved", "starting", "running")
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
 MOST_FILES = 500
 MOST_HITS = 20
+MOST_MERGES = 10  # newest landings named in an automatic request (the boundary and counts cover all)
 SCAN_TRIES = 5  # scans of what goes out that may each find it changed by the time it is recorded
 PATTERN_LINE_LIMIT = 2.0  # seconds on one line, across its patterns; not a setting
 PATTERN_SCAN_LIMIT = 60.0  # seconds matching patterns in one scan; end a stall, not pace ordinary releases
@@ -401,10 +402,10 @@ def outgoing(repo, since: str, commit: str) -> tuple:
     return commits, sorted({x for x in names.splitlines() if x})
 
 
-def hansa_merges(desk: Desk, s: dict, a: dict) -> set:
+def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
     """Read tasks only while asking: landings in this repository and base, from every lane."""
     found = set()
-    for m in desk.tasks():
+    for m in desk.tasks() if tasks is None else tasks:
         if not m.get("merge_commit"):
             continue
         ln = s["lanes"].get(m.get("lane"), {})
@@ -721,7 +722,7 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
 
 
 def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, target: str | None = None,
-        direct: str | None = None) -> dict:
+        direct: str | None = None, after_merge: bool = False) -> dict:
     """Record a request for a release of the lane's base branch as it is now, by one of its release targets (None:
     its only one). Returns it; raises SystemExit, with nothing recorded, when it cannot be asked, and with the
     request recorded as forbidden on a forbidden word. What goes out is read and scanned without the desk lock
@@ -733,8 +734,17 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
     for _ in range(SCAN_TRIES):
         with desk.lock():
             s = desk.settings()
+            automatic = None
+            tasks = None
+            if after_merge:
+                tasks = desk.tasks()
+                automatic = _after_merge_ready(s, lane, target, tasks, releases(desk))
+                if not automatic:
+                    raise SystemExit("hansa: this target has no settled merges to run now. Nothing was asked")
+                if not lane_listed(s, lane, target):
+                    raise SystemExit("hansa: the principal's tick no longer counts. Nothing was asked")
             a = _askable(desk, s, lane, target)
-            merges = hansa_merges(desk, s, a)
+            merges = hansa_merges(desk, s, a, tasks)
             words = lane_words(s, lane)
             mailboxes = s.get("release_mailboxes", False)
             mailbox_allow = s.get("release_mailbox_allow") or []
@@ -744,7 +754,11 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
             except RuntimeError as e:
                 raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). "
                                  "Nothing was asked")
-            if scanned and scanned[0] == (key, a["target"], merges):
+            if scanned and scanned[0] == (key, a["target"], merges, automatic):
+                if automatic:
+                    a["after_merge"] = automatic
+                    note = "Asked by hansa after merges: " + merges_text(automatic["merges"], automatic["merges_count"])
+                    by = "hansa"
                 r = _record(desk, s, lane, a, key, scanned[1:], note, by, session, direct)
                 break
         try:  # without the lock: the server's round, the page and other commands go on meanwhile
@@ -753,7 +767,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
             hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow)
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
-        scanned = ((key, a["target"], merges), commits, files, hits, checked, directs)
+        scanned = ((key, a["target"], merges, automatic), commits, files, hits, checked, directs)
     else:
         raise SystemExit(f"hansa: what goes out from lane {lane} kept changing while it was read (its base branch "
                          "moving, say); ask again in a moment. Nothing was asked")
@@ -764,7 +778,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
         desk.event("release_void", id=n, lane=lane, target=target, why=f"replaced by release #{r['id']}", quiet=True)
     if hits:
         desk.event("release_forbidden", id=r["id"], lane=lane, target=target, commit=commit, found=len(hits),
-                   quiet=True)
+                   quiet=not after_merge)
     return r
 
 
@@ -788,6 +802,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
          "repo": repo_key(a["repo"]), "base": a["base"], "commit": a["commit"], "command": command,
          **outside.inspect(command, a["repo"]),
          **({"fixed": True} if a["fixed"] else {}), "note": desk.redact(note.strip()), "asked": now(),
+         **({"after_merge": a["after_merge"]} if a.get("after_merge") else {}),
          "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
          "count": len(commits), "checked": checked, "scanned": key, "commits": commits[:MOST_COMMITS],
          "direct": directs[:MOST_COMMITS], "direct_count": len(directs),
@@ -1208,6 +1223,12 @@ def _not_ready(desk: Desk, s: dict, r: dict) -> tuple | None:
     """Under the desk lock: None when an approved release may start now as far as what the principal saw goes;
     else (why, why_zh) to void it, or () when it only waits (sent back to the principal, or the desk is paused)."""
     rid, target = r["id"], r.get("target") or ""
+    if r.get("after_merge"):
+        t = lane_targets(s["lanes"].get(r["lane"])).get(target) or {}
+        if not t.get("after_merge_min") or t.get("after"):
+            return ("runs after merges were turned off for this target", "此目标已关闭合并后自动运行")
+        if not lane_listed(s, r["lane"], target):
+            return ("the principal's tick no longer counts for this target", "此目标的负责人勾选已不再有效")
     if r.get("without_asking") and not lane_listed(s, r["lane"], target):  # off the list, or changed
         change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
         desk.event("release_waits", id=rid, lane=r["lane"], target=target,
@@ -1413,6 +1434,90 @@ def _recover(desk: Desk, r: dict) -> None:
     finish(desk, r["id"])
 
 
+def merges_text(merges: list, count: int | None = None) -> str:
+    """The tasks a run covers, named even if their lane later moves or disappears."""
+    names = "; ".join(f"{m['id']} ({m.get('title', '')})" for m in merges)
+    return names + (f"; and {count - len(merges)} more" if count is not None and count > len(merges) else "")
+
+
+def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -> dict | None:
+    """Use the round's records first: only settled, unconsumed landings merit looking at a tick or at git.
+    Automatic requests consume their batch however they end; completed manual runs cover earlier landings.
+    The boundary is at the ask, not the end: a merge during a fixed run remains for the next run."""
+    ln = s["lanes"].get(lane) or {}
+    t = lane_targets(ln).get(target) or {}
+    delay = t.get("after_merge_min")
+    if not delay or t.get("after"):
+        return None
+    repo, base = repo_key(ln["repo"]), ln.get("base") or "main"
+    target_runs = [r for r in rs if r.get("lane") == lane and r.get("target") == target]
+    if any(r.get("state") in OPEN for r in target_runs):
+        return None
+    own = [r for r in target_runs if r.get("repo") == repo and r.get("base") == base]
+    through = max(((r.get("after_merge") or {}).get("through", 0)
+                   or ((r.get("asked") or 0) if r.get("state") in ("done", "failed") else 0)
+                   for r in own), default=0)
+    passed = [r for r in own if r.get("state") == "done"]
+    last_pass = passed[-1] if passed else {}
+    pass_through = ((last_pass.get("after_merge") or {}).get("through")
+                    or last_pass.get("asked") or 0)
+    merges = []
+    for m in tasks:
+        if m.get("state") == "merging" and (merge_target(s, m.get("lane")) or ("",))[0] == repo:
+            return None  # every merge of this repository, including one queued behind another
+        if not m.get("merged") or not m.get("merge_commit"):
+            continue
+        origin = s["lanes"].get(m.get("lane")) or {}
+        landed_repo = m.get("merge_repo") or m.get("repo") or origin.get("repo")
+        landed_base = m.get("merge_base") or origin.get("base") or "main"
+        if landed_repo and repo_key(landed_repo) == repo and landed_base == base:
+            merges.append({k: m.get(k) for k in ("id", "title", "merged", "merge_commit")})
+    merges.sort(key=lambda m: (m["merged"], m["id"]))
+    fresh = [m for m in merges if m["merged"] > through]
+    if not fresh or now() - fresh[-1]["merged"] < 60 * delay:
+        return None
+    since_pass = [m for m in merges if m["merged"] > pass_through]
+    return {"through": fresh[-1]["merged"], "merges": fresh[-MOST_MERGES:], "merges_count": len(fresh),
+            "since_pass": since_pass[-MOST_MERGES:], "since_pass_count": len(since_pass)}
+
+
+def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
+    """Ask via the ordinary release path; failed gates tell the coordinator once per changed batch/settings."""
+    configured = [(lane, target) for lane, ln in s["lanes"].items()
+                  for target, t in lane_targets(ln).items() if t.get("after_merge_min")]
+    if not configured:
+        return
+    tasks = (tasks or desk.tasks)()
+    for lane, target in configured:
+        with serve_step():
+            batch = _after_merge_ready(s, lane, target, tasks, rs())
+            if not batch:
+                continue
+            signature = json.dumps([batch, s], sort_keys=True)
+            previous = desk.after_merge_waits.get((lane, target))
+            if previous == (signature, True):
+                continue
+            held = False
+            if not lane_listed(s, lane, target):
+                held = True  # outside files are fingerprinted again only for a new batch or settings
+                why = "the principal's tick no longer counts" if any(
+                    listed_key(e) == (lane, target) for e in s.get("releases_without_asking") or []) else \
+                    "this target needs the principal's tick"
+            else:
+                try:
+                    ask(desk, lane, target=target, after_merge=True)
+                except SystemExit as e:
+                    why = str(e)
+                    held = '--direct "<why>"' in why or "tick no longer counts" in why
+                else:
+                    desk.after_merge_waits.pop((lane, target), None)
+                    continue
+            desk.after_merge_waits[lane, target] = (signature, held)
+            if previous != (signature, held):
+                desk.event("release_after_merge_waits", lane=lane, target=target, why=why,
+                           merges=merges_text(batch["merges"], batch["merges_count"]))
+
+
 def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
@@ -1428,6 +1533,7 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pe
         if not read or read[0] != desk.writes:
             read[:] = [desk.writes, releases(desk)]
         return read[1]
+    _after_merges(desk, s, tasks, rs)
     if not procs and not any(r.get("state") in ("approved", "starting", "running") for r in rs()):
         sweep_checkouts(desk, rs())  # none open: only what a server that stopped left
         return
@@ -1478,6 +1584,7 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pe
                     stop(r.get("pid"), r.get("pid_start", ""), proc)
     with serve_step():
         sweep_checkouts(desk, rs())
+    _after_merges(desk, s, tasks, rs)  # a run just ended: merges during it make one more run
     approved = sorted((r for r in rs() if r.get("state") == "approved"), key=lambda r: r["id"])
     if not starting or not approved:
         return
@@ -1707,12 +1814,20 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
         out += [f"{head}: {t.get('command')} (hansa release {name}{' ' + target if target else ''} asks for it; "
                 f"{how[bool(t.get('fixed'))]}; {limit} min as its limit"
                 + (f"; only for a commit target {t['after']} already sent out" if t.get("after") else "")
+                + ("; " + after_merge_text(s, name, target) if t.get("after_merge_min") else "")
                 + (": the principal lets it go out without asking" if lane_listed(s, name, target)
                    else unlisted(s, name, target)) + ")",
                 f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
         out += ["    " + x for x in outside.lines(outside.inspect(t.get("command") or "", ln["repo"],
                                                                  fingerprint=False))]
     return out + listed
+
+
+def after_merge_text(s: dict, lane: str, target: str) -> str:
+    delay = lane_targets(s["lanes"][lane])[target]["after_merge_min"]
+    gate = ("ticked by the principal" if lane_listed(s, lane, target) else
+            "needs the principal's tick; the setting is kept but nothing runs until they tick this target")
+    return f"after merges: {delay} min; {gate}"
 
 
 def unlisted(s: dict, name: str, target: str = "") -> str:

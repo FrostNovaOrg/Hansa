@@ -105,7 +105,7 @@ LISTED_AS = ("repo", "base", "command", "after", "fixed")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release", "outside")
 MAX_TARGETS = 20  # named release targets on one lane
 MAX_RELEASE_FILES = 100  # paths or globs on one lane's release_files
-TARGET_FIELDS = ("command", "timeout_min", "after", "fixed")
+TARGET_FIELDS = ("command", "timeout_min", "after", "fixed", "after_merge_min")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
@@ -1303,7 +1303,7 @@ def target_problems(ln: dict) -> list:
         if not isinstance(name, str) or not NAME.match(name):
             p.append(f"{at}: use lowercase letters, digits and '-'")
         if not isinstance(t, dict):
-            p.append(f"{at}: must be an object with command, and optionally timeout_min, after and fixed")
+            p.append(f"{at}: must be an object with command, and optionally timeout_min, after, fixed and after_merge_min")
             continue
         extra = set(t) - set(TARGET_FIELDS)
         if extra:
@@ -1313,6 +1313,10 @@ def target_problems(ln: dict) -> list:
             p.append(f"{at}: command must be one shell command line (up to 1000 characters)")
         if "timeout_min" in t and not _is_int(t["timeout_min"], 1, 1440):
             p.append(f"{at}: timeout_min must be from 1 to 1440")
+        if "after_merge_min" in t and not _is_int(t["after_merge_min"], 1, 1440):
+            p.append(f"{at}: after_merge_min must be from 1 to 1440")
+        if "after_merge_min" in t and t.get("after"):
+            p.append(f"{at}: --after-merge cannot be set on a target with --after")
         if "fixed" in t and t["fixed"] is not True:
             p.append(f"{at}: fixed must be true (or left out)")
         named_base = t.get("fixed") is True and isinstance(cmd, str) and names_branch(cmd, ln.get("base") or "main")
@@ -2528,6 +2532,7 @@ class Desk:
         self._mutex = threading.RLock()  # the desk lock, within this process
         self._held = 0
         self._lock_file = None
+        self.after_merge_waits = {}  # automatic targets held at a gate: batch/settings already reported
         # how many times this process wrote a task's or a release's record: a list of them read before it changed
         # may be out of date (hansa serve reads the tasks and the releases once a round, and again only after this)
         self.writes = 0

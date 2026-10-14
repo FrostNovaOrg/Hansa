@@ -22950,6 +22950,367 @@ class DeskTest(unittest.TestCase):
                 finally:
                     c.doCleanups()
 
+    def test_after_merge_release_cases(self):
+        from hansa import alert, release
+
+        cases = [(1, "two merges settle into one run"), (2, "the principal's tick gates the setting"),
+                 (3, "idle rounds consume no new work"), (4, "merges during a run make one more run"),
+                 (5, "failure reaches the coordinator and principal"), (6, "success sends no principal alert"),
+                 (7, "paused requests wait for resume"), (8, "a changed command invalidates the tick"),
+                 (9, "all hansa landings from other lanes count"), (10, "ordered targets refuse the setting"),
+                 (11, "none turns it off"), (12, "direct hold needs a human reason"),
+                 (13, "completed manual runs cover earlier merges"), (14, "manual direct runs cover their batch"),
+                 (15, "only ten newest merges are named with full counts"), (16, "held ticks wait for a change")]
+        for row, label in cases:
+            with self.subTest(row=row, case=label):
+                c = DeskTest(self._testMethodName)
+                c.setUp()
+                clock = [time.time()]
+                gate = c.repo / "proceed"
+                d = None
+                try:
+                    with unittest.mock.patch.object(release, "now", side_effect=lambda: clock[0]):
+                        command = ('while [ ! -f "$HANSA_RELEASE_REPO/proceed" ]; do sleep 0.02; done; echo checked'
+                                   if row == 4 else 'test -f fixed.txt || { echo broken; exit 7; }'
+                                   if row == 5 else "echo broken; exit 7" if row == 15 else "echo checked")
+                        if row == 16:
+                            script = c.tmp / "check.sh"
+                            script.write_text("echo checked\n")
+                            command = "sh " + shlex.quote(str(script))
+                        c.hansa("lane", "target", "a", "linux", command, *(["--fixed"] if row == 4 else []))
+                        if row != 2:
+                            c.tick_targets("linux")
+                        def enable():
+                            said = c.hansa("lane", "target", "a", "linux", "--after-merge", "1")
+                            c.assertEqual(c.desk.settings()["lanes"]["a"]["targets"]["linux"]["after_merge_min"], 1)
+                            c.assertIn("ticked by the principal" if row != 2 else "needs the principal's tick", said)
+                            for shown in (c.hansa("lane", "target", "a"), c.hansa("explain", "lane", "a")):
+                                c.assertIn("after merges: 1 min", shown)
+
+                        if row not in (13, 15):
+                            enable()
+                        d = Dispatcher(c.desk)
+
+                        def land(name="work.txt", lane="a"):
+                            clock[0] += 3
+                            s = c.desk.settings()
+                            s["lanes"][lane]["env"] = {"FAKE_HELLO": name}
+                            c.assertEqual(c.desk.save_settings(s), [])
+                            tid = c.desk.new_task("Add " + name, lane=lane)
+                            c.assertEqual(c.settle(d, tid)["state"], "done")
+                            c.hansa("merge", tid)
+                            c.assertEqual(c.desk.meta(tid)["state"], "merged")
+                            c.desk.update(tid, merged=clock[0])
+                            return tid
+
+                        if row >= 13:
+                            landing = release.git("rev-parse", "HEAD", cwd=c.repo)
+
+                        def recorded_land():
+                            clock[0] += 3
+                            tid = c.desk.new_task("Recorded landing " + str(clock[0]), lane="a")
+                            c.desk.update(tid, state="merged", merged=clock[0], merge_commit=landing,
+                                          merge_repo=str(c.repo), merge_base="main")
+                            return tid
+
+                        def ready():
+                            clock[0] += 60
+                            d.tick()
+
+                        def heard(kind):
+                            return "\n".join(x["line"] for x in notify.items_for(
+                                c.desk, c.events(kind), {"key": "k", "session": None}))
+
+                        def ran(ids):
+                            rs = release.releases(c.desk)
+                            c.assertTrue(rs, "no automatic release was asked")
+                            r = rs[-1]
+                            c.assertEqual(r["by"], "hansa")
+                            c.assertIn("Asked by hansa after merges", r["note"])
+                            c.assertEqual([m["id"] for m in r["after_merge"]["merges"]], ids)
+                            for tid in ids:
+                                c.assertIn(tid, r["note"])
+                                c.assertIn(c.desk.meta(tid)["title"], r["note"])
+                            r = c.settle_release(d, r["id"], timeout=30)
+                            c.assertEqual(r["state"], "done", r)
+                            if row != 5:
+                                c.assertIn("checked", " ".join(r["tail"]))
+                            return r
+
+                        if row == 10:
+                            c.hansa("lane", "target", "a", "parent", "true")
+                            c.hansa("lane", "target", "a", "ordered", "true", "--after", "parent")
+                            before = c.desk.settings_path.read_bytes()
+                            c.assertIn("--after", c.refused("lane", "target", "a", "ordered", "--after-merge", "1"))
+                            c.assertIn("--after-merge", c.refused("lane", "target", "a", "linux", "--after", "parent"))
+                            c.assertEqual(c.desk.settings_path.read_bytes(), before)
+                            continue
+
+                        if row in (12, 14):
+                            c.assertTrue(c.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+                        if row in (5, 6, 8):
+                            alerts = c.alert_fake()
+                        first = recorded_land() if row >= 13 else land()
+                        if row in (12, 14):
+                            # A direct commit between hansa merges is in the outgoing range even on a first release.
+                            c.commit_in_repo("direct.txt", "direct\n", "Direct base correction")
+                            recorded_land() if row == 14 else land("second.txt")
+
+                        if row in (1, 3):
+                            first_time = clock[0]
+                            second = land("second.txt")
+                            clock[0] = first_time + 61  # a minute after the first, but not after the second
+                            d.tick()
+                            c.assertEqual(release.releases(c.desk), [])
+                            clock[0] = first_time + 63
+                            d.tick()
+                            ran([first, second])
+                            c.assertEqual(len(c.events("release_asked")), 1)
+                            if row == 3:
+                                # Include the scheduler in the existing idle-read contract, without altering its test.
+                                clock[0] += 600
+                                with unittest.mock.patch.object(c.desk, "tasks", wraps=c.desk.tasks) as tasks, \
+                                        unittest.mock.patch.object(release, "releases", wraps=release.releases) as rs, \
+                                        unittest.mock.patch.object(release, "git", side_effect=AssertionError("idle git")), \
+                                        unittest.mock.patch.object(release, "_git_bytes", side_effect=AssertionError("idle scan")), \
+                                        unittest.mock.patch.object(release.outside, "inspect", side_effect=AssertionError("idle files")):
+                                    d.tick()
+                                    c.assertEqual(tasks.call_count, 1)
+                                    c.assertEqual(rs.call_count, 2)
+                                # A restarted dispatcher must also remember which merges were consumed.
+                                Dispatcher(c.desk).tick()
+                                c.assertEqual(len(c.events("release_asked")), 1)
+                        elif row == 2:
+                            ready()
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.assertIn("needs the principal's tick", heard("release_after_merge_waits"))
+                            for value in ("0", "1441", "1.5", "bad"):
+                                before = c.desk.settings_path.read_bytes()
+                                c.assertIn("1 to 1440", c.refused("lane", "target", "a", "linux", "--after-merge", value))
+                                c.assertEqual(c.desk.settings_path.read_bytes(), before)
+                            c.tick_targets("linux")
+                            d.tick()
+                            ran([first])
+                        elif row == 4:
+                            ready()
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "running")
+                            # The fixed checkout permits real hansa merges while the command waits for its gate.
+                            second, third = land("second.txt"), land("third.txt")
+                            ready()
+                            c.assertEqual(len(release.releases(c.desk)), 1)
+                            gate.touch()
+                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "done")
+                            ran([second, third])
+                            c.assertEqual(len(c.events("release_asked")), 2)
+                            c.assertFalse(d.release_procs)
+                        elif row == 5:
+                            ready()
+                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "failed")
+                            told = heard("release_ended")
+                            for word in ("linux", "check FAILED", first, "broken", "task to fix", "after", "merge"):
+                                c.assertIn(word, told)
+                            c.assertTrue(alert.send_due(c.desk, gather=0)["ok"])
+                            c.assertIn("failed", c.alerted(alerts)[-1]["text"].lower())
+                            clock[0] += 600
+                            d.tick()
+                            c.assertEqual(len(release.releases(c.desk)), 1)  # failures do not loop without a new merge
+                            second = land("second.txt")
+                            ready()
+                            c.assertEqual(c.settle_release(d, 2, timeout=30)["state"], "failed")
+                            r = release.get(c.desk, 2)
+                            c.assertEqual([m["id"] for m in r["after_merge"]["since_pass"]], [first, second])
+                            latest = notify.items_for(c.desk, [c.events("release_ended")[-1]],
+                                                      {"key": "k", "session": None})[0]["line"]
+                            for tid in (first, second):
+                                c.assertIn(tid, latest)
+                                c.assertIn(c.desk.meta(tid)["title"], latest)
+                            fixed = land("fixed.txt")
+                            ready()
+                            ran([fixed])
+                            next_task = land("next.txt")
+                            ready()
+                            r = ran([next_task])
+                            c.assertEqual([m["id"] for m in r["after_merge"]["since_pass"]], [next_task])
+                        elif row == 6:
+                            ready()
+                            ran([first])
+                            c.assertEqual(alert.queued(c.desk), [])
+                            c.assertIsNone(alert.send_due(c.desk, gather=0))
+                            c.assertEqual(c.alerted(alerts), [])
+                            # The automatic ask uses the same word gate and must report its refusal without a CLI.
+                            c.hansa("lane", "target", "a", "linux", "echo keptword")
+                            c.assertTrue(c.page_save(lambda s: s.update(release_forbidden=["keptword"]))["ok"])
+                            c.tick_targets("linux")
+                            land("blocked.txt")
+                            ready()
+                            c.assertEqual(release.releases(c.desk)[-1]["state"], "forbidden")
+                            c.assertEqual(len(c.events("release_started")), 1)
+                            c.assertIn("linux", heard("release_forbidden"))
+                            c.assertIn("refused", heard("release_forbidden"))
+                        elif row == 7:
+                            c.hansa("pause", "reviewing")
+                            ready()
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "approved")
+                            c.assertEqual(c.events("release_started"), [])
+                            d.tick()
+                            c.assertEqual(len(release.releases(c.desk)), 1)
+                            c.hansa("resume")
+                            c.free = 0
+                            d.tick()
+                            c.assertEqual(c.events("release_started"), [])
+                            c.free = 500 * 10 ** 9
+                            d.tick()
+                            ran([first])
+                        elif row == 8:
+                            c.hansa("lane", "target", "a", "linux", "echo changed")
+                            ready()
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.assertIn("tick no longer counts", heard("release_after_merge_waits"))
+                            c.tick_targets("linux")
+                            c.hansa("pause", "reviewing")
+                            d.tick()
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "approved")
+                            c.hansa("lane", "target", "a", "linux", "echo changed again")
+                            d.tick()
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "void")
+                            c.assertIn("tick no longer counts", heard("release_void"))
+                            c.assertEqual(c.events("release_started"), [])
+                            c.assertEqual(alert.queued(c.desk), [])
+                        elif row == 9:
+                            d, checked, waited = c.two_lanes(check="true")
+                            c.merge_lane_for_checks("true")
+                            c.hansa("merge", checked, "--recheck")
+                            c.hansa("merge", waited, "--despite-check")
+                            c.assertTrue(c.desk.meta(waited)["merge_check"]["plain"])
+                            for tid in (checked, waited):
+                                c.assertEqual(c.settle_merge(d, tid, timeout=30)["state"], "merged")
+                                clock[0] += 3
+                                c.desk.update(tid, merged=clock[0])
+                            c.assertEqual(c.desk.meta(checked)["merge_check_result"]["lane"], "m")
+                            c.hansa("lane", "set", "b", "base", "other")  # recorded destination still counts
+                            for repo, base in ((str(c.repo), "elsewhere"), (str(c.tmp / "other"), "main")):
+                                ignored = c.desk.new_task("Unrelated landing", lane="a")
+                                c.desk.update(ignored, state="merged", merged=clock[0], merge_commit="other",
+                                              merge_repo=repo, merge_base=base)
+                            # Even a queued merge of another base in this repository holds the ask back.
+                            blocker = c.desk.new_task("Merge on another base", lane="b")
+                            c.desk.update(blocker, state="merging", merge_check={"phase": "queued"})
+                            ready()
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.desk.update(blocker, state="cancelled", merge_check=None)
+                            d.tick()
+                            ran([first, checked, waited])
+                        elif row == 11:
+                            c.hansa("pause", "reviewing")
+                            ready()
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "approved")
+                            c.hansa("lane", "target", "a", "linux", "--after-merge", "none")
+                            c.assertNotIn("after_merge_min", c.desk.settings()["lanes"]["a"]["targets"]["linux"])
+                            c.assertNotIn("after merges", c.hansa("lane", "target", "a"))
+                            d.tick()
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "void")
+                            c.hansa("resume")
+                            land("second.txt")
+                            ready()
+                            c.assertEqual(len(release.releases(c.desk)), 1)
+                            c.assertEqual(c.events("release_started"), [])
+                        elif row in (12, 14):
+                            ready()
+                            c.assertEqual(release.releases(c.desk), [])
+                            told = heard("release_after_merge_waits")
+                            for word in ("linux", first, "direct", '--direct "<why>"', "hansa release a linux"):
+                                c.assertIn(word, told)
+                            with unittest.mock.patch.object(release, "ask", wraps=release.ask) as asks:
+                                d.tick()
+                                c.assertEqual(asks.call_count, 0)  # the unchanged hold does not scan every round
+                            c.hansa("release", "a", "linux", "--direct", "Reviewed the direct correction")
+                            c.assertEqual(release.releases(c.desk)[0]["state"], "waiting")
+                            if row == 14:
+                                r = release.get(c.desk, 1)
+                                c.assertTrue(release.answer(c.desk, 1, True, commit=r["commit"], command=r["command"])["ok"])
+                                c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "done")
+                                ready()
+                                c.assertEqual(len(release.releases(c.desk)), 1)
+                                c.assertEqual(len(c.events("release_asked")), 1)
+                        elif row == 13:
+                            recorded_land()
+                            c.hansa("release", "a", "linux", "Check these merges by hand")
+                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "done")
+                            enable()
+                            ready()
+                            c.assertEqual(len(release.releases(c.desk)), 1)
+                            next_task = recorded_land()
+                            ready()
+                            r = ran([next_task])
+                            c.assertEqual([m["id"] for m in r["after_merge"]["since_pass"]], [next_task])
+                            c.assertEqual(len(release.releases(c.desk)), 2)
+                            # A completed failing manual run also covers its pre-ask merges.
+                            c.hansa("lane", "target", "a", "linux", "echo broken; exit 7", "--after-merge", "none")
+                            c.tick_targets("linux")
+                            recorded_land()
+                            c.hansa("release", "a", "linux", "Check by hand again")
+                            c.assertEqual(c.settle_release(d, 3, timeout=30)["state"], "failed")
+                            enable()
+                            ready()
+                            c.assertEqual(len(release.releases(c.desk)), 3)
+                        elif row == 15:
+                            ids = [first] + [recorded_land() for _ in range(24)]
+                            enable()
+                            ready()
+                            r = c.settle_release(d, 1, timeout=30)
+                            c.assertEqual(r["state"], "failed")
+                            c.assertEqual(len(release.releases(c.desk)), 1)
+                            for field in ("merges", "since_pass"):
+                                c.assertEqual([m["id"] for m in r["after_merge"][field]], ids[-10:])
+                                c.assertEqual(r["after_merge"][field + "_count"], 25)
+                            c.assertEqual(r["after_merge"]["through"], c.desk.meta(ids[-1])["merged"])
+                            told = heard("release_ended")
+                            for text in (r["note"], told):
+                                c.assertIn("and 15 more", text)
+                                for tid in ids[-10:]:
+                                    c.assertIn(tid, text)
+                                    c.assertIn(c.desk.meta(tid)["title"], text)
+                                for tid in ids[:-10]:
+                                    c.assertNotIn(tid, text)
+                            ready()
+                            c.assertEqual(len(release.releases(c.desk)), 1)
+                            next_task = recorded_land()
+                            ready()
+                            r = c.settle_release(d, 2, timeout=30)
+                            c.assertEqual(r["state"], "failed")
+                            c.assertEqual([m["id"] for m in r["after_merge"]["merges"]], [next_task])
+                            c.assertEqual(r["after_merge"]["merges_count"], 1)
+                            c.assertEqual([m["id"] for m in r["after_merge"]["since_pass"]], (ids + [next_task])[-10:])
+                            c.assertEqual(r["after_merge"]["since_pass_count"], 26)
+                            c.assertIn("and 16 more", heard("release_ended"))
+                        elif row == 16:
+                            script.write_text("echo checked # changed after the tick\n")
+                            ready()
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 1)
+                            c.assertIn("tick no longer counts", heard("release_after_merge_waits"))
+                            with unittest.mock.patch.object(release, "git", side_effect=AssertionError("held git")), \
+                                    unittest.mock.patch.object(release, "_git_bytes", side_effect=AssertionError("held scan")), \
+                                    unittest.mock.patch.object(release.outside, "inspect", side_effect=AssertionError("held files")):
+                                for _ in range(3):
+                                    ready()
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 1)
+                            # A fresh merge rechecks the gate, even while settings stay the same.
+                            second = recorded_land()
+                            ready()
+                            c.assertEqual(len(c.events("release_after_merge_waits")), 2)
+                            c.assertEqual(release.releases(c.desk), [])
+                            c.tick_targets("linux")
+                            d.tick()
+                            ran([first, second])
+                            c.assertEqual(len(c.events("release_asked")), 1)
+                finally:
+                    gate.touch()  # release a gated command even if an assertion failed; cleanups wait for it
+                    c.doCleanups()
+                    if d:
+                        for proc in d.release_procs.values():
+                            proc.wait(timeout=30)
+
     def test_release_files_globs_match_nested_poms_and_are_kept_relative(self):
         from hansa.desk import release_files_in, validate
         files = ["pom.xml", "core/pom.xml", "a/b/c/pom.xml", "pom.xml.bak", "core/src/Main.java", "build.sh",
@@ -24905,7 +25266,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(ui.count(x), 2, x)
         self.assertIn('"/api/alert/test"', ui)
         self.assertNotIn("hansa alert", self.hansa("help", "card"))
-        self.assertIn("the coordinator does not send them", self.hansa("help", "card"))
+        self.assertIn("the coordinator does not send", self.hansa("help", "card"))
 
     def test_each_kind_of_alert_reaches_the_command_with_its_text(self):
         from hansa import alert, release
