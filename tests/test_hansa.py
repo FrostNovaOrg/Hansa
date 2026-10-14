@@ -3990,7 +3990,7 @@ class DeskTest(unittest.TestCase):
             c.assertIn(entry, said)
             c.assertIn(path, said)
             c.assertIn("over 0.2 s", said)
-            c.assertIn("scan stopped here", said)
+            c.assertIn("scan stopped", said)
             c.assertIn("this line and the rest were not checked", said)
             c.assertIn("Shorten or split the line", said)
             c.assertIn("ask the principal to change the pattern", said)
@@ -4146,9 +4146,9 @@ class DeskTest(unittest.TestCase):
                 c.assertEqual(got[key][0]["code"], "thread")
                 c.assertIn("off the main thread", got[key][0]["reason"])
                 c.assertIn("patterns were not run", got[key][0]["reason"])
-                c.assertIn("scan stopped here", got[key][0]["reason"])
+                c.assertIn("scan stopped", got[key][0]["reason"])
                 c.assertIn("this line and the rest were not checked", got[key][0]["reason"])
-                c.assertIn("检查在这里停止", release.pattern_limit_text(got[key][0], zh=True))
+                c.assertIn("检查到此停止", release.pattern_limit_text(got[key][0], zh=True))
                 c.assertIn("这一行及剩余内容未检查", release.pattern_limit_text(got[key][0], zh=True))
             c.assertIn(entry, got["command"][0])
             c.assertIn("off the main thread", got["command"][0][2])
@@ -4321,13 +4321,13 @@ class DeskTest(unittest.TestCase):
                 c.assertNotIn(entry, words)
                 c.assertIn(entry, limits)
                 c.assertIn(where, limits)
-                reasons = {"line": ("over 0.2 s", "这里耗时超过 0.2 秒"),
+                reasons = {"line": ("over 0.2 s", "这一行耗时超过 0.2 秒"),
                            "scan": ("over 1 s in this scan, so the rest was not checked", "总耗时超过 1 秒，因此剩余内容未检查"),
                            "long": ("longer than 10,000 characters, so patterns could not check it", "超过 10,000 字符，因此正则无法检查它"),
                            "thread": ("off the main thread", "不在主线程上，正则未运行")}
                 c.assertIn(reasons[code][int(zh)], limits)
                 if code in ("line", "thread"):
-                    c.assertIn("检查在这里停止" if zh else "scan stopped here", limits)
+                    c.assertIn("检查到此停止" if zh else "scan stopped", limits)
                     c.assertIn("这一行及剩余内容未检查" if zh else "this line and the rest were not checked", limits)
                 if zh:
                     c.assertNotIn("so the line was not checked", limits)
@@ -4363,7 +4363,8 @@ class DeskTest(unittest.TestCase):
             for code, reason, seconds in (("line", r["hits"][-1]["reason"], 0.2),
                                           ("scan", "the patterns took over 1 s in this scan, so the rest was not checked", 1),
                                           ("long", "the line is longer than 10,000 characters, so patterns could not check it", None),
-                                          ("thread", "patterns were not run: this scan is off the main thread, so the scan stopped here; this line and the rest were not checked", None)):
+                                          ("thread", "patterns were not run: this scan is off the main thread, "
+                                           "so the scan stopped there: this line and the rest were not checked", None)):
                 hits = [r["hits"][0], {**r["hits"][-1], "code": code, "reason": reason, "seconds": seconds}]
                 st["releases"][0]["hits"] = hits
                 for language in ("en", "zh"):
@@ -4406,7 +4407,8 @@ class DeskTest(unittest.TestCase):
             for text in (coordinator, c.hansa("release")):
                 for detail in (ordinary_line, limit_line[:300], literal, entry, "unchecked.txt",
                                "Words found that must not go out:", "The line could not be checked:",
-                               "over 0.2 s", "scan stopped here", "this line and the rest were not checked", "Shorten or split the line"):
+                               "over 0.2 s", "scan stopped", "this line and the rest were not checked",
+                               "Shorten or split the line"):
                     c.assertIn(detail, text)
 
         cases = [(1, added_shape), (2, message_shape), (3, title_shape), (4, command_shape),
@@ -22358,7 +22360,8 @@ class DeskTest(unittest.TestCase):
                  (23, "comments and shell input text"), (24, "relative outside link"),
                  (25, "old request with file"), (26, "shlex fallback after bash quoting"),
                  (27, "bare outside link"), (28, "paths after tee across newline"),
-                 (29, "tee process substitution"), (30, "assignment name is not an outside link")]
+                 (29, "tee process substitution"), (30, "assignment name is not an outside link"),
+                 (31, "path with equals is taken whole"), (32, "assignment and option paths unchanged")]
         for row, label in cases:
             with self.subTest(row=row, case=label):
                 c = DeskTest(self._testMethodName)
@@ -22391,7 +22394,7 @@ class DeskTest(unittest.TestCase):
                         warning(c, shlex.quote(str(spaced)), spaced)
                         punctuated = ops / "deploy:prod=live.sh"
                         punctuated.write_text("true\n")
-                        c.assertEqual(outside.inspect(shlex.quote(str(punctuated)), c.repo)["outside"], [])
+                        warning(c, shlex.quote(str(punctuated)), punctuated)
                     elif row == 3:
                         (c.repo / "deploy.sh").write_text("true\n")
                         binary = ops / "binary"
@@ -22498,7 +22501,7 @@ class DeskTest(unittest.TestCase):
                             warning(c, cmd, config)
                             c.assertEqual([f["path"] for f in outside.inspect(cmd, c.repo)["outside"]],
                                           [str(config.resolve())])
-                    elif row == 30:
+                    elif row in (30, 32):
                         (c.repo / "deploy.sh").symlink_to(script)
                         config = ops / "c.txt"
                         config.write_text("config\n")
@@ -22508,6 +22511,16 @@ class DeskTest(unittest.TestCase):
                         warning(c, "./d --config=~/ops/c.txt", config)
                         c.assertEqual([f["path"] for f in outside.inspect(
                             "./d --config=~/ops/c.txt", c.repo)["outside"]], [str(config.resolve())])
+                    elif row == 31:
+                        local = ops / "deploy=v2.sh"
+                        local.write_text("#!/bin/sh\ntrue\n")
+                        cmd = "bash ~/ops/deploy=v2.sh"
+                        warning(c, cmd, local)
+                        found = [{"path": str(local.resolve()),
+                                  "sha256": hashlib.sha256(local.read_bytes()).hexdigest()}]
+                        c.assertEqual(outside.inspect(cmd, c.repo)["outside"], found)
+                        r = release.ask(c.desk, "a", target="prod")
+                        c.assertEqual(r["outside"], found)
                     elif row == 23:
                         local = ops / "x"
                         local.write_text("shell input text\n")

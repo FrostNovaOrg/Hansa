@@ -203,13 +203,15 @@ class PatternScan:
         elapsed = time.monotonic()
         if not self.main_thread:
             code, seconds = "thread", None
-            reason = "patterns were not run: this scan is off the main thread, so the scan stopped here; this line and the rest were not checked"
+            reason = ("patterns were not run: this scan is off the main thread, so the scan stopped there: "
+                      "this line and the rest were not checked")
         elif self.matching_time + (elapsed - self.search_started) >= PATTERN_SCAN_LIMIT:
             code, seconds = "scan", PATTERN_SCAN_LIMIT
             reason = f"the patterns took over {PATTERN_SCAN_LIMIT:g} s in this scan, so the rest was not checked"
         elif elapsed - self.line_started >= PATTERN_LINE_LIMIT:
             code, seconds = "line", PATTERN_LINE_LIMIT
-            reason = f"the pattern took over {PATTERN_LINE_LIMIT:g} s here, so the scan stopped here; this line and the rest were not checked"
+            reason = (f"the pattern took over {PATTERN_LINE_LIMIT:g} s on this line, so the scan stopped there: "
+                      "this line and the rest were not checked")
         else:
             return
         raise PatternLimit({**self.place, "kind": "pattern_limit", "code": code,
@@ -586,8 +588,8 @@ def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
         else:
             out.append(f'{target} holds "{w}", a word the principal keeps from going out: {line}')
     return desk.redact("Warning: " + "; ".join(out)
-        + ". The setting is kept, but hansa refuses every release whose command line holds such a word or could not be checked: change the "
-          "command, or ask the principal about the word")
+        + ". The setting is kept, but hansa refuses every release whose command line holds such a word "
+          "or could not be checked: change the command, or ask the principal about the word")
 
 
 def hits_text(hits: list, zh: bool = False) -> str:
@@ -606,9 +608,9 @@ def pattern_limit_text(hit, zh: bool = False):
     if zh:
         seconds = hit.get("seconds") or (PATTERN_SCAN_LIMIT if hit.get("code") == "scan" else PATTERN_LINE_LIMIT)
         reason = {"long": "这一行超过 10,000 字符，因此正则无法检查它",
-                  "line": f"正则在这里耗时超过 {seconds:g} 秒，因此检查在这里停止，这一行及剩余内容未检查",
+                  "line": f"正则在这一行耗时超过 {seconds:g} 秒，因此检查到此停止，这一行及剩余内容未检查",
                   "scan": f"本次检查中正则的总耗时超过 {seconds:g} 秒，因此剩余内容未检查",
-                  "thread": "本次检查不在主线程上，正则未运行，因此检查在这里停止，这一行及剩余内容未检查"}.get(hit.get("code"), hit["reason"])
+                  "thread": "本次检查不在主线程上，正则未运行，因此检查到此停止，这一行及剩余内容未检查"}.get(hit.get("code"), hit["reason"])
         return reason + "。请缩短或拆分这一行，或请负责人修改正则（hansa ask）"
     return (hit["reason"] + ". Shorten or split the line, or ask the principal to change the pattern (hansa ask)")
 
