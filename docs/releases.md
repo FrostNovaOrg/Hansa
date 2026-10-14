@@ -12,7 +12,8 @@ that sends it out in more than one way (a push to the public repository, an
 install on a test server, an install on the production server) names its
 release targets, with `hansa lane target L NAME "<command>"
 [--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
-(else the lane's `timeout_min`) and optionally another target of the lane
+(else the lane's `timeout_min`; an invalid target limit in a hand-edited settings file also uses the lane's)
+and optionally another target of the lane
 that must have sent out the same commit first. An older unnamed release
 moves to `default` if absent, taking only its tick for the same command.
 Other unnamed ticks match nothing, even if `default` has the same command.
@@ -171,7 +172,8 @@ commits and reason; waiting alerts give only their count, never subjects. Older 
 
 For checks that need another machine, system or the project's CI, the coordinator can set
 `hansa lane target L NAME --after-merge MINUTES` (1–1440; `none` turns it off), refused on a target
-with `--after`: the setting is kept without the principal's tick, but only a target whose tick still
+with `--after`: an invalid `after_merge_min` in a hand-edited settings file turns it off. The setting is
+kept without the principal's tick, but only a target whose tick still
 counts runs by itself. After a task lands in that repository and base branch, from any lane and by
 any hansa merge, hansa waits MINUTES after the last such merge and until no task of that repository
 is merging, then asks the ordinary release, marked as asked by hansa after merges and naming them.
