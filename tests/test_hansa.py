@@ -22054,6 +22054,7 @@ class DeskTest(unittest.TestCase):
             (11, [], "check"),
             (12, [60, 120], "merge_check_result"),
             (13, [], "check"),
+            (14, [], "check"),
         ]
         fixed_now = time.time()
         for row, seconds, field in rows:
@@ -22079,7 +22080,7 @@ class DeskTest(unittest.TestCase):
                     ln["merge_check"] = " make   lint  && make test-all "
                 if row == 8:
                     ln["release_files"] = ["pom.xml", "tools/**"]  # count order, not settings order
-                if row == 11:
+                if row in (11, 14):
                     ln["release_files"] = ["tools/**"]
                 self.assertEqual(desk.save_settings(s), [])
 
@@ -22155,6 +22156,12 @@ class DeskTest(unittest.TestCase):
                         tid = desk.new_task("Not m's task merge check", lane=lane, kind=kind)
                         desk.update(tid, merge_check_result={"ok": True, "exit": 0, "seconds": 999,
                                                              "at": fixed_now, "lane": ran_on})
+                if row == 14:
+                    tid = desk.new_task("Release tool change", lane="a")
+                    desk.update(tid, state="merged", merged=fixed_now - 86400,
+                                base=self.git_out("rev-parse", "HEAD"), head=self.git_out("rev-parse", "HEAD"),
+                                files=["tools/x.sh"])
+                    self.repo.rename(self.tmp / "moved-repo")
 
                 def explain():
                     out = io.StringIO()
@@ -22224,6 +22231,14 @@ class DeskTest(unittest.TestCase):
                     self.assertIn("check after each task: none", shown)
                     self.assertIn("task check times: no check", shown)
                     self.assertNotIn("task check times: not enough runs yet", shown)
+                elif row == 14:
+                    self.assertIn("check after each task: make lint", shown)
+                    self.assertIn("task check times: not enough runs yet", shown)
+                    self.assertIn("merge check times: not enough runs yet", shown)
+                    self.assertEqual([line for line in shown.splitlines() if "counts could not be read" in line],
+                                     ["  release_files counts could not be read: No such file or directory."])
+                    self.assertNotIn("release_files matches", shown)
+                    self.assertIn("  standing instructions:", shown)
 
     def test_release_files_globs_match_nested_poms_and_are_kept_relative(self):
         from hansa.desk import release_files_in, validate

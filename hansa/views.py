@@ -1354,7 +1354,11 @@ def lane_release_counts(tasks: list, ln: dict) -> list:
     from .cli import _release_files_touched  # cli imports views; use merge's check when explain is called
     since = time.time() - 14 * 86400
     recent = [m for m in tasks if m.get("state") == "merged" and m.get("merged", 0) >= since]
-    touched = [_release_files_touched(Path(ln["repo"]).expanduser(), m, ln) for m in recent]
+    try:
+        touched = [_release_files_touched(Path(ln["repo"]).expanduser(), m, ln) for m in recent]
+    except (OSError, RuntimeError) as error:
+        reason = (error.strerror or "repository unavailable") if isinstance(error, OSError) else "git failed"
+        return [f"  release_files counts could not be read: {reason}."]
     counts = [(p, sum(bool(release_files_in(files, [p])) for files in touched))
               for p in ln.get("release_files") or []]
     counts = sorted(((p, n) for p, n in counts if n), key=lambda x: (-x[1], x[0]))
