@@ -1,5 +1,6 @@
 """Run unittest tests on dynamically fed subprocesses (Python 3.9+, macOS/Linux)."""
 import argparse
+import inspect
 import io
 import json
 import os
@@ -39,6 +40,14 @@ def load_tests(names):
 
 def describe(test):
     return [str(test), test.shortDescription()]
+
+
+def source_length(test):
+    try:
+        method = getattr(test, test._testMethodName)
+        return len(inspect.getsource(inspect.unwrap(method)))
+    except (AttributeError, OSError, TypeError):
+        return 0  # unreadable sources follow readable ones, in unittest's order
 
 
 class RemoteTest:
@@ -180,6 +189,9 @@ class Parallel:
     def __init__(self, names, jobs):
         self.names = names
         self.tests = load_tests(names)
+        self.order = list(range(len(self.tests)))
+        if jobs > 1:
+            self.order.sort(key=lambda index: -source_length(self.tests[index]))
         self.jobs = jobs
         self.timings = []
         self.interrupted = None
@@ -194,7 +206,7 @@ class Parallel:
 
         def dispatch(w):
             nonlocal next_index
-            index = next_index if next_index < len(self.tests) else None
+            index = self.order[next_index] if next_index < len(self.tests) else None
             if index is not None:
                 next_index += 1
             w.assign(index)

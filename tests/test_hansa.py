@@ -27753,6 +27753,44 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("Ran 2 tests", r.stdout)
 
+    def test_9_longer_sources_start_first_but_one_job_keeps_unittest_order(self):
+        self.module('''
+            import time, unittest
+            from pathlib import Path
+            class Case(unittest.TestCase):
+                def setUp(self):
+                    if self._testMethodName == "test_b_middle":
+                        # Either initially assigned test must enter its body before the middle one.
+                        # This avoids comparing the startup speed of two independent interpreters.
+                        end = time.monotonic() + 20
+                        while not any(Path(name).exists() for name in ("test_a_short", "test_c_long")):
+                            self.assertLess(time.monotonic(), end, "first test did not start")
+                            time.sleep(0.02)
+                def note(self):
+                    Path(self._testMethodName).write_text(str(time.time_ns()))
+                def test_a_short(self): self.note()
+                def test_b_middle(self):
+                    self.note()
+                    # A method with a middling source length.
+                    self.assertEqual(2 + 2, 4)
+                def test_c_long(self):
+                    self.note()
+                    # This source is longest, without relying on previously recorded run times.
+                    # Its position in unittest's order is last, so an unsorted queue fails this check.
+                    self.assertEqual(3 + 3, 6)
+                    self.assertEqual(4 + 4, 8)
+        ''')
+        names = ["test_a_short", "test_b_middle", "test_c_long"]
+        for jobs, expected in (("2", ["test_c_long"]), ("1", names)):
+            with self.subTest(jobs=jobs):
+                for name in names:
+                    (self.tmp / name).unlink(missing_ok=True)
+                r = self.run_sample("--jobs", jobs)
+                self.assertEqual(r.returncode, 0, r.stdout)
+                self.assertIn("Ran 3 tests", r.stdout)
+                started = sorted(names, key=lambda name: int((self.tmp / name).read_text()))
+                self.assertEqual(started if jobs == "1" else started[:1], expected)
+
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
