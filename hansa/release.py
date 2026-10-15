@@ -42,6 +42,7 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -440,30 +441,47 @@ def direct_commits(repo, since: str, commit: str, commits: list, merges: set) ->
     return [c for c in commits if c["sha"] in direct]
 
 
-def _binary_blob(repo, blob):
-    """Git's content test, independent of attributes: a NUL in the first 8,000 bytes of the new blob."""
+@contextlib.contextmanager
+def _binary_blobs(repo):
+    """One batch reader per scan; test each blob's first 8,000 bytes, independent of attributes."""
     with tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(["git", "cat-file", "blob", blob], cwd=str(repo), stdout=subprocess.PIPE,
-                             stderr=err, stdin=subprocess.DEVNULL)
-        try:
-            prefix = p.stdout.read(8000)
-            if len(prefix) < 8000 and p.wait():
-                err.seek(0)
-                raise RuntimeError(f"git cat-file blob failed: {err.read().decode('utf-8', 'replace').strip()[:300]}")
+        p = subprocess.Popen(["git", "cat-file", "--batch"], cwd=str(repo), stdout=subprocess.PIPE,
+                             stderr=err, stdin=subprocess.PIPE)
+
+        def binary(blob):
+            p.stdin.write((blob + "\n").encode("ascii"))
+            p.stdin.flush()
+            header = p.stdout.readline().split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise RuntimeError(f"git cat-file --batch: expected blob {blob}, got {b' '.join(header)!r}")
+            size = int(header[2])
+            prefix = p.stdout.read(min(size, 8000))
+            left = size - len(prefix)
+            while left:
+                chunk = p.stdout.read(min(left, 65536))
+                if not chunk:
+                    raise RuntimeError(f"git cat-file --batch: incomplete blob {blob}")
+                left -= len(chunk)
+            if p.stdout.read(1) != b"\n":
+                raise RuntimeError(f"git cat-file --batch: incomplete blob {blob}")
             return b"\0" in prefix
+
+        try:
+            yield binary
         finally:
+            p.stdin.close()
             p.stdout.close()
-            p.kill()  # a large blob need not be read beyond its prefix
+            p.kill()
             p.wait()
 
 
-def _added(repo, lines):
+def _added(lines, binary_blob):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
-    conflict's resolution; a line that came from a parent is that parent's commit's). Binary results are skipped;
-    --full-index supplies their new blob IDs, including in a combined diff."""
+    conflict's resolution; a line that came from a parent is that parent's commit's). Binary results and gitlink
+    content are skipped; --full-index supplies new blob IDs, including in a combined diff."""
     sha = path = None
-    blob, binary = None, False
+    blob, mode, binary = None, None, False
     old, new, n = [], 0, 1  # lines left in the hunk on each parent's side and on the result's; parents
     for line in lines:
         if new > 0 or any(x > 0 for x in old):  # inside a hunk: counted, so an added line that reads like a
@@ -480,12 +498,19 @@ def _added(repo, lines):
             continue
         if line.startswith("\0"):
             sha, path = line[1:].strip(), None
+        elif line.startswith("diff "):
+            blob, mode, binary = None, None, False
+        elif line.startswith(("new file mode ", "new mode ", "mode ")):
+            mode = line.split()[-1].split("..")[-1]
         elif line.startswith("index "):
-            blob = line.split()[1].split("..")[-1]
+            fields = line.split()
+            blob = fields[1].split("..")[-1]
+            if len(fields) == 3:
+                mode = fields[2]
         elif line.startswith("+++ "):
             p = line[4:].rstrip("\t")
             path = None if p == "/dev/null" else p[2:] if p.startswith("b/") else p
-            binary = _binary_blob(repo, blob) if path else False
+            binary = mode == "160000" or (binary_blob(blob) if path else False)
         else:
             m = HUNK.match(line)
             if m:
@@ -561,17 +586,18 @@ def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
     patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--unified=0", "--no-renames", "--full-index", "--format=%x00%H", *rng)
     try:
-        for sha, path, line in _added(repo, patch):
-            look(sha, path or "?", line)
-            if mailboxes:
-                for mailbox in mailbox_hits(line, addresses, domains):
-                    place = (sha, path, line, mailbox)
-                    if place not in mailboxes_seen:
-                        mailboxes_seen.add(place)
-                        hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
-                                     "line": line.strip()[:300]})
-            if len(hits) >= MOST_HITS:
-                break
+        with _binary_blobs(repo) as binary_blob:
+            for sha, path, line in _added(patch, binary_blob):
+                look(sha, path or "?", line)
+                if mailboxes:
+                    for mailbox in mailbox_hits(line, addresses, domains):
+                        place = (sha, path, line, mailbox)
+                        if place not in mailboxes_seen:
+                            mailboxes_seen.add(place)
+                            hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
+                                         "line": line.strip()[:300]})
+                if len(hits) >= MOST_HITS:
+                    break
     finally:
         patch.close()
     return hits[:MOST_HITS], checked

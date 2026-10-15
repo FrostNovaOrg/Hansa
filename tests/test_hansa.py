@@ -552,6 +552,11 @@ if os.environ.get("FAKE_WRITE"):
     open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_WRITE_HEX"):
     open(os.environ.get("FAKE_WRITE_FILE", "blob.bin"), "wb").write(bytes.fromhex(os.environ["FAKE_WRITE_HEX"]))
+if os.environ.get("FAKE_GITLINK"):
+    os.makedirs(os.environ["FAKE_GITLINK"], exist_ok=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "160000", head, os.environ["FAKE_GITLINK"]],
+                   check=True)
 if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git folder with a hook of its own
     import shutil
     common = subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
@@ -4638,6 +4643,77 @@ class DeskTest(unittest.TestCase):
         sh("git", "add", "--", name, cwd=self.repo)
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Image data", cwd=self.repo)
         return self.git_out("rev-parse", "HEAD")
+
+    def test_word_scan_gitlink_row_1_task_merges_but_forbidden_entry_name_is_refused(self):
+        self.forbid(r"re:\bAI\b", "Subproject")
+        tid = self.done_with(env={"FAKE_GITLINK": "vendor/lib"})
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertTrue(self.git_out("ls-tree", "main", "vendor/lib").startswith("160000 commit "))
+        tid = self.done_with(env={"FAKE_GITLINK": "vendor/AI"})
+        self.assertIn("file name: vendor/AI", self.refused("merge", tid))
+
+    def test_word_scan_gitlink_row_2_release_is_asked_even_without_the_submodule_object(self):
+        from hansa import release
+        self.with_release("true")
+        self.forbid(r"re:\bAI\b")
+        # A superproject need not hold the commit the submodule points to.
+        (self.repo / "vendor/lib").mkdir(parents=True)
+        sh("git", "update-index", "--add", "--cacheinfo", "160000", "1" * 40, "vendor/lib", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add dependency",
+           cwd=self.repo)
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r.get("hits")), ("waiting", None))
+        self.assertIn("vendor/lib", r["files"])
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+        self.forbid(r"re:\bAI\b", r"re:\bGPT\b")  # also exercise the scan at release start
+        r = self.settle_release(Dispatcher(self.desk), 1)
+        self.assertEqual(r["state"], "done", r)
+
+    def test_word_scan_gitlink_row_3_git_process_count_does_not_grow_with_changed_files(self):
+        from hansa import release
+        commands_by_scan = []
+        for files in (1, 40):
+            before = self.git_out("rev-parse", "HEAD")
+            for revision in range(3):
+                for i in range(files):
+                    # Exceed a pipe's capacity and the prefix limit; the following query must stay aligned.
+                    data = self.word_scan_png() + bytes(100000) if i % 2 else f"safe {revision}\n".encode()
+                    (self.repo / f"file-{i}.dat").write_bytes(data + f"{revision}\n".encode())
+                sh("git", "add", "--all", cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Change files",
+                   cwd=self.repo)
+            self.commit_in_repo("tail.txt", "an AI plan\n", message="Add text")
+            with unittest.mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as launch:
+                hits, checked = release.words_in(self.repo, [f"{before}..HEAD", "--"], [r"re:\bAI\b"])
+            self.assertEqual(checked, 4)
+            self.assertEqual([(h["where"], h["line"]) for h in hits], [("tail.txt", "an AI plan")])
+            commands = [c.args[0] for c in launch.call_args_list if c.args[0][0] == "git"]
+            commands_by_scan.append(commands)
+            # Change tail.txt next time so both ranges contain its forbidden added line.
+            self.commit_in_repo("tail.txt", "safe\n", message="Reset text")
+        self.assertEqual(len(commands_by_scan[0]), len(commands_by_scan[1]))
+        for commands in commands_by_scan:
+            self.assertEqual([c for c in commands if "cat-file" in c], [["git", "cat-file", "--batch"]])
+
+    def test_word_scan_gitlink_updates_skip_content_and_do_not_hide_text_files(self):
+        from hansa import release
+        before = self.git_out("rev-parse", "HEAD")
+        for revision, commit in enumerate((before, "1" * 40)):
+            sh("git", "update-index", "--add", "--cacheinfo", "160000", commit, "entry", cwd=self.repo)
+            if revision:
+                # Sorts after the gitlink in the same patch: its mode must not carry over.
+                (self.repo / "z-text.txt").write_text("an AI plan\n")
+                sh("git", "add", "z-text.txt", cwd=self.repo)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Update dependency",
+               cwd=self.repo)
+        hits, _ = release.words_in(self.repo, [f"{before}..HEAD", "--"], ["Subproject", r"re:\bAI\b"])
+        self.assertEqual([(h["where"], h["line"]) for h in hits], [("z-text.txt", "an AI plan")])
+        # Replacing the gitlink by a regular file must scan the new file's content.
+        before = self.git_out("rev-parse", "HEAD")
+        head = self.commit_in_repo("entry", "an AI dependency\n", message="Replace dependency")
+        hits, _ = release.words_in(self.repo, [f"{before}..{head}", "--"], [r"re:\bAI\b"])
+        self.assertEqual([(h["where"], h["line"]) for h in hits], [("entry", "an AI dependency")])
 
     def test_word_scan_binary_row_1_png_task_merges_with_and_without_a_merge_check(self):
         png = self.word_scan_png()

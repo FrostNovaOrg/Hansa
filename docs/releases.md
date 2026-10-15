@@ -283,7 +283,7 @@ The word scan is a net, not a proof. A word is matched within one line only,
 so a phrase split over a line break is not found; and only in text hansa can
 read as UTF-8, so a UTF-16 file is not looked into. A binary file (a NUL byte
 in its new content's first 8,000 bytes) is looked at by its name only,
-whatever `.gitattributes` says.
+whatever `.gitattributes` says. Submodule entries are also looked at by name only.
 
 ## Files a release runs outside the sandbox
 
