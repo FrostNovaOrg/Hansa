@@ -63,7 +63,7 @@ run it belongs to; design sessions run only on macOS and have no count.
 
 A run that ends on a dropped connection queues again and its provider becomes unreachable: nothing
 else starts on it until it answers a check. `hansa serve` sends the same one-line request as
-`hansa provider check` every 3 minutes, with a 90-second timeout, without holding up other lanes.
+`hansa ping` every 3 minutes, with a 90-second timeout, without holding up other lanes.
 The outage's start, reason and check times stay with the provider's state across server restarts.
 `hansa status` and the page give those details, the last check's result and how many tasks wait for it.
 When a check answers, those tasks carry on from their last commits as above, on the same provider.
