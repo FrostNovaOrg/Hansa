@@ -47,6 +47,7 @@ worktree: never two at once. The first one's output is kept beside the second's
 After a dropped connection or usage limit, hansa carries on new commits without keys or markers, unless
 the run began with update conflicts. Otherwise it keeps earlier carried work, or repeats the original
 start and update. `hansa show` says where and why.
+Time in the queue while a provider is unreachable or resting does not use the run's time ceiling.
 
 A worker or verification the system killed (SIGKILL: exit -9, or 137 through a wrapper) after the lane's
 setup, before it wrote its result, is queued again once the same way, without using a try, whatever its
@@ -60,8 +61,21 @@ run it belongs to; design sessions run only on macOS and have no count.
 
 ### Retries after a dropped connection
 
-A run that ended on a dropped connection is tried once more by itself. hansa
-reads only Claude Code's own error lines for this: one that begins `API Error`
+A run that ends on a dropped connection queues again and its provider becomes unreachable: nothing
+else starts on it until it answers a check. `hansa serve` sends the same one-line request as
+`hansa provider check` every 3 minutes, with a 90-second timeout, without holding up other lanes.
+The outage's start, reason and check times stay with the provider's state across server restarts.
+`hansa status` and the page give those details, the last check's result and how many tasks wait for it.
+When a check answers, those tasks carry on from their last commits as above, on the same provider.
+
+A drop while the provider is already marked unreachable uses no try and does not count toward a
+task's two drops. A second counted drop, after the provider answered a check in between, fails the
+task with "the connection to the provider failed twice, so hansa stopped trying". Verifications follow
+the same rule. This prevents one continuing outage from failing tasks; if the provider answers checks
+but its long runs keep dropping, the task still fails after two drops. A report written before the
+connection went ends as before. Usage limits, key or login problems and system kills keep their own rules.
+
+hansa reads only Claude Code's own error lines for a dropped connection: one that begins `API Error`
 (a 5xx, a connection error or reset, a request that timed out, an overloaded
 provider, unable to connect, but not a certificate error), one that begins
 with a connection reset, refused or closed, a socket hang up, a fetch that failed or "Connection lost while your

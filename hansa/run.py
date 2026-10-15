@@ -26,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -107,7 +108,7 @@ AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[1
 AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
 # The connection to the provider failed, or the provider did (overloaded, a server error): nothing the task
-# did, and nothing that says the provider's key or quota is wrong. The task is tried once more by itself.
+# did, and nothing that says the provider's key or quota is wrong. The provider waits for a passing check.
 # Only on Claude Code's own error lines: one that begins "API Error" (a 5xx, a connection or timeout, the provider
 # overloaded, unable to connect), one that begins with a connection reset, refused, closed or lost while the
 # computer was asleep, a socket hang up or a fetch that failed (after an "Error:" maybe), one that ends
@@ -125,6 +126,7 @@ NETWORK = re.compile(r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?P<server>API Error:?[ \t]
                      r"\((?P<unreach>ENETUNREACH)\)[ \t.]*$|"  # the network itself out of reach, at a line's end
                      r"\"type\"[ \t]*:[ \t]*\"(?P<json>overloaded_error)\"", re.I | re.M)
 OVERLOADED_STATUS = 529
+PROBE_MINUTES = 3  # unreachable providers: one check per interval, outside serve's loop
 # A run the system killed (SIGKILL, as Linux's kernel kills the largest process when memory runs short): its exit as
 # Popen gives it, and as a shell or hansa/preview.py passes it on
 KILLED_EXITS = (-9, 137)
@@ -1352,9 +1354,29 @@ def rest_text(st: dict) -> str:
 
 
 def tries_used(attempts: list) -> int:
-    """The tries a task has used: each earlier run but those that ended on a usage limit and cost no try, and
-    those the system killed (finish), which cost none."""
-    return sum(1 for a in attempts if a.get("kind") != "killed" and (a.get("kind") != "limit" or a.get("counted")))
+    """Earlier runs except free usage-limit returns, system kills and drops during a known outage."""
+    return sum(1 for a in attempts if a.get("kind") != "killed"
+               and (a.get("kind") != "limit" or a.get("counted"))
+               and (a.get("kind") != "network" or a.get("counted", True)))
+
+
+def task_providers(s: dict, lane: str, m: dict) -> list:
+    """A dropped run waits for its own provider; other tasks keep their lane's provider order."""
+    order = s["lanes"][lane]["providers"]
+    last = (m.get("attempts") or [{}])[-1]
+    return [last["provider"]] if last.get("kind") == "network" and last.get("provider") in order else order
+
+
+def unreachable_text(st: dict) -> str:
+    since = st.get("unreachable_since")
+    if not since:
+        return ""
+    text = (f"unreachable since {time.strftime('%H:%M', time.localtime(since))} "
+            f"({st.get('unreachable_reason', '')}); checked every {PROBE_MINUTES:g} minutes")
+    check = st.get("check") or {}
+    if check.get("at", 0) >= since:
+        text += f"; last at {time.strftime('%H:%M', time.localtime(check['at']))}: {check['detail']}"
+    return text
 
 
 def refused_by(m: dict) -> set:
@@ -1391,7 +1413,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
         how = rest_text(st)
         return (f"resting until {time.strftime('%m-%d %H:%M', time.localtime(st['cool_until']))} ({st.get('reason', '')})"
                 + (f": {how}" if how else ""))
-    return ""
+    return unreachable_text(st)
 
 
 def config_home(desk: Desk, name: str, p: dict) -> Path:
@@ -4524,14 +4546,21 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state = "queued" if tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else f"gave up after {TRIES} tries")
-    elif net:  # tried once more on the same provider, which does not rest for it
-        again = any(a.get("kind") == "network" for a in attempts)
-        attempts.append({"provider": meta["provider"], "at": now(), "error": net, "kind": "network"})
+    elif net:
+        with desk.lock():  # mark and count together: later finishes in this outage use no try
+            st = desk.provider_state().get(meta["provider"], {})
+            counted = not st.get("unreachable_since")
+            if counted:
+                desk.set_provider_state(meta["provider"], unreachable_since=now(), unreachable_reason=desk.redact(net),
+                                        probe_at=0)
+        again = counted and any(a.get("kind") == "network" and a.get("counted", True) for a in attempts)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": net, "kind": "network", "counted": counted})
         state = "failed" if again else "queued"
         retry = (f"hansa verify {meta['parent']}" if meta.get("kind") == "verify" and meta.get("parent")
                  else f'hansa retry {tid} "try again"')
         error = f"{meta['provider']}: {net}; " + (
-            "queued again once" if state == "queued" else
+            ("queued again; waits until the provider answers a check" if counted else
+             "queued again without using a try; the provider is still unreachable") if state == "queued" else
             "the connection to the provider failed twice, so hansa stopped trying. This is the machine's or the "
             f"provider's problem, not the task's: when the connection is back, {retry}")
     elif killed:  # queued again once, as after a dropped connection, without using a try; each cause counts its own
@@ -5700,6 +5729,7 @@ class Dispatcher:
         self.release_procs = {}  # releases (hansa release) this server started, by id
         self.pending_stops = {}  # stop marks whose writes failed, by kind/id and launch
         self.resting = None  # the providers resting at the last round; None before the first
+        self.probes = {}  # at most one background check per unreachable provider
         self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
@@ -6059,10 +6089,37 @@ class Dispatcher:
         that name it, as those do (desk.ready_news), under the same once-only rule, so a rest that starts is
         looked at too. Also once as the server starts, for rests that ran out while no server ran."""
         st = self.desk.provider_state()
-        resting = {n for n in s["providers"] if (st.get(n) or {}).get("cool_until", 0) > time.time()}
+        resting = {n for n in s["providers"] if (st.get(n) or {}).get("cool_until", 0) > time.time()
+                   or (st.get(n) or {}).get("unreachable_since")}
         if resting != self.resting:
             self.desk.ready_news()
         self.resting = resting
+
+    def probe_providers(self, s: dict) -> None:
+        """Check unreachable providers without holding up a round, even for the check's full timeout.
+        The last start is kept with provider state so restarting serve does not shorten the interval."""
+        for name in s["providers"]:
+            worker = self.probes.get(name)
+            if worker and worker.is_alive():
+                continue
+            with self.desk.lock():
+                st = self.desk.provider_state().get(name) or {}
+                if not st.get("unreachable_since") or st.get("cool_until", 0) > time.time() or time.time() - max(
+                        st["unreachable_since"], st.get("probe_at", 0)) < 60 * PROBE_MINUTES:
+                    continue
+                self.desk.set_provider_state(name, probe_at=time.time())
+
+            def probe(name=name):
+                try:
+                    check_provider(self.desk, name)
+                except Exception as e:  # noqa: BLE001 - failed writes must not stop future checks or serve
+                    with serve_step():
+                        self.desk.event("provider_probe_failed", provider=name,
+                                        error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+
+            worker = threading.Thread(target=probe, name=f"hansa-probe-{name}", daemon=True)
+            self.probes[name] = worker
+            worker.start()
 
     def disk(self, s: dict) -> list:
         """The volumes under the floor of free space (disk.look), for which nothing new starts this round; and,
@@ -6117,6 +6174,8 @@ class Dispatcher:
             beat(desk)
         with serve_step():
             self.rests(s)
+        with serve_step():
+            self.probe_providers(s)
         with serve_step():
             if not self.retried:  # a hold an earlier server made, perhaps on earlier code: tried again, once
                 self.retried = True
@@ -6210,7 +6269,7 @@ class Dispatcher:
                 for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
                     if ln in busy or ln not in s["lanes"] or s["lanes"][ln].get("merge_lane") or self.sandbox_waits(ln, s):
                         continue
-                    pname = next((p for p in s["lanes"][ln]["providers"]
+                    pname = next((p for p in task_providers(s, ln, m)
                                   if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
                     if not pname:
                         continue
@@ -6527,7 +6586,7 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
             why.append(f"lane {ln} is busy")
             continue
         probs = {p: "refused this task" if p in refused_by(m) else lk["problems"][p]
-                 for p in s["lanes"][ln]["providers"]}
+                 for p in task_providers(s, ln, m)}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
             why_not = lk["not_looking"]
@@ -6595,8 +6654,9 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
                                                      "ran, so it says nothing about them now; check again"}
         desk.set_provider_state(name, check=result)
         if ok:
-            desk.set_provider_state(name, cool_until=0, reason="")
+            desk.set_provider_state(name, cool_until=0, reason="", unreachable_since=0, unreachable_reason="")
         elif kind:
+            desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
             rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)
     desk.ready_news()
