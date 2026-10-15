@@ -234,6 +234,23 @@ that text. What holds up:
 
 ## Merging, the merge check and conflicts
 
+A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
+`VERDICT: does not hold` or `VERDICT: unsure`.
+It says "does not hold" when ordinary use misses something the task asked for
+or breaks something that worked before; in any state, when the change merges
+into the wrong branch, loses work, shows a key, or reports a check passed that
+did not pass; or when the only tests for a named defect still pass with the
+code undone.
+
+"Holds, with notes" means everything holds in ordinary use and the gaps found
+show only in rare combinations of states: something coming between two steps
+(a cancel, a restart, a failed write), old records or settings, or a setting
+made by hand. The failures above still mean "does not hold". The report lists
+the gaps under "Notes", each with what it would take to meet it. This verdict
+counts as "holds" for merging, including release files, and for the suggested
+next step. Show, the page and the merge command name the verification with
+the notes. Only "does not hold" counts toward the advice to rethink below.
+
 `hansa merge ID` merges a task's branch into its lane's base branch. A failed
 check blocks it unless the coordinator says `--despite-check` (recorded), and
 so does a verification that does not hold. That flag skips the merge check

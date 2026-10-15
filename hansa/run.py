@@ -320,19 +320,31 @@ VERIFY_TASK = """Find out, by running things, whether task {id} does what it ask
 3. For text or documentation, compare what it says with the code it describes.
 
 Report what you ran and what happened (the command and the lines that matter); then, for each
-thing the task asked, whether it holds, does not hold or is unsure, with that evidence; then
+thing the task asked, whether it holds, holds with notes, does not hold or is unsure, with that evidence; then
 anything the change does that the task did not ask for and each part no test watches. End with
 exactly one of these lines:
+VERDICT: holds, with notes
 VERDICT: holds
 VERDICT: does not hold
 VERDICT: unsure
-Say "does not hold" when something the task asked for does not hold, and also when the only
-tests for a defect the task names still pass with the code undone: such a test checks nothing,
-even if the task asked for it that way. A coverage test the task asked for that passes either
+Say "does not hold" when any of these is true:
+- In ordinary use, something the task asked for does not hold, or something that worked before
+  no longer does.
+- In any state, the change merges into the wrong branch, loses work, shows a key, or reports
+  a check passed that did not pass.
+- The only tests for a defect the task names still pass with the code undone: such a test checks
+  nothing, even if the task asked for it that way.
+Say "holds, with notes" when everything holds in ordinary use and the gaps found show only in
+rare combinations of states, except for the failures above that always mean "does not hold".
+Examples: something coming between two steps (a cancel, a restart, a failed write); records or
+settings left from before the change; a setting made by hand. List these gaps under "Notes",
+each with what it would take to meet it.
+A coverage test the task asked for that passes either
 way does not count against the change; a test whose name promises one case and tests another
 does, coverage or not.
 """
-VERDICT = re.compile(r"^\W*VERDICT:\W*(holds|does not hold|unsure)\b", re.I | re.M)
+VERDICT = re.compile(r"^\W*VERDICT:\W*(holds, with notes|holds|does not hold|unsure)\b", re.I | re.M)
+HOLDING_VERDICTS = ("holds", "holds, with notes")
 VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
 # A task or verification worker may run any command: its sandbox (sandbox_settings) holds what the command
 # can reach, and the deny rules, weighed before this, still hold. Without it Claude Code asks about commands
@@ -4946,7 +4958,7 @@ def unverified_note(desk: Desk, m: dict) -> str:
                 "unsure": "could not tell whether it holds"}.get(v["verdict"], f"said: {v['verdict']}")
     code = [f for f in m.get("files") or [] if not text_only(f)]
     own = verdict(m)
-    if not code or (own and own["verdict"] == "holds"):
+    if not code or (own and own["verdict"] in HOLDING_VERDICTS):
         return ""
     what = f"{m['id']} changed {', '.join(code[:3])}" + (f" and {len(code) - 3} more" if len(code) > 3 else "")
     if own:
@@ -4964,7 +4976,7 @@ def unverified_note(desk: Desk, m: dict) -> str:
         pv = verdict(at)
         if pv:
             which = "the attempt it retries" if len(earlier) == 1 else "an earlier attempt of this change"
-            if pv["verdict"] != "holds":
+            if pv["verdict"] not in HOLDING_VERDICTS:
                 return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, "
                         f"and {found(pv)}")
             return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, not "

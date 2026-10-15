@@ -19289,6 +19289,16 @@ class DeskTest(unittest.TestCase):
             self.assertIn(words, text)
         self.assertIn("VERDICT: does not hold", text)
 
+    def test_verification_instructions_allow_notes_but_keep_ordinary_and_unsafe_failures(self):
+        from hansa.run import VERIFY_TASK
+        text = " ".join(VERIFY_TASK.split())
+        for words in ('VERDICT: holds, with notes', 'In ordinary use', 'something that worked before',
+                      'In any state', 'merges into the wrong branch', 'loses work', 'shows a key',
+                      'reports a check passed that did not pass', 'rare combinations of states',
+                      'a cancel, a restart, a failed write', 'settings left from before the change',
+                      'a setting made by hand', 'under "Notes"', 'each with what it would take to meet it'):
+            self.assertIn(words, text)
+
     def test_retry_replaces_the_original(self):
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         main(["--desk", str(self.desk.root), "retry", m["id"], "also", "add", "a", "second", "line"])
@@ -20356,7 +20366,10 @@ class DeskTest(unittest.TestCase):
                                             ("late-tool", "holds", "does not hold", "does not hold"),
                                             ("late-twice", "does not hold", "holds", "holds"),
                                             ("waiting", "", "unsure", "unsure"),
-                                            ("plain", "holds", "", "holds")):
+                                            ("plain", "holds", "", "holds"),
+                                            ("plain", "holds, with notes", "", "holds, with notes"),
+                                            ("late-tool", "does not hold", "holds, with notes", "holds, with notes"),
+                                            ("late-twice", "holds, with notes", "does not hold", "does not hold")):
             with self.subTest(kind=kind, report=report, late=late):
                 m = self.verification_transcript_run(kind, FAKE_VERDICT_REPORT=report, FAKE_VERDICT_LATE=late)
                 self.assertEqual((m["state"], m["verdict"]), ("done", verdict), m)
@@ -20617,6 +20630,98 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("error:", shown)
         self.assertNotIn("next:", shown)  # nothing left to do with it
         self.assertNotIn(vid, [m["id"] for m in views.status(self.desk)["review"]])
+
+    def task_with_verdict(self, verdict, name="change.py", release_files=False):
+        s = self.desk.settings()
+        s["lanes"]["a"].update(check="test -f README.md", env={"FAKE_HELLO": name, "FAKE_VERDICT": verdict})
+        if release_files:
+            s["lanes"]["a"]["release_files"] = [name]
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.settle(d, self.desk.new_task(f"Add {name}"))["id"]
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        self.settle(d, vid)
+        return d, tid, vid
+
+    def test_a_verification_holds_with_notes_and_suggests_merging(self):
+        _, tid, vid = self.task_with_verdict("holds, with notes")
+        self.assertEqual(self.desk.meta(vid)["verdict"], "holds, with notes")
+        self.assertIn(f"{vid}: holds, with notes", self.hansa("show", tid))
+        self.assertIn(f"next: hansa merge {tid}", self.hansa("show", tid))
+        self.assertIn(f"{vid} · done", self.hansa("show", vid))
+        self.assertIn("verdict: holds, with notes", self.hansa("show", vid))
+        self.assertIn("VERDICT: holds, with notes", self.hansa("show", vid, "--report"))
+
+    def test_merging_with_notes_accepts_checks_and_release_files_and_names_the_report(self):
+        for name, release_files, recheck in (("change.py", False, False), ("build.sh", True, False),
+                                              ("other.py", False, True)):
+            with self.subTest(name=name):
+                d, tid, vid = self.task_with_verdict("holds, with notes", name, release_files)
+                self.assertTrue(self.desk.meta(tid)["check"]["ok"])
+                out = self.hansa("merge", tid, *(["--recheck"] if recheck else []))
+                self.assertIn(f"{vid}: holds, with notes", out)
+                self.assertIn(f"hansa show {vid} --report", out)
+                self.assertNotIn("nothing verified", out)
+                m = self.settle_merge(d, tid) if recheck else self.desk.meta(tid)
+                self.assertEqual(m["state"], "merged")
+                self.assertIsNone(m.get("unverified"))
+                event = [e for e in self.events("task_merged") if e["task"] == tid][-1]
+                self.assertNotIn("despite_check", event)
+
+    def test_a_follow_up_counts_only_does_not_hold_after_holding_with_notes(self):
+        d, tid, vid = self.task_with_verdict("holds, with notes")
+        self.assertEqual(self.desk.meta(vid)["verdict"], "holds, with notes")
+        new, text = self.follow_up(tid, "Cover the notes")
+        self.assertIn(f"its verdict: holds, with notes", text)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "does not hold", "FAKE_HELLO": "follow.py"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.settle(d, new)
+        from hansa.run import unverified_note
+        note = unverified_note(self.desk, self.desk.meta(new))
+        self.assertIn(f"{vid} verified {tid}", note)
+        self.assertIn("not this one: what came after that verification", note)
+        self.hansa("verify", new)
+        vnew = self.desk.meta(new)["verify"]
+        self.assertEqual(self.settle(d, vnew)["verdict"], "does not hold")
+        self.assertIn('judged 0 of them "does not hold"', self.rounds_line(new)[0])  # earlier rounds only
+        self.assert_rethink(new, vnew, None)  # one failed verification across both rounds
+        later, _ = self.follow_up(new, "Try again")
+        self.assertIn('judged 1 of them "does not hold"', self.rounds_line(later)[0])
+        self.assert_rethink(later, None, None)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_shows_holds_with_notes_and_the_verification_with_the_report(self):
+        _, tid, vid = self.task_with_verdict("holds, with notes")
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language, verdict in (("en", "holds, with notes"), ("zh", "成立，附注")):
+            with self.subTest(language=language):
+                r = subprocess.run(["node", str(harness), str(page), "status", language],
+                                   input=json.dumps({"/api/status": views.status(self.desk)}),
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                text = json.loads(r.stdout)
+                self.assertIn(verdict, text)
+                self.assertIn(tid, text)
+                self.assertIn(vid, text)
+
+    def test_existing_verdicts_keep_their_record_display_and_merge_behaviour(self):
+        for i, verdict in enumerate(("holds", "does not hold", "unsure")):
+            with self.subTest(verdict=verdict):
+                _, tid, vid = self.task_with_verdict(verdict, f"change{i}.py")
+                self.assertEqual(self.desk.meta(vid)["verdict"], verdict)
+                self.assertIn(f"{vid}: {verdict}", self.hansa("show", tid))
+                self.assertIn(f"verdict: {verdict}\n", self.hansa("show", vid))
+                if verdict == "does not hold":
+                    self.assertIn("nothing was merged", self.refused("merge", tid))
+                    self.hansa("close", tid)
+                else:
+                    next_step = f"hansa merge {tid}" if verdict == "holds" else f"hansa diff {tid} --stat"
+                    self.assertIn(f"next: {next_step}", self.hansa("show", tid))
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
 
     def scratch_verification(self, d, tid, text="scratch evidence"):
         s = self.desk.settings()
@@ -25361,7 +25466,7 @@ if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()]
   }
   console.log(JSON.stringify(nulls));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
-else if (ask === "release-hits") vm.runInContext("loadStatus()", ctx).then(() => {
+else if (ask === "release-hits" || ask === "status") vm.runInContext("loadStatus()", ctx).then(() => {
   console.log(JSON.stringify(ids["#tab-status"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {

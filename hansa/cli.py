@@ -21,7 +21,7 @@ from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, den
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, write_text)
-from .run import (DESIGN_ON_LINUX, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (DESIGN_ON_LINUX, HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -583,6 +583,8 @@ def cmd_merge(a):
                          "it; choose one. Nothing was merged")
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
+        verification_note = (f"; verification {v['task']}: holds, with notes (report: hansa show {v['task']} --report)"
+                             if v and v["verdict"] == "holds, with notes" else "")
         check_name = merge_lane(desk.settings(), m["lane"])
         check_lane = desk.settings()["lanes"][check_name]
         sess = notify.recorded(notify.session_here())  # the session that hears how a merge check ends
@@ -598,7 +600,7 @@ def cmd_merge(a):
                   f"{base} as it is now in lane {check_name}'s worktree, runs {_merge_step(check_lane, lane)} there, and merges "
                   f"exactly that if it passes. {_runs_when(desk, a.id, base)} "
                   f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
-                  + _unverified_later(desk, m))
+                  + verification_note + _unverified_later(desk, m))
             return
         # the base has commits the task's branch does not: the two together were never checked; or the lane's
         # merge check runs a command of its own, which ran on neither
@@ -617,7 +619,8 @@ def cmd_merge(a):
                   f"{check_name}'s worktree, runs {_merge_step(check_lane, lane)} there, and merges "
                   f"exactly that if it passes. "
                   f"{_runs_when(desk, a.id, base)} {_wait_for(desk, a.id)} "
-                  f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)" + _unverified_later(desk, m))
+                  f"(hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
+                  + verification_note + _unverified_later(desk, m))
             return
         # a merge check runs or waits on this repository and base branch: going in now would move the base under
         # it, so this merge waits its turn in the same line
@@ -646,6 +649,7 @@ def cmd_merge(a):
             print(f"{a.id} is not merged yet: merges go into {base} one at a time {there}, in the order they were "
                   f"asked, so it waits for {ahead}. When its turn comes, hansa merges it "
                   f"{then}. {_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
+                  + verification_note
                   + (f"\nnote: {note}. It is merged all the same when its turn comes: this is a note, not a stop"
                      if note else ""))
             return
@@ -672,7 +676,8 @@ def cmd_merge(a):
     print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
                                                      f"since it was made)" if why_check == "moved" else
                                                      f" (without running the lane's merge check, "
-                                                     f"{merge_command(check_lane)})" if unchecked else ""))
+                                                     f"{merge_command(check_lane)})" if unchecked else "")
+          + verification_note)
     if note:
         print(f"note: {note}. It is merged: this is a note, not a stop")
     if said:
@@ -740,7 +745,7 @@ def _mergeable(desk: Desk, a):
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. {_wait_for(desk, v['task'])}")
     touched = _release_files_touched(repo, m, lane)
-    if touched and not (v and v["verdict"] == "holds"):
+    if touched and not (v and v["verdict"] in HOLDING_VERDICTS):
         beyond = len(touched) - 10
         raise SystemExit(
             f"hansa: the change in {a.id} touches what lane {m['lane']}'s releases build and run outside the sandbox "
