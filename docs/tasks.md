@@ -209,6 +209,29 @@ server bound inside listens on the sandbox's own loopback, and the browser,
 which runs outside the sandbox, cannot reach it. The worker is told so. A
 design session starts its own preview, as before.
 
+## Writing a task a verification can judge
+
+A verification judges a change against the task's text, so most rounds of sending work back start in
+that text. What holds up:
+
+- Ask for the use that is needed. For a rare case (a lane removed and made again elsewhere, a cancel
+  between two steps, records from an older hansa), say what the change does with it: refuse it with a
+  way out ("give the work again with `hansa add`"), or accept it as it is. Do not ask for it to be
+  handled.
+- Give the cases of ordinary use as a table up front, one row each, with what each should do. A rare
+  case gets a row only to say "refused" or "accepted as it is".
+- Avoid "never", "any" and "all" in what you ask: each is a promise about every state.
+- Ask for behaviour built on facts hansa or the program has (an exit code, a count it read), not on
+  guesses about what another program did.
+- When you ask for a test, say which failure a user would meet that it catches. Tests of test helpers
+  or fixtures are not needed.
+- In what a change stores or shows, ask for what happened, not a forecast: something coming in
+  between makes a forecast wrong.
+- Write the verification's text from the task's: the same rows, nothing stricter, and the list of
+  what is accepted as it is.
+- Send work back to narrow it. Removing a condition can widen what a change does; widening is a new
+  task.
+
 ## Merging, the merge check and conflicts
 
 `hansa merge ID` merges a task's branch into its lane's base branch. A failed
