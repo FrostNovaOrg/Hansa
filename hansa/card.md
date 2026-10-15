@@ -63,7 +63,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge into the lane's base branch (Merging) |
-| `hansa retry <id> "<what to change>" [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
+| `hansa retry <id> "<what to change>" [--lane L] [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
 | `hansa verify <id> ["what to look at"] [--lane L] [...]` | a worker runs the change to see whether it holds |
 | `hansa design "<what to shape>" [--lane L] [--title T]` | a design session the principal joins |
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
