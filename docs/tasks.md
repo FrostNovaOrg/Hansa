@@ -53,6 +53,10 @@ setup, before it wrote its result, is queued again once the same way, without us
 stderr says of the provider. `hansa status` gives the kill as its last run while it waits; what the killed run
 reported, if anything, is not kept: the next run's report replaces it. A second kill in the task fails it: the
 machine may be short of memory, so fewer runs at once may help (`hansa concurrency`).
+On Linux, the run's record, `hansa show` and its end notice give any rise in the kernel's `oom_kill`
+count while it ran, including both runs' known counts after two kills. This counts processes killed on the
+whole machine, not just this task; a missing or unreadable count changes nothing. A setup is covered by the
+run it belongs to; design sessions run only on macOS and have no count.
 
 ### Retries after a dropped connection
 
@@ -105,7 +109,20 @@ lines. Its first line says which of the two follow and how to print each whole: 
 `hansa show ID --merge-check-log` print one output whole, keys removed, under a line that names it, its length
 and its file.
 For setups and checks, a command killed by a signal exits with 128 plus the signal number on both Linux
-and macOS, so a killed check fails.
+and macOS. On Linux, a failed check or merge check runs once more only when hansa could read `oom_kill`
+at both ends and its count rose, and hansa did not stop the run itself. Any failing exit, or no exit code,
+can qualify; exit 137 or a missing exit alone cannot. Without a readable, rising count it ends as before.
+A passing check keeps its count and passes. Cancellation, time ceilings and other stops made by hansa
+never cause this retry. A merge check whose lane setup fails is not run again and shows the setup's
+output as before. The rerun gets the lane's full time ceiling; a merge check keeps its place in line and
+merges if it passes.
+`hansa show ID --check` gives the first run's exit, last lines and the machine-wide evidence. The first run's
+note records only what happened; hansa says it ran again only after the rerun starts. The first
+run stays recorded if the base then moves and another merge check runs. If the rerun fails while the count
+rises again, it says "failed twice while the out-of-memory killer ran" with both counts and a memory hint
+(`hansa concurrency`); a rerun that fails without a rising count ends as an ordinary failed check.
+Lane tries are requested by hand and
+releases never restart: both only keep the count.
 
 ## Effort
 

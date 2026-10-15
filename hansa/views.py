@@ -14,7 +14,7 @@ from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
                    read_split, release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
-                  markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, own_merge_check, own_rest_minutes, progress_of,
+                  markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, own_rest_minutes, progress_of,
                   provider_problem, rest_minutes, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, tried_lanes, waiting_looks, waiting_reason, write_list)
 
@@ -831,6 +831,21 @@ def merge_log(m: dict) -> str:
 CHECK_LOG_TAIL = 20  # the last lines of each log hansa show ID --check gives
 
 
+def check_end_lines(record: dict, what: str) -> list:
+    from .run import check_retry_reason, exit_text
+    out = oom_lines(record, what)
+    first = record.get("retried") or (record if record.get("rerun_started") else None)
+    if first:
+        out += [f"{what} ran again once: {check_retry_reason(first)} ({exit_text(first)}); "
+                "its last lines:", *["  " + x for x in first.get("tail", [])]]
+    else:
+        first = record.get("previous") or record
+        if first.get("oom_kills") and first.get("note") == check_retry_reason(first):
+            out += [f"{what}'s first run: {check_retry_reason(first)} ({exit_text(first)}); its last lines:",
+                    *["  " + x for x in first.get("tail", [])]]
+    return out
+
+
 def _check_logs(desk: Desk, m: dict) -> list:
     """The task's last check and last merge check, those that ran: (what, the option that prints it whole, its
     first line, its log file)."""
@@ -872,6 +887,8 @@ def check_output_text(desk: Desk, tid: str) -> str:
     for what, opt, head, f in logs:
         lines = desk.redact(read_text(f)).rstrip().splitlines()
         out += ["", f"== {head}"]
+        result = m.get("check" if what == "check" else "merge_check_result") or {}
+        out += ["   " + x for x in check_end_lines(result, what)]
         if not f.exists():
             out.append("   its output is not kept: hansa show has its last lines")
             continue
@@ -994,6 +1011,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
         if a.get("turns_unknown_after_resume"):  # run.finish: the system killed the run hansa resumed
             out.append("  its turns after hansa resumed it are unknown: the system killed it before it said")
+        out += ["  " + x for x in oom_lines(a, "earlier run")]
         start = a.get("run_start")
         if (not start and a.get("kind") in ("network", "limit") and m.get("base")
                 and m.get("kind") not in ("verify", "design")):
@@ -1005,6 +1023,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"next run starts from: {started_from(m['restart'])}")
     elif m["state"] != "queued" and m.get("run_start"):
         out.append(f"run started from: {started_from(m['run_start'])}")
+    out += oom_lines(m, {"verify": "verification", "design": "design session"}.get(m.get("kind"), "worker"))
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
     report = report_of(desk, tid)
@@ -1122,6 +1141,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(merge_check_text(desk, m))
     elif m["state"] in ("done", "merged"):
         out += merge_result_lines(m, desk.redact(read_text(d / merge_log(m))))
+    out += check_end_lines(m.get("check") or {}, "check")
+    out += check_end_lines(m.get("merge_check_result") or {}, "merge check")
     if m["state"] == "merged" and m.get("unverified"):
         out.append(f"note: {m['unverified']}")
     if m["state"] == "running" and m.get("phase") == "starting":
@@ -1693,6 +1714,7 @@ def try_text(lane: str, t: dict) -> str:
                 f"(hansa explain server). Fix it, then hansa lane try {lane}")
     out = [f"lane {lane} tried at {(t.get('onto') or '')[:10]}: " + ("ok" if t.get("ok") else "FAILED")
            + (f" ({t['note']})" if t.get("note") else "")]
+    out += oom_lines(t, "lane try")
     for step, x in t.get("steps", {}).items():
         if not x["ran"]:
             out.append(f"{step.replace('_', ' ')}: {x['command']}\n  did not run: the setup failed")
@@ -1702,6 +1724,7 @@ def try_text(lane: str, t: dict) -> str:
                    + (", last lines:" if x["tail"] else ", no output"))
         out += [f"    {plain(line, None)}" for line in x["tail"]]
         out += [f"  {h}" for h in x.get("hints", [])]
+        out += ["  " + line for line in oom_lines(x, step.replace("_", " "))]
     if t.get("log"):
         out.append(f"each step's whole output, keys removed: {t['log']} (hansa lane try {lane}"
                    f"{' --merge-check' if t.get('merge') else ''} --log)")
