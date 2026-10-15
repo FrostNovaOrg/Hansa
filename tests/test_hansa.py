@@ -1726,6 +1726,7 @@ class SrtOutputTest(unittest.TestCase):
                     meta = {"state": "merging", "lane": "a", "head": "a" * 40, "title": "burst",
                             "merge_check": {"phase": "queued"}}
                     desk = types.SimpleNamespace(raw_dir=lambda tid: folder, lock=contextlib.nullcontext,
+                                                 tasks=lambda: [],
                                                  meta=lambda tid: meta, settings=lambda: {"lanes": {"a": lane}, "providers": {}},
                                                  update=lambda tid, **kw: meta.update(kw), event=lambda *a, **kw: None,
                                                  worktrees_dir=folder)
