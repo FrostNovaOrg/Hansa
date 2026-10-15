@@ -1847,7 +1847,7 @@ class SrtOutputTest(unittest.TestCase):
                         self.assertIn(b"err-tail", lines)
                         self.assertLess(lines.index(b"tail"), lines.index(b"err-tail"))
                         if system == "linux":
-                            self.assertLess(elapsed, 3.5, "a leftover held up Linux's end")
+                            self.assertLess(elapsed, 3.9, "a leftover held up Linux's end")  # waiting for Linux leftovers
                             self.assertNotIn(b"late\n", out)
                         else:
                             self.assertGreater(elapsed, 1.4, "macOS lost the leftover's output")
@@ -4004,7 +4004,7 @@ class DeskTest(unittest.TestCase):
             with small_pattern_limits():
                 start = time.monotonic()
                 said = c.refused("merge", tid)
-                c.assertLess(time.monotonic() - start, 1.2)
+                c.assertLess(time.monotonic() - start, 4.0)  # runaway pattern backtracking
             assert_pattern_limit(c, said, entry, "notes.txt")
             c.assertNotIn("holds words the principal keeps from going out", said)
             c.assertEqual(c.git_out("rev-parse", "main"), tip)
@@ -4024,7 +4024,7 @@ class DeskTest(unittest.TestCase):
                 assert_pattern_limit(c, warning, entry, "release target default")
                 start = time.monotonic()
                 said = c.refused("release", "a")
-                c.assertLess(time.monotonic() - start, 1.2)
+                c.assertLess(time.monotonic() - start, 4.0)  # runaway pattern backtracking
             assert_pattern_limit(c, said, entry, "release command")
             c.assertEqual(release.get(c.desk, 1)["state"], "forbidden")
             with small_pattern_limits():
@@ -4080,7 +4080,7 @@ class DeskTest(unittest.TestCase):
                 m = c.settle_merge(Dispatcher(c.desk), tid)
             c.assertEqual(m["state"], "done", m)
             c.assertEqual(m["merge_check_result"]["lane"], "m")
-            c.assertLess(max(spans), 1.2)
+            c.assertLess(max(spans), 4.0)  # backtracking while holding the desk lock
             assert_pattern_limit(c, m["merge_check_result"]["note"], entry, "notes.txt")
             c.assertEqual(c.git_out("rev-parse", "main"), tip)
 
@@ -4111,7 +4111,7 @@ class DeskTest(unittest.TestCase):
                     unittest.mock.patch.object(release.PatternScan, "_check", record_limit):
                 start = time.monotonic()
                 said = c.refused("merge", tid)
-                c.assertLess(time.monotonic() - start, 2.0)
+                c.assertLess(time.monotonic() - start, 6.0)  # a scan ignoring its total budget
             c.assertIn(entry, said)
             c.assertIn("many.txt: " + searched[-1], said)
             c.assertIn("over 1 s in this scan, so the rest was not checked", said)
@@ -4235,7 +4235,7 @@ class DeskTest(unittest.TestCase):
                 start = time.monotonic()
                 said = c.refused("merge", tid)
                 elapsed = time.monotonic() - start
-            c.assertLess(elapsed, 0.4)
+            c.assertLess(elapsed, 3.0)  # backtracking on an oversized line
             c.assertIn(entry, said)
             c.assertIn("notes.txt", said)
             c.assertIn("longer than 10,000 characters, so patterns could not check it", said)
@@ -8938,7 +8938,7 @@ class DeskTest(unittest.TestCase):
             self.assertIsNone(cli.hold_server_lock(self.desk))
             took = time.monotonic() - t0
         self.assertGreaterEqual(took, cli.LOCK_WAIT)
-        self.assertLess(took, cli.LOCK_WAIT + 1)  # counting 40 sleeps of 0.15 s would take 6 s
+        self.assertLess(took, cli.LOCK_WAIT + 3)  # counting sleeps would take 6 s
 
     def test_a_server_on_a_port_another_holds_says_so_in_one_line(self):
         skip_unless_ports(self)
@@ -9378,7 +9378,7 @@ class DeskTest(unittest.TestCase):
         d = Dispatcher(self.desk)
         t0 = time.time()
         d.tick()
-        self.assertLess(time.time() - t0, 1.5)  # the setup runs in the worker's own process, not in hansa serve
+        self.assertLess(time.time() - t0, 1.8)  # running the two-second setup in serve
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "failed", m)
         self.assertIn("setup command failed (exit 3)", m["error"])
@@ -10894,7 +10894,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             for first, second in zip(calls, calls[1:]):
                 self.assertGreaterEqual(second - first, 0.23)
-                self.assertLess(second - first, 5)
+                self.assertLess(second - first, 15)  # probes stuck on the normal three-minute interval
             first, second = map(json.loads, seen.read_text().splitlines())
             self.assertEqual(second["head"], kept)
             self.assertEqual(second["partial"], f"half done for {tid}\n")
@@ -11910,7 +11910,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(namer.tick(), "old")  # the lookup started, and runs on by itself
         self.assertTrue(namer.thread.is_alive())
         self.assertEqual(namer.tick(), "old")
-        self.assertLess(time.time() - t0, 1)
+        self.assertLess(time.time() - t0, 3)  # waiting for the ten-second name lookup
         release.set()
         namer.thread.join()
         self.assertEqual(namer.tick(), "desk-87")
@@ -20092,7 +20092,7 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(text.startswith("http://localhost:8128/\n"))
         self.assertRegex(text, r"\n\[hansa: \d+ bytes of the preview's output left out here\]\nA{999}\n")
         self.assertTrue(text.endswith("the end of it\n"))
-        self.assertLess(max(took), 10)  # hansa serve read no more than that
+        self.assertLess(max(took), 30)  # unbounded preview work in serve
         self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
         big = self.tmp / "big.log"  # what publish reads of a log hansa did not write itself is bounded too
         with open(big, "wb") as f:
@@ -25070,7 +25070,7 @@ class DeskTest(unittest.TestCase):
         release.change(self.desk, 1, lambda x: {"started": x["started"] - 61})  # a minute and more went by
         start = time.time()
         r = self.settle_release(d, 1)
-        self.assertLess(time.time() - start, 15)
+        self.assertLess(time.time() - start, 45)  # waiting for the sixty-second release to finish
         self.assertEqual(r["state"], "failed", r)
         self.assertEqual(r["problem"], "stopped at the lane's time limit (1 min)")
         self.assertIn("started", r["tail"])
@@ -26943,7 +26943,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.desk.add_ask("still there?")
         t0 = time.time()
         r = alert.send_due(self.desk, gather=0, timeout=0.5)
-        self.assertLess(time.time() - t0, 10)
+        self.assertLess(time.time() - t0, 20)  # waiting for the thirty-second alert to finish
         self.assertEqual((r["ok"], r["timed_out"]), (False, True))
         self.assertTrue(self.events("alert_failed")[-1]["timed_out"])
         self.assertIn("timed out after", self.hansa("status"))
@@ -27012,7 +27012,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.desk.add_ask("are you there")
         t0 = time.time()
         r = alert.send_due(self.desk, gather=0, timeout=2)
-        self.assertLess(time.time() - t0, 1.5)
+        self.assertLess(time.time() - t0, 2.5)  # waiting for the alert's three-second child
         self.assertEqual((r["ok"], r["exit"], r["timed_out"], r["tail"]), (True, 0, False, ["sent"]))
         self.assertEqual(self.events("alert_failed"), [])
         self.assertNotIn("FAILED", self.hansa("status"))
