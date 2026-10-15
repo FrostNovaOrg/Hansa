@@ -42,6 +42,7 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -440,11 +441,48 @@ def direct_commits(repo, since: str, commit: str, commits: list, merges: set) ->
     return [c for c in commits if c["sha"] in direct]
 
 
-def _added(lines):
+@contextlib.contextmanager
+def _binary_blobs(repo):
+    """One batch reader per scan; only blobs with a NUL in their first 8,000 bytes are binary, regardless of
+    attributes. Other objects' bodies are consumed to keep the next answer aligned; missing objects have none."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "cat-file", "--batch"], cwd=str(repo), stdout=subprocess.PIPE,
+                             stderr=err, stdin=subprocess.PIPE)
+
+        def binary(blob):
+            p.stdin.write((blob + "\n").encode("ascii"))
+            p.stdin.flush()
+            header = p.stdout.readline().split()
+            if len(header) != 3:  # missing (or another answer without an object body)
+                return False
+            size = int(header[2])
+            prefix = p.stdout.read(min(size, 8000))
+            left = size - len(prefix)
+            while left:
+                chunk = p.stdout.read(min(left, 65536))
+                if not chunk:
+                    raise RuntimeError(f"git cat-file --batch: incomplete object {blob}")
+                left -= len(chunk)
+            if p.stdout.read(1) != b"\n":
+                raise RuntimeError(f"git cat-file --batch: incomplete object {blob}")
+            return header[1] == b"blob" and b"\0" in prefix
+
+        try:
+            yield binary
+        finally:
+            p.stdin.close()
+            p.stdout.close()
+            p.kill()
+            p.wait()
+
+
+def _added(lines, binary_blob):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
-    conflict's resolution; a line that came from a parent is that parent's commit's)."""
+    conflict's resolution; a line that came from a parent is that parent's commit's). Only binary blob results
+    are skipped; --full-index supplies new object IDs, including in a combined diff."""
     sha = path = None
+    blob, binary = None, False
     old, new, n = [], 0, 1  # lines left in the hunk on each parent's side and on the result's; parents
     for line in lines:
         if new > 0 or any(x > 0 for x in old):  # inside a hunk: counted, so an added line that reads like a
@@ -456,14 +494,19 @@ def _added(lines):
                 continue
             new -= 1
             old = [x - (m == " ") for x, m in zip(old, marks)]
-            if marks == "+" * n:
+            if marks == "+" * n and not binary:
                 yield sha, path, text
             continue
         if line.startswith("\0"):
             sha, path = line[1:].strip(), None
+        elif line.startswith("diff "):
+            blob, binary = None, False
+        elif line.startswith("index "):
+            blob = line.split()[1].split("..")[-1]
         elif line.startswith("+++ "):
             p = line[4:].rstrip("\t")
             path = None if p == "/dev/null" else p[2:] if p.startswith("b/") else p
+            binary = binary_blob(blob) if path else False
         else:
             m = HUNK.match(line)
             if m:
@@ -537,19 +580,20 @@ def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
         elif line:
             look(sha, "file name", line)
     patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
-                       "--unified=0", "--no-renames", "--format=%x00%H", *rng)
+                       "--unified=0", "--no-renames", "--full-index", "--format=%x00%H", *rng)
     try:
-        for sha, path, line in _added(patch):
-            look(sha, path or "?", line)
-            if mailboxes:
-                for mailbox in mailbox_hits(line, addresses, domains):
-                    place = (sha, path, line, mailbox)
-                    if place not in mailboxes_seen:
-                        mailboxes_seen.add(place)
-                        hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
-                                     "line": line.strip()[:300]})
-            if len(hits) >= MOST_HITS:
-                break
+        with _binary_blobs(repo) as binary_blob:
+            for sha, path, line in _added(patch, binary_blob):
+                look(sha, path or "?", line)
+                if mailboxes:
+                    for mailbox in mailbox_hits(line, addresses, domains):
+                        place = (sha, path, line, mailbox)
+                        if place not in mailboxes_seen:
+                            mailboxes_seen.add(place)
+                            hits.append({"kind": "mailbox", "word": mailbox, "commit": sha or "", "where": path or "?",
+                                         "line": line.strip()[:300]})
+                if len(hits) >= MOST_HITS:
+                    break
     finally:
         patch.close()
     return hits[:MOST_HITS], checked

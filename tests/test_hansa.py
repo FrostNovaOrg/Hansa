@@ -550,6 +550,13 @@ if os.environ.get("FAKE_SANDBOX_LEFT"):  # what a sandbox on Linux leaves in the
         open(f, "w").close()
 if os.environ.get("FAKE_WRITE"):
     open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
+if os.environ.get("FAKE_WRITE_HEX"):
+    open(os.environ.get("FAKE_WRITE_FILE", "blob.bin"), "wb").write(bytes.fromhex(os.environ["FAKE_WRITE_HEX"]))
+if os.environ.get("FAKE_GITLINK"):
+    os.makedirs(os.environ["FAKE_GITLINK"], exist_ok=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "160000", head, os.environ["FAKE_GITLINK"]],
+                   check=True)
 if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git folder with a hook of its own
     import shutil
     common = subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
@@ -4620,7 +4627,272 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(all(h["commit"] == head and h["where"] == "tests/contacts.txt" for h in hits))
         self.assertGreater(checked, 0)
 
-    def test_mailboxes_in_utf16_and_binary_files_are_read_as_the_word_scan_reads_them(self):
+    @staticmethod
+    def word_scan_png(pixel=b" AI "):
+        """A valid one-pixel PNG whose uncompressed pixel bytes contain a regex word, without image text."""
+        import zlib
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\0" + pixel, level=0)) + chunk(b"IEND", b""))
+
+    def commit_word_scan_bytes(self, name, data):
+        (self.repo / name).write_bytes(data)
+        sh("git", "add", "--", name, cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Image data", cwd=self.repo)
+        return self.git_out("rev-parse", "HEAD")
+
+    def test_word_scan_gitlink_row_1_task_merges_but_forbidden_entry_name_is_refused(self):
+        self.forbid(r"re:\bAI\b")
+        tid = self.done_with(env={"FAKE_GITLINK": "vendor/lib"})
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertTrue(self.git_out("ls-tree", "main", "vendor/lib").startswith("160000 commit "))
+        tid = self.done_with(env={"FAKE_GITLINK": "vendor/AI"})
+        self.assertIn("file name: vendor/AI", self.refused("merge", tid))
+
+    def test_word_scan_gitlink_row_2_release_is_asked_even_without_the_submodule_object(self):
+        from hansa import release
+        self.with_release("true")
+        self.forbid(r"re:\bAI\b")
+        # A superproject need not hold the commit the submodule points to.
+        (self.repo / "vendor/lib").mkdir(parents=True)
+        sh("git", "update-index", "--add", "--cacheinfo", "160000", "1" * 40, "vendor/lib", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add dependency",
+           cwd=self.repo)
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r.get("hits")), ("waiting", None))
+        self.assertIn("vendor/lib", r["files"])
+        self.assertEqual(release.answer(self.desk, 1, True, "", r["commit"], r["command"]), {"ok": True})
+        self.forbid(r"re:\bAI\b", r"re:\bGPT\b")  # also exercise the scan at release start
+        r = self.settle_release(Dispatcher(self.desk), 1)
+        self.assertEqual(r["state"], "done", r)
+
+    def test_word_scan_gitlink_row_3_git_process_count_does_not_grow_with_changed_files(self):
+        from hansa import release
+        commands_by_scan = []
+        for files in (1, 40):
+            before = self.git_out("rev-parse", "HEAD")
+            for revision in range(3):
+                for i in range(files):
+                    # Exceed a pipe's capacity and the prefix limit; the following query must stay aligned.
+                    data = self.word_scan_png() + bytes(100000) if i % 2 else f"safe {revision}\n".encode()
+                    (self.repo / f"file-{i}.dat").write_bytes(data + f"{revision}\n".encode())
+                sh("git", "add", "--all", cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Change files",
+                   cwd=self.repo)
+            self.commit_in_repo("tail.txt", "an AI plan\n", message="Add text")
+            with unittest.mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as launch:
+                hits, checked = release.words_in(self.repo, [f"{before}..HEAD", "--"], [r"re:\bAI\b"])
+            self.assertEqual(checked, 4)
+            self.assertEqual([(h["where"], h["line"]) for h in hits], [("tail.txt", "an AI plan")])
+            commands = [c.args[0] for c in launch.call_args_list if c.args[0][0] == "git"]
+            commands_by_scan.append(commands)
+            # Change tail.txt next time so both ranges contain its forbidden added line.
+            self.commit_in_repo("tail.txt", "safe\n", message="Reset text")
+        self.assertEqual(len(commands_by_scan[0]), len(commands_by_scan[1]))
+        for commands in commands_by_scan:
+            self.assertEqual([c for c in commands if "cat-file" in c], [["git", "cat-file", "--batch"]])
+
+    def test_word_scan_gitlink_updates_are_scanned_and_do_not_hide_text_files(self):
+        from hansa import release
+        before = self.git_out("rev-parse", "HEAD")
+        for revision, commit in enumerate((before, "1" * 40)):
+            sh("git", "update-index", "--add", "--cacheinfo", "160000", commit, "entry", cwd=self.repo)
+            if revision:
+                # Text after the missing object must still be scanned.
+                (self.repo / "z-text.txt").write_text("an AI plan\n")
+                sh("git", "add", "z-text.txt", cwd=self.repo)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Update dependency",
+               cwd=self.repo)
+        hits, _ = release.words_in(self.repo, [f"{before}..HEAD", "--"], ["Subproject", r"re:\bAI\b"])
+        self.assertEqual([(h["where"], h["line"]) for h in hits],
+                         [("entry", f"Subproject commit {'1' * 40}"), ("z-text.txt", "an AI plan"),
+                          ("entry", f"Subproject commit {before}")])
+        # Replacing the gitlink by a regular file must scan the new file's content.
+        before = self.git_out("rev-parse", "HEAD")
+        head = self.commit_in_repo("entry", "an AI dependency\n", message="Replace dependency")
+        hits, _ = release.words_in(self.repo, [f"{before}..{head}", "--"], [r"re:\bAI\b"])
+        self.assertEqual([(h["where"], h["line"]) for h in hits], [("entry", "an AI dependency")])
+
+    def word_scan_gitlink_resolution(self, repo):
+        """A real merge whose submodule result differs from both parents; none of those objects is local."""
+        base = self.git_out("rev-parse", "HEAD", cwd=repo)
+        parents = []
+        for digit in ("1", "2", "3"):
+            sh("git", "update-index", "--add", "--cacheinfo", "160000", digit * 40, "entry", cwd=repo)
+            tree = self.git_out("write-tree", cwd=repo)
+            parent_args = [arg for parent in (parents if digit == "3" else [base]) for arg in ("-p", parent)]
+            commit = self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree,
+                                  *parent_args, "-m", "Resolve dependency", cwd=repo)
+            parents.append(commit)
+        sh("git", "reset", "--hard", "-q", commit, cwd=repo)
+        patch = self.git_out("show", "--cc", "--full-index", "--format=", commit, cwd=repo)
+        self.assertIn("diff --cc entry", patch)
+        self.assertRegex(patch, rf"(?m)^index {'1' * 40},{'2' * 40}\.\.{'3' * 40}$")
+        self.assertIn(f"++Subproject commit {'3' * 40}", patch)
+        return commit
+
+    def test_word_scan_gitlink_answer_row_1_resolution_merge_releases_and_task_merges(self):
+        from hansa import release
+        self.with_release("true")
+        self.forbid(r"re:\bAI\b")
+        for command in ("release", "merge"):
+            with self.subTest(command=command):
+                tid = self.done_with() if command == "merge" else None
+                repo = Path(self.desk.meta(tid)["worktree"]) if tid else self.repo
+                head = self.word_scan_gitlink_resolution(repo)
+                if tid:
+                    self.desk.update(tid, head=head)
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+                    self.assertEqual(self.desk.meta(tid)["state"], "merged")
+                else:
+                    self.hansa("release", "a")
+                    r = release.get(self.desk, 1)
+                    self.assertEqual((r["state"], r.get("hits")), ("waiting", None))
+                    self.assertEqual(r["commit"], head)
+
+    def test_word_scan_gitlink_answer_row_2_commit_binary_and_text_keep_the_batch_aligned(self):
+        from hansa import release
+        before = self.git_out("rev-parse", "HEAD")
+        sh("git", "update-index", "--add", "--cacheinfo", "160000", before, "a-entry", cwd=self.repo)
+        (self.repo / "b-AI.png").write_bytes(self.word_scan_png() + bytes(100000))
+        (self.repo / "c-text.txt").write_text("an AI plan\n")
+        sh("git", "add", "b-AI.png", "c-text.txt", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add files", cwd=self.repo)
+        hits, checked = release.words_in(self.repo, [f"{before}..HEAD", "--"], ["Subproject", r"re:\bAI\b"])
+        self.assertEqual(checked, 1)
+        self.assertEqual([(h["where"], h["line"]) for h in hits],
+                         [("file name", "b-AI.png"), ("a-entry", f"Subproject commit {before}"),
+                          ("c-text.txt", "an AI plan")])
+
+    def test_word_scan_gitlink_other_non_blob_answers_keep_the_batch_aligned(self):
+        from hansa import release
+        self.commit_word_scan_bytes("data.bin", self.word_scan_png() + bytes(100000))
+        self.commit_in_repo("text.txt", "an AI plan\n")
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "tag", "-a", "v1", "-m", "Version", cwd=self.repo)
+        binary, text = (self.git_out("rev-parse", f"HEAD:{path}") for path in ("data.bin", "text.txt"))
+        # A tree contains NULs, but only a blob can make a file's added lines binary.
+        objects = [self.git_out("rev-parse", ref) for ref in ("HEAD", "HEAD^{tree}", "v1")]
+        with release._binary_blobs(self.repo) as binary_blob:
+            for obj in [*objects, "1" * 40]:
+                with self.subTest(object=obj):
+                    self.assertFalse(binary_blob(obj))
+                    self.assertTrue(binary_blob(binary))
+                    self.assertFalse(binary_blob(text))
+
+    def test_word_scan_binary_row_1_png_task_merges_with_and_without_a_merge_check(self):
+        png = self.word_scan_png()
+        self.assertRegex(png.decode("utf-8", "replace"), r"\bAI\b")
+        self.commit_in_repo(".gitattributes", "*.png diff\n")  # attributes cannot make binary content text
+        self.forbid(r"re:\bAI\b")
+        for check in ("", "true"):
+            with self.subTest(check=check):
+                path = "checked.png" if check else "console.png"
+                tid = self.done_with(check=check, env={"FAKE_WRITE_HEX": png.hex(), "FAKE_WRITE_FILE": path})
+                if check:
+                    self.move_main()
+                    self.assertIn("is not merged yet", self.hansa("merge", tid))
+                    self.assertEqual(self.settle_merge(Dispatcher(self.desk), tid)["state"], "merged")
+                else:
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+                self.assertEqual((self.repo / path).read_bytes(), png)
+
+    def test_word_scan_binary_row_2_png_releases_and_target_rescan_are_allowed(self):
+        from hansa import release
+        self.with_release("true")
+        self.hansa("lane", "target", "a", "mirror", "true")
+        self.commit_word_scan_bytes("console.png", self.word_scan_png())
+        self.forbid(r"re:\bAI\b")
+        for rid, target in enumerate(("default", "mirror"), 1):
+            self.hansa("release", "a", target)
+            r = release.get(self.desk, rid)
+            self.assertEqual((r["state"], r.get("hits")), ("waiting", None))
+            self.assertEqual(release.answer(self.desk, rid, True, "", r["commit"], r["command"]), {"ok": True})
+        self.forbid(r"re:\bAI\b", r"re:\bGPT\b")  # force the approved targets to scan again at start
+        d = Dispatcher(self.desk)
+        for rid in (1, 2):
+            self.assertEqual(self.settle_release(d, rid)["state"], "done")
+
+    def test_word_scan_binary_row_3_text_and_binary_file_names_still_refuse_merge(self):
+        self.forbid(r"re:\bAI\b")
+        tid = self.done_with(env={"FAKE_WRITE": "an AI plan", "FAKE_WRITE_FILE": "plan.txt"})
+        self.assertIn("plan.txt: an AI plan", self.refused("merge", tid))
+        tid = self.done_with(env={"FAKE_WRITE_HEX": self.word_scan_png().hex(), "FAKE_WRITE_FILE": "AI.png"})
+        self.assertIn("file name: AI.png", self.refused("merge", tid))
+
+    def test_word_scan_binary_row_4_changed_png_and_combined_merge_own_png_are_allowed(self):
+        from hansa import release
+        self.commit_word_scan_bytes("console.png", self.word_scan_png(b"safe"))
+        changed = self.commit_word_scan_bytes("console.png", self.word_scan_png())
+        with self.subTest(change="existing PNG"):
+            hits, _ = release.words_in(self.repo, [changed, f"^{changed}^", "--"], [r"re:\bAI\b"])
+            self.assertEqual(hits, [])
+        sh("git", "checkout", "-q", "-b", "side", cwd=self.repo)
+        self.commit_in_repo("side.txt", "side\n")
+        sh("git", "checkout", "-q", "main", cwd=self.repo)
+        self.commit_in_repo("main.txt", "main\n")
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "--no-commit", "side",
+           cwd=self.repo)
+        merge = self.commit_word_scan_bytes("merge-only.png", self.word_scan_png())
+        patch = self.git_out("show", "--cc", "--text", "--format=", merge)
+        self.assertIn("diff --cc merge-only.png", patch)
+        with self.subTest(change="merge's own PNG"):
+            hits, _ = release.words_in(self.repo, [merge, f"^{merge}^1", f"^{merge}^2", "--"], [r"re:\bAI\b"])
+            self.assertEqual(hits, [])
+        # Some git versions still say "Binary files differ" for --cc --text. Exercise the combined hunk
+        # with this merge's real new blob as well, so those versions also check the parser's binary filter.
+        blob = self.git_out("rev-parse", f"{merge}:merge-only.png")
+        lines = [f"\0{merge}", f"index {'0' * 40},{'0' * 40}..{blob}", "--- /dev/null",
+                 "+++ b/merge-only.png", "@@@ -0,0 -0,0 +1 @@@", "++ AI "]
+        git_lines = release._git_lines
+
+        def combined_lines(repo, *args):
+            yield from lines if "-p" in args else git_lines(repo, *args)
+
+        with self.subTest(change="combined hunk"):
+            with unittest.mock.patch.object(release, "_git_lines", combined_lines):
+                hits, _ = release.words_in(self.repo, [merge, f"^{merge}^1", f"^{merge}^2", "--"], [r"re:\bAI\b"])
+            self.assertEqual(hits, [])
+
+    def test_word_scan_binary_row_5_attributes_do_not_hide_text(self):
+        from hansa import release
+        for attr in ("binary", "-diff"):
+            with self.subTest(attribute=attr):
+                self.commit_in_repo(".gitattributes", f"plan.txt {attr}\n")
+                self.forbid(r"re:\bAI\b")
+                tid = self.done_with(env={"FAKE_WRITE": f"an AI plan ({attr})", "FAKE_WRITE_FILE": "plan.txt"})
+                self.assertIn("plan.txt: an AI plan", self.refused("merge", tid))
+                hits, _ = release.words_in(self.repo, [self.desk.meta(tid)["head"], "^main", "--"], [r"re:\bAI\b"])
+                self.assertEqual([h["where"] for h in hits], ["plan.txt"])
+
+    def test_word_scan_binary_row_6_mailboxes_in_binary_content_do_not_refuse_merge_or_release(self):
+        from hansa import release
+        self.assertEqual(self.page_save(lambda s: s.update(release_mailboxes=True)), {"ok": True, "problems": []})
+        tid = self.done_with(env={"FAKE_WRITE_BINARY": "jane@realmail.hansa"})
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.with_release("true")
+        self.hansa("release", "a")
+        self.assertEqual((release.get(self.desk, 1)["state"], release.get(self.desk, 1).get("hits")), ("waiting", None))
+
+    def test_word_scan_binary_test_uses_new_content_and_exactly_8000_bytes(self):
+        from hansa import release
+        # The NUL may be unchanged context, absent from the added lines. A later NUL does not make a file binary.
+        for offset in (7999, 8000):
+            with self.subTest(nul_offset=offset):
+                path = f"data-{offset}.bin"
+                before = self.commit_word_scan_bytes(path, b"x\n" * (offset // 2) + b"x" * (offset % 2) + b"\0\n")
+                head = self.commit_word_scan_bytes(path, (self.repo / path).read_bytes() + b" AI \n")
+                hits, _ = release.words_in(self.repo, [head, f"^{before}", "--"], [r"re:\bAI\b"])
+                self.assertEqual([h["where"] for h in hits], [] if offset == 7999 else [path])
+        before = self.commit_word_scan_bytes("converted.txt", b"\0old\n")
+        head = self.commit_word_scan_bytes("converted.txt", b" AI \n")
+        self.assertEqual([h["where"] for h in release.words_in(
+            self.repo, [head, f"^{before}", "--"], [r"re:\bAI\b"])[0]], ["converted.txt"])
+
+    def test_mailboxes_in_utf16_and_binary_files_are_skipped_as_the_word_scan_skips_them(self):
         from hansa import release
         before = self.git_out("rev-parse", "HEAD")
         (self.repo / "utf16.txt").write_bytes("jane@realmail.hansa\n".encode("utf-16"))
@@ -4633,8 +4905,7 @@ class DeskTest(unittest.TestCase):
         mailbox_hits = release.words_in(self.repo, rng, [], mailboxes=True)[0]
         self.assertEqual([(h["commit"], h["where"], h["line"]) for h in mailbox_hits],
                          [(h["commit"], h["where"], h["line"]) for h in word_hits])
-        self.assertEqual([h["where"] for h in mailbox_hits], ["binary.bin"])
-        self.assertEqual(mailbox_hits[0]["word"], "jane@realmail.hansa")
+        self.assertEqual(mailbox_hits, [])
 
     def test_the_mailbox_scan_returns_at_most_most_hits(self):
         from hansa import release
