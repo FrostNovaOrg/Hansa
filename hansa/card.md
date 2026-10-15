@@ -142,8 +142,10 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
 - Code or tests: `hansa verify <id>` first. A worker runs the change: it undoes the code to see new
   tests fail, runs what the task is about, tries edge cases. Each named defect needs a test that fails
   on old code; requested coverage tests may pass on both, judged on whether they test what their
-  names say. Its verdict (holds, does not hold, unsure) shows in `hansa show <id>`; hansa will not merge
+  names say. Its verdict ("holds", "holds, with notes", "does not hold", "unsure") shows in
+  `hansa show <id>`; hansa will not merge
   while it runs, nor after "does not hold" unless you say `--despite-check`.
+  "Holds, with notes" counts as "holds"; its verification's report lists the rare-state gaps under "Notes".
 - `--lane L` verifies on another lane of the same repository: another model is stronger than the
   same model; use it if the task's provider is new to the desk or its lane is busy.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and also have the
