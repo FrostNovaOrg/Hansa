@@ -443,7 +443,8 @@ def direct_commits(repo, since: str, commit: str, commits: list, merges: set) ->
 
 @contextlib.contextmanager
 def _binary_blobs(repo):
-    """One batch reader per scan; test each blob's first 8,000 bytes, independent of attributes."""
+    """One batch reader per scan; only blobs with a NUL in their first 8,000 bytes are binary, regardless of
+    attributes. Other objects' bodies are consumed to keep the next answer aligned; missing objects have none."""
     with tempfile.TemporaryFile() as err:
         p = subprocess.Popen(["git", "cat-file", "--batch"], cwd=str(repo), stdout=subprocess.PIPE,
                              stderr=err, stdin=subprocess.PIPE)
@@ -452,19 +453,19 @@ def _binary_blobs(repo):
             p.stdin.write((blob + "\n").encode("ascii"))
             p.stdin.flush()
             header = p.stdout.readline().split()
-            if len(header) != 3 or header[1] != b"blob":
-                raise RuntimeError(f"git cat-file --batch: expected blob {blob}, got {b' '.join(header)!r}")
+            if len(header) != 3:  # missing (or another answer without an object body)
+                return False
             size = int(header[2])
             prefix = p.stdout.read(min(size, 8000))
             left = size - len(prefix)
             while left:
                 chunk = p.stdout.read(min(left, 65536))
                 if not chunk:
-                    raise RuntimeError(f"git cat-file --batch: incomplete blob {blob}")
+                    raise RuntimeError(f"git cat-file --batch: incomplete object {blob}")
                 left -= len(chunk)
             if p.stdout.read(1) != b"\n":
-                raise RuntimeError(f"git cat-file --batch: incomplete blob {blob}")
-            return b"\0" in prefix
+                raise RuntimeError(f"git cat-file --batch: incomplete object {blob}")
+            return header[1] == b"blob" and b"\0" in prefix
 
         try:
             yield binary
@@ -478,10 +479,10 @@ def _binary_blobs(repo):
 def _added(lines, binary_blob):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
-    conflict's resolution; a line that came from a parent is that parent's commit's). Binary results and gitlink
-    content are skipped; --full-index supplies new blob IDs, including in a combined diff."""
+    conflict's resolution; a line that came from a parent is that parent's commit's). Only binary blob results
+    are skipped; --full-index supplies new object IDs, including in a combined diff."""
     sha = path = None
-    blob, mode, binary = None, None, False
+    blob, binary = None, False
     old, new, n = [], 0, 1  # lines left in the hunk on each parent's side and on the result's; parents
     for line in lines:
         if new > 0 or any(x > 0 for x in old):  # inside a hunk: counted, so an added line that reads like a
@@ -499,18 +500,13 @@ def _added(lines, binary_blob):
         if line.startswith("\0"):
             sha, path = line[1:].strip(), None
         elif line.startswith("diff "):
-            blob, mode, binary = None, None, False
-        elif line.startswith(("new file mode ", "new mode ", "mode ")):
-            mode = line.split()[-1].split("..")[-1]
+            blob, binary = None, False
         elif line.startswith("index "):
-            fields = line.split()
-            blob = fields[1].split("..")[-1]
-            if len(fields) == 3:
-                mode = fields[2]
+            blob = line.split()[1].split("..")[-1]
         elif line.startswith("+++ "):
             p = line[4:].rstrip("\t")
             path = None if p == "/dev/null" else p[2:] if p.startswith("b/") else p
-            binary = mode == "160000" or (binary_blob(blob) if path else False)
+            binary = binary_blob(blob) if path else False
         else:
             m = HUNK.match(line)
             if m:

@@ -4645,7 +4645,7 @@ class DeskTest(unittest.TestCase):
         return self.git_out("rev-parse", "HEAD")
 
     def test_word_scan_gitlink_row_1_task_merges_but_forbidden_entry_name_is_refused(self):
-        self.forbid(r"re:\bAI\b", "Subproject")
+        self.forbid(r"re:\bAI\b")
         tid = self.done_with(env={"FAKE_GITLINK": "vendor/lib"})
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
         self.assertTrue(self.git_out("ls-tree", "main", "vendor/lib").startswith("160000 commit "))
@@ -4696,24 +4696,92 @@ class DeskTest(unittest.TestCase):
         for commands in commands_by_scan:
             self.assertEqual([c for c in commands if "cat-file" in c], [["git", "cat-file", "--batch"]])
 
-    def test_word_scan_gitlink_updates_skip_content_and_do_not_hide_text_files(self):
+    def test_word_scan_gitlink_updates_are_scanned_and_do_not_hide_text_files(self):
         from hansa import release
         before = self.git_out("rev-parse", "HEAD")
         for revision, commit in enumerate((before, "1" * 40)):
             sh("git", "update-index", "--add", "--cacheinfo", "160000", commit, "entry", cwd=self.repo)
             if revision:
-                # Sorts after the gitlink in the same patch: its mode must not carry over.
+                # Text after the missing object must still be scanned.
                 (self.repo / "z-text.txt").write_text("an AI plan\n")
                 sh("git", "add", "z-text.txt", cwd=self.repo)
             sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Update dependency",
                cwd=self.repo)
         hits, _ = release.words_in(self.repo, [f"{before}..HEAD", "--"], ["Subproject", r"re:\bAI\b"])
-        self.assertEqual([(h["where"], h["line"]) for h in hits], [("z-text.txt", "an AI plan")])
+        self.assertEqual([(h["where"], h["line"]) for h in hits],
+                         [("entry", f"Subproject commit {'1' * 40}"), ("z-text.txt", "an AI plan"),
+                          ("entry", f"Subproject commit {before}")])
         # Replacing the gitlink by a regular file must scan the new file's content.
         before = self.git_out("rev-parse", "HEAD")
         head = self.commit_in_repo("entry", "an AI dependency\n", message="Replace dependency")
         hits, _ = release.words_in(self.repo, [f"{before}..{head}", "--"], [r"re:\bAI\b"])
         self.assertEqual([(h["where"], h["line"]) for h in hits], [("entry", "an AI dependency")])
+
+    def word_scan_gitlink_resolution(self, repo):
+        """A real merge whose submodule result differs from both parents; none of those objects is local."""
+        base = self.git_out("rev-parse", "HEAD", cwd=repo)
+        parents = []
+        for digit in ("1", "2", "3"):
+            sh("git", "update-index", "--add", "--cacheinfo", "160000", digit * 40, "entry", cwd=repo)
+            tree = self.git_out("write-tree", cwd=repo)
+            parent_args = [arg for parent in (parents if digit == "3" else [base]) for arg in ("-p", parent)]
+            commit = self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree,
+                                  *parent_args, "-m", "Resolve dependency", cwd=repo)
+            parents.append(commit)
+        sh("git", "reset", "--hard", "-q", commit, cwd=repo)
+        patch = self.git_out("show", "--cc", "--full-index", "--format=", commit, cwd=repo)
+        self.assertIn("diff --cc entry", patch)
+        self.assertRegex(patch, rf"(?m)^index {'1' * 40},{'2' * 40}\.\.{'3' * 40}$")
+        self.assertIn(f"++Subproject commit {'3' * 40}", patch)
+        return commit
+
+    def test_word_scan_gitlink_answer_row_1_resolution_merge_releases_and_task_merges(self):
+        from hansa import release
+        self.with_release("true")
+        self.forbid(r"re:\bAI\b")
+        for command in ("release", "merge"):
+            with self.subTest(command=command):
+                tid = self.done_with() if command == "merge" else None
+                repo = Path(self.desk.meta(tid)["worktree"]) if tid else self.repo
+                head = self.word_scan_gitlink_resolution(repo)
+                if tid:
+                    self.desk.update(tid, head=head)
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+                    self.assertEqual(self.desk.meta(tid)["state"], "merged")
+                else:
+                    self.hansa("release", "a")
+                    r = release.get(self.desk, 1)
+                    self.assertEqual((r["state"], r.get("hits")), ("waiting", None))
+                    self.assertEqual(r["commit"], head)
+
+    def test_word_scan_gitlink_answer_row_2_commit_binary_and_text_keep_the_batch_aligned(self):
+        from hansa import release
+        before = self.git_out("rev-parse", "HEAD")
+        sh("git", "update-index", "--add", "--cacheinfo", "160000", before, "a-entry", cwd=self.repo)
+        (self.repo / "b-AI.png").write_bytes(self.word_scan_png() + bytes(100000))
+        (self.repo / "c-text.txt").write_text("an AI plan\n")
+        sh("git", "add", "b-AI.png", "c-text.txt", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add files", cwd=self.repo)
+        hits, checked = release.words_in(self.repo, [f"{before}..HEAD", "--"], ["Subproject", r"re:\bAI\b"])
+        self.assertEqual(checked, 1)
+        self.assertEqual([(h["where"], h["line"]) for h in hits],
+                         [("file name", "b-AI.png"), ("a-entry", f"Subproject commit {before}"),
+                          ("c-text.txt", "an AI plan")])
+
+    def test_word_scan_gitlink_other_non_blob_answers_keep_the_batch_aligned(self):
+        from hansa import release
+        self.commit_word_scan_bytes("data.bin", self.word_scan_png() + bytes(100000))
+        self.commit_in_repo("text.txt", "an AI plan\n")
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "tag", "-a", "v1", "-m", "Version", cwd=self.repo)
+        binary, text = (self.git_out("rev-parse", f"HEAD:{path}") for path in ("data.bin", "text.txt"))
+        # A tree contains NULs, but only a blob can make a file's added lines binary.
+        objects = [self.git_out("rev-parse", ref) for ref in ("HEAD", "HEAD^{tree}", "v1")]
+        with release._binary_blobs(self.repo) as binary_blob:
+            for obj in [*objects, "1" * 40]:
+                with self.subTest(object=obj):
+                    self.assertFalse(binary_blob(obj))
+                    self.assertTrue(binary_blob(binary))
+                    self.assertFalse(binary_blob(text))
 
     def test_word_scan_binary_row_1_png_task_merges_with_and_without_a_merge_check(self):
         png = self.word_scan_png()
