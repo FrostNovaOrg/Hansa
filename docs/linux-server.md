@@ -153,8 +153,9 @@ unreadable file, or a file without `oom_kill` leaves no count and does not inter
 Setups belong to those runs and are covered by their counts; design sessions run only on macOS.
 
 A failed check or merge check runs once more only with a readable Linux count that rose while it ran,
-and only if hansa did not stop it itself; a merge lane's setup failure follows the same rule. Exit 137 or no
-exit code alone does not qualify: its command may have killed itself, or its exit file could not be written.
+and only if hansa did not stop it itself. A merge check whose lane setup fails is not run again and shows
+the setup's output as before. Exit 137 or no exit code alone does not qualify: its command may have killed
+itself, or its exit file could not be written.
 The rerun has the lane's full time ceiling; a merge check stays first in line.
 `hansa show ID --check` keeps the first run's exit and last lines, even
 if the base moves after the rerun, and states the count's evidence without claiming this run was killed

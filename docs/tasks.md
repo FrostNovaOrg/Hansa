@@ -113,8 +113,9 @@ and macOS. On Linux, a failed check or merge check runs once more only when hans
 at both ends and its count rose, and hansa did not stop the run itself. Any failing exit, or no exit code,
 can qualify; exit 137 or a missing exit alone cannot. Without a readable, rising count it ends as before.
 A passing check keeps its count and passes. Cancellation, time ceilings and other stops made by hansa
-never cause this retry. A merge lane's setup failure follows the same rule. The rerun gets the lane's full
-time ceiling; a merge check keeps its place in line and merges if it passes.
+never cause this retry. A merge check whose lane setup fails is not run again and shows the setup's
+output as before. The rerun gets the lane's full time ceiling; a merge check keeps its place in line and
+merges if it passes.
 `hansa show ID --check` gives the first run's exit, last lines and the machine-wide evidence. The first run's
 note records only what happened; hansa says it ran again only after the rerun starts. The first
 run stays recorded if the base then moves and another merge check runs. If the rerun fails while the count

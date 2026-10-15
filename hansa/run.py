@@ -5230,7 +5230,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
-    stopped = mc.get("cancel") or mc.get("timed_out") or changed
+    stopped = mc.get("cancel") or mc.get("timed_out") or changed or setup
     if check_killed(result, stopped):
         if not result.get("retried"):
             result["note"] = check_retry_reason(result)

@@ -9883,7 +9883,7 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn("setup_oom_kills", m["merge_check_result"])
             self.assertIn("merge check: the system's out-of-memory killer killed 3 processes", views.show_text(desk, tid))
 
-    def test_merge_setup_failures_retry_only_with_a_rising_count_and_no_git_guard_stop(self):
+    def test_a_failed_merge_lane_setup_is_not_run_again_even_with_a_rising_oom_count(self):
         with self.oom_counter() as vmstat:
             for mode in ("once", "twice", "unchanged", "guarded"):
                 with self.subTest(mode=mode):
@@ -9913,29 +9913,59 @@ class DeskTest(unittest.TestCase):
                     self.assertEqual(desk.save_settings(s), [])
                     m = self.oom_settle(d, desk, tid)
                     result = m["merge_check_result"]
-                    self.assertEqual(m["state"], "merged" if mode == "once" else "done", m)
-                    self.assertEqual(result["ok"], mode == "once")
-                    self.assertEqual((root / "setup-count").read_text(), "2" if mode in ("once", "twice") else "1")
-                    if mode in ("once", "twice"):
-                        self.assertEqual(result["retried"]["oom_kills"], 1)
-                        shown = views.check_output_text(desk, tid)
-                        self.assertIn("ran again once", shown)
+                    self.assertEqual(m["state"], "done", m)
+                    self.assertFalse(result["ok"])
+                    self.assertEqual((root / "setup-count").read_text(), "1")
+                    self.assertNotIn("retried", result)
+                    self.assertFalse((root / "count").exists())  # the check never ran
+                    shown = views.check_output_text(desk, tid)
+                    self.assertNotIn("ran again", shown)
+                    if mode != "guarded":
+                        self.assertEqual(result["note"], "the lane's setup failed (exit 23), so the check did not run")
+                        self.assertIn("merge-setup.log", shown)
                         self.assertIn("setup output from run 1", shown)
-                        if mode == "twice":
-                            self.assertEqual(result["oom_kills"], 2)
-                            for words in ("failed twice", "short of memory", "hansa concurrency"):
-                                self.assertIn(words, shown)
-                        else:
-                            self.assertEqual((root / "count").read_text(), "1")
+                        self.assertIn("setup failed (exit 23)", shown)
+                        self.assertNotIn("merge-check.log", shown)
+                    if mode == "unchanged":
+                        self.assertNotIn("oom_kills", result)
                     else:
-                        self.assertNotIn("retried", result)
-                        if mode == "unchanged":
-                            self.assertNotIn("oom_kills", result)
-                            self.assertIn("setup failed (exit 23)", result["note"])
-                        else:
-                            self.assertEqual(result["oom_kills"], 1)
-                    if mode != "once":
-                        self.assertFalse((root / "count").exists())  # the check never ran
+                        self.assertEqual(result["oom_kills"], 1)
+                        for display in (shown, views.show_text(desk, tid)):
+                            self.assertIn("out-of-memory killer killed 1 process while", display)
+                            self.assertIn("a count for the whole machine", display)
+
+    def test_a_merge_merges_after_its_failed_lane_setup_is_fixed(self):
+        # A new merge request must not read the previous setup's published error.
+        with self.oom_counter() as vmstat:
+            d, desk, tid, root = self.oom_check_task("fixed-merge-setup", "pass", vmstat, True)
+            repo = Path(desk.settings()["lanes"]["a"]["repo"])
+            before = sh_out("git", "rev-parse", "main", cwd=repo)
+            script = root / "setup.py"
+            script.write_text("print('setup failed before the fix', flush=True)\nraise SystemExit(23)\n")
+            s = desk.settings()
+            s["lanes"]["m"]["setup"] = shlex.join([sys.executable, str(script)])
+            self.assertEqual(desk.save_settings(s), [])
+            m = self.oom_settle(d, desk, tid)
+            result = m["merge_check_result"]
+            self.assertEqual(m["state"], "done")
+            self.assertFalse(result["ok"])
+            self.assertIn("setup failed (exit 23)", result["note"])
+            self.assertNotIn("oom_kills", result)
+            self.assertFalse((root / "count").exists())
+            self.assertIn("failed (exit 23)", (desk.tasks_dir / tid / "merge-check.err").read_text())
+            self.assertEqual(sh_out("git", "rev-parse", "main", cwd=repo), before)
+
+            script.write_text("print('setup passed after the fix', flush=True)\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(desk.root), "merge", tid])
+            m = self.oom_settle(d, desk, tid)
+            self.assertEqual(m["state"], "merged", m)
+            self.assertTrue(m["merge_check_result"]["ok"])
+            self.assertEqual(m["merge_check_result"]["exit"], 0)
+            self.assertEqual((root / "count").read_text(), "1")
+            self.assertEqual((desk.tasks_dir / tid / "merge-check.err").read_text(), "")
+            self.assertEqual(sh_out("git", "rev-parse", "main", cwd=repo).strip(), m["merge_commit"])
+            self.assertNotEqual(sh_out("git", "rev-parse", "main", cwd=repo), before)
 
     def test_hansas_check_stops_never_retry_a_sigkill(self):
         # Rows 6 and 7: exercise the real cancel and timeout paths, forcing their escalation to SIGKILL.
