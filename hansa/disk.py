@@ -23,6 +23,7 @@ What old tasks kept (trim): a task's folder keeps its text, record (meta.json), 
 Once a day hansa serve cuts merged tasks' passed setup, check and merge check logs to their first TRIM_HEAD and
 last TRIM_KEEP bytes, with a line counting the bytes cut. Other kept logs (TRIMMED) of tasks that ended (ENDED)
 or stayed done more than TRIM_AFTER ago, and ended releases' logs that old, keep their last TRIM_KEEP bytes.
+Verification scratch refs are removed once the verification ended TRIM_AFTER ago.
 The task's record says so too (`trimmed`), and hansa show. The event log is not touched.
 """
 from __future__ import annotations
@@ -427,6 +428,7 @@ def trim(desk: Desk, at: float | None = None) -> list:
     """Daily trim: merged tasks' passed logs, old ended/done tasks and old ended releases. Return
     (task or 'release #ID', file, size before) for each cut."""
     from . import release
+    from .run import git
     at = at or time.time()
     tasks = {m["id"]: m for m in desk.tasks() if isinstance(m.get("id"), str)}
     done = []
@@ -436,6 +438,13 @@ def trim(desk: Desk, at: float | None = None) -> list:
             m = desk.meta(tid)  # a done task may have queued a merge since tasks() was read
             end = ended_at(m, tasks)
             old = isinstance(end, (int, float)) and at - end >= TRIM_AFTER
+            if old and m.get("kind") == "verify" and m.get("scratch_ref") and m.get("repo"):
+                try:
+                    git("update-ref", "-d", f"refs/hansa/scratch/{tid}", cwd=m["repo"])
+                except (RuntimeError, OSError):  # an unavailable repository may be back at the next trim
+                    pass
+                else:
+                    desk.change(tid, lambda x: {"scratch_ref": None})
             passed = ({"setup.log": m.get("setup_exit") in (None, 0),
                        "check.log": (m.get("check") or {}).get("ok"),
                        "merge-check.log": (m.get("merge_check_result") or {}).get("ok"),

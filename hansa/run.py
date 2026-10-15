@@ -4429,7 +4429,15 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             desk, wt, meta.get("base", "") if meta.get("update") and meta.get("update_conflicts") else "")
         if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
-                wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: {tid} scratch changes")
+                wgit(desk, wt, "add", "-A")
+                tree = wgit(desk, wt, "write-tree")
+                scratch = wgit(desk, wt, "commit-tree", tree, "-p", head, "-m", f"hansa: {tid} scratch changes")
+                ref = f"refs/hansa/scratch/{tid}"
+                wgit(desk, wt, "update-ref", ref, scratch)
+                fields["scratch_ref"] = ref
+                # Only clean after the snapshot has a ref; neither the task branch nor refs/stash moves.
+                wgit(desk, wt, "reset", "--hard", head)
+                wgit(desk, wt, "clean", "-fd")
             else:
                 ln = desk.settings()["lanes"].get(meta.get("lane"))
                 head = commit_work(desk, wt, task_message(ln, meta.get("lane") or "", tid, meta.get("title") or ""),

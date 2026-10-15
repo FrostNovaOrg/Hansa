@@ -20302,7 +20302,8 @@ class DeskTest(unittest.TestCase):
         wt = Path(v["worktree"])
         self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True,
                                         text=True).stdout, "")
-        self.assertIn(vid, subprocess.run(["git", "stash", "list"], cwd=wt, capture_output=True, text=True).stdout)
+        self.assertEqual(sh_out("git", "stash", "list", cwd=wt), "")
+        self.assertEqual(v["scratch_ref"], f"refs/hansa/scratch/{vid}")
         argv = json.loads(seen.read_text().splitlines()[-1])
         self.assertIn("Bash(git checkout:*)", argv)
         self.assertNotIn("Bash(git stash:*)", argv[argv.index("--allowedTools"):])
@@ -20336,6 +20337,84 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("next:", shown)  # nothing left to do with it
         self.assertNotIn(vid, [m["id"] for m in views.status(self.desk)["review"]])
 
+    def scratch_verification(self, d, tid, text="scratch evidence"):
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds", "FAKE_WRITE": text, "FAKE_WRITE_FILE": "scratch.txt"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        v = self.settle(d, self.desk.meta(tid)["verify"])
+        self.assertEqual((v["state"], v["verdict"]), ("done", "holds"), v)
+        return v
+
+    def test_verification_scratch_ref_keeps_changed_and_new_files_without_changing_the_stash(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        parent = self.settle(d, tid)
+        # A pre-existing stash reflog entry is left alone, as is an older verification's show output.
+        legacy = self.desk.new_task("Old verification", kind="verify", parent=tid, lane="a", state="done")
+        sh("git", "update-ref", "--create-reflog", "-m", f"hansa: {legacy} scratch changes", "refs/stash",
+           parent["head"], cwd=self.repo)
+        before = sh_out("git", "stash", "list", cwd=self.repo)
+        self.assertIn(f"hansa: {legacy} scratch changes", before)
+        v = self.scratch_verification(d, tid)
+        ref = f"refs/hansa/scratch/{v['id']}"
+        self.assertEqual(sh_out("git", "stash", "list", cwd=self.repo), before)
+        self.assertEqual(sh_out("git", "show", f"{ref}:hello.txt", cwd=self.repo), f"hello from {v['id']}")
+        self.assertEqual(sh_out("git", "show", f"{ref}:scratch.txt", cwd=self.repo), "scratch evidence")
+        wt = Path(v["worktree"])
+        self.assertEqual(sh_out("git", "status", "--porcelain", cwd=wt), "")
+        self.assertEqual(sh_out("git", "rev-parse", "HEAD", cwd=wt), parent["head"])
+        shown = self.hansa("show", v["id"])
+        [line] = [x for x in shown.splitlines() if "scratch changes" in x]
+        command = shlex.split(line[line.index("hansa git "):])
+        self.assertEqual(command, ["hansa", "git", "a", "show", ref])
+        patch = self.hansa(*command[1:])
+        self.assertIn("diff --git a/hello.txt b/hello.txt", patch)
+        self.assertIn("diff --git a/scratch.txt b/scratch.txt", patch)
+        self.assertIn(f"+hello from {v['id']}", patch)
+        self.assertIn("+scratch evidence", patch)
+        self.assertNotIn("scratch changes", self.hansa("show", legacy))
+
+    def test_two_verifications_keep_separate_scratch_refs_and_leave_the_stash_empty(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        first = self.scratch_verification(d, tid, "first evidence")
+        second = self.scratch_verification(d, tid, "second evidence")
+        refs = sh_out("git", "for-each-ref", "--format=%(refname)", "refs/hansa/scratch/", cwd=self.repo).splitlines()
+        self.assertEqual(refs, [f"refs/hansa/scratch/{v['id']}" for v in (first, second)])
+        for v, text in ((first, "first evidence"), (second, "second evidence")):
+            self.assertEqual(sh_out("git", "show", f"refs/hansa/scratch/{v['id']}:scratch.txt", cwd=self.repo), text)
+        self.assertEqual(sh_out("git", "stash", "list", cwd=self.repo), "")
+        self.assertEqual(sh_out("git", "status", "--porcelain", cwd=Path(second["worktree"])), "")
+
+    def test_daily_trim_removes_only_old_verification_scratch_refs(self):
+        from hansa import disk
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        old = self.scratch_verification(d, tid, "old evidence")
+        young = self.scratch_verification(d, tid, "young evidence")
+        # Seed the refs independently: without the trim change this fails at the removal, not the save.
+        for v in (old, young):
+            ref = f"refs/hansa/scratch/{v['id']}"
+            sh("git", "update-ref", ref, v["head"], cwd=self.repo)
+            self.desk.update(v["id"], scratch_ref=ref)
+        at = time.time()
+        self.desk.update(old["id"], finished=at - disk.TRIM_AFTER - 60)
+        self.desk.update(young["id"], finished=at - disk.TRIM_AFTER + 60)
+        # The recorded repository still owns the refs if the lane has since been removed.
+        s = self.desk.settings()
+        s["lanes"].pop("a")
+        self.assertEqual(self.desk.save_settings(s), [])
+        disk.trim(self.desk, at)
+        refs = sh_out("git", "for-each-ref", "--format=%(refname)", "refs/hansa/scratch/", cwd=self.repo).splitlines()
+        self.assertEqual(refs, [f"refs/hansa/scratch/{young['id']}"])
+        self.assertFalse(self.desk.meta(old["id"]).get("scratch_ref"))
+        self.assertEqual(self.desk.meta(young["id"])["scratch_ref"], refs[0])
+        disk.trim(self.desk, at + 1)
+        self.assertEqual(sh_out("git", "for-each-ref", "--format=%(refname)", "refs/hansa/scratch/", cwd=self.repo), refs[0])
+
     def test_verify_on_another_lane_runs_there_and_stays_a_verification(self):
         seen = self.tmp / "argv.jsonl"
         d, t1, t2 = self.two_lanes()
@@ -20365,13 +20444,14 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((v["lane"], v["provider"], v["kind"], v["verdict"], v.get("check")),
                          ("b", "other", "verify", "holds", None))  # b's provider; never checked
         self.assertEqual((v["commits"], v["files"]), (0, []))  # its scratch changes are set aside
-        self.assertIn(vid, subprocess.run(["git", "stash", "list"], cwd=v["worktree"], capture_output=True,
-                                          text=True).stdout)
+        self.assertEqual(sh_out("git", "stash", "list", cwd=Path(v["worktree"])), "")
+        self.assertEqual(v["scratch_ref"], f"refs/hansa/scratch/{vid}")
         self.assertEqual(Path(v["worktree"]), self.desk.worktrees_dir / "b")
         argv = json.loads(seen.read_text().splitlines()[-1])
         self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
         shown = views.show_text(self.desk, vid)
         self.assertIn(f"{vid} · done · lane b · other", shown)
+        self.assertIn(f"hansa git b show refs/hansa/scratch/{vid}", shown)
         self.assertIn(f"it ran on lane b, not {t1}'s own lane a", shown)
         self.assertIn(f"verification (a worker ran the change): {vid}: holds; on lane b", views.show_text(self.desk, t1))
         with self.assertRaises(SystemExit):
