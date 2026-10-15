@@ -100,6 +100,10 @@ the words or the command changed. The coordinator hears when the principal answe
 and when the release ends. `hansa release` lists them; `hansa explain lane L`
 shows each target's command and its last release.
 
+Put a step that cannot be taken back (pushing a tag, publishing a package) last in a target's
+command, after the build it depends on has passed, so that a target that fails halfway has published
+nothing.
+
 ### A release gated on a full build on another desk
 
 A release that should go on only if a full build passes on another desk's

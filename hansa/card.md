@@ -35,6 +35,8 @@ a gap in hansa, not in you: say so with `hansa ask`.
   inside a Claude Code session.
 - With `hansa ask`: a change that held a key; a folder outside the desk you keep needing to read;
   an entry to take off what workers may not read; anything else only the principal sets.
+- Ask the principal in your reply, not in a dialog that stops your session: while it waits for an
+  answer, hansa's posts wait too. Go on with what does not depend on the answer.
 
 ## How work moves
 1. You queue a task: one change a worker can make and check on its own.
@@ -118,6 +120,9 @@ screenshot of every finding, say) costs turns.
   list. Installing dependencies belongs in the setup, not in the task.
 - A task starts from the base branch as it is at that moment, which can be before you merge the one
   ahead of it. If a task needs an earlier task's change, queue it after that merge.
+- A task a verification will judge: ask for the use that is needed, give its cases as a table, and
+  say for each rare case whether it is refused or accepted as it is; send work back only to narrow
+  it. More: `hansa help writing-tasks`.
 
 ## Reading the result
 `hansa show <id>` gives the report and what hansa recorded: changed files, commits, the check's
@@ -346,6 +351,7 @@ loads nothing.
 | `check-output` | a check's output |
 | `effort` | where a run's effort comes from |
 | `browser` | browser tasks, the preview |
+| `writing-tasks` | a task a verification can judge |
 | `merge-check` | merging, merge checks and lanes, conflicts, sending back |
 | `cost-figures` | what `hansa cost` counts |
 | `states` | a task's states |
