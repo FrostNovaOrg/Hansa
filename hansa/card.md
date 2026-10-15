@@ -164,6 +164,10 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   current base, runs the setup and merge check there, and moves the base to that exact merge commit
   if it passes. You are told how it ended; `hansa cancel <id>` stops it and returns the task to review.
   `--recheck` does the same even if the base has not moved.
+- Checks take queued merges together in order, up to the check lane's `merge_batch`
+  (default 4; 1–10, `none` restores 4). Each keeps its own merge commit. A failed or
+  stopped batch returns to its old places, each checked alone; cancelling a member
+  returns that member to review and the others are checked alone. More: `hansa help merge-check`.
 - `hansa lane set L merge_check "<command>"` (limit: `merge_timeout_min`) is for checks too slow to
   run after every task; it runs before every merge of a changed task. Try `hansa lane try L --merge-check`.
   For long merge checks and busy lanes, a merge lane:

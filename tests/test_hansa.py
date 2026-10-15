@@ -6560,6 +6560,334 @@ class DeskTest(unittest.TestCase):
         self.merge_lane_for_checks(command, **fields)
         return d, tid
 
+    def batch_queue(self, count=3, *, limit=None, conflict=False, fail=False, start=True):
+        """Queue finished branches behind a gated running check, then start the next batch."""
+        from hansa import run
+        self.hansa("lane", "add", "b", "--like", "a")
+        for lane in ("a", "b"):
+            self.hansa("lane", "set", lane, "merge_message", f"{lane}: {{task}} {{title}}")
+            self.hansa("lane", "set", lane, "identity", f"Person {lane} <{lane}@example.org>")
+        gates, runs = self.tmp / "gates", self.tmp / "batch-runs"
+        gates.mkdir()
+        command = (f'echo "$HANSA_TASK $(git rev-parse HEAD)" >> {shlex.quote(str(runs))}; '
+                   f'while test ! -f {shlex.quote(str(gates))}/"$HANSA_TASK"; do sleep 0.05; done; '
+                   + ("test ! -f bad.txt" if fail else "echo batch-passed"))
+        self.merge_lane_for_checks(command)
+        self.hansa("lane", "set", "m", "setup", "echo batch-setup")
+        if limit is not None:
+            self.hansa("lane", "set", "m", "merge_batch", str(limit))
+        base, tasks = self.git_out("rev-parse", "main"), []
+        for i in range(count + 1):
+            lane = "b" if i % 2 == 0 else "a"
+            tid = self.desk.new_task(f"Add file {i}", lane=lane)
+            filename = "m1.txt" if conflict and i == 3 else "bad.txt" if fail and i == 2 else f"m{i}.txt"
+            self.git_out("checkout", "-qb", f"task/{tid}", base)
+            (self.repo / filename).write_text(f"work of {tid}\nbatch-key-{tid}\n")
+            self.git_out("add", filename)
+            self.git_out("-c", "user.name=t", "-c", "user.email=t@example.org", "commit", "-qm", f"work {tid}")
+            head = self.git_out("rev-parse", "HEAD")
+            self.git_out("checkout", "-q", "main")
+            self.desk.update(tid, state="done", base=base, head=head, branch=f"task/{tid}",
+                             commits=1, files=[filename], check={"ok": True, "seconds": 0, "command": "true"})
+            tasks.append(tid)
+        d = Dispatcher(self.desk)
+
+        def cleanup():
+            for task in tasks:
+                (gates / task).touch()
+            for proc in d.merge_procs.values():
+                run.stop(proc.pid, "", proc)
+                proc.wait(timeout=20)
+        self.addCleanup(cleanup)
+        self.hansa("merge", tasks[0])
+        d.tick()
+        self.soon(lambda: runs.exists() and tasks[0] in runs.read_text())
+        for task in tasks[1:]:
+            self.hansa("merge", task)
+        self.assertTrue(all(self.desk.meta(t)["merge_check"]["phase"] == "queued" for t in tasks[1:]))
+        if start:
+            (gates / tasks[0]).touch()
+            self.assertEqual(self.settle_merge(d, tasks[0])["state"], "merged")
+            self.soon(lambda: (d.tick() or True) and (runs.exists() and tasks[1] in runs.read_text()))
+        return d, tasks[1:], gates, runs, tasks[0]
+
+    def batch_finish(self, d, tasks, gates):
+        for task in tasks:
+            (gates / task).touch()
+        return [self.settle_merge(d, task) for task in tasks]
+
+    def test_merge_batch_row_1_passes_once_with_each_lanes_commits_and_output(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        onto = self.git_out("rev-parse", "main")
+        queued = [self.desk.meta(t)["merge_check"]["queued"] for t in tasks]
+        self.assertEqual(queued, sorted(queued))
+        for task in tasks:
+            shown = self.hansa("show", task)
+            for other in tasks:
+                self.assertIn(other, shown)
+            self.assertIn(f"hansa show {tasks[0]} --merge-check-log", shown)
+        status = views.status(self.desk)
+        for m in status["merging"]:
+            self.assertEqual(m["members"], tasks)
+            self.assertEqual(m["check_task"], tasks[0])
+        self.assertIn("checked with", self.hansa("status"))
+        merged = self.batch_finish(d, tasks, gates)
+        self.assertEqual([m["state"] for m in merged], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0]])
+        self.assertEqual(self.git_out("rev-parse", "main"), merged[-1]["merge_commit"])
+        self.assertEqual(self.git_out("rev-list", "--first-parent", "--reverse", f"{onto}..main").splitlines(),
+                         [m["merge_commit"] for m in merged])
+        for m in merged:
+            commit = m["merge_commit"]
+            self.assertEqual(self.git_out("show", "-s", "--format=%s", commit), f"{m['lane']}: {m['id']} {m['title']}")
+            self.assertEqual(self.git_out("show", "-s", "--format=%an|%cn", commit), f"Person {m['lane']}|Person {m['lane']}")
+            self.assertEqual(self.git_out("rev-parse", f"{commit}^1"), onto)
+            onto = commit
+            for other in tasks:
+                self.assertIn(other, self.hansa("show", m["id"]))
+            self.assertIn("batch-passed", self.hansa("show", m["id"], "--merge-check-log"))
+        self.assertEqual(self.events("merge_check_started")[-1]["members"], tasks)
+        self.assertEqual([e["members"] for e in self.events("task_merged") if e["task"] in tasks], [tasks] * 3)
+        calls = [x for x in self.srt_calls() if "batch-setup" in str(x)]
+        self.assertEqual(len(calls), 2)  # blocker, then one setup for all three
+
+    def test_merge_batch_row_2_failure_checks_each_alone_in_order(self):
+        d, tasks, gates, runs, blocker = self.batch_queue(fail=True)
+        tip = self.git_out("rev-parse", "main")
+        places = {t: self.desk.meta(t)["merge_check"]["queued"] for t in tasks}
+        (gates / tasks[0]).touch()
+        self.soon(lambda: (d.merge_checks(self.desk.settings(), starting=False) or True)
+                  and all((self.desk.meta(t).get("merge_check") or {}).get("alone") for t in tasks))
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        for task in tasks:
+            self.assertEqual(self.desk.meta(task)["merge_check"]["queued"], places[task])
+        merged = self.batch_finish(d, tasks, gates)
+        self.assertEqual([m["state"] for m in merged], ["merged", "done", "merged"])
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], *tasks])
+
+    def test_merge_batch_row_3_stops_before_a_conflict(self):
+        d, tasks, gates, runs, blocker = self.batch_queue(count=4, conflict=True)
+        self.assertEqual(self.desk.meta(tasks[0])["merge_check"].get("members"), tasks[:2])
+        merged = self.batch_finish(d, tasks, gates)
+        self.assertEqual([m["state"] for m in merged], ["merged", "merged", "done", "merged"])
+        self.assertIn("conflict", merged[2]["merge_check_result"]["note"])
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], tasks[3]])
+
+    def test_merge_batch_row_4_cancelling_a_follower_stops_the_check(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        tip = self.git_out("rev-parse", "main")
+        self.hansa("cancel", tasks[1])
+        self.assertEqual(self.desk.meta(tasks[1])["state"], "done")
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        for task in (tasks[0], tasks[2]):
+            self.assertTrue(self.desk.meta(task)["merge_check"].get("alone"))
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged", "done", "merged"])
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], tasks[0], tasks[2]])
+
+    def test_merge_batch_row_5_one_keeps_individual_checks(self):
+        d, tasks, gates, runs, blocker = self.batch_queue(limit=1)
+        self.assertEqual(self.desk.meta(tasks[1])["merge_check"]["phase"], "queued")
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, *tasks])
+
+    def test_merge_batch_row_6_forbidden_member_prevents_every_landing(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        tip = self.git_out("rev-parse", "main")
+        self.forbid(f"work of {tasks[1]}")  # saved while the batch runs: checked at landing
+        (gates / tasks[0]).touch()
+        self.soon(lambda: (d.merge_checks(self.desk.settings(), starting=False) or True)
+                  and self.desk.meta(tasks[1])["state"] == "done")
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertIn(f"work of {tasks[1]}", self.hansa("show", tasks[1]))
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged", "done", "merged"])
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], tasks[0], tasks[2]])
+
+    def test_merge_batch_row_7_a_moving_base_checks_every_member_alone(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        self.assertEqual(self.desk.meta(tasks[0])["merge_check"].get("members"), tasks)
+        self.move_main()
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], *tasks])
+
+    def test_merge_batch_row_8_restart_adopts_a_live_check(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        reaper = threading.Thread(target=d.merge_procs[tasks[0]].wait)
+        reaper.start()
+        self.addCleanup(reaper.join)
+        self.addCleanup(lambda: [(gates / task).touch() for task in tasks])
+        resumed = Dispatcher(self.desk)
+        resumed.tick()
+        merged = self.batch_finish(resumed, tasks, gates)
+        self.assertEqual([m["state"] for m in merged], ["merged"] * 3)
+        self.assertEqual(runs.read_text().splitlines()[-1].split()[1], merged[-1]["merge_commit"])
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0]])
+        self.assertEqual(len(self.events("task_merged")), 4)
+
+    def test_merge_batch_row_9_different_check_lanes_keep_their_own_checks(self):
+        commands = {"a": "test -f a.txt && echo checked-a", "b": "test -f b.txt && echo checked-b"}
+        d, t1, t2 = self.two_lanes(check="true", more={n: {"merge_check": c} for n, c in commands.items()})
+        self.hansa("merge", t1)
+        self.hansa("merge", t2)
+        d.tick()
+        self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "queued")
+        for task in (t1, t2):
+            m = self.settle_merge(d, task)
+            self.assertEqual(m["state"], "merged")
+            self.assertEqual(m["merge_check_result"]["command"], commands[m["lane"]])
+        self.assertEqual([(e["task"], e["lane"]) for e in self.events("merge_check_started")], [(t1, "a"), (t2, "b")])
+
+    def test_merge_batch_restart_before_launch_returns_every_member_alone(self):
+        from hansa import run
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        proc = d.merge_procs[tasks[0]]
+        run.stop(proc.pid, "", proc)
+        proc.wait(timeout=20)
+        mc = self.desk.meta(tasks[0])["merge_check"]
+        (self.desk.raw_dir(tasks[0]) / "merge-check.exit").unlink(missing_ok=True)
+        self.desk.update(tasks[0], merge_check={**mc, "phase": "starting", "pid": None,
+                                               "launch": f"hansa-merge-{tasks[0]}-never-started"})
+        resumed = Dispatcher(self.desk)
+        resumed.merge_checks(self.desk.settings(), starting=False)
+        self.assertTrue(all(self.desk.meta(t)["merge_check"]["alone"] for t in tasks))
+        self.assertEqual([m["state"] for m in self.batch_finish(resumed, tasks, gates)], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], *tasks])
+
+    def batch_interrupted_landing(self, after_move):
+        from hansa import run
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        (gates / tasks[0]).touch()
+        d.merge_procs[tasks[0]].wait(timeout=20)
+        real_git, real_update = run.git, self.desk.update
+
+        def git(*args, **kw):
+            if args[:2] == ("merge", "--ff-only") and not after_move:
+                raise KeyboardInterrupt("server stopped before git moved the base")
+            return real_git(*args, **kw)
+
+        def update(tid, **fields):
+            if tid == tasks[1] and fields.get("state") == "merged":
+                raise KeyboardInterrupt("server stopped after recording the first member")
+            return real_update(tid, **fields)
+
+        with unittest.mock.patch.object(run, "git", git), unittest.mock.patch.object(self.desk, "update", update):
+            with self.assertRaises(KeyboardInterrupt):
+                run.finish_merge_check(self.desk, tasks[0])
+        self.assertTrue(list((self.desk.state_dir / "merge-batches").glob("*.json")))
+        resumed = Dispatcher(self.desk)
+        merged = self.batch_finish(resumed, tasks, gates)
+        self.assertEqual([m["state"] for m in merged], ["merged"] * 3)
+        self.assertTrue(all(m["merge_check"] is None for m in merged))
+        self.assertEqual(self.git_out("rev-parse", "main"), merged[-1]["merge_commit"])
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()],
+                         [blocker, tasks[0]] + ([] if after_move else tasks))
+        self.assertEqual(len(self.events("task_merged")), 4)
+        self.assertEqual(list((self.desk.state_dir / "merge-batches").glob("*.json")), [])
+
+    def test_merge_batch_restart_before_the_base_moves_checks_alone(self):
+        self.batch_interrupted_landing(after_move=False)
+
+    def test_merge_batch_restart_after_the_base_moves_finishes_recording_once(self):
+        self.batch_interrupted_landing(after_move=True)
+
+    def test_merge_batch_stopped_by_the_ceiling_returns_every_member_alone(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        mc = self.desk.meta(tasks[0])["merge_check"]
+        self.desk.update(tasks[0], merge_check={**mc, "started": now() - 241 * 60})
+        d.merge_checks(self.desk.settings(), starting=False)
+        self.soon(lambda: (d.merge_checks(self.desk.settings(), starting=False) or True)
+                  and all((self.desk.meta(t).get("merge_check") or {}).get("alone") for t in tasks))
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], *tasks])
+
+    def test_merge_batch_default_takes_four_and_leaves_the_fifth(self):
+        d, tasks, gates, runs, blocker = self.batch_queue(count=5)
+        self.assertEqual(self.desk.meta(tasks[0])["merge_check"]["members"], tasks[:4])
+        self.assertEqual(self.desk.meta(tasks[4])["merge_check"]["phase"], "queued")
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 5)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], tasks[4]])
+
+    def test_merge_batch_a_system_kill_returns_every_member_alone(self):
+        from hansa import run
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        proc = d.merge_procs[tasks[0]]
+        run.stop(proc.pid, "", proc)
+        proc.wait(timeout=20)
+        d.merge_checks(self.desk.settings(), starting=False)
+        self.assertTrue(all(self.desk.meta(t)["merge_check"].get("alone") for t in tasks))
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], *tasks])
+
+    def test_merge_batch_a_moved_member_branch_refuses_only_its_own_landing(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        tip = self.git_out("rev-parse", "main")
+        self.git_out("update-ref", f"refs/heads/task/{tasks[1]}", tip)
+        (gates / tasks[0]).touch()
+        self.soon(lambda: (d.merge_checks(self.desk.settings(), starting=False) or True)
+                  and self.desk.meta(tasks[1])["state"] == "done")
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertIn("no longer holds", self.desk.meta(tasks[1])["merge_check_result"]["note"])
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged", "done", "merged"])
+
+    def test_merge_batch_a_new_key_refuses_only_the_member_holding_it(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        tip = self.git_out("rev-parse", "main")
+        self.desk.write_key("demo", f"batch-key-{tasks[1]}")
+        (gates / tasks[0]).touch()
+        self.soon(lambda: (d.merge_checks(self.desk.settings(), starting=False) or True)
+                  and self.desk.meta(tasks[1])["state"] == "done")
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual(self.desk.meta(tasks[1])["leaked"], ["demo"])
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged", "done", "merged"])
+
+    def test_merge_batch_stops_before_a_plain_merge(self):
+        d, tasks, gates, runs, blocker = self.batch_queue(start=False)
+        mc = self.desk.meta(tasks[1])["merge_check"]
+        self.desk.update(tasks[1], merge_check={**mc, "plain": True, "despite": True})
+        (gates / blocker).touch()
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 3)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()], [blocker, tasks[0], tasks[2]])
+
+    def test_merge_batch_stops_before_an_alone_member(self):
+        d, tasks, gates, runs, blocker = self.batch_queue(count=4, start=False)
+        mc = self.desk.meta(tasks[1])["merge_check"]
+        self.desk.update(tasks[1], merge_check={**mc, "alone": True})
+        (gates / blocker).touch()
+        self.assertEqual([m["state"] for m in self.batch_finish(d, tasks, gates)], ["merged"] * 4)
+        self.assertEqual([line.split()[0] for line in runs.read_text().splitlines()],
+                         [blocker, tasks[0], tasks[1], tasks[2]])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to render the page")
+    def test_merge_batch_page_names_companions_and_check_owner_in_both_languages(self):
+        d, tasks, gates, runs, blocker = self.batch_queue()
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language, words in (("en", "Checked with"), ("zh", "一起验收")):
+            r = subprocess.run(["node", str(harness), str(page), "status", language],
+                               input=json.dumps({"/api/status": views.status(self.desk)}),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(words, json.loads(r.stdout))
+            self.assertIn(tasks[0], json.loads(r.stdout))
+        self.batch_finish(d, tasks, gates)
+
+    def test_merge_batch_settings_validate_default_and_unset(self):
+        self.assertIn("merge_batch: 4", self.hansa("explain", "lane", "a"))
+        for n in (1, 10):
+            self.hansa("lane", "set", "a", "merge_batch", str(n))
+            self.assertIn(f"merge_batch: {n}", self.hansa("explain", "lane", "a"))
+        before = self.desk.settings()
+        for value in ("0", "11", "1.5", "true"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                self.hansa("lane", "set", "a", "merge_batch", value)
+            self.assertEqual(self.desk.settings(), before)
+        s = self.desk.settings()
+        s["lanes"]["a"]["merge_batch"] = True
+        self.assertIn("lane a: merge_batch must be from 1 to 10", self.desk.save_settings(s))
+        self.hansa("lane", "set", "a", "merge_batch", "none")
+        self.assertNotIn("merge_batch", self.desk.settings()["lanes"]["a"])
+        self.assertIn("merge_batch: 4", self.hansa("explain", "lane", "a"))
+
     def test_merge_lane_settings_and_refusals(self):
         self.merge_lane_for_checks()
         self.hansa("lane", "add", "b", "--like", "a")
@@ -6749,7 +7077,7 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         d, t1, t2 = self.two_lanes(check="true")
         gate = self.tmp / "merge-go"
-        self.merge_lane_for_checks(f"while ! test -f {shlex.quote(str(gate))}; do sleep 0.05; done")
+        self.merge_lane_for_checks(f"while ! test -f {shlex.quote(str(gate))}; do sleep 0.05; done", merge_batch=1)
         self.hansa("lane", "set", "b", "check", "sleep 30")
         self.hansa("lane", "set", "b", "env", "FAKE_HELLO=new-b.txt")
         self.hansa("merge", t1)
@@ -6777,7 +7105,7 @@ class DeskTest(unittest.TestCase):
 
     def test_merge_lane_runs_two_merges_in_order_while_both_task_lanes_are_busy(self):
         d, t1, t2 = self.two_lanes(check="true")
-        self.merge_lane_for_checks()
+        self.merge_lane_for_checks(merge_batch=1)
         work = []
         for lane in ("a", "b"):
             self.hansa("lane", "set", lane, "check", "sleep 30")

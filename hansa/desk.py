@@ -741,7 +741,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
                            "preview", "preview_wait_s", "setup", "release", "targets", "release_files", "max_turns",
-                           "timeout_min", "merge_timeout_min", "merge_lane", "note", "identity", *MESSAGE_FIELDS}
+                           "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "note", "identity", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -803,6 +803,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             p.append(f"{at}: timeout_min must be from 1 to 1440")
         if "merge_timeout_min" in ln and not _is_int(ln["merge_timeout_min"], 1, 1440):
             p.append(f"{at}: merge_timeout_min must be from 1 to 1440")
+        if "merge_batch" in ln and not _is_int(ln["merge_batch"], 1, 10):
+            p.append(f"{at}: merge_batch must be from 1 to 10")
         if "preview_wait_s" in ln and not _is_int(ln["preview_wait_s"], 1, 1800):
             p.append(f"{at}: preview_wait_s must be from 1 to 1800")
 

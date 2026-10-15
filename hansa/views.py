@@ -310,7 +310,13 @@ def merge_check_text(desk: Desk, m: dict, tasks: list | None = None, sentence: b
     mc = m.get("merge_check") or {}
     lane = merge_check_lane(desk.settings(), m)
     base = desk.settings()["lanes"].get(m.get("lane"), {}).get("base") or "main"
-    again = f" (again: {base} moved while it was checked)" if mc.get("moves") else ""
+    if len(mc.get("members", [])) > 1:
+        owner = mc["leader"]
+        running = desk.meta(owner).get("merge_check") or {}
+        return (f"merge check running on lane {lane}: checked with {', '.join(x for x in mc['members'] if x != m['id'])}; "
+                f"{owner}'s check runs on {str(running.get('commit', ''))[:10]}; "
+                f"output: hansa show {owner} --merge-check-log ({desk.tasks_dir / owner / 'merge-check.log'})")
+    again = f" (again: {base} moved while it was checked)" if mc.get("moves") else " (alone)" if mc.get("alone") else ""
     if mc.get("phase") in ("starting", "running"):
         where = f" on lane {lane}" if lane != m.get("lane") else ""
         return (f"merge check running for {_mins(mc.get('started'))} min{where}{again}: {m['id']} merged onto {base} at "
@@ -594,6 +600,8 @@ def status(desk: Desk) -> dict:
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy, looks), **killed_last(m)} for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": merge_check_lane(s, m),
+                     "members": (m.get("merge_check") or {}).get("members", []),
+                     "check_task": (m.get("merge_check") or {}).get("leader", m["id"]),
                      **({"waiting_for": merge_lane_wait(desk, m, tasks)} if merge_check_lane(s, m) != m.get("lane") else {}),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
                      "minutes": _mins((m.get("merge_check") or {}).get("started")),
@@ -880,7 +888,7 @@ def _check_logs(desk: Desk, m: dict) -> list:
         out.append(("merge check", "--merge-check-log",
                     f"merge check (on the task merged onto the base at {str(r.get('onto', ''))[:10]}): {how}: "
                     f"{r.get('command', '')}" + (" (what the lane's setup printed)" if merge_log(m) == "merge-setup.log"
-                                                 else ""), d / merge_log(m)))
+                                                 else ""), desk.tasks_dir / r.get("output_task", m["id"]) / merge_log(m)))
     return out
 
 
@@ -1160,6 +1168,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     elif m["state"] in ("done", "merged"):
         out += merge_result_lines(m, desk.redact(read_text(d / merge_log(m))))
     out += check_end_lines(m.get("check") or {}, "check")
+    batch_result = m.get("merge_check_result") or {}
+    if batch_result.get("batch"):
+        owner = batch_result["output_task"]
+        out.append(f"checked with: {', '.join(x for x in batch_result['batch'] if x != tid)}; "
+                   f"{owner}'s check; output: hansa show {owner} --merge-check-log "
+                   f"({desk.tasks_dir / owner / merge_log(m)})")
     out += check_end_lines(m.get("merge_check_result") or {}, "merge check")
     if m["state"] == "merged" and m.get("unverified"):
         out.append(f"note: {m['unverified']}")
@@ -1434,6 +1448,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             *([merge_lane_text(s, name)] if merge_lane_text(s, name) else []),
+            f"  merge_batch: {check_lane.get('merge_batch', 4)} on check lane {check_name} "
+            "(1 to 10; default 4; unsuccessful batches are checked alone)",
             f"  read them with hansa git {name} log|show|diff|grep ... (--worktree: the worktree), git commands that"
             " read only, run as the desk's account",
             f"  author and committer of every commit hansa makes for the lane (its tasks' commits, their merges into"

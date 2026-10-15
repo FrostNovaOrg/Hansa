@@ -272,17 +272,36 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   that passes moves the base to exactly that merge commit. The coordinator is
   told when it ends: the task ends `merged`, or back in review with `hansa show
   ID` saying why nothing was merged (the check's last lines, or a conflict). If
-  the base moves again while it is checked, it is checked once more on the new
+  the base moves again while it is checked alone, it is checked once more on the new
   tip; after a second move it stops and says so. `--despite-check` merges at
   once without it (recorded).
-- **One at a time.** Merges into one base branch go one at a time, in the order
-  they were asked: a merge asked while a merge check runs or waits on the same
-  repository and base branch waits its turn behind it, as `merging`, and so
-  does one asked while a release runs in that repository. When its turn comes it
-  merges without a check if the base has still not moved, and with a merge
-  check as above if it has.
+- **One at a time, or a batch.** Merges into one repository and base branch keep
+  the order they were asked. A check starting with others queued behind it takes
+  the next ones too, up to its check lane's `merge_batch` (default 4, including
+  itself). Set `hansa lane set L merge_batch N` to 1–10; `none` restores 4 and
+  1 checks each task separately. This is the merge lane's setting when one serves
+  the base, otherwise the task lane's. It stops before an `alone` task, a merge
+  needing no check (`plain`), a different check lane, or a conflict. An `alone`
+  first task takes none. Each member gets its own merge commit, message and
+  identity, on top of the preceding member; setup and check run once on the last.
+  After a pass, each member's branch, checkout, keys and forbidden words in what
+  its own merge adds are checked before the base moves to the last commit. All
+  land together, each recorded with its own commit, or none land.
+  Any failed or stopped batch, moved base, landing refusal, or restart that cannot
+  finish it returns every still-merging member to its old place marked `alone`.
+  It stays alone until merged or sent back to review; members with their own
+  landing refusal go back to review saying why. A failed batch is not divided:
+  its extra check is followed by individual checks in merge order.
+  `hansa status`, `hansa show` and the page name the members and whose check runs;
+  each member's show points to that check's output and keeps its companions after
+  merging. Events record the members at check start and on each merge.
+  Merges also wait while a release runs in that repository. A plain merge waits
+  its turn and goes in without a check if the base has still not moved, or with
+  a check as above if it has.
 - **Cancelling.** `hansa cancel ID` on a `merging` task stops its merge check
-  and puts the task back in review.
+  and puts the task back in review. For a batch member it stops the shared check;
+  only that member goes back to review, and the others keep their old places,
+  each checked alone.
 - **Closing.** `hansa close ID` closes a finished task without merging, or a finished verification
   while keeping its verdict. `cancel` on finished work refuses and points to `close`.
 - **`--recheck`.** `hansa merge ID --recheck` goes the same way whether or not
