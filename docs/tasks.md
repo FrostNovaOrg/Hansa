@@ -291,6 +291,9 @@ The worker is told that hansa runs the lane's check after it ends, with the
 command, so it runs only the tests related to its change. A verification is
 told the command of the task's last check and how it ended, and that the whole
 check need not be run again unless it needs to.
+A verification's scratch changes are kept under `refs/hansa/scratch/ID`, leaving its worktree clean
+and the shared stash alone; `hansa show ID` gives the `hansa git` command to read them, and the daily
+trim removes the ref 30 days after it ends.
 
 ## What work costs
 

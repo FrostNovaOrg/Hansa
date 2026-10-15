@@ -986,6 +986,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"error: {m['error']}")
     out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
     out += [disk.trimmed_text(m)] if disk.trimmed_text(m) else []
+    if verifying and m.get("scratch_ref"):
+        out.append(f"left scratch changes: hansa git {m['lane']} show {m['scratch_ref']}")
     if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
         out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":

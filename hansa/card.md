@@ -42,7 +42,8 @@ a gap in hansa, not in you: say so with `hansa ask`.
    own git worktree, on a fresh branch `task/<id>`.
 3. The worker changes files there and ends with a short report. Workers do not commit: hansa
    commits the changes on the branch, as one commit named after the task (a verification's scratch
-   changes are set aside, never committed). If the task changed something and the lane has a check,
+   changes stay off its branch, under its own ref; `hansa show ID` gives the command to read them).
+   If the task changed something and the lane has a check,
    hansa runs it on the branch itself, so the result does not depend on what the worker says.
    More: `hansa help time-limits`.
 4. hansa tells your session when a task finishes or fails (Hearing from hansa).
