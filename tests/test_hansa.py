@@ -2336,7 +2336,7 @@ class DeskTest(unittest.TestCase):
         self.addCleanup(proc.wait, timeout=10)
         self.addCleanup(proc.kill)
         end = time.time() + 20
-        while not ready.exists() and proc.poll() is None and time.time() < end:
+        while not (ready.exists() and ready.read_text()) and proc.poll() is None and time.time() < end:
             time.sleep(0.05)
         self.assertTrue(ready.exists(), (self.desk.raw_dir(tid) / "run.err").read_text())
         pid = self.desk.meta(tid)["pid"]
@@ -5027,11 +5027,26 @@ class DeskTest(unittest.TestCase):
             self.assertFalse(run.group_running(proc.pid), "fixture cleanup left its child running")
         self.addCleanup(cleanup)
         end = time.time() + 10
-        while not marker.exists() and time.time() < end:
-            time.sleep(0.01)
-        self.assertTrue(marker.exists(), "process fixture did not start its child")
-        proc.child_pid = int(marker.read_text())
-        return proc
+        while time.time() < end:
+            try:
+                proc.child_pid = int(marker.read_text())
+                return proc
+            except (FileNotFoundError, ValueError):
+                time.sleep(0.01)
+        self.fail("process fixture did not record its child's pid")
+
+    def test_start_record_group_waits_for_the_child_pid_to_be_written(self):
+        marker = self.tmp / "delayed-child.pid"
+        popen = subprocess.Popen
+
+        def delayed_writer(argv, **kwargs):
+            argv[2] = argv[2].replace(".write_text(str(os.getpid()))",
+                                    ".touch(); time.sleep(0.2); pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))")
+            return popen(argv, **kwargs)
+
+        proc = self.start_record_group("delayed-marker", marker, delayed_writer)
+        self.assertGreater(proc.child_pid, 0)
+        self.assertEqual(proc.child_pid, int(marker.read_text()))
 
     def assert_start_record_group_stopped(self, proc):
         from hansa import run
@@ -8532,7 +8547,7 @@ class DeskTest(unittest.TestCase):
         self.hansa("merge", t1)
         self.hansa("merge", t2)
         end = time.time() + 20
-        while not runs.exists() and time.time() < end:
+        while not (runs.exists() and runs.read_text().endswith("\n")) and time.time() < end:
             d.tick()
             time.sleep(0.05)
         self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "running")
@@ -19178,7 +19193,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         d, end = Dispatcher(self.desk), time.time() + 20
-        while not pidfile.exists() and time.time() < end:
+        while not (pidfile.exists() and pidfile.read_text()) and time.time() < end:
             d.tick()
             time.sleep(0.05)
         group, check = self.desk.meta(tid)["pid"], int(pidfile.read_text())
@@ -19791,7 +19806,10 @@ class DeskTest(unittest.TestCase):
 
     def preview_pid(self) -> int:
         f = self.tmp / "preview.pid"
-        return int(f.read_text()) if f.exists() else 0
+        try:
+            return int(f.read_text())
+        except (FileNotFoundError, ValueError):
+            return 0
 
     def kill_preview(self):
         if self.preview_pid() > 0:  # never 0: that is this process's own group
