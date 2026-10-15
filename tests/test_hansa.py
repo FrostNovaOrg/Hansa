@@ -9520,6 +9520,13 @@ class DeskTest(unittest.TestCase):
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "mimo"))
 
     def net_lane(self, what: str, times: int, **env) -> Path:
+        from hansa import run
+        # These existing resume tests let the real one-line check answer between dropped runs.
+        probe = unittest.mock.patch.object(run, "PROBE_MINUTES", 0, create=True)
+        probe.start()
+        self.addCleanup(probe.stop)
+        if (self.desk.provider_state().get("claude") or {}).get("unreachable_since"):
+            self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
         count = self.tmp / f"net-{what}-{times}"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_NET": f"{what}:{times}:{count}", **env}
@@ -10501,7 +10508,8 @@ class DeskTest(unittest.TestCase):
             tid = desk.new_task("Add hello.txt")
             ends = self.kill_runs(desk, tid, {"FAKE_NET": f"econnreset:1:{root / 'net'}",
                                               "FAKE_KILL": f"KILL:{2 if first_net else 1}:{root / 'count'}"})
-            dropped = "claude: the connection to the provider failed (Connection dropped); queued again once"
+            dropped = ("claude: the connection to the provider failed (Connection dropped); "
+                       "queued again; waits until the provider answers a check")
             self.assertEqual([(rc, m["state"], m["error"]) for rc, m in ends],
                              [(1, "queued", dropped), (-9, "queued", once.format(-9)), (0, "done", "")] if first_net else
                              [(-9, "queued", once.format(-9)), (1, "queued", dropped), (0, "done", "")])
@@ -10773,6 +10781,260 @@ class DeskTest(unittest.TestCase):
             with self.subTest(row=n, case=case):
                 check()
 
+    def test_unreachable_providers_follow_the_rule_table(self):
+        from hansa import run
+
+        def setup(row, other=False):
+            desk, repo, root = self.kill_desk(f"unreachable-{row}")
+            self.addCleanup(stop_started_on, desk.root, time.time())
+            if other:
+                s = desk.settings()
+                s["providers"]["other"] = {**s["providers"]["claude"], "config_dir": str(root / "other-home")}
+                s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["other"]}
+                s["concurrency"] = 2
+                self.assertEqual(desk.save_settings(s), [])
+            return desk, repo, root
+
+        def drop(desk, root, tid, what="econnreset"):
+            [(_, m)] = self.kill_runs(desk, tid, {"FAKE_NET": f"{what}:100:{root / 'drops'}"}, most=1)
+            return m
+
+        def wait(d, desk, tid, predicate):
+            end = time.monotonic() + 25
+            while time.monotonic() < end:
+                d.tick()
+                m = desk.meta(tid)
+                if predicate(m):
+                    return m
+                time.sleep(0.02)
+            self.fail(f"timed out waiting for {tid}: {desk.meta(tid)}")
+
+        def join(d):
+            for thread in getattr(d, "probes", {}).values():
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), "provider check did not end")
+
+        def queue_verification(desk, parent):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--desk", str(desk.root), "verify", parent]), 0)
+            return desk.meta(parent)["verify"]
+
+        def row1():
+            desk, repo, root = setup(1, other=True)
+            tid = desk.new_task("Add hello.txt", lane="a")
+            m = drop(desk, root, tid)
+            self.assertEqual(m["state"], "queued")
+            state = Desk(desk.root).provider_state().get("claude", {})  # survives a new desk/server
+            self.assertGreater(state.get("unreachable_since", 0), 0)
+            self.assertIn("connection", state["unreachable_reason"])
+            for _ in range(2):
+                desk.new_task("Wait too", lane="a")
+            other = desk.new_task("Add hello.txt", lane="b")
+            d = Dispatcher(desk)
+            done = wait(d, desk, other, lambda m: m["state"] == "done")
+            self.assertEqual(done["provider"], "other")
+            self.assertEqual((desk.meta(tid)["state"], (root / "drops").read_text()), ("queued", "1"))
+            st = views.status(desk)  # the page uses these same provider rows
+            problem = next(p["problem"] for p in st["providers"] if p["name"] == "claude")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["--desk", str(desk.root), "status"]), 0)
+            for words in ("unreachable since", "connection", "checked every 3 minutes", "3 tasks wait for it"):
+                self.assertIn(words, problem)
+                self.assertIn(words, views.status_text(st))
+                self.assertIn(words, output.getvalue())
+
+        def row2():
+            desk, repo, root = setup(2)
+            seen = root / "starts.jsonl"
+            s = desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_NET": f"econnreset:1:{root / 'drops'}", "FAKE_NET_SEE": str(seen)}
+            self.assertEqual(desk.save_settings(s), [])
+            tid = desk.new_task("Add hello.txt")
+            d = Dispatcher(desk)
+            queued = wait(d, desk, tid, lambda m: bool(m.get("attempts")))
+            self.assertEqual(queued["state"], "queued")
+            self.assertTrue(desk.provider_state().get("claude", {}).get("unreachable_since"))
+            kept = queued["head"]
+            desk.update(tid, started=time.time() - 24 * 60 * 60)  # queued time never uses the run's ceiling
+            # A restarted server keeps the outage and the time of the last probe.
+            d = Dispatcher(desk)
+            calls, actual = [], subprocess.run
+
+            def answer(argv, **kwargs):
+                if kwargs.get("input") != "Reply with the single word OK.":
+                    return actual(argv, **kwargs)
+                calls.append(time.monotonic())
+                self.assertEqual(kwargs["env"]["CLAUDE_CODE_MAX_RETRIES"], "0")
+                if len(calls) <= 2:
+                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                return actual(argv, **kwargs)
+
+            with unittest.mock.patch.object(run, "PROBE_MINUTES", 0.004, create=True), \
+                    unittest.mock.patch.object(run.subprocess, "run", answer):
+                try:
+                    m = wait(d, desk, tid, lambda m: m["state"] == "done")
+                finally:
+                    join(d)
+            self.assertEqual(len(calls), 3)
+            for first, second in zip(calls, calls[1:]):
+                self.assertGreaterEqual(second - first, 0.23)
+                self.assertLess(second - first, 5)
+            first, second = map(json.loads, seen.read_text().splitlines())
+            self.assertEqual(second["head"], kept)
+            self.assertEqual(second["partial"], f"half done for {tid}\n")
+            self.assertEqual(m["run_start"]["commit"], kept)
+            self.assertFalse(provider_problem(desk, desk.settings(), "claude"))
+
+        def row3():
+            desk, repo, root = setup(3)
+            s = desk.settings()
+            s["lanes"]["b"] = dict(s["lanes"]["a"])
+            for ln in ("a", "b"):
+                s["lanes"][ln]["env"] = {"FAKE_NET": f"econnreset:1:{root / ln}"}
+            self.assertEqual(desk.save_settings(s), [])
+            first = desk.new_task("First", lane="a")
+            second = desk.new_task("Another running task", lane="b")
+            p1 = run.start(desk, first, "a", "claude")
+            p2 = run.start(desk, second, "b", "claude")
+            rc1, rc2 = p1.wait(timeout=20), p2.wait(timeout=20)
+            run.finish(desk, first, rc1)
+            since = desk.provider_state().get("claude", {}).get("unreachable_since")
+            m = run.finish(desk, second, rc2)  # already running when the first run's drop was read
+            self.assertEqual(m["state"], "queued")
+            self.assertEqual(run.tries_used(m["attempts"]), 0)
+            self.assertFalse(m["attempts"][-1].get("counted", True))
+            self.assertEqual(desk.provider_state()["claude"]["unreachable_since"], since)
+
+        def row4():
+            for verify in (False, True):
+                desk, repo, root = setup(f"4-{verify}")
+                parent = desk.new_task("Parent")
+                if verify:
+                    self.kill_runs(desk, parent, {})
+                    tid = queue_verification(desk, parent)
+                else:
+                    tid = parent
+                drop(desk, root, tid)
+                self.assertTrue(desk.provider_state().get("claude", {}).get("unreachable_since"))
+                self.assertTrue(run.check_provider(desk, "claude")["ok"])
+                m = drop(desk, root, tid)
+                self.assertEqual(m["state"], "failed")
+                retry = f"hansa verify {parent}" if verify else f'hansa retry {tid} "try again"'
+                self.assertEqual(m["error"], "claude: the connection to the provider failed (Connection dropped); "
+                                 "the connection to the provider failed twice, so hansa stopped trying. This is the "
+                                 "machine's or the provider's problem, not the task's: when the connection is back, " + retry)
+
+        def row5():
+            for verify in (False, True):
+                desk, repo, root = setup(f"5-{verify}")
+                tid = desk.new_task("Add hello.txt")
+                if verify:
+                    self.kill_runs(desk, tid, {})
+                    tid = queue_verification(desk, tid)
+                drop(desk, root, tid)
+                m = drop(desk, root, tid)
+                self.assertEqual(m["state"], "queued")
+                self.assertEqual(run.tries_used(m["attempts"]), 1)
+                self.assertEqual([a.get("counted", True) for a in m["attempts"]], [True, False])
+                self.assertIn("unreachable", provider_problem(desk, desk.settings(), "claude"))
+
+        def row6():
+            for status in ("529", "500"):
+                desk, repo, root = setup(f"6-{status}")
+                m = drop(desk, root, desk.new_task("Add hello.txt"), status)
+                self.assertEqual(m["state"], "queued")
+                self.assertIn("unreachable since", provider_problem(desk, desk.settings(), "claude"))
+                self.assertIn(f"HTTP {status}", desk.provider_state()["claude"]["unreachable_reason"])
+
+        def row7():
+            for kind, status in (("quota", 429), ("key", 401), ("login", None), ("killed", None), ("report", None)):
+                desk, repo, root = setup(f"7-{kind}")
+                tid = desk.new_task("Add hello.txt")
+                if kind == "killed":
+                    [(_, m)] = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1:{root / 'kills'}"}, most=1)
+                    self.assertEqual((m["state"], run.tries_used(m["attempts"])), ("queued", 0))
+                else:
+                    s = desk.settings()
+                    s["lanes"]["a"]["env"] = {"FAKE_NET": f"econnreset:1:{root / 'drops'}"}
+                    self.assertEqual(desk.save_settings(s), [])
+                    proc = run.start(desk, tid, "a", "claude")
+                    rc = proc.wait(timeout=20)
+                    if kind != "report":
+                        result = {"is_error": True, "api_error_status": status,
+                                  "result": "Not logged in · Please run /login" if kind == "login" else "API Error"}
+                        write_json(desk.state_dir / "runs" / tid / "run.json", result)
+                    with unittest.mock.patch.object(run, "report_after_notices", return_value=("Finished work", [])
+                                                    if kind == "report" else None):
+                        m = run.finish(desk, tid, rc)
+                    self.assertEqual(m["state"], "failed" if kind == "report" else "queued")
+                    if kind == "quota":
+                        self.assertEqual((m["attempts"][0]["kind"], run.tries_used(m["attempts"])), ("limit", 0))
+                    elif kind in ("key", "login"):
+                        self.assertEqual(run.tries_used(m["attempts"]), 1)
+                        self.assertIn("key rejected" if kind == "key" else "not logged in",
+                                      provider_problem(desk, desk.settings(), "claude"))
+                    elif kind == "report":
+                        self.assertEqual(m["attempts"], [])
+                        self.assertEqual((desk.tasks_dir / tid / "result.md").read_text(), "Finished work\n")
+                self.assertFalse((desk.provider_state().get("claude") or {}).get("unreachable_since"))
+                if kind in ("quota", "key", "login"):
+                    # Another already-running task's drop must not shorten this usage/key/login rest.
+                    until = desk.provider_state()["claude"]["cool_until"]
+                    desk.set_provider_state("claude", unreachable_since=time.time() - 600,
+                                            unreachable_reason="the connection failed")
+                    d = Dispatcher(desk)
+                    with unittest.mock.patch.object(run, "PROBE_MINUTES", 0, create=True):
+                        d.tick()
+                    self.assertFalse(getattr(d, "probes", {}))
+                    self.assertEqual(desk.meta(tid)["state"], "queued")
+                    self.assertEqual(desk.provider_state()["claude"]["cool_until"], until)
+                    self.assertNotIn("unreachable since", provider_problem(desk, desk.settings(), "claude"))
+
+        def row8():
+            desk, repo, root = setup(8, other=True)
+            drop(desk, root, desk.new_task("Wait", lane="a"))
+            started, ended = threading.Event(), threading.Event()
+            actual, check = subprocess.run, run.check_provider
+
+            def request(argv, **kwargs):
+                if kwargs.get("input") == "Reply with the single word OK.":
+                    started.set()
+                    try:
+                        return actual([str(sleeper)], **kwargs)
+                    finally:
+                        ended.set()
+                return actual(argv, **kwargs)
+
+            # This check's child gives no answer at all: the real subprocess timeout ends it.
+            sleeper = root / "silent-provider"
+            sleeper.write_text(f"#!{sys.executable}\nimport signal\nsignal.pause()\n")
+            sleeper.chmod(0o755)
+            d = Dispatcher(desk)
+            def probe(desk, name):
+                return check(desk, name, timeout=8)
+
+            with unittest.mock.patch.object(run, "PROBE_MINUTES", 0, create=True), \
+                    unittest.mock.patch.object(run, "check_provider", probe), \
+                    unittest.mock.patch.object(run.subprocess, "run", request):
+                try:
+                    d.tick()
+                    self.assertTrue(started.wait(5), "serve did not start its provider check")
+                    other = desk.new_task("Add hello.txt", lane="b")
+                    m = wait(d, desk, other, lambda m: m["state"] == "done")
+                    self.assertEqual(m["provider"], "other")
+                    self.assertFalse(ended.is_set(), "the provider check held up another lane")
+                finally:
+                    join(d)
+            self.assertTrue(ended.is_set())
+            problem = next(p["problem"] for p in views.status(desk)["providers"] if p["name"] == "claude")
+            for words in ("unreachable since", "last at", "no answer in 8s", "1 task waits for it"):
+                self.assertIn(words, problem)
+
+        for row, check in enumerate((row1, row2, row3, row4, row5, row6, row7, row8), 1):
+            with self.subTest(row=row):
+                check()
+
     def test_a_dropped_connection_is_tried_once_more_then_fails_plainly(self):
         from hansa import run
         for what, why in (("econnreset", "the connection to the provider failed (Connection dropped)"),
@@ -10794,7 +11056,7 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual(second["partial"], f"half done for {tid}\n")
                 self.assertIn("You carry on an interrupted run of this same task, from that run's commits "
                               f"({kept[:12]}).", second["system"])
-                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")  # it does not rest
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")  # the check answered
                 shown = views.show_text(self.desk, tid)
                 self.assertIn(f"earlier try on claude: {why}", shown)
                 self.assertIn(f"  started from: base {m['base'][:12]}", shown)
@@ -10811,7 +11073,7 @@ class DeskTest(unittest.TestCase):
                                  "stopped trying. This is the machine's or the provider's problem, not the task's: "
                                  f'when the connection is back, hansa retry {tid} "try again"')
                 self.assertNotIn("success", m["error"])
-                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+                self.assertIn("unreachable since", provider_problem(self.desk, self.desk.settings(), "claude"))
         for text in ("API Error: Connection error.", "API Error: socket hang up", "API Error: Request timed out.",
                      'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
                      "API Error: 502 Bad Gateway"):
@@ -20211,6 +20473,7 @@ class DeskTest(unittest.TestCase):
         self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
         self.assertFalse(seen.exists())
 
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
     def test_a_retry_after_a_resumed_run_dropped_its_connection_keeps_its_own_record(self):
         # Resumed, the run ends on a dropped connection: the task is queued again, in a new session, which also
         # leaves background work. That try is resumed in its own right, and nothing of the first try's carries.
@@ -26340,6 +26603,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         shown = re.search(r"usage mimo-x[^:]*: in ([\d,]+)", views.show_text(self.desk, m["id"]))
         return sum(r["in"] for r in rep["rows"] if r["task"] == m["id"]), int(shown.group(1).replace(",", ""))
 
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
     def test_cost_counts_a_resumed_run_and_the_tries_around_it_once(self):
         from hansa import run
         # resumed, and the resumed run ends without its totals: its part of the session record, after the resume
