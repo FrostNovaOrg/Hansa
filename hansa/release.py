@@ -440,11 +440,30 @@ def direct_commits(repo, since: str, commit: str, commits: list, merges: set) ->
     return [c for c in commits if c["sha"] in direct]
 
 
-def _added(lines):
+def _binary_blob(repo, blob):
+    """Git's content test, independent of attributes: a NUL in the first 8,000 bytes of the new blob."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "cat-file", "blob", blob], cwd=str(repo), stdout=subprocess.PIPE,
+                             stderr=err, stdin=subprocess.DEVNULL)
+        try:
+            prefix = p.stdout.read(8000)
+            if len(prefix) < 8000 and p.wait():
+                err.seek(0)
+                raise RuntimeError(f"git cat-file blob failed: {err.read().decode('utf-8', 'replace').strip()[:300]}")
+            return b"\0" in prefix
+        finally:
+            p.stdout.close()
+            p.kill()  # a large blob need not be read beyond its prefix
+            p.wait()
+
+
+def _added(repo, lines):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
-    conflict's resolution; a line that came from a parent is that parent's commit's)."""
+    conflict's resolution; a line that came from a parent is that parent's commit's). Binary results are skipped;
+    --full-index supplies their new blob IDs, including in a combined diff."""
     sha = path = None
+    blob, binary = None, False
     old, new, n = [], 0, 1  # lines left in the hunk on each parent's side and on the result's; parents
     for line in lines:
         if new > 0 or any(x > 0 for x in old):  # inside a hunk: counted, so an added line that reads like a
@@ -456,14 +475,17 @@ def _added(lines):
                 continue
             new -= 1
             old = [x - (m == " ") for x, m in zip(old, marks)]
-            if marks == "+" * n:
+            if marks == "+" * n and not binary:
                 yield sha, path, text
             continue
         if line.startswith("\0"):
             sha, path = line[1:].strip(), None
+        elif line.startswith("index "):
+            blob = line.split()[1].split("..")[-1]
         elif line.startswith("+++ "):
             p = line[4:].rstrip("\t")
             path = None if p == "/dev/null" else p[2:] if p.startswith("b/") else p
+            binary = _binary_blob(repo, blob) if path else False
         else:
             m = HUNK.match(line)
             if m:
@@ -537,9 +559,9 @@ def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
         elif line:
             look(sha, "file name", line)
     patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
-                       "--unified=0", "--no-renames", "--format=%x00%H", *rng)
+                       "--unified=0", "--no-renames", "--full-index", "--format=%x00%H", *rng)
     try:
-        for sha, path, line in _added(patch):
+        for sha, path, line in _added(repo, patch):
             look(sha, path or "?", line)
             if mailboxes:
                 for mailbox in mailbox_hits(line, addresses, domains):
