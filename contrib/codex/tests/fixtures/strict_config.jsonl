@@ -1,0 +1,2 @@
+{"fake": "stderr", "text": "Error loading config.toml: unknown configuration field `approvals_reviewer` in -c/--config override"}
+{"fake": "exit", "code": 1}

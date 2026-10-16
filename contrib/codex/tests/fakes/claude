@@ -1,0 +1,16 @@
+#!/usr/bin/perl
+# A fake real `claude`: records in the folder FAKE_CLAUDE_RECORD its arguments (NUL after each), stdin, pid and
+# environment (NAME=VALUE, NUL after each), then exits with FAKE_CLAUDE_EXIT. Perl: it adds nothing to the
+# environment it is given, which is what is measured here.
+use strict;
+use warnings;
+my $d = $ENV{FAKE_CLAUDE_RECORD};
+sub put { my ($name, $data) = @_; open(my $f, ">:raw", "$d/$name") or die $!; print $f $data; close $f; }
+put("env", join("", map { "$_=$ENV{$_}\0" } sort keys %ENV));
+put("argv", join("", map { "$_\0" } @ARGV));
+put("pid", "$$\n");
+binmode STDIN;
+local $/;
+my $in = <STDIN>;
+put("stdin", defined $in ? $in : "");
+exit($ENV{FAKE_CLAUDE_EXIT} // 0);

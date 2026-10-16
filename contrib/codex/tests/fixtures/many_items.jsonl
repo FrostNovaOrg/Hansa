@@ -1,0 +1,33 @@
+{"type":"thread.started","thread_id":"0199f3a2-0000-7000-8000-000000000008"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'echo step 0'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'echo step 0'","aggregated_output":"step 0\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_0","type":"agent_message","text":"Done step 0."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'echo step 1'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'echo step 1'","aggregated_output":"step 1\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_1","type":"agent_message","text":"Done step 1."}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'echo step 2'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'echo step 2'","aggregated_output":"step 2\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_2","type":"agent_message","text":"Done step 2."}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"bash -lc 'echo step 3'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"bash -lc 'echo step 3'","aggregated_output":"step 3\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_3","type":"agent_message","text":"Done step 3."}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"bash -lc 'echo step 4'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"bash -lc 'echo step 4'","aggregated_output":"step 4\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_4","type":"agent_message","text":"Done step 4."}}
+{"type":"item.started","item":{"id":"item_5","type":"command_execution","command":"bash -lc 'echo step 5'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"bash -lc 'echo step 5'","aggregated_output":"step 5\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_5","type":"agent_message","text":"Done step 5."}}
+{"type":"item.started","item":{"id":"item_6","type":"command_execution","command":"bash -lc 'echo step 6'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_6","type":"command_execution","command":"bash -lc 'echo step 6'","aggregated_output":"step 6\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_6","type":"agent_message","text":"Done step 6."}}
+{"type":"item.started","item":{"id":"item_7","type":"command_execution","command":"bash -lc 'echo step 7'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_7","type":"command_execution","command":"bash -lc 'echo step 7'","aggregated_output":"step 7\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_7","type":"agent_message","text":"Done step 7."}}
+{"type":"item.started","item":{"id":"item_8","type":"command_execution","command":"bash -lc 'echo step 8'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_8","type":"command_execution","command":"bash -lc 'echo step 8'","aggregated_output":"step 8\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_8","type":"agent_message","text":"Done step 8."}}
+{"type":"item.started","item":{"id":"item_9","type":"command_execution","command":"bash -lc 'echo step 9'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_9","type":"command_execution","command":"bash -lc 'echo step 9'","aggregated_output":"step 9\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg_9","type":"agent_message","text":"Done step 9."}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":10}}

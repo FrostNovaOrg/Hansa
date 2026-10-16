@@ -7,6 +7,8 @@ the operating system's sandbox, in its lane's git worktree, on a branch of its o
 worker's changes, runs the lane's check and keeps the record. A person, the principal, owns the providers,
 keys and settings through a local web page, and hansa releases nothing without the principal's yes: given
 for each release, or once for a release target the principal lets go out without asking.
+A worker may also run Codex's command line instead, through the optional adapter in
+[`contrib/codex`](contrib/codex/README.md) (macOS only).
 
 | | |
 |---|---|
@@ -259,6 +261,9 @@ More: [The desk: files, keys and notes](docs/desk.md).
 - A worker's commands and the lane's setup and check run in the operating system's sandbox. The coordinator
   runs as the desk's user (or as root on a Linux server). Run a desk as a user, or on a machine, whose files
   you are content for that code to reach.
+- With the [Codex adapter](contrib/codex/README.md), a Codex run's own commands can read the Codex login, because
+  Codex and the commands it runs share one sandbox; other lanes' workers cannot read it, and the run's network
+  reaches only the lane's hosts and OpenAI's.
 - A release's command runs outside the sandbox, as the desk's account, and so does what it builds and
   starts from the base branch: list a lane's build and release files as its `release_files`.
 - The coordinator's rules against pushing and publishing catch the plain forms only; a command run another

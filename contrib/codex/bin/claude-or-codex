@@ -1,0 +1,17 @@
+#!/usr/bin/perl
+# hansa's claude on a desk that uses the Codex adapter (HANSA_CLAUDE): starts the shim, which execs the real claude
+# for every call but a worker run or a check on the Codex provider. Perl, and only these lines: a shell adds PWD,
+# SHLVL and _ to the environment, and python adds LC_CTYPE (and, as macOS's /usr/bin/python3, SDKROOT, CPATH and
+# more), while the real claude must get hansa's environment exactly. So this hands the shim the environment as it
+# was given (HANSA_SHIM_ENV0), and execs: nothing stays in between.
+use strict;
+use warnings;
+use Cwd 'abs_path';
+use File::Basename 'dirname';
+use MIME::Base64 'encode_base64';
+
+my $shim = dirname(abs_path($0)) . "/../shim/hansa_codex_shim.py";
+my $snap = encode_base64(join("", map { "$_=$ENV{$_}\0" } sort keys %ENV), "");
+my ($py) = grep { -f && -x } ((map { "$_/python3" } grep { length } split(/:/, $ENV{PATH} // "")), "/usr/bin/python3");
+$ENV{HANSA_SHIM_ENV0} = $snap;
+exec { $py } $py, "-I", $shim, @ARGV or die "claude-or-codex: cannot run python3: $!\n";
