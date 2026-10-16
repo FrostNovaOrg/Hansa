@@ -5,7 +5,7 @@ off). Each round hansa serve looks at the free space (shutil.disk_usage) of each
 (places: the desk's folder, each lane's repository and worktree, the folder worker runs get their temporary folders
 in and hansa serve's own TMPDIR, where the setups', checks' and tries' are made; on Linux also the desk's .hansa/tmp,
 where those commands' own TMPDIR is, run.run_tmp: on the desk's volume, but named). While any of them has less free than
-its floor, it starts no new task, verification, try, merge or merge check, design session or release; what already
+its floor, it starts no new task, verification, try, merge or merge check or release; what already
 runs goes on (a worker's resume and its task's check are part of a task that runs). It starts again once every
 volume has its floor and its margin more free (MARGIN GB), so that it does not flap. A volume's floor is the
 setting, but a volume smaller than SMALL times it (a tmpfs /tmp of 3.9 GB, say) gets 1/SMALL of its size instead
@@ -19,7 +19,7 @@ as a whole holds nothing back while it fails, and its record says so (look_faile
 changes (disk_look_failed, disk_look_ok), not each round: the event log is never trimmed.
 
 What old tasks kept (trim): a task's folder keeps its text, record (meta.json), report (result.md) and result
-(run.json), which stay whole, and the output of its processes, of which only the preview's is capped (PREVIEW_KEEP).
+(run.json), which stay whole, and the output of its processes, which may be trimmed later.
 Once a day hansa serve cuts merged tasks' passed setup, check and merge check logs to their first TRIM_HEAD and
 last TRIM_KEEP bytes, with a line counting the bytes cut. Other kept logs (TRIMMED) of tasks that ended (ENDED)
 or stayed done more than TRIM_AFTER ago, and ended releases' logs that old, keep their last TRIM_KEEP bytes.
@@ -43,15 +43,14 @@ DEFAULT_FLOOR = 10  # GB
 MOST_FLOOR = 100000  # GB: a floor past this is a typo
 MARGIN = 1  # GB over the floor every volume needs before hansa serve starts things again
 SMALL = 4  # a volume smaller than this many times the floor gets 1/SMALL of its size as its floor
-STARTS = "no new task, verification, try, merge or merge check, design session or release"
+STARTS = "no new task, verification, try, merge or merge check or release"
 TRIM_AFTER = 30 * 86400  # a task that ended this long ago has its kept logs trimmed
 TRIM_KEEP = 256 * 1024  # bytes of a trimmed log kept, its end
 TRIM_HEAD = 32 * 1024  # also kept at the start of a merged task's passed log
 TRIM_EVERY = 86400  # seconds between hansa serve's trims
 # what a task's processes wrote that hansa keeps in its folder: the worker's errors, the setup's, check's and merge
-# check's output, the preview's (capped already, but long)
-TRIMMED = ("run.err", "setup.log", "check.log", "merge-check.log", "merge-setup.log", "merge-check.err", "preview.log",
-           "preview-before-resume.log")
+# check's output, the merge setup's
+TRIMMED = ("run.err", "setup.log", "check.log", "merge-check.log", "merge-setup.log", "merge-check.err")
 ENDED = ("merged", "cancelled", "failed", "replaced")
 
 

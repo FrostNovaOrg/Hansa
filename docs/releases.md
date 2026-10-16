@@ -17,8 +17,6 @@ and optionally another target of the lane
 that must have sent out the same commit first. An older unnamed release
 moves to `default` if absent, taking only its tick for the same command.
 Other unnamed ticks match nothing, even if `default` has the same command.
-`lane set L release CMD` (or `none`) forwards to `lane target L default` until
-the next version; it refuses a default target with its own options.
 `hansa lane target L` lists them, each with the way it runs. `hansa
 release L [TARGET] [note]` (TARGET needed when there is more than one)
 records the request (a new request for the same target replaces one still
@@ -33,7 +31,7 @@ message or the author's or committer's name or email of any outgoing commit
 were checked; the word scan and its limits are under [Forbidden words before a
 release](#forbidden-words-before-a-release)), refuses it; each hit names its commit and where it is (`author`, `committer`, a
 file). A command that holds one of those words
-is kept when it is set (`hansa lane set L release`, `hansa lane target`,
+is kept when it is set (`hansa lane target`,
 `hansa lane add --like`), and hansa says the word and where at once, before
 any release is asked. A command that holds one of the desk's keys is
 refused when it is set, since a command is stored and shown as written: have
@@ -200,12 +198,12 @@ branch: taking it out takes another task, and the history still holds it.
 So hansa looks for the same words, matched the same way (any case, within
 one line, in text read as UTF-8), earlier:
 
-- `hansa add` and `hansa design` refuse a title that holds one, saying the
+- `hansa add` refuses a title that holds one, saying the
   word and that it is in `--title` or in the text's first line (the title
   when no `--title` is given), and queue nothing: the title goes into the
   task's commit message and its merge's. The rest of the task's text is
   not committed and is not looked at.
-- `hansa merge` refuses a task, or a design session, whose commits that the
+- `hansa merge` refuses a task whose commits that the
   base branch does not hold yet hold one: in a message, an added line (a
   merge commit's: what it adds beyond its parents), the name of a file
   added or changed, or an author's or committer's name or email. The merge
@@ -235,8 +233,8 @@ the principal can remove an entry when that shape is safe to send out.
 The principal's `release_forbidden_except` on the same page lists exceptions
 under the forbidden entries, one row per entry with its lanes:
 `{"entry": "internal-only", "lanes": ["e", "f"]}`. The entry must be spelled
-exactly as on `release_forbidden`. On those lanes it is skipped in task and
-design titles, merges and merge checks (including checks run by a merge
+exactly as on `release_forbidden`. On those lanes it is skipped in task
+titles, merges and merge checks (including checks run by a merge
 lane for that task), release targets' commands and releases. Every other
 entry and the mailbox rule still apply. An entry absent from the forbidden
 list, or a lane absent from the desk, is kept; the page says each matches
@@ -366,7 +364,7 @@ its own rounds have stopped for 15 minutes, and when what hansa posts to the coo
 (below); not for ordinary task events,
 which go to the coordinator. It runs as the desk's account, outside the
 sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
-coordinator, workers, verifiers and design sessions; removed when the command ends, and what a stopped or killed
+coordinator, workers and verifiers; removed when the command ends, and what a stopped or killed
 `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
 `release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `test`; comma-separated when several go

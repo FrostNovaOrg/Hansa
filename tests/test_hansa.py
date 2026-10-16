@@ -36,7 +36,7 @@ import hansa  # noqa: E402
 from hansa import account, cli, cost, notify, plugin, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
-from hansa.run import (Dispatcher, join_command, provider_problem, text_only, tmux_bin, tmux_socket,  # noqa: E402
+from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
                        waiting_reason)
 from hansa.web import cookie_name, start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
@@ -133,12 +133,6 @@ def unix_sockets_refused() -> str:
 NEED_UNIX_SOCKETS = ("HANSA_TESTS_NEED_UNIX_SOCKETS", "Unix sockets must work")
 
 
-def design_as_on_mac(test):
-    """Run a test about what a design session gets as on a Mac, so it runs on Linux too, where hansa refuses
-    design sessions (test_a_design_session_does_not_start_on_linux is the test of that refusal)."""
-    return unittest.mock.patch.object(account, "LINUX", False)(test)
-
-
 # What Claude Code writes when a worker starts work in the background: the tool result's text and the row's
 # toolUseResult, used to pair background launches with completion notices.
 BG_SHAPES = r'''
@@ -188,7 +182,7 @@ def killed():
     # FAKE_KILL "KILL|TERM:runs:count file": the runs numbered in runs (1,2: the first two) write half a file, then
     # end by that signal. FAKE_KILL_SEE: where each run started and what it was told; FAKE_KILL_NO_WRITE: nothing
     # written; FAKE_KILL_USAGE: a reply with its tokens in the session record first; FAKE_KILL_RESULT: its result
-    # written first; FAKE_KILL_WRAPPED: killed in a child, whose end it passes on as a shell or hansa/preview.py does;
+    # written first; FAKE_KILL_WRAPPED: killed in a child, whose end it passes on as a shell does;
     # FAKE_KILL_ERR: these words on its stderr first; FAKE_KILL_LATE: its session record holds a report, then a
     # correction ending in these words, in a turn a background notice opened
     if not os.environ.get("FAKE_KILL"):
@@ -238,21 +232,7 @@ def killed():
         sys.exit(128 - rc)
     os.kill(os.getpid(), sig)
     time.sleep(30)
-prompt = sys.stdin.read() if "-p" in sys.argv else sys.argv[1]
-if "-p" not in sys.argv:  # a design session, in a terminal the principal joins
-    if os.environ.get("FAKE_SHOW_ARGV"):
-        open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
-    sid = sys.argv[sys.argv.index("--session-id") + 1]
-    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-design", sid + ".jsonl")
-    os.makedirs(os.path.dirname(rec), exist_ok=True)
-    open("badge.txt", "w").write("bigger\n")
-    with open(rec, "w") as f:
-        for i, t in enumerate(("Here is how it looks now.", "Hand-in: the badge is bigger; the checks pass.")):
-            f.write(json.dumps({"type": "assistant", "message": {"id": f"d{i}", "model": "claude-x", "content": [
-                {"type": "text", "text": t}], "usage": {"input_tokens": 100, "output_tokens": 20}}}) + "\n")
-    killed()
-    time.sleep(float(os.environ.get("FAKE_DESIGN_SECONDS", "0")))
-    sys.exit(0)
+prompt = sys.stdin.read()
 if "--resume" in sys.argv:  # hansa resuming a run that left background work: it runs it in the foreground
     sid = sys.argv[sys.argv.index("--resume") + 1]
     if os.environ.get("FAKE_RESUMED"):
@@ -353,14 +333,6 @@ if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given
     open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
-if os.environ.get("FAKE_SEE_PREVIEW"):  # "pid file:out file": whether the preview hansa started runs as the worker does
-    pidf, outf = os.environ["FAKE_SEE_PREVIEW"].split(":")
-    pid = int(open(pidf).read()) if os.path.exists(pidf) else 0
-    try:
-        group = os.getpgid(pid) if pid else None
-    except OSError:
-        group = None
-    open(outf, "w").write(json.dumps({"up": group is not None, "group": group, "mine": os.getpgrp()}))
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -743,7 +715,6 @@ def sh_out(*args, cwd) -> str:
     return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-
 FAKEHOME = str(Path(__file__).resolve().parent / "fakehome")
 ROOT_ABOVE = "HANSA_TESTS_ROOT_ABOVE"  # for a hansa started as a command (tests/fakehome), as root_above does
 
@@ -840,7 +811,7 @@ def partial_write(path, after=None):
 # | `secrets/<provider>.key`, `Desk.write_key` | Replacement; replace link | Whole replacement at `0600`; private-files matrix |
 # | `PAUSED`, `Desk.pause` | In place; keep link | Whole replacement; replacement matrix |
 # | `tasks/<id>/task.md`, `Desk.new_task` | In place; keep link | Whole creation; failed-creation matrix |
-# | Published `run.json`, `run.err`, `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err`, `preview.log`, `preview-before-resume.log`, `run.publish` | In place; keep link | One replacement row per name; raw source is also checked intact |
+# | Published `run.json`, `run.err`, `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err`, `run.publish` | In place; keep link | One replacement row per name; raw source is also checked intact |
 # | Published task text/results/logs and lanes' `try.log`, `merge-check-try.log`, `Desk.scrub` | Text: in place, keep link; JSON: replacement, replace link | Whole replacement; private-files matrix covers each text name; JSON scrubs use `write_json` |
 # | Initial `lanes/<lane>/brief.md`, `CLAUDE.md`, `notes/PROJECT.md`, `cli.init_desk` | In place; keep link | Whole writes; other-sites matrix, three rows |
 # | Follow-up `tasks/<id>/note.md`, `cli._retry` | In place; keep link | Whole write; other-sites matrix |
@@ -848,15 +819,12 @@ def partial_write(path, after=None):
 # | Refreshed card, helpers and their timestamped `.hansa/` backups, `cli._bring` | In place; keep link | Whole writes; other-sites matrix covers both destination and backup expressions |
 # | Copied, new and edited lane briefs, and `brief-before-*.md`, `cli.cmd_lane` | In place; keep link | Whole writes; other-sites matrix, four rows |
 # | `.hansa/runs/<id>/lane-env.sh`, `run.env_file` | In place; keep link | Whole replacement at `0600`; private-files matrix |
-# | Task `browser-mcp.json`, `run.browser_for` | In place; keep link | Whole replacement; other-sites matrix |
 # | `.hansa/runs/<id>/worker-argv.json`, `run.start` | In place; keep link | Whole replacement with the existing JSON format; other-sites matrix |
 # | Task `result.md`, `run.finish` | In place; keep link | Whole replacement; other-sites matrix |
 # | Lane `try.log` and `merge-check-try.log`, `run.keep_try_log` | In place; keep link | Whole replacements; private-files matrix also checks the writer's failure return |
-# | Design startup `run.err`, `session.main` | In place; keep link | Whole replacement; other-sites matrix |
 # | `.hansa/web-token`, `Desk.web_token` | In place; keep link | Whole creation at `0600`; failed-creation matrix checks retry |
 # | `secrets/release-code.hmac`, `release._code_key` | Replacement; replace link | Whole creation at `0600`; failed-creation matrix checks retry |
 # | Finished `.hansa/releases/<id>.log`, `release.finish` | In place; keep link | Whole replacement after redaction; other-sites matrix |
-# | Raw preview state, `preview.main.save` | Replacement; replace link | Whole replacement with the existing JSON format; other-sites matrix |
 # | Git evidence `what-was-found.txt`, `run.git_file_changed` (two branches) | In place; keep link | Whole writes; other-sites matrix, two rows |
 # | Git evidence `config` and files under `hooks/`, `desk.copy_file` used directly and by `copytree` | In place; keep link | Whole copies, including copied metadata before replacement; private-files matrix covers both paths |
 # | Check and merge-check `.exit`, `run.CHECK_SCRIPT` | In place; keep link | Whole writes through the shared shell helper; shell-completion matrix |
@@ -876,8 +844,7 @@ def partial_write(path, after=None):
 #
 # | Place | Why it can stay |
 # |---|---|
-# | Worker/design stdout and stderr in raw `run.json` and `run.err`; setup, check, merge-check and try logs; the release's running log (`run` wrappers, `release._launch`) | These are live process output streams. Their published or finished copies use whole replacement. |
-# | Raw preview output, `preview.Kept` | This is a live process log, with its capped tail rewritten while output arrives; it is published whole after the preview ends. |
+# | Worker stdout and stderr in raw `run.json` and `run.err`; setup, check, merge-check and try logs; the release's running log (`run` wrappers, `release._launch`) | These are live process output streams. Their published or finished copies use whole replacement. |
 # | Follower `.log`, `notify.spawn`, and the optional `HANSA_NOTIFY_CAPTURE` file, `notify.post` | Appended process output; capture is a test facility, not the desk event log. |
 # | `.hansa/lock`, `alert.lock` and follower `.lock` files | Empty lock files have no payload to be part-written. Their inode must remain stable for holders and waiters. |
 # | `.hansa/serve.lock`, `cli.hold_server_lock` | Its PID text is attached to the inode that the server locks. Replacing it would let another server lock a different inode and start. It remains a lock file, not a replaceable record. |
@@ -919,7 +886,7 @@ class FailedWriteTest(unittest.TestCase):
         rows = [("JSON record", self.desk.settings_path, lambda: write_json(self.desk.settings_path, {"new": 1})),
                 ("PAUSED", self.desk.paused_path, lambda: self.desk.pause("new reason"))]
         for name in ("run.json", "run.err", "setup.log", "check.log", "merge-check.log", "merge-setup.log",
-                     "merge-check.err", "preview.log", "preview-before-resume.log"):
+                     "merge-check.err"):
             src, dst = raw / name, task / name
             src.write_bytes(b"new process output\n")
             rows.append(("publish " + name, dst, lambda n=name: run.publish(self.desk, "t0001", n)))
@@ -935,7 +902,7 @@ class FailedWriteTest(unittest.TestCase):
         Extracting the call from its function keeps this table on the production write path; copying the
         expression into the test would still pass if a caller reverted to an in-place write.
         """
-        from hansa import preview, release, run, session
+        from hansa import release, run
         task, raw = self.desk.tasks_dir / "t0001", self.desk.raw_dir("t0001")
         task.mkdir()
         brief = self.desk.lanes_dir / "a" / "brief.md"
@@ -943,18 +910,17 @@ class FailedWriteTest(unittest.TestCase):
                   "port": 8765, "d": task, "raw": raw, "argv": ["worker", "--prompt", "text"],
                   "brief": brief, "aside": brief.with_name("brief-before.md"), "text": "new text\n", "old": "old text\n",
                   "note": "follow-up note", "report": "a report", "new": "new card\n", "dst": self.root / "CLAUDE.md",
-                  "keep_as": "card", "cfg": task / "browser-mcp.json", "command": "browser command",
+                  "keep_as": "card",
                   "keep": raw / "evidence", "dot": task / "example.git",
                   "e": types.SimpleNamespace(path=task / "example.git", found="changed", expected="original"),
-                  "state": str(raw / "preview.json"), "rec": {"pgid": 123, "ready": False}, "seen_procs": {123: "start"},
                   "log": self.desk.state_dir / "releases" / "1.log", "f": self.root / "command-input.txt",
                   "paths": ["/example"], "kept": ["/private"]}
         # Each call below is a row; ENOSPC part way is the column. All rows start at 0600.
         scopes = [(cli, cli.init_desk, 3), (cli, cli._retry, 1), (cli, cli.cmd_serve, 2),
                   (cli, cli._bring, 2), (cli, cli.cmd_lane, 4), (run, run.git_file_changed, 2),
-                  (run, run.browser_for, 1), (run, run.start, 1), (run, run.finish, 1),
+                  (run, run.start, 1), (run, run.finish, 1),
                   (run, run.around_note, 1), (run, run._srt_writes, 1),
-                  (session, session.main, 1), (release, release.finish, 1), (preview, preview.main, 1)]
+                  (release, release.finish, 1)]
         with unittest.mock.patch("time.time", return_value=1700000000):
             for module, function, count in scopes:
                 tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
@@ -1193,7 +1159,7 @@ class FailedWriteTest(unittest.TestCase):
                                          0o400 if destination == "read-only" else 0o600)
 
     def test_symlinked_records_and_text_files(self):
-        from hansa import disk, preview, release
+        from hansa import disk, release
         from hansa.desk import copy_file, write_text
         source = self.root / "source"
         source.write_bytes(b"new text\n")
@@ -1206,19 +1172,11 @@ class FailedWriteTest(unittest.TestCase):
             with unittest.mock.patch.object(release, "code_key_file", return_value=p):
                 release._code_key(self.desk)
 
-        # Exercise the real nested save expression without starting a preview process.
-        tree = ast.parse(textwrap.dedent(inspect.getsource(preview.main)))
-        call = next(c for c in ast.walk(tree) if isinstance(c, ast.Call) and
-                    isinstance(c.func, ast.Name) and c.func.id == "write_text")
-        save = compile(ast.Expression(call), "<preview save>", "eval")
         rows = (("record", lambda p: write_json(p, {"new": 1}), b'{\n  "new": 1\n}\n', False, b"old contents\n"),
                 ("provider-key", provider_key, b"new-key-123456\n", False, b"old contents\n"),
                 ("release-code-key", code_key, None, False, None),  # made only when the target is absent
                 ("trim", lambda p: disk._trim_one(p, time.time()), None, False,
                  b"old log\n" * disk.TRIM_KEEP),
-                ("preview-state", lambda p: eval(save, preview.__dict__,
-                                                {"state": str(p), "rec": {}, "seen_procs": {}}),
-                 b'{"seen": {}}', False, b"old contents\n"),
                 ("text", lambda p: write_text(p, "new text\n"), b"new text\n", True, b"old contents\n"),
                 ("copy", lambda p: copy_file(source, p), b"new text\n", True, b"old contents\n"))
         for label, write, contents, follows, old in rows:
@@ -1470,7 +1428,6 @@ class FailedWriteTest(unittest.TestCase):
 # | Merge setup | start_merge_check | shared relay tests | shared relay tests | shared relay tests |
 # | Merge check | start_merge_check | shared relay tests | shared relay tests | shared relay tests |
 # | Try | script, all steps | shared relay tests | shared relay tests | shared relay tests |
-# | Preview | preview.main | shared relay tests | shared relay tests | shared relay tests |
 class SrtOutputTest(unittest.TestCase):
     """srt's output becomes non-blocking; Linux kills leftovers, macOS leaves output open."""
 
@@ -1664,28 +1621,6 @@ class SrtOutputTest(unittest.TestCase):
                 argv = srt_output.protected(command)
                 self.assertEqual(argv[4:], [sys.executable, str(Path(srt_output.__file__).resolve()), mode, *command])
 
-    def test_preview_keeps_bursts_and_exit_codes(self):
-        from hansa import preview
-        class Launched(Exception):
-            pass
-        for rc in (0, 23):
-            with self.subTest(exit=rc):
-                folder = self.tmp / f"preview-{rc}"
-                folder.mkdir()
-                command = self.command(folder, "write", rc)
-                args = ["preview.py", str(folder / "log"), "state", "5", str(self.srt), "unused",
-                        str(folder), "task", str(folder), command, "ready", "not-ready", "--", "true"]
-                def launch(argv, **kwargs):
-                    kwargs["env"]["OUTPUT_READY"] = str(folder / "ready")
-                    result = self.paused_run(argv, **kwargs)
-                    self.assertEqual(result.stdout, self.out + self.err)
-                    self.assertEqual(result.returncode, rc)
-                    self.report(folder)
-                    raise Launched  # stop after the actual launch; no preview or worker left running
-                with unittest.mock.patch.object(preview.sys, "argv", args), \
-                        unittest.mock.patch.object(preview, "Kept"), \
-                        unittest.mock.patch.object(preview.subprocess, "Popen", launch), self.assertRaises(Launched):
-                    preview.main()
 
     def test_startup_chain_keeps_bursts_and_reports_its_failure(self):
         from hansa import run
@@ -2120,7 +2055,7 @@ class DeskTest(unittest.TestCase):
 
     def srt_calls(self, tries=False, sandbox=False) -> list:
         """What srt was called to run; tries: also hansa's runs of `true` to see that srt starts; sandbox: only its
-        tries of a worker's, a verifier's or a design session's sandbox, on /usr/bin/true and writing what git needs
+        tries of a worker's, a verifier's sandbox, on /usr/bin/true and writing what git needs
         open (run.try_sandbox)."""
         calls = [json.loads(x) for x in self.srt_log.read_text().splitlines()] if self.srt_log.exists() else []
         tried = lambda c: c["argv"][-2:] == ["--", "/usr/bin/true"] or c["argv"][-1].endswith("/hansa-git-open-try.sh")
@@ -2162,11 +2097,6 @@ class DeskTest(unittest.TestCase):
         keep = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "srt").exists()]
         return unittest.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(keep)})
 
-    def design_worktree(self, tid) -> str:
-        """Lane a's design worktree on task tid's branch, made as start_design makes it."""
-        from hansa import run
-        lane = self.desk.settings()["lanes"]["a"]
-        return str(run.prepare(self.desk, "a", lane, self.desk.meta(tid), wt=self.desk.worktrees_dir / "a-design")[0])
 
     def settle(self, d, tid, timeout=20):
         end = time.time() + timeout
@@ -2508,11 +2438,83 @@ class DeskTest(unittest.TestCase):
     # | 7 | ordinary add/change/delete/rename and .vscodex | ordinary_work |
     # | 8 | worker-staged empty .bashrc and .claude/settings.json | staged_placeholders |
 
-    def protected_worktree(self, kind="task"):
+    def test_retired_settings_are_ignored_on_load_validate_run_and_page_save(self):
+        old = self.desk.settings()
+        retired = {"design": ["bad model"], "browser": 12, "coordinator_read": "missing",
+                   "audits_cost": "yes"}
+        old.update(retired)
+        old["coordinator"]["audits_cost"] = "not a boolean"
+        old["providers"]["claude"]["rest_minutes"] = "not a number"
+        old["lanes"]["a"].update(preview=["missing"], preview_wait_s=-2, note={"old": "note"})
+        write_json(self.desk.settings_path, old)
+        self.assertEqual(validate(old, self.desk.root), [])
+        public = public_settings(self.desk)
+        self.assertEqual(public["problems"], [])
+        current = public["settings"]
+        self.assertFalse(set(retired) & set(current))
+        self.assertNotIn("audits_cost", current["coordinator"])
+        self.assertNotIn("rest_minutes", current["providers"]["claude"])
+        self.assertFalse({"preview", "preview_wait_s", "note"} & set(current["lanes"]["a"]))
+        for words in (("status",), ("explain",), ("explain", "lane", "a"), ("explain", "provider", "claude")):
+            text = self.hansa(*words)
+            for key in retired:
+                self.assertNotIn(key, text)
+        tid = self.desk.new_task("Add hello.txt", lane="a", browser=True)
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.assertEqual(self.desk.save_settings(old, by="page"), [])
+        self.assertEqual(json.loads(self.desk.settings_path.read_text()), current)
+
+    def test_historical_task_metadata_and_events_render_without_live_features(self):
+        from hansa import web
+        tid = self.desk.new_task("An earlier task", lane="a")
+        recorded = {"command": "serve-app", "started": False, "why": "recorded reason"}
+        for kind in ("task", "design"):
+            with self.subTest(kind=kind):
+                self.desk.update(tid, state="running", kind=kind, browser=True, preview=recorded,
+                                 provider="claude", model_asked="old-model", started=time.time(), tmux=["old", "session"])
+                before = self.desk.meta(tid)
+                shown = views.show_text(self.desk, tid)
+                self.assertIn(json.dumps(recorded), shown)
+                self.assertNotIn("attach", shown)
+                status = views.status(self.desk)
+                self.assertEqual(status["running"][0]["id"], tid)
+                self.assertNotIn("design", status)
+                self.assertIn(tid, views.status_text(status))
+                self.assertEqual(self.desk.meta(tid), before)
+        self.desk.event("preview", task=tid, **recorded)
+        self.assertEqual(web._events(self.desk, 1, "")[0]["command"], "serve-app")
+        if shutil.which("node"):
+            harness = self.tmp / "history-page.js"
+            harness.write_text(self.PAGE_HARNESS)
+            page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+            for lang in ("en", "zh-CN"):
+                result = subprocess.run(["node", str(harness), str(page), "status", lang],
+                    input=json.dumps({"/api/status": status, "/api/events": web._events(self.desk, 1, "")}),
+                    capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("serve-app", result.stdout)
+
+    def test_removed_forms_are_unknown_to_the_parser(self):
+        forms = (("design", "a feature"), ("add", "work", "--browser"), ("retry", "t0001", "--browser"),
+                 ("verify", "t0001", "--browser"), ("check",), ("notify", "on", "--clear-daily", "04-09"),
+                 ("lane", "set", "a", "release", "true"), ("explain", "states"),
+                 ("lane", "set", "a", "note", "old"), ("lane", "set", "a", "preview", "true"),
+                 ("lane", "set", "a", "preview_wait_s", "10"))
+        before = self.desk.settings_path.read_bytes()
+        for args in forms:
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), *args])
+            self.assertEqual(e.exception.code, 2)
+            self.assertRegex(error.getvalue(), "invalid choice|unrecognized arguments")
+            self.assertNotIn("is now", error.getvalue())
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        self.assertEqual(self.desk.tasks(), [])
+
+    def protected_worktree(self):
         from hansa import run
-        tid = self.desk.new_task("Work on ordinary files", kind=kind, lane="a")
+        tid = self.desk.new_task("Work on ordinary files", lane="a")
         lane = self.desk.settings()["lanes"]["a"]
-        wt = Path(self.design_worktree(tid)) if kind == "design" else run.prepare(
+        wt = run.prepare(
             self.desk, "a", lane, self.desk.meta(tid))[0]
         base = self.git_out("rev-parse", "HEAD", cwd=wt)
         self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt),
@@ -2546,12 +2548,11 @@ class DeskTest(unittest.TestCase):
     def test_hansas_commit_refuses_protected_blobs_in_the_index(self):
         from hansa import run
         paths = [".claude/settings.json", ".mcp.json", ".vscode/settings.json", ".Claude/Settings.json"]
-        # Both worker runs and design sessions' end use the rule. Test all roots and link types too.
         paths += [p for p in run.SANDBOX_PROTECTED_PATHS if p not in paths]
-        for kind in ("task", "design"):
+        for kind in ("task",):
             for path in paths:
                 with self.subTest(kind=kind, path=path):
-                    tid, wt, base = self.protected_worktree(kind)
+                    tid, wt, base = self.protected_worktree()
                     blob = self.stage_protected_blob(wt, path)
                     self.assert_protected_finish(tid, wt, base, [path])
                     self.assertEqual(self.git_out("rev-parse", f":{path}", cwd=wt), blob)
@@ -2614,7 +2615,7 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn(path, self.git_out("ls-files", cwd=wt))
 
     def test_hansas_commit_names_every_protected_path_and_refuses_link_types(self):
-        tid, wt, base = self.protected_worktree("design")
+        tid, wt, base = self.protected_worktree()
         paths = [".idea/" + "x" * 180 + ".xml", ".vscode/" + "y" * 180 + ".json", ".claude"]
         for path in paths:
             self.stage_protected_blob(wt, path, "120000" if path == ".claude" else "100644")
@@ -3528,9 +3529,6 @@ class DeskTest(unittest.TestCase):
             except_e(c)
             c.assertIn("queued for lane e", c.hansa("add", "Work", "--lane", "e", "--title", product))
             c.assertIn("Nothing was queued", c.refused("add", "Work", "--lane", "a", "--title", product))
-            with unittest.mock.patch.object(account, "LINUX", False):
-                c.assertIn("queued", c.hansa("design", "Work", "--lane", "e", "--title", product))
-                c.assertIn("Nothing was queued", c.refused("design", "Work", "--lane", "a", "--title", product))
             command = "echo '" + product + "'"
             c.assertNotIn("Warning", c.hansa("lane", "target", "e", "ship", command))
             c.assertIn("Warning", c.hansa("lane", "target", "a", "ship", command))
@@ -4449,10 +4447,6 @@ class DeskTest(unittest.TestCase):
         said = self.refused("add", "falcon badge\nmore")  # no --title: the first line is the title
         self.assertIn("the title (the first line of the text, as no --title was given)", said)
         self.assertIn('"falcon badge"', said)
-        with unittest.mock.patch.object(account, "LINUX", False):  # design sessions refuse first on Linux
-            self.assertIn("Nothing was queued", self.refused("design", "the falcon plan", "--lane", "a"))
-        with unittest.mock.patch.object(account, "LINUX", True):
-            self.assertIn("design sessions do not run on Linux", self.refused("design", "the falcon plan", "--lane", "a"))
         self.assertEqual(self.desk.tasks(), [])
         self.assertIn("queued", self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "a"))
         self.forbid()
@@ -5264,9 +5258,7 @@ class DeskTest(unittest.TestCase):
     # | recovered lane check    | stopped group; failed; no second start         |
     # | recovered merge check   | stopped group; done/back for review; no restart|
     # | recovered release       | stopped group; failed; no second start         |
-    # | design in tmux          | stopped session/group; failed; no second start |
     # | resumed worker/verify   | stopped group; original run ends; no new resume|
-    # Tries do not recover a found pid; design recovery kills the recorded session already.
     # Restart before the failure can be saved (new launches and failed recovery writes):
     # | kind                | unrecorded start after restart                     |
     # | worker/verification | queued, then dispatched; old group gone first      |
@@ -5274,7 +5266,6 @@ class DeskTest(unittest.TestCase):
     # | merge check         | check runs again; old group gone first             |
     # | try                 | done/ok=False; no second start                     |
     # | release shared/fixed| failed/lost; no second start                       |
-    # | design in tmux      | queued, then reopened; old session/group gone      |
     # There is no durable failed-start marker: a fresh Desk uses ordinary recovery.
 
     def start_record_group(self, token, marker, popen):
@@ -5541,70 +5532,6 @@ class DeskTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.unrecordable_start(kind, True, True, restart=True)
 
-    @design_as_on_mac
-    def test_a_failed_design_start_record_stops_its_tmux_session_and_group(self):
-        from hansa import run
-        for persistent, restart in ((False, False), (True, False), (True, True)):
-            with self.subTest(persistent=persistent, restart=restart):
-                tid = self.desk.new_task("A design start-record fixture", kind="design", lane="a")
-                procs, commands, full = [], [], []
-                popen, execute, write = subprocess.Popen, subprocess.run, write_json
-
-                def tmux(argv, **kwargs):
-                    if argv[0] != "test-tmux":
-                        return execute(argv, **kwargs)
-                    commands.append(argv)
-                    if "new-session" in argv:
-                        for previous in procs:
-                            self.assert_start_record_group_stopped(previous)
-                        marker = self.tmp / f"design-{tid}-child-{len(procs)}.pid"
-                        procs.append(self.start_record_group(tid, marker, popen))
-                        return subprocess.CompletedProcess(argv, 0, str(procs[-1].pid) + "\n", "")
-                    if "kill-session" in argv:
-                        run.stop(procs[-1].pid, proc=procs[-1])
-                        return subprocess.CompletedProcess(argv, 0, "", "")
-                    self.fail(f"unexpected tmux command: {argv}")
-
-                def save(path, data):
-                    if (procs and data.get("pid") == procs[0].pid) or (persistent and full):
-                        full.append(str(path))
-                        raise OSError(errno.ENOSPC, "design start record disk full")
-                    return write(path, data)
-
-                with unittest.mock.patch.object(run, "tmux_bin", return_value="test-tmux"), \
-                        unittest.mock.patch.object(subprocess, "run", side_effect=tmux):
-                    with unittest.mock.patch("hansa.desk.write_json", side_effect=save):
-                        try:
-                            run.start_design(self.desk, tid, "a")
-                        except OSError as e:
-                            try:
-                                run.not_started(self.desk, tid, e)  # the CLI's existing failed-start path
-                            except OSError:
-                                self.assertTrue(persistent)
-                        self.assertTrue(full)
-                        self.assertEqual(sum("kill-session" in c for c in commands), 1)
-                        self.assert_start_record_group_stopped(procs[0])
-                        if restart:
-                            self.desk = Desk(self.desk.root)
-                    d = Dispatcher(self.desk)
-                    if restart:
-                        self.desk.pause("observe design recovery before dispatch")
-                        d.tick()
-                        self.assertEqual(self.desk.meta(tid)["state"], "queued")
-                        self.assert_start_record_group_stopped(procs[0])
-                        self.desk.resume()
-                    for _ in range(3):
-                        d.tick()
-                    self.assertEqual(sum("new-session" in c for c in commands), 2 if restart else 1)
-                m = self.desk.meta(tid)
-                if restart:
-                    self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", procs[-1].pid), m)
-                    self.assertIsNone(procs[-1].poll())
-                    self.assertEqual(len(self.desk.asks()), 1)
-                    continue
-                self.assertEqual((m["state"], m["phase"], m.get("pid")), ("failed", "", None), m)
-                self.assertIn("could not start: [Errno 28] design start record disk full", m["error"])
-                self.assertEqual(self.desk.asks(), [])
 
     def test_a_failed_resume_pid_record_stops_worker_and_verification_groups(self):
         from hansa import run
@@ -6601,31 +6528,18 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"pid {pid['script']}: ", shown)
         self.assertIn(f"pid {pid['tmpdir']}: ", shown)
 
-    @design_as_on_mac
-    def test_a_verification_and_a_design_session_are_swept_at_their_end_too(self):
+
+    def test_a_verification_is_swept_at_its_end_too(self):
         from hansa import run
-        tid = self.desk.new_task("Make the badge bigger")
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet", kind="design")
-        _, env, _ = run.design_command(self.desk, tid)
-        tmp = self.desk.meta(tid)["worker_tmp"]
-        self.assertEqual(env["CLAUDE_CODE_TMPDIR"], tmp)  # a folder of its own, as a worker's
-        self.assertEqual([r["path"] for r in self.desk.meta(tid)["worker_tmps"]], [tmp])
+        tmp = str(self.tmp / "worker")
         bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
-        left = self.sleeper(env={**bare, "TMPDIR": os.path.join(tmp, "claude-501")})
-        other = self.sleeper(env={**bare, "TMPDIR": tmp + "2"})
-        with unittest.mock.patch("hansa.run.end_design"):
-            m = run.finish(self.desk, tid, 0)
-        self.assertEqual([x["pid"] for x in m["left_running"]], [left.pid])
-        self.assertIsNotNone(left.poll())
-        self.assertIsNone(other.poll())
-        self.assertFalse(os.path.exists(tmp))
         vid = self.desk.new_task("Check the badge")
         self.desk.update(vid, lane="a", provider="claude", worktree=str(self.repo), kind="verify",
                          worker_tmps=[{"path": tmp + "v", "removed": True}])
         left = self.sleeper(tmp + "v/load.sh", env=bare)
         m = run.finish(self.desk, vid, 0)
         self.assertEqual([x["pid"] for x in m["left_running"]], [left.pid])
+
 
     def leave_hidden(self):
         """Have the stand-in worker leave a process with no marker the sweep looks for; the file that gets its pid."""
@@ -7259,11 +7173,10 @@ class DeskTest(unittest.TestCase):
                          "The merge check is queued (again: main moved while it was checked): waits for lane m, "
                          "held by a try.")
 
-    def test_merge_lane_refuses_tasks_verifications_designs_and_retries(self):
+    def test_merge_lane_refuses_tasks_verifications_and_retries(self):
         _, tid = self.merge_lane_task()
         before = len(self.desk.tasks())
-        for args, linux in ((("add", "--lane", "m", "work"), False), (("verify", tid, "--lane", "m"), False),
-                            (("design", "--lane", "m", "design"), False), (("design", "--lane", "m", "design"), True)):
+        for args, linux in ((("add", "--lane", "m", "work"), False), (("verify", tid, "--lane", "m"), False)):
             with self.subTest(args=args, linux=linux), unittest.mock.patch.object(account, "LINUX", linux), self.assertRaises(SystemExit) as e:
                 self.hansa(*args)
             self.assertIn("lane m is a merge lane and takes no work", str(e.exception))
@@ -7274,6 +7187,7 @@ class DeskTest(unittest.TestCase):
             self.hansa("retry", tid, "again")
         self.assertIn("lane a is a merge lane and takes no work", str(e.exception))
         self.assertEqual((len(self.desk.tasks()), self.desk.meta(tid)["state"]), (before, "done"))
+
 
     def test_merge_lane_automatic_assignment_skips_it_and_a_try_works(self):
         from hansa import run
@@ -7867,7 +7781,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("hansa", " ".join(a + c for a, c in got.values()))
         shown = self.hansa("explain", "lane", "b")
         self.assertIn("Bo Lane <bo@example.org>, from the lane's identity", shown)
-        self.assertIn("design sessions' commits, the commit hansa lane remove --keep makes)", shown)
+        self.assertIn("the commit hansa lane remove --keep makes)", shown)
 
     def test_without_a_lane_identity_hansa_takes_the_repositorys_own_and_never_the_accounts_global_one(self):
         globl = self.tmp / "global-gitconfig"
@@ -8544,8 +8458,6 @@ class DeskTest(unittest.TestCase):
         self.hansa("lane", "set", "a", "env", "PORT_BASE=4000")
         self.hansa("lane", "set", "a", "write", str(self.tmp / "cache"))
         self.hansa("lane", "set", "a", "timeout_min", "90")
-        self.hansa("lane", "set", "a", "preview", "make serve")
-        self.hansa("lane", "set", "a", "note", "the C++ lane")
         self.hansa("lane", "brief", "a", "Use C++20.")
         s = self.desk.settings()
         s["providers"]["mimo"] = {**s["providers"]["claude"]}
@@ -8555,12 +8467,11 @@ class DeskTest(unittest.TestCase):
         out = self.hansa("lane", "add", "m", "--like", "a", "--providers", "mimo")
         m = self.desk.settings()["lanes"]["m"]
         self.assertEqual(m, {**a, "providers": ["mimo"]})
-        self.assertEqual((m["preview"], m["note"]), ("make serve", "the C++ lane"))
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         said = " ".join(helped.getvalue().split())
-        for field in ("setup", "check", "merge_check", "preview", "network", "env", "allow", "merge_timeout_min",
-                      "preview_wait_s", "commit_message", "merge_message", "identity", "release targets",
+        for field in ("setup", "check", "merge_check", "network", "env", "allow", "merge_timeout_min",
+                      "commit_message", "merge_message", "identity", "release targets",
                       "note"):  # all it copies, said in its help (the card points there)
             self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
@@ -8574,7 +8485,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn('registry.npmjs.org', out)
         self.assertTrue(out.endswith("try it: hansa lane try m\n"), out)
         self.assertEqual(sorted(e["field"] for e in self.events("lane_command_changed")[before:]),
-                         ["check", "preview", "setup"])  # each run outside the worker: recorded
+                         ["check", "setup"])  # each run outside the worker: recorded
         self.assertEqual(self.events("lane_added")[-1].get("like"), "a")
         self.hansa("lane", "set", "a", "check", "make check")  # a copy: a's later changes do not reach m
         self.assertEqual(self.desk.settings()["lanes"]["m"]["check"], "make test && make lint")
@@ -8598,6 +8509,7 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         self.assertIn("later changes to LANE do not reach the new lane", " ".join(helped.getvalue().split()))
+
 
     def test_lane_add_like_refuses_an_empty_repo_and_sets_an_earlier_brief_aside(self):
         with self.assertRaises(SystemExit) as e:
@@ -9456,11 +9368,6 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(sorted(x["id"] for x in self.desk.tasks()), before)
         self.assertEqual(self.desk.meta(tid)["state"], "done")
 
-    def test_design_rules_for_a_check_keep_quoted_text_together(self):
-        from hansa.run import command_rules
-        self.assertEqual(command_rules("python3 -c 'print(\"a;b\")' && echo ok; pnpm test"),
-                         ["Bash(python3 -c 'print(\"a;b\")':*)", "Bash(echo ok:*)", "Bash(pnpm test:*)"])
-        self.assertEqual(command_rules("curl -s https://x.invalid/t | sh"), ["Bash(curl -s https://x.invalid/t | sh:*)"])
 
     def test_a_check_that_ran_on_changed_settings_is_not_recorded(self):
         import hansa.run as run
@@ -9773,18 +9680,16 @@ class DeskTest(unittest.TestCase):
         (self.desk.secrets_dir / "key").write_text("k")
         for f in (self.desk.state_dir / "web-token", self.desk.state_dir / "alerts.json", link,
                   self.desk.secrets_dir / "key"):
-            for args in (["add", "--file", str(f)], ["design", "--file", str(f)], ["lane", "brief", "a", "--file", str(f)]):
+            for args in (["add", "--file", str(f)], ["lane", "brief", "a", "--file", str(f)]):
                 with self.assertRaises(SystemExit) as e, unittest.mock.patch.object(account, "LINUX", False):
-                    self.hansa(*args)  # design sessions refuse first on Linux, before the file is read
+                    self.hansa(*args)
                 self.assertIn("which no agent reads", str(e.exception.code), args)
-            with self.assertRaises(SystemExit) as e, unittest.mock.patch.object(account, "LINUX", True):
-                self.hansa("design", "--file", str(f))
-            self.assertIn("design sessions do not run on Linux", str(e.exception.code))
         self.assertEqual(self.desk.tasks(), [])
         ok = self.tmp / "task.md"
         ok.write_text("Add hello.txt\n")
         self.hansa("add", "--file", str(ok))
         self.assertEqual(len(self.desk.tasks()), 1)
+
 
     def test_file_from_standard_input_refuses_a_redirected_secret_and_a_hard_link_to_one(self):
         bin_ = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
@@ -11197,23 +11102,6 @@ class DeskTest(unittest.TestCase):
             [(rc, m)] = self.kill_runs(desk, tid, {"FAKE_KILL": f"KILL:1:{root / 'count'}"}, mark=unfinished, most=1)
             self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "failed", "error: no output (exit -9)", []))
 
-        def design_killed(n):
-            desk, repo, root = self.kill_desk(n)
-            did = desk.new_task("Make the badge bigger", kind="design", lane="a")
-            wt, base = run.prepare(desk, "a", desk.settings()["lanes"]["a"], desk.meta(did),
-                                   wt=desk.worktrees_dir / "a-design")
-            sid, p = str(uuid.uuid4()), desk.settings()["providers"]["claude"]
-            desk.update(did, state="running", provider="claude", worktree=str(wt), session_id=sid, model_asked="sonnet",
-                        base=base, branch=f"task/{did}")
-            rc = subprocess.run([os.environ["HANSA_CLAUDE"], "Make the badge bigger", "--session-id", sid], cwd=wt,
-                                stdin=subprocess.DEVNULL, env={**os.environ, "HANSA_TASK": did,
-                                                               "CLAUDE_CONFIG_DIR": str(run.config_home(desk, "claude", p)),
-                                                               "FAKE_KILL": f"KILL:1:{root / 'count'}"}).returncode
-            with unittest.mock.patch("hansa.run.end_design"):
-                m = run.finish(desk, did, rc)
-            self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "done", "", []), m)
-            self.assertEqual(sorted(m["files"]), ["badge.txt", "partial.txt"])
-
         def follow_up(n):
             desk, repo, root = self.kill_desk(n)
             t1, t2 = desk.new_task("Add hello.txt"), desk.new_task("Add hello.txt too")
@@ -11370,7 +11258,6 @@ class DeskTest(unittest.TestCase):
                 mark=lambda desk, tid: desk.update(tid, sandbox_failed="sandbox_apply: Invalid argument"))["held"])),
             (13, "the setup killed before it finished", lambda: setup_killed(13)),
             (14, "killed after writing its result", lambda: as_today(14, "done", "", FAKE_KILL_RESULT="1")),
-            (15, "a design session killed", lambda: design_killed(15)),
             (16, "exit code unknown", lambda: as_today(16, "failed", "error: no output (exit None)", as_exit=lambda rc: None)),
             (17, "a follow-up with --update, killed with no commits of its own", lambda: follow_up(17)),
             (18, "a task with all its tries used but one, then killed", lambda: last_try(18)),
@@ -12027,30 +11914,6 @@ class DeskTest(unittest.TestCase):
                                   "Claude AI usage limit reached|" + str(int(t0) + 90 * 86400))
         self.assertAlmostEqual(until, t0 + 31 * 86400, delta=5)
 
-    def test_a_provider_s_own_rest_overrides_cool_minutes(self):
-        from hansa import run
-        s = self.desk.settings()
-        s["cool_minutes"] = 30
-        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid",
-                                  "rest_minutes": 300}
-        self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.write_key("mimo", "sk-test-01")
-        s = self.desk.settings()
-        self.assertEqual((run.rest_minutes(s, "mimo"), run.rest_minutes(s, "claude")), (300, 30))
-        t0 = time.time()
-        for name, minutes in (("mimo", 300), ("claude", 30)):
-            until = run.rest_provider(self.desk, s, name, "quota", "out of quota (HTTP 429)", "API Error: 429 rate_limit_error")
-            self.assertAlmostEqual(until, t0 + 60 * minutes, delta=5)
-        self.assertIn(f"no reset time in its error, so its rest of 300 minutes",
-                      provider_problem(self.desk, s, "mimo"))
-        out = views.status_text(views.status(self.desk))
-        self.assertRegex(out, r"\n  mimo +compatible +mimo-x +rest 300 min +resting until")
-        self.assertRegex(out, r"\n  claude +subscription +opus +rest 30 min \(desk\) +resting until")
-        self.assertIn("else 300 minutes (its own rest_minutes)", views.explain_text(self.desk, "provider", "mimo"))
-        self.assertIn("else 30 minutes (the desk's cool_minutes)", views.explain_text(self.desk, "provider", "claude"))
-        status = views.status(self.desk)["providers"]
-        self.assertEqual([(p["name"], p["rest_minutes"], p["rest_own"]) for p in status],
-                         [("claude", 30, False), ("mimo", 300, True)])  # what the page shows
 
     def test_a_usage_limit_costs_no_try_and_the_task_starts_again_after_the_rest(self):
         from hansa import run
@@ -12194,24 +12057,6 @@ class DeskTest(unittest.TestCase):
                                         datetime(2026, 12, 31, 23, 30, tzinfo=berlin).timestamp()),
                          datetime(2026, 12, 31, 23, 0, tzinfo=berlin).timestamp())
 
-    def test_the_page_checks_a_provider_s_rest_minutes(self):
-        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
-        self.assertIn('bind(p, "rest_minutes", "number")', ui)
-        self.assertIn("T.restNote", ui)
-        want = ("provider claude: rest_minutes (its rest after a usage limit) must be a whole number from 1 to 44640, "
-                "or empty for the desk's cool_minutes")
-        for bad in (0, 44641, "30", 1.5, True):
-            with self.subTest(bad):
-                r = self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=bad))
-                self.assertEqual((r["ok"], r["problems"]), (False, [want]))
-        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
-        for good in (1, 300, 44640):
-            self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].update(rest_minutes=good)),
-                             {"ok": True, "problems": []})
-            self.assertEqual(self.desk.settings()["providers"]["claude"]["rest_minutes"], good)
-        self.assertEqual(self.page_save(lambda s: s["providers"]["claude"].pop("rest_minutes")),  # emptied on the page
-                         {"ok": True, "problems": []})
-        self.assertNotIn("rest_minutes", self.desk.settings()["providers"]["claude"])
 
     def test_rejected_key_rests_provider_until_a_new_key(self):
         s = self.desk.settings()
@@ -12251,7 +12096,6 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(run.check_provider(self.desk, "mimo")["ok"])
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
 
-    @design_as_on_mac
     def test_runs_ride_out_a_short_network_drop_and_the_provider_check_answers_at_once(self):
         from hansa import cli, run
         retries, popen = {}, run.subprocess.Popen
@@ -12272,19 +12116,7 @@ class DeskTest(unittest.TestCase):
             vid = self.desk.meta(tid)["verify"]
             self.assertEqual(self.settle(d, vid)["verdict"], "holds")
         self.assertEqual(retries, {tid: {"8"}, vid: {"8"}})  # a task and a verification
-        did = self.desk.new_task("Make the badge bigger")
-        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
-                         model_asked="sonnet", kind="design")
-        self.assertEqual(run.design_command(self.desk, did)[1]["CLAUDE_CODE_MAX_RETRIES"], "8")
-        self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["env"]["CLAUDE_CODE_MAX_RETRIES"], "8")
-        seen = {}
 
-        def answer(argv, **kwargs):
-            seen.update(kwargs["env"])
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
-        with unittest.mock.patch.object(run.subprocess, "run", answer):
-            self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
-        self.assertEqual(seen["CLAUDE_CODE_MAX_RETRIES"], "0")
 
     def test_the_provider_check_says_not_logged_in(self):
         from hansa import run
@@ -12987,25 +12819,6 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(notify.live_records(self.desk), [])
         self.assertIn("notifies no session", self.hansa_out("notify"))
 
-    def test_notify_on_still_takes_clear_daily_and_says_where_the_daily_clear_went(self):
-        p, sock = self.session()
-        with self.in_session(p, sock):
-            said = self.hansa_out("notify", "on", "--clear-daily", "04-09")
-        self.assertIn("now posts to this session", said)  # turned on as without the option
-        self.assertEqual(said.splitlines()[-1], notify.CLEAR_MOVED)  # and one line on where the daily clear went
-        self.assertIn("hansa coordinator --clear-daily HH-HH", notify.CLEAR_MOVED)
-        live = self.soon(lambda: notify.live_records(self.desk))
-        self.assertNotIn("clear", live[0])  # the follower clears nothing
-        log = (notify.private_dir(self.desk) / f"{live[0]['key']}.log").read_text()
-        self.assertNotIn("daily clear", log)
-        with self.in_session(p, sock):
-            self.assertEqual(self.hansa_out("notify", "on", "--clear-daily", "9am").splitlines()[-1],
-                             notify.CLEAR_MOVED)  # already on; any window, as start scripts give it
-            self.assertNotIn(notify.CLEAR_MOVED, self.hansa_out("notify", "on"))
-            with self.assertRaises(SystemExit) as e:
-                main(["--desk", str(self.desk.root), "notify", "off", "--clear-daily", "04-09"])
-            self.assertIn("goes with hansa coordinator", str(e.exception.code))
-            self.hansa_out("notify", "off")
 
     def test_a_register_written_before_the_daily_clear_left_the_follower_loads_and_its_clear_is_ignored(self):
         p, sock = self.session()
@@ -13028,11 +12841,7 @@ class DeskTest(unittest.TestCase):
         me = {k: v for k, v in old.items() if k != "clear"}
         notify.handle(self.desk, {"op": "feed", "me": me, "pos": 0, "done": 0})  # its next write drops it
         self.assertNotIn("clear", json.loads((notify.register_dir(self.desk) / f"{key}.json").read_text()))
-        # a follower started by an older hansa restarts on this code with --clear-daily on its command line: taken
-        with unittest.mock.patch.object(notify, "follow", return_value=0) as follow, self.assertRaises(SystemExit):
-            main(["--desk", str(self.desk.root), "notify-follow", "--key", key, "--pid", str(p.pid), "--socket", sock,
-                  "--nonce", "n", "--clear-daily", "04-09"])
-        self.assertEqual(follow.call_args.args[1:], (key, {"pid": p.pid, "start": ""}, sock, "n", ""))
+
 
     def test_a_request_answered_on_the_page_reaches_the_session_that_asked_with_the_answer(self):
         skip_unless_ports(self)
@@ -13150,7 +12959,7 @@ class DeskTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("ask", "--close", "9", "done")
         self.assertIn("there is no request #9", str(e.exception.code))
-        with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):  # a worker, verification or design session
+        with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):  # a worker, verification
             with self.assertRaises(SystemExit) as e:
                 self.hansa_out("ask", "--close", "1", "done")
             self.assertIn("only the coordinator closes a request", str(e.exception.code))
@@ -13233,7 +13042,6 @@ class DeskTest(unittest.TestCase):
         echo.chmod(0o755)
         (self.desk.root / "CLAUDE.md").write_text("an older card\n")
         (self.desk.root / ".claude" / "agents").mkdir(parents=True)
-        (self.desk.root / ".claude" / "agents" / "verifier.md").write_text("a retired helper\n")
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
                             "coordinator", "--permission-mode", "dontAsk"],
                            capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
@@ -13249,8 +13057,6 @@ class DeskTest(unittest.TestCase):
         for name in ("scout.md", "reviewer.md"):  # the desk's helpers come along
             self.assertEqual((agents / name).read_text(), (code / "agents" / name).read_text())
         self.assertIn("effort: medium", (agents / "scout.md").read_text())
-        self.assertFalse((agents / "verifier.md").exists())  # retired, kept in .hansa/
-        self.assertTrue(list(self.desk.state_dir.glob("verifier.md.*")))
 
     @unittest.skipIf(os.getuid() == 0, "root may write anywhere")
     def test_the_coordinator_turns_off_claude_codes_updates_only_where_this_account_cannot_write_its_install(self):
@@ -13315,76 +13121,6 @@ class DeskTest(unittest.TestCase):
         return subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
                                "coordinator"], capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
 
-    def test_a_folder_the_principal_lets_the_coordinator_read_reaches_its_start_command(self):
-        inc = (self.tmp / "opt" / "include").resolve()
-        inc.mkdir(parents=True)
-        self.assertEqual(self.desk.settings()["coordinator_read"], [])
-        self.assertEqual(self.page_save(lambda s: s.update(coordinator_read=[str(inc)])), {"ok": True, "problems": []})
-        self.assertEqual(public_settings(self.desk)["settings"]["coordinator_read"], [str(inc)])  # the page shows it
-        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
-        self.assertIn("S.coordinator_read", ui)
-        self.assertIn("T.coordinatorRead", ui)
-        r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--add-dir {self.repo.resolve()} {inc} --disallowedTools", r.stdout)
-        self.assertIn(f"Edit(//{str(inc).lstrip('/')}/**)", r.stdout.split("--disallowedTools")[1].split("--model")[0])
-        self.assertNotIn("skipped", r.stderr)
-        told = self.hansa("explain")
-        self.assertIn(str(inc), told)
-        self.assertIn("principal", told)
-        self.assertIn("hansa ask", (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
-                      .split("read folders outside the desk without asking")[1][:120])
-        # the coordinator's own changes leave it as the principal set it
-        self.hansa("concurrency", "2")
-        self.assertEqual(self.desk.settings()["coordinator_read"], [str(inc)])
-        # a folder removed later: the settings still save, and the start skips it and says so
-        shutil.rmtree(inc)
-        self.hansa("concurrency", "1")
-        r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn(str(inc), r.stdout)
-        self.assertIn(f"{inc}: there is no such folder; skipped", r.stderr)
-        self.assertIn(f"not given: {inc}", self.hansa("explain"))
-
-    def test_folders_the_coordinator_may_not_be_let_read_are_refused_on_saving_and_skipped_at_start(self):
-        home = Path(os.path.expanduser("~"))
-        cc = self.tmp / "logins" / "cc"
-        (cc / "sessions").mkdir(parents=True)
-        s = self.desk.settings()
-        s["providers"]["claude"]["config_dir"] = str(cc)
-        self.assertEqual(self.desk.save_settings(s), [])
-        (self.tmp / "afile").write_text("x")
-        link = self.tmp / "link-to-secrets"
-        link.symlink_to(self.desk.secrets_dir)
-        bad = {"relative/path": "full path", str(self.tmp / "nowhere"): "no such folder",
-               str(self.tmp / "afile"): "not a folder", "/": "whole machine",
-               str(home): "home folder", str(home.parent): "home folder",
-               str(self.desk.root): "the desk", str(self.desk.secrets_dir): "the desk", str(self.tmp): "the desk",
-               str(link): "the desk",  # where a link leads
-               str(cc): "Claude Code folder", str(cc / "sessions"): "Claude Code folder",
-               str(cc.parent): "Claude Code folder",
-               str(home / ".ssh"): "login or key", str(home / ".ssh" / "keys"): "login or key",
-               str(home / ".config"): "login or key"}
-        good = self.tmp / "opt"
-        good.mkdir()
-        for path, why in bad.items():
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-            self.assertFalse(told["ok"], path)
-            self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
-            self.assertEqual(self.desk.settings()["coordinator_read"], [])  # nothing was saved
-        self.assertFalse(self.page_save(lambda s: s.update(coordinator_read="/opt"))["ok"])
-        self.assertFalse(self.page_save(lambda s: s.update(coordinator_read=[["/opt"]]))["ok"])
-        # written into settings.json another way: the start skips each and says so, and gives the good one
-        s = self.desk.settings()
-        s["coordinator_read"] = [*bad, str(good)]
-        write_json(self.desk.settings_path, s)
-        r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-        for path, why in bad.items():
-            self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
-                            (path, r.stderr))
-        self.assertEqual(len(self.events("coordinator_read_skipped")), len(bad))
 
     def ignores_case(self) -> bool:
         return os.path.exists(str(self.tmp).swapcase()) and os.path.samefile(self.tmp, str(self.tmp).swapcase())
@@ -13406,23 +13142,7 @@ class DeskTest(unittest.TestCase):
                str(up(self.desk.root)): "the desk", str(self.desk.root / "SECRETS"): "the desk",
                str(up(self.desk.root) / "Notes"): "the desk"}
         with as_home(home):
-            for path, why in bad.items():
-                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-                self.assertFalse(told["ok"], path)
-                self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
-            self.assertEqual(self.page_save(lambda s: s.update(coordinator_read=[str(up(good))])), {"ok": True, "problems": []})
             s = self.desk.settings()
-            s["coordinator_read"] = [*bad, str(good), str(up(good))]
-            write_json(self.desk.settings_path, s)
-            r = self.echo_coordinator()
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)  # one folder once
-            for path, why in bad.items():
-                self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
-                                (path, r.stderr))
-            # a lane's write list: the same spellings
-            s = self.desk.settings()
-            s["coordinator_read"] = []
             for path, why in {str(up(home)): "home folder", str(home / ".SSH"): "login or key",
                               str(home / ".AWS" / "sso"): "login or key", str(home / ".CLAUDE"): "Claude Code folder",
                               str(up(self.desk.root)): "the desk's", str(self.desk.root / "SECRETS"): "the desk's",
@@ -13438,77 +13158,6 @@ class DeskTest(unittest.TestCase):
             s["lanes"]["a"]["write"] = [str(home / "LIBRARY" / "x")]  # the rule for the home folder, in any case
             self.assertEqual(len(validate(s, self.desk.root)), 1)
 
-    def test_the_machine_owners_claude_code_folder_is_never_let_read_nor_a_name_a_rule_cannot_hold(self):
-        home = self.tmp / "home"
-        (home / ".claude" / "projects").mkdir(parents=True)
-        s = self.desk.settings()
-        s["providers"]["claude"]["config_dir"] = str(self.tmp / "logins" / "cc")  # not ~/.claude
-        self.assertEqual(self.desk.save_settings(s), [])
-        odd = [self.tmp / n for n in ("a)b (x", "star*", "what?", "[br]", "{a,b}")]
-        for d in odd:
-            d.mkdir()
-        (self.tmp / "plain").symlink_to(odd[0])
-        good = self.tmp / "opt"
-        good.mkdir()
-        bad = {str(home / ".claude"): "machine owner's Claude Code folder",
-               str(home / ".claude" / "projects"): "machine owner's Claude Code folder",
-               **{str(d): "permission rule" for d in odd}, str(self.tmp / "plain"): "permission rule"}
-        with as_home(home):
-            for path, why in bad.items():
-                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-                self.assertFalse(told["ok"], path)
-                self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
-            s = self.desk.settings()
-            s["coordinator_read"] = [*bad, str(good)]
-            write_json(self.desk.settings_path, s)
-            r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-        for path, why in bad.items():
-            self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
-                            (path, r.stderr))
-
-    def test_a_saved_folder_that_went_bad_is_said_on_the_page_and_keeps_nothing_else_from_saving(self):
-        good, other = self.tmp / "opt", self.tmp / "other"
-        good.mkdir()
-        other.mkdir()
-        link = self.tmp / "lk"
-        link.symlink_to(good)
-        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(link), str(good)]))["ok"])
-        self.assertEqual(public_settings(self.desk)["read_skipped"], [])
-        link.unlink()
-        link.symlink_to(self.desk.secrets_dir)  # pointed elsewhere after it was saved
-        shown = public_settings(self.desk)
-        self.assertEqual(shown["problems"], [])
-        self.assertEqual(len(shown["read_skipped"]), 1)
-        self.assertIn(f"{link}: it would open {self.desk.root}, the desk", shown["read_skipped"][0])
-        self.assertIn("READ_SKIPPED = r.read_skipped", (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
-        self.assertEqual(self.page_save(lambda s: s.update(cool_minutes=45)), {"ok": True, "problems": []})  # another setting
-        self.hansa("concurrency", "3")  # the coordinator's changes
-        self.assertEqual(self.desk.settings()["concurrency"], 3)
-        self.assertEqual(self.desk.settings()["cool_minutes"], 45)
-        told = self.page_save(lambda s: s.update(coordinator_read=[str(link), str(good), str(other)]))  # the list itself
-        self.assertFalse(told["ok"])
-        self.assertIn(str(link), told["problems"][0])
-        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(good), str(other)]))["ok"])
-        self.assertEqual(public_settings(self.desk)["read_skipped"], [])
-
-    def test_hansa_explain_checks_the_folders_the_coordinator_reads_as_its_start_does(self):
-        own = self.tmp / "own-claude"
-        (own / "projects").mkdir(parents=True)
-        good = self.tmp / "opt"
-        good.mkdir()
-        s = self.desk.settings()
-        s["coordinator_read"] = [str(own / "projects"), str(good)]
-        write_json(self.desk.settings_path, s)
-        with unittest.mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(own)}):
-            r = self.echo_coordinator()
-            told = self.hansa("explain")
-        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-        self.assertIn(f"{own / 'projects'}: it would open {own}, the Claude Code folder the coordinator runs from; skipped",
-                      r.stderr)
-        self.assertIn(f"without asking, besides the lanes' repositories: {good} (", told)
-        self.assertIn(f"not given: {own / 'projects'}: it would open {own}, the Claude Code folder", told)
 
     def test_macos_data_volume_opens_nothing_in_either_list(self):
         data = "/System/Volumes/Data"
@@ -13525,24 +13174,7 @@ class DeskTest(unittest.TestCase):
                data + str(home / ".ssh"): "login or key", data + str(home / ".aws" / "sso"): "login or key",
                data + str(home / ".claude"): "Claude Code folder", data + str(self.desk.root / "secrets"): "the desk"}
         with as_home(home):
-            for path, why in bad.items():
-                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-                self.assertFalse(told["ok"], path)
-                self.assertTrue(any(path in p and why in p for p in told["problems"]), (path, told))
             s = self.desk.settings()
-            bad[data + str(good)] = "the system's own"  # a good folder is listed from /, not through the volume
-            s["coordinator_read"] = [*bad, str(good)]
-            write_json(self.desk.settings_path, s)
-            r = self.echo_coordinator()
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-            for path, why in bad.items():
-                self.assertTrue(any(f"read {path}: " in x and why in x and "skipped" in x for x in r.stderr.splitlines()),
-                                (path, r.stderr))
-            told = self.hansa("explain")
-            for path in bad:
-                self.assertIn(f"not given: {path}: ", told)
-            s["coordinator_read"] = []
             for path, why in bad.items():
                 s["lanes"]["a"]["write"] = [path]
                 told = validate(s, self.desk.root)
@@ -13556,31 +13188,11 @@ class DeskTest(unittest.TestCase):
         good = (self.tmp / "opt").resolve()
         good.mkdir()
         two, three = "/" + str(good), "//" + str(good)
-        code = ("import sys, json; from hansa.desk import read_split, write_problems; "
-                "print(json.dumps([[read_split([x]), write_problems([x])] for x in sys.argv[1:]]))")
-        r = subprocess.run([sys.executable, "-c", code, "//", "//opt", "///opt", two, three],
-                           cwd=Path(__file__).resolve().parent.parent,
-                           capture_output=True, text=True, timeout=60)  # each ends: none walks upward for ever
-        self.assertEqual(r.returncode, 0, r.stderr)
-        top, *_, (read2, write2), (read3, write3) = json.loads(r.stdout)
-        self.assertIn("it is the whole machine", top[0][1][0])
-        self.assertIn("the home folder", top[1][0])
-        self.assertEqual((read2, write2, read3, write3), ([[str(good)], []], [], [[str(good)], []], []))
-        told = self.page_save(lambda s: s.update(coordinator_read=["//", two]))
-        self.assertTrue(not told["ok"] and any("read //: it is the whole machine" in x for x in told["problems"]), told)
-        s = self.desk.settings()
-        s["coordinator_read"] = ["//", "//nowhere", two, three]
-        write_json(self.desk.settings_path, s)
-        r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)  # once, from /
-        self.assertTrue(any("read //: it is the whole machine" in x and "skipped" in x for x in r.stderr.splitlines()),
-                        r.stderr)
-        self.assertIn("not given: //nowhere: there is no such folder", self.hansa("explain"))
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "lane", "set", "a", "write", "//", "//x"])
         self.assertIn("write cannot include //: it would open", str(e.exception.code))
         self.hansa("lane", "set", "a", "write", two)
+
 
     def test_macos_volumes_and_library_open_nothing_in_either_list(self):
         if sys.platform != "darwin" or not os.path.isdir("/Volumes") or not os.path.isdir("/.vol"):
@@ -13611,25 +13223,7 @@ class DeskTest(unittest.TestCase):
             bad[root + "/Volumes"] = "/Volumes"
         fine = [good, lib / "Caches", lib / "Caches" / "pip", self.tmp / "lc"]
         with as_home(home):
-            for path, why in bad.items():
-                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-                self.assertFalse(told["ok"], path)
-                self.assertTrue(any(f"read {path}: it would open {why}" in p for p in told["problems"]), (path, told))
-            self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(x) for x in fine]))["ok"])
             s = self.desk.settings()
-            for some in (list(bad)[:10], list(bad)[10:]):  # a list holds 20 at most
-                s["coordinator_read"] = [*some, *(str(x) for x in fine)]
-                write_json(self.desk.settings_path, s)
-                r = self.echo_coordinator()
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn(f"--add-dir {self.repo.resolve()} {good} {lib / 'Caches'} {lib / 'Caches' / 'pip'} "
-                              "--disallowedTools", r.stdout)  # the link to Caches is that folder: given once
-                told = self.hansa("explain")
-                for path in some:
-                    self.assertTrue(any(f"read {path}: " in x and "skipped" in x for x in r.stderr.splitlines()),
-                                    (path, r.stderr))
-                    self.assertIn(f"not given: {path}: ", told)
-            s["coordinator_read"] = []
             for path, why in bad.items():
                 s["lanes"]["a"]["write"] = [path]
                 told = validate(s, self.desk.root)
@@ -13673,24 +13267,7 @@ class DeskTest(unittest.TestCase):
                 bad[root + "/.nofollow"] = hidden
         (self.tmp / "ldev").symlink_to("/dev")
         bad[str(self.tmp / "ldev")] = own
-        for path, why in bad.items():
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-            self.assertFalse(told["ok"], path)
-            self.assertTrue(any(f"read {path}: " in p and why in p for p in told["problems"]), (path, told))
         s = self.desk.settings()
-        names = list(bad)
-        for some in (names[i:i + 19] for i in range(0, len(names), 19)):  # a list holds 20 at most
-            s["coordinator_read"] = [*some, str(good)]
-            write_json(self.desk.settings_path, s)
-            r = self.echo_coordinator()
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-            told = self.hansa("explain")
-            for path in some:
-                self.assertTrue(any(f"read {path}: " in x and "skipped" in x for x in r.stderr.splitlines()),
-                                (path, r.stderr))
-                self.assertIn(f"not given: {path}: ", told)
-        s["coordinator_read"] = []
         for path, why in bad.items():
             s["lanes"]["a"]["write"] = [path]
             told = validate(s, self.desk.root)
@@ -13700,7 +13277,7 @@ class DeskTest(unittest.TestCase):
 
     def test_a_path_whose_links_cannot_be_followed_is_refused_in_the_lists_that_open_and_crashes_nothing(self):
         # as Python 3.9's realpath does for /proc/1/root on Linux, for any account but root
-        from hansa.desk import deny_split, read_split
+        from hansa.desk import deny_split
         good, shut = (self.tmp / "opt").resolve(), (self.tmp / "shut").resolve()
         good.mkdir()
         shut.mkdir()
@@ -13712,12 +13289,6 @@ class DeskTest(unittest.TestCase):
             return real(p, *a, **k)
         cannot = "hansa cannot follow its links to see where it leads"
         with unittest.mock.patch("os.path.realpath", realpath):
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), str(shut)]))
-            self.assertFalse(told["ok"])
-            self.assertTrue(any(f"read {shut}: {cannot}" in p for p in told["problems"]), told)
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), "/proc/1/root"]))
-            self.assertTrue(any("read /proc/1/root: it is /proc or inside it" in p for p in told["problems"]), told)
-            self.assertEqual(read_split([str(good), str(shut / "x")])[0], [str(good)])
             self.assertEqual(write_problems([str(shut / "cache")]), [f"write cannot include {shut / 'cache'}: {cannot} "
                                                                     "(a folder on the way cannot be looked into), so "
                                                                     "it cannot check what it would open"])
@@ -13725,6 +13296,7 @@ class DeskTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(shut / "cache")])
             self.assertIn(cannot, str(e.exception.code))
+
 
     def unfollowable(self, under):
         """os.path.realpath as Python 3.9's on Linux, for an account other than root, under /proc/1/root: it
@@ -13738,7 +13310,7 @@ class DeskTest(unittest.TestCase):
         return unittest.mock.patch("os.path.realpath", realpath)
 
     def test_a_deny_entry_whose_links_cannot_be_followed_is_kept_and_closes_the_folders_above_it(self):
-        from hansa.desk import deny_split, read_split
+        from hansa.desk import deny_split
         share = (self.tmp / "share").resolve()
         (share / "lnk").mkdir(parents=True)
         secret = str(share / "lnk" / "secret")
@@ -13748,11 +13320,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(self.desk.settings()["workers_may_not_read"], [secret])
             kept, said = deny_split([secret])
             self.assertEqual((kept, said), ([secret], []))
-            self.assertIn("which is on the list of what workers may not read", read_split([str(share)], denied=kept)[1][0])
             self.assertIn("which the principal keeps workers from reading", write_problems([str(share)], denied=kept)[0])
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(share)]))
-            self.assertFalse(told["ok"], told)
-            self.assertTrue(any("on the list of what workers may not read" in p for p in told["problems"]), told)
 
     def test_a_saved_deny_entry_that_cannot_be_followed_later_is_still_denied_to_runs_and_the_coordinator(self):
         from hansa import run
@@ -13768,12 +13336,6 @@ class DeskTest(unittest.TestCase):
             plan = cli.coordinator_desk(self.desk, os.getuid())
             self.assertEqual(plan["no_read"], [secret])
             self.assertEqual(cli.no_read_paths(self.desk, plan, "someone"), ([secret], []))
-            s = self.desk.settings()
-            s["coordinator_read"] = [str(share)]
-            write_json(self.desk.settings_path, s)
-            plan = cli.coordinator_desk(self.desk, os.getuid())
-            self.assertEqual(plan["read"], [])
-            self.assertEqual(cli.read_folders(self.desk, plan, {}, "someone", [secret])[0], [])
 
     def test_hansa_notes_lists_a_file_whose_links_cannot_be_followed_as_such(self):
         (self.desk.notes_dir / "plan.md").write_text("# Plan\n")
@@ -13807,83 +13369,13 @@ class DeskTest(unittest.TestCase):
         bad = [str(odd), str(good) + "\u202e", str(good / "\ufeffx" / "y"), str(self.tmp.resolve() / "a\u2066b\u2069"),
                str(good) + "/\u00adx", str(self.tmp.resolve() / "lodd")]  # and a link that leads to such a name
         why = "invisible or direction-changing character"
-        for path in bad:
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-            self.assertFalse(told["ok"], ascii(path))
-            self.assertTrue(any(f"read {json.dumps(path)}: " in p and why in p for p in told["problems"]), told)
         s = self.desk.settings()
-        s["coordinator_read"] = [*bad, str(good)]
-        write_json(self.desk.settings_path, s)
-        r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-        told = self.hansa("explain")
-        for path in bad:
-            self.assertTrue(any(f"read {json.dumps(path)}: " in x and "skipped" in x for x in r.stderr.splitlines()),
-                            (ascii(path), r.stderr))
-            self.assertIn(f"not given: {json.dumps(path)}: ", told)
-        s["coordinator_read"] = []
         for path in bad:
             s["lanes"]["a"]["write"] = [str(good), path]
             told = validate(s, self.desk.root)
             self.assertTrue(len(told) == 1 and f"write cannot include {json.dumps(path)}: " in told[0] and why in told[0],
                             (ascii(path), told))
 
-    def test_a_read_folder_is_given_to_claude_code_as_the_disk_spells_it(self):
-        if not self.ignores_case():
-            self.skipTest("this disk tells names apart by case")
-        good = (self.tmp / "Opt" / "include").resolve()
-        good.mkdir(parents=True)
-        (self.tmp / "LK").symlink_to(str(good).upper())  # a link, and where it leads, in other spellings
-        typed = [str(good.parent).upper() + "/INCLUDE/", str(self.tmp / "lk")]
-        self.assertEqual(self.page_save(lambda s: s.update(coordinator_read=typed)), {"ok": True, "problems": []})
-        r = self.echo_coordinator()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)  # the link is the same folder
-        rules = r.stdout.split("--disallowedTools")[1].split()
-        self.assertIn(f"Edit(//{str(good).lstrip('/')}/**)", rules)
-        self.assertFalse([x for x in rules if "INCLUDE" in x or "OPT" in x], rules)
-        self.assertIn(f"besides the lanes' repositories: {good} (", self.hansa("explain"))
-        s = self.desk.settings()
-        s["coordinator_read"] = [str(self.tmp / "lk")]  # the link alone: by its stored name, and where it leads
-        write_json(self.desk.settings_path, s)
-        rules = self.echo_coordinator().stdout.split("--disallowedTools")[1].split()
-        self.assertIn(f"Edit(//{str(self.tmp / 'LK').lstrip('/')}/**)", rules)
-        self.assertIn(f"Edit(//{str(good).lstrip('/')}/**)", rules)
-
-    def test_hansa_explain_says_a_list_of_read_folders_that_is_not_a_list_in_whole_words(self):
-        s = self.desk.settings()
-        s["coordinator_read"] = "/opt/include"
-        write_json(self.desk.settings_path, s)
-        told = self.hansa("explain")
-        self.assertIn("  not given: the folders the coordinator may read must be a list of up to 20 full paths", told)
-        self.assertNotIn("not given: d must", told)
-
-    def test_root_gives_the_coordinator_the_folders_of_the_accounts_plan_and_checks_them_again(self):
-        self.as_root()
-        self.stand_in_runuser()
-        inc = self.tmp / "opt"
-        inc.mkdir()
-        s = self.desk.settings()
-        s["coordinator_read"] = [str(inc)]
-        self.assertEqual(self.desk.save_settings(s), [])
-        started = self.coordinator_as_root({})
-        argv = started["argv"]
-        self.assertEqual(argv[argv.index("--add-dir") + 1:argv.index("--disallowedTools")], [str(self.repo.resolve()), str(inc)])
-        self.assertIn(f"Edit(//{str(inc.resolve()).lstrip('/')}/**)", argv)
-        # a plan the account wrote itself: root looks again, with its own home and Claude Code folder
-        own = self.tmp / "root-claude"
-        own.mkdir()
-        plan = {"repos": [], "model": "opus", "effort": "", "env": {}, "read_refused": ["said by the account"],
-                "read": [str(inc), "-p", "rel", str(self.desk.root), "/", os.path.expanduser("~"), str(own), 7]}
-        done = unittest.mock.Mock(returncode=0, stdout=json.dumps(plan), stderr="")
-        err = io.StringIO()
-        with unittest.mock.patch.object(account, "run", lambda *a, **k: done), contextlib.redirect_stderr(err):
-            started = self.coordinator_as_root({"CLAUDE_CONFIG_DIR": str(own)})
-        argv = started["argv"]
-        self.assertEqual(argv[argv.index("--add-dir") + 1:argv.index("--disallowedTools")], [str(inc)])
-        self.assertEqual(len([x for x in err.getvalue().splitlines() if "skipped" in x]), 8)
-        self.assertIn("said by the account; skipped", err.getvalue())
 
     @staticmethod
     def covered(rules, tool, path) -> bool:
@@ -14229,18 +13721,11 @@ class DeskTest(unittest.TestCase):
         self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
         worker, verifier = [json.loads(x) for x in seen.read_text().splitlines()[-2:]]
         self.assertIn("checking another worker's finished task", verifier[verifier.index("--append-system-prompt") + 1])
-        design = None
-        if not account.LINUX:  # design sessions do not run there (test_a_design_session_does_not_start_on_linux)
-            from hansa import run
-            self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                             model_asked="sonnet")
-            design, design_env, _ = run.design_command(self.desk, tid)
-            self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-            self.assertFalse({"HANSA_MOD_SETTINGS", "CLAUDE_CODE_PLUGIN_DIRS"} & set(design_env))
-        for argv in (worker, verifier) + ((design,) if design else ()):
-            self.assertIn("-p" if argv is not design else "--session-id", argv)
+        for argv in (worker, verifier):
+            self.assertIn("-p", argv)
             self.assertFalse({"--plugin-dir", "--autocompact"} & set(argv))
             self.assertFalse([x for x in argv if "coordinator-mod" in x])
+
 
     def test_an_install_puts_the_mod_in_place_and_the_coordinator_started_from_it_copies_it_into_the_desk(self):
         code = Path(__file__).resolve().parent.parent
@@ -15203,12 +14688,6 @@ class DeskTest(unittest.TestCase):
             self.assertIn("chown -R", told)  # a task git refuses fails with this, not git's text
         self.assertNotIn("b", self.desk.settings()["lanes"])
 
-    def test_join_a_design_session_by_its_sockets_full_path(self):
-        m = {"tmux": ["hansa-abc123", "design-t0001"]}
-        with unittest.mock.patch.dict(os.environ, {"TMUX_TMPDIR": str(self.tmp)}):
-            self.assertEqual(join_command(m), f"tmux -u -S {self.tmp}/tmux-{os.getuid()}/hansa-abc123 attach -t design-t0001")
-        with unittest.mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "TMUX_TMPDIR"}, clear=True):
-            self.assertEqual(join_command(m), f"tmux -u -S /tmp/tmux-{os.getuid()}/hansa-abc123 attach -t design-t0001")
 
     def test_login_advice_on_a_linux_server_gives_the_form_to_run_from_root(self):
         self.desk.set_provider_state("claude", cool_until=time.time() + 60, reason="not logged in (Please run /login)")
@@ -15287,13 +14766,6 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("answered", r["detail"])
         self.assertIn("NOT ok", self.hansa("ping", "mimo"))
 
-    def test_check_points_to_ping_without_sending_a_request(self):
-        before = self.desk.events_path.read_bytes()
-        with unittest.mock.patch("hansa.cli.check_provider") as pinged:
-            self.assertIn("hansa ping [PROVIDER]; nothing was run", self.refused("check", "claude"))
-            self.assertIn("hansa ping [PROVIDER]; nothing was run", self.refused("check"))
-        pinged.assert_not_called()
-        self.assertEqual(self.desk.events_path.read_bytes(), before)
 
     def test_ping_uses_the_same_request_and_keeps_old_provider_records(self):
         from hansa import run
@@ -15490,11 +14962,6 @@ class DeskTest(unittest.TestCase):
         self.assertIn("--clear-daily HH-HH", out.getvalue())
         self.assertIn("claude --help lists them", " ".join(out.getvalue().split()))
         self.assertEqual(out.getvalue(), self.hansa_out("help", "coordinator"))
-        # explain states: still answered for one release, with the new form
-        said = self.hansa_out("explain", "states")
-        self.assertTrue(said.startswith("hansa explain states is now hansa help states"), said)
-        self.assertIn("replaced", said)
-
     def test_explain_task_points_to_show_and_forwards_its_output(self):
         tid = self.desk.new_task("A task to look at")
         said = self.hansa("explain", "task", tid)
@@ -15524,7 +14991,7 @@ class DeskTest(unittest.TestCase):
         a = helped.call_args[0][0]
         commands, lane_subs = set(a.visible), set(a.lane_commands)
         explain = next(x for x in a.commands["explain"]._actions if x.dest == "what")
-        targets = set(explain.choices) - set(cli.EXPLAIN_RETIRED)
+        targets = set(explain.choices)
         top = Path(__file__).resolve().parent.parent
         files = [*sorted((top / "hansa").glob("*.py")), top / "hansa" / "card.md",
                  *sorted((top / "hansa" / "agents").glob("*.md")), *sorted((top / "docs").glob("*.md")),
@@ -15585,8 +15052,6 @@ class DeskTest(unittest.TestCase):
         for f in files:
             if f.suffix == ".md":
                 text = f.read_text(encoding="utf-8")
-                for forms in re.findall(r"hansa explain \[([^\]]*)\]", text):
-                    self.assertEqual([x for x in re.split(r"[\s\\|]+", forms) if x in cli.EXPLAIN_RETIRED], [], f.name)
                 self.assertEqual(re.findall(r"`hansa explain`[^.;]{0,60}?\b(?:address|host|port|web page)\b", text),
                                  [], f.name)
 
@@ -15688,7 +15153,7 @@ class DeskTest(unittest.TestCase):
     def test_a_change_of_allow_is_recorded_and_told_to_the_principal(self):
         out = self.hansa("lane", "set", "a", "allow", "WebSearch", "Bash(pnpm test:*)")
         self.assertIn("Tell the principal, in the conversation, what you changed and why", out)
-        self.assertIn("workers, verifiers and design sessions", out)
+        self.assertIn("workers and verifiers", out)
         self.assertEqual([(e["lane"], e["old"], e["new"]) for e in self.events("lane_allow_changed")],
                          [("a", [], ["WebSearch", "Bash(pnpm test:*)"])])
         out = self.hansa("lane", "set", "a", "allow", "Bash(pnpm test:*)", "WebSearch")  # the same rules: no change
@@ -15702,18 +15167,17 @@ class DeskTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["lane", "set", "--help"])
-        self.assertIn("workers, verifiers and design sessions", " ".join(out.getvalue().split()))
+        self.assertIn("workers and verifiers", " ".join(out.getvalue().split()))
 
     def test_explain_lane_names_who_gets_the_allow_list_and_the_web_tools_sites(self):
         explained = views.explain_text(self.desk, "lane", "a")
         self.assertIn("web tools (Claude Code's own, outside the sandbox's network list): none", explained)
-        self.assertNotIn("design sessions only", explained)
         s = self.desk.settings()
         s["lanes"]["a"]["network"] = ["registry.npmjs.org"]
         s["lanes"]["a"]["allow"] = ["WebFetch(domain:docs.python.org)", "WebFetch(domain:*.python.org)", "WebSearch"]
         self.assertEqual(self.desk.save_settings(s), [])
         explained = views.explain_text(self.desk, "lane", "a")
-        self.assertIn("given to the lane's workers, verifiers and design sessions", explained)
+        self.assertIn("given to the lane's workers and verifiers", explained)
         self.assertIn("network during a task: registry.npmjs.org", explained)
         self.assertIn("WebFetch reaches only: docs.python.org, *.python.org", explained)
         self.assertIn("WebSearch: sends search queries out of the machine", explained)
@@ -15847,20 +15311,11 @@ class DeskTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "allow", bad])
             self.assertIn("more than one rule", str(e.exception.code), bad)
-        # saved before: never reaches a run; nor does a check whose rule would split, for a design session
         s["lanes"]["a"].update(allow=[*split, "Bash(npm run test:*)"], check="pytest $(git ls-files tests) -q")
         self.desk.settings_path.write_text(json.dumps(s))
         self.assertEqual([r for r in run.lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
                          ["Bash(npm run test:*)"])
-        tid = self.desk.new_task("Design it", kind="design")
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet")
-        with unittest.mock.patch.object(account, "LINUX", False):  # as on a Mac: none runs on Linux
-            argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        for r in [*self.denied_by(argv), *self.allowed_by(argv)]:
-            self.assertEqual(split_rules(r), [r])
-        self.assertFalse([r for r in self.allowed_by(argv) if "WebFetch" in r or "pytest" in r])
+
 
     def test_a_folder_whose_deny_rule_would_split_is_refused_and_never_dropped(self):
         from hansa import run
@@ -15881,7 +15336,6 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(repo)])
         self.assertIn("move it to a path", str(e.exception.code))
         self.assertNotIn("b", self.desk.settings()["lanes"])
-        # a desk moved to such a path since: no worker, verifier or design session starts, and nothing is dropped
         moved = self.tmp / "Work (2024) x" / "desk"
         shutil.move(str(self.desk.root), str(moved))
         self.desk = Desk(moved)
@@ -15891,16 +15345,6 @@ class DeskTest(unittest.TestCase):
         self.assertIn("hansa started no worker", m["error"])
         self.assertIn(f"the path {os.path.realpath(moved)}", m["error"])
         self.assertIn("move it to a path", m["error"])
-        did = self.desk.new_task("Design it", kind="design")
-        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
-                         model_asked="sonnet")
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, did)
-        with unittest.mock.patch.object(account, "LINUX", False), self.assertRaises(RuntimeError) as e:
-            run.design_command(self.desk, did)  # as on a Mac
-        self.assertIn("hansa started no design session", str(e.exception))
-        with unittest.mock.patch.object(account, "LINUX", True), self.assertRaises(RuntimeError) as e:
-            run.design_command(self.desk, did)  # on Linux: refused for being there, first
-        self.assertEqual(str(e.exception), run.DESIGN_ON_LINUX)
         echo = self.tmp / "echo-claude"
         echo.write_text("#!/bin/sh\necho \"$@\"\n")
         echo.chmod(0o755)
@@ -15911,6 +15355,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("the coordinator's session was not started", r.stderr)
         self.assertIn("move it to a path", r.stderr)
         self.assertIn("move it to a path", run.paths_problem(self.desk, self.repo))
+
 
     def test_a_desk_whose_path_has_a_pattern_character_is_refused_at_init(self):
         out = io.StringIO()
@@ -15965,15 +15410,6 @@ class DeskTest(unittest.TestCase):
             run.lane_sandbox(self.desk, self.desk.settings()["lanes"]["a"], "claude",
                              self.desk.settings()["providers"]["claude"], self.repo)
         self.assertIn("hansa starts no run", str(e.exception))
-        did = self.desk.new_task("Design it", kind="design")
-        self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
-                         session_id="sid-d", model_asked="sonnet")
-        with unittest.mock.patch.object(account, "LINUX", False), self.assertRaises(RuntimeError) as e:
-            run.design_command(self.desk, did)  # as on a Mac
-        self.assertIn(f"the desk {moved}", str(e.exception))
-        with unittest.mock.patch.object(account, "LINUX", True), self.assertRaises(RuntimeError) as e:
-            run.design_command(self.desk, did)  # on Linux: refused for being there, first
-        self.assertEqual(str(e.exception), run.DESIGN_ON_LINUX)
         r = self.echo_coordinator()
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertEqual(r.stdout, "")  # Claude Code never started
@@ -15984,6 +15420,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("hansa serve did not start", r.stderr)
         self.assertIn(f"the desk {moved}", r.stderr)
+
 
     def test_a_worktree_or_lane_repository_under_a_pattern_character_starts_no_run(self):
         from hansa import run
@@ -16128,8 +15565,7 @@ class DeskTest(unittest.TestCase):
             self.assertIn("- This lane has no check command: hansa runs nothing here after you end.\n", prompt)
             self.assertNotIn("lane's setup", prompt)
 
-    @design_as_on_mac
-    def test_workers_may_run_any_command_in_the_sandbox_and_design_sessions_may_not(self):
+    def test_workers_may_run_any_command_in_the_sandbox(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
@@ -16162,15 +15598,9 @@ class DeskTest(unittest.TestCase):
             self.assertIn("If a command you need is refused", prompt)
         self.assertIn("Bash(git commit:*)", self.denied_by(task))
         self.assertIn("Bash(git checkout:*)", self.allowed_by(verify))
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet")
-        argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
-        self.assertNotIn("Bash", self.allowed_by(argv))  # in the sandbox, but only the lane's rules and its own git
-        self.assertIn("Bash(git commit:*)", self.allowed_by(argv))
 
-    @design_as_on_mac
-    def test_workers_verifiers_and_design_sessions_cannot_read_the_desks_notes_or_card(self):
+
+    def test_workers_and_verifiers_cannot_read_the_desks_notes_or_card(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
@@ -16194,12 +15624,7 @@ class DeskTest(unittest.TestCase):
         srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
         self.assertIn(str(notes), srt)  # the setup and the check
         self.assertIn(str(card), srt)
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet")
-        argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        for r in rules:
-            self.assertIn(r, self.denied_by(argv))
+
 
     def test_the_coordinator_cannot_push_or_publish_from_its_own_shell(self):
         self.assertEqual(self.echo_coordinator().returncode, 0)  # the desk's permissions brought up to date
@@ -16304,7 +15729,7 @@ class DeskTest(unittest.TestCase):
                str(home / ".cache"): "settings and caches in the home folder",
                str(systmp): "the temporary folder", "/var/tmp": "the temporary folder",
                str(wts): "the desk's worktrees folder", str(wts / "a"): "a lane's worktree",
-               str(wts / "a-design"): "a lane's worktree",
+               str(wts / "a"): "a lane's worktree",
                "/dev": "devices", "/dev/null": "devices", "/dev/tty": "devices", "/dev/fd": "devices",
                "/opt/homebrew/Cellar": "Homebrew's programs", "/opt/homebrew/opt": "Homebrew's programs",
                "/usr/local/Cellar": "Homebrew's programs", "/usr/local/opt": "Homebrew's programs",
@@ -17577,16 +17002,13 @@ class DeskTest(unittest.TestCase):
             there = good / f"a{c}b"
             there.mkdir()
             (self.tmp / "lodd").symlink_to(there)
-            for path in (str(there), str(good / "new" / f"{c}x"), str(self.tmp.resolve() / "lodd")):  # where a link leads
-                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-                self.assertTrue(not told["ok"] and any(why in p for p in told["problems"]), (ascii(path), told))
+            for path in (str(there), str(good / "new" / f"{c}x"), str(self.tmp.resolve() / "lodd")):
                 self.refused_and_left_out(path, why)
             (self.tmp / "lodd").unlink()
         self.assertEqual(write_problems([str(good / "caf\u00e9"), str(good / "\u30ad\u30e3\u30c3\u30b7\u30e5")]), [])
 
     def test_the_home_folder_is_the_accounts_whatever_home_says(self):
         from hansa import run
-        from hansa.desk import read_split
         home, other = (self.tmp / "home").resolve(), (self.tmp / "elsewhere").resolve()
         for d in (home / ".ssh", other / ".ssh", home / "Library" / "Keychains"):
             d.mkdir(parents=True)
@@ -17601,12 +17023,6 @@ class DeskTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".ssh")])
             self.assertIn("a login or key", str(e.exception.code))
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(home)]))  # the coordinator's read list
-            self.assertTrue(not told["ok"] and "the home folder of the user hansa runs as" in told["problems"][0], told)
-            self.assertIn("a login or key", read_split([str(home / ".ssh")])[1][0])
-            if sys.platform == "darwin":
-                self.assertIn(f"it would open {home / 'Library'}", read_split([str(home / "Library" / "Keychains")])[1][0])
-            self.assertEqual(read_split([str(other / ".ssh")]), ([str(other / ".ssh")], []))  # not the account's
             for fs in (run.sandbox_settings(self.desk, {"network": []}, "claude", p, self.repo)["sandbox"]["filesystem"],
                        run.srt_settings(self.desk, {"network": []}, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]):
                 self.assertIn(str(home / ".ssh"), fs["denyRead"])  # the sandbox's denials too
@@ -17621,10 +17037,10 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"write cannot include {mine / '.ssh'}: it would open", r.stderr)
         self.assertEqual(self.desk.settings_path.read_text(), before)
 
+
     def test_a_name_with_a_backslash_or_a_character_that_shows_as_nothing_is_in_neither_list(self):
         good = (self.tmp / "opt").resolve()
         (good / "a b").mkdir(parents=True)  # the plain space is a name like another
-        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(good / "a b")]))["ok"])
         self.assertEqual(write_problems([str(good / "a b")]), [])
         unseen = "invisible or direction-changing character"
         odd = {"\\": "has one of ()[]{}*?\\", "\u00a0": unseen, "\u2003": unseen, "\u202f": unseen, "\u3000": unseen,
@@ -17633,19 +17049,10 @@ class DeskTest(unittest.TestCase):
             there = good / f"a{c}b"
             there.mkdir()
             (self.tmp / "lodd").symlink_to(there)
-            for path in (str(there), str(good / "new" / f"{c}x"), str(self.tmp.resolve() / "lodd")):  # where a link leads
-                told = self.page_save(lambda s: s.update(coordinator_read=[str(good), path]))
-                self.assertTrue(not told["ok"] and any(why in p for p in told["problems"]), (ascii(path), told))
+            for path in (str(there), str(good / "new" / f"{c}x"), str(self.tmp.resolve() / "lodd")):
                 self.refused_and_left_out(path, why)
-            s = self.desk.settings()
-            s["lanes"]["a"]["write"] = []
-            s["coordinator_read"] = [str(there), str(good)]  # written into settings.json another way
-            write_json(self.desk.settings_path, s)
-            r = self.echo_coordinator()
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"--add-dir {self.repo.resolve()} {good} --disallowedTools", r.stdout)
-            self.assertTrue(any(why in x and "skipped" in x for x in r.stderr.splitlines()), (ascii(c), r.stderr))
             (self.tmp / "lodd").unlink()
+
 
     def test_a_worker_on_a_key_provider_cannot_read_another_providers_claude_code_folder(self):
         seen, cc = self.tmp / "argv.jsonl", self.tmp / "logins" / "cc"
@@ -17668,7 +17075,6 @@ class DeskTest(unittest.TestCase):
 
     def test_more_logins_and_keys_are_kept_from_workers_and_the_macos_ones_only_on_macos(self):
         from hansa import run
-        from hansa.desk import read_split
         home, p = Path.home(), self.desk.settings()["providers"]["claude"]
         everywhere = (".ssh", ".tsh", ".tbot", ".codex", ".gemini", ".cursor", ".grok", ".config/gcloud", ".azure", ".oci",
                       ".git-credentials", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml",
@@ -17696,7 +17102,6 @@ class DeskTest(unittest.TestCase):
         # the write list and the coordinator's read list refuse the new names, as they did the old
         for f in (".tsh", ".cargo/credentials.toml", ".cargo", ".config/gcloud/x"):
             self.assertIn("a login or key that workers may not read", write_problems([str(home / f)])[0], f)
-            self.assertIn("a login or key", read_split([str(home / f)])[1][0], f)
         self.assertEqual(write_problems([str(home / "hansa-cache" / "a" / "cargo"), str(home / "work" / "m2")]), [])
         # the coordinator's Read tool is denied them too, but no Claude Code folder: its memory lives in one
         r = self.echo_coordinator()
@@ -17713,6 +17118,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("~/.tsh", told)  # the built-in list as a count, and where the whole of it is
         self.assertRegex(told, r"\(built in\): \d+ names.* \(the whole list: hansa explain lane a --all\)")
         self.assertIn("~/.tsh", self.hansa("explain", "lane", "a", "--all"))
+
 
     def test_anthropics_tool_settings_and_proxy_clients_settings_are_kept_from_workers(self):
         from hansa import run
@@ -17745,7 +17151,6 @@ class DeskTest(unittest.TestCase):
         for f in everywhere:
             self.assertIn(f"~/{f}", told)
 
-    @design_as_on_mac
     def test_what_the_principal_keeps_from_workers_reaches_every_sandbox_and_every_read_tool(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -17791,15 +17196,6 @@ class DeskTest(unittest.TestCase):
         for c in calls:
             self.assertIn(str(keys), c["settings"]["filesystem"]["denyRead"])
             self.assertIn(str(token), c["settings"]["filesystem"]["denyRead"])
-        # a design session
-        self.desk.update(tid, lane="a", provider="claude", session_id="sid-d", model_asked="sonnet")
-        argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        design = argv[argv.index("--disallowedTools") + 1:argv.index("--allowedTools")]
-        box = json.loads(Path(argv[argv.index("hansa-setup") + 7]).read_text())  # its setup's sandbox (srt's settings)
-        self.assertIn(str(keys), box["filesystem"]["denyRead"])
-        for r in rules:
-            self.assertIn(r, design)
         # the coordinator
         r = self.echo_coordinator()
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -17817,10 +17213,6 @@ class DeskTest(unittest.TestCase):
             self.assertIn("which the principal keeps workers from reading", str(e.exception.code), x)
         self.assertEqual(self.desk.settings()["lanes"]["a"].get("write", []), [])
         (keys / "sub").mkdir()
-        for x in (keys, keys / "sub", keys.parent):
-            told = self.page_save(lambda s: s.update(coordinator_read=[str(x)]))
-            self.assertFalse(told["ok"], x)
-            self.assertIn("which is on the list of what workers may not read", told["problems"][0])
         s = self.desk.settings()
         s["lanes"]["a"]["repo"] = str(keys / "sub")
         self.assertTrue(any("repo cannot be" in x and "the principal keeps workers from reading" in x
@@ -17837,6 +17229,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(str(keys), self.sandbox_of(argv)["filesystem"]["denyRead"])
         self.assertIn(str(self.desk.secrets_dir), self.sandbox_of(argv)["filesystem"]["denyRead"])
         self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=31))["ok"])
+
 
     def test_deny_read_fences_the_relay_but_not_python_dependencies(self):
         from hansa import desk as hdesk, run
@@ -17994,7 +17387,6 @@ class DeskTest(unittest.TestCase):
             self.assertIn("; skipped", said[0])
             self.assertEqual(len(self.events("no_read_skipped")), len(left))
 
-    @design_as_on_mac
     def test_an_entry_of_what_workers_may_not_read_that_cannot_be_written_as_a_rule_stops_every_run(self):
         from hansa import run
         seen = self.tmp / "argv.jsonl"
@@ -18023,7 +17415,7 @@ class DeskTest(unittest.TestCase):
             write_json(self.desk.settings_path, s)
             stop = public_settings(self.desk)["no_read_stop"]
             self.assertIn(said, stop)
-            for x in ("hansa starts no worker, verifier, design session or coordinator", "()[]{}*?\\",
+            for x in ("hansa starts no worker, verifier or coordinator", "()[]{}*?\\",
                       "on the web page, Settings"):
                 self.assertIn(x, stop)
             runs = len(seen.read_text().splitlines())
@@ -18040,19 +17432,6 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(v["state"], "failed", v)
             self.assertIn(stop, v["error"])
             self.assertEqual(len(seen.read_text().splitlines()), runs)  # no Claude Code started
-            # the design session: refused before tmux is asked, and its command refuses too
-            did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
-            with unittest.mock.patch.object(run, "tmux_bin", lambda: "/nonexistent/tmux"):
-                with self.assertRaises(RuntimeError) as e:
-                    run.start_design(self.desk, did, "a")
-            self.assertIn(stop, str(e.exception))
-            self.assertFalse((self.desk.worktrees_dir / "a-design").exists())
-            self.desk.update(did, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
-                             session_id="sid-d", model_asked="sonnet")
-            with self.assertRaises(RuntimeError) as e:
-                run.design_command(self.desk, did)
-            self.assertIn(stop, str(e.exception))
-            self.desk.update(did, state="cancelled")
             # the coordinator
             r = self.echo_coordinator()
             self.assertNotEqual(r.returncode, 0)
@@ -18065,6 +17444,8 @@ class DeskTest(unittest.TestCase):
                 self.assertIn(x, (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text())
 
     # -- hansa hide: the coordinator adds to what workers may not read; only the principal removes ----------------
+
+
     def hide(self, *paths) -> tuple:
         """hansa hide PATH ...: (what it printed, its exit code: 0, or what it exited with)."""
         out = io.StringIO()
@@ -18155,14 +17536,12 @@ class DeskTest(unittest.TestCase):
     def test_hansa_hide_refuses_each_entry_the_page_refuses_with_the_pages_reason(self):
         from hansa.desk import account_home
         home, tmp = Path(account_home()), self.tmp.resolve()
-        tools, systmp, shared = tmp / "tools", tmp / "systmp", tmp / "shared"
-        for d in (tools / "bin", systmp, shared / "keys"):
+        tools, systmp = tmp / "tools", tmp / "systmp"
+        for d in (tools / "bin", systmp):
             d.mkdir(parents=True)
         link = self.tmp / "link-to-repo"
         link.symlink_to(self.repo)
         wts = self.desk.root / "worktrees"
-        # what the coordinator is let read: an entry inside it would close it
-        self.assertTrue(self.page_save(lambda s: s.update(coordinator_read=[str(shared)]))["ok"])
         # one table for the page and the command: each kind of entry the page refuses, and a word of its reason
         refused = {"relative/path": "must be a full path", "/": "the whole machine",
                    str(home): "the home folder", str(home.parent): "the home folder",
@@ -18176,8 +17555,7 @@ class DeskTest(unittest.TestCase):
                    str(wts): "the desk's worktrees folder", str(wts / "a"): "a lane's worktree",
                    "/dev": "devices", "/dev/null": "devices", "/opt/homebrew/Cellar": "Homebrew's programs",
                    f"{tmp}/a\nb": "control character", f"{tmp}/a​b": "invisible or direction-changing",
-                   f"{tmp}/star*": "read as a pattern", f"{tmp}/(x)": "read as a pattern",
-                   str(shared / "keys"): "which is on the list of what workers may not read"}
+                   f"{tmp}/star*": "read as a pattern", f"{tmp}/(x)": "read as a pattern"}
         with unittest.mock.patch.object(tempfile, "gettempdir", return_value=str(systmp)), \
                 unittest.mock.patch.dict(os.environ, {"PATH": f"{tools / 'bin'}{os.pathsep}/usr/bin:/bin"}):
             for path, why in refused.items():
@@ -18214,6 +17592,7 @@ class DeskTest(unittest.TestCase):
             self.assertIn(f"added to what workers may not read: {tmp}/fine\n", told)
             self.assertIn("refused: /\n  workers cannot be kept from reading /: it is the whole machine", told)
             self.assertEqual(self.desk.settings()["workers_may_not_read"], [f"{tmp}/fine"])
+
 
     def test_hansa_hide_adds_one_path_once_however_it_is_spelled(self):
         keys = (self.tmp / "keys").resolve()
@@ -18463,181 +17842,6 @@ class DeskTest(unittest.TestCase):
         self.assertIn("folders a worker may also write (a build or test tool's cache): none",
                       views.explain_text(self.desk, "lane", "a"))
 
-    @design_as_on_mac
-    def test_a_design_session_runs_in_the_sandbox_of_a_worker_of_its_lane(self):
-        from hansa import run
-        seen = self.tmp / "argv.jsonl"
-        s = self.desk.settings()
-        s["lanes"]["a"].update(env={"FAKE_SHOW_ARGV": str(seen)}, network=["registry.npmjs.org"], write=["/opt/m2"])
-        self.assertEqual(self.desk.save_settings(s), [])
-        self.assertEqual(self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))["state"], "done")
-        worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))
-        tid = self.desk.new_task("Make the badge bigger")
-        wt = self.design_worktree(tid)
-        self.desk.update(tid, lane="a", provider="claude", worktree=wt, session_id="sid-d", model_asked="sonnet")
-        argv, env, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)  # the run folder it made for the session
-        box = self.sandbox_of(argv)
-        self.assertEqual((box["enabled"], box["failIfUnavailable"]), (True, True))
-        network = dict(box["network"])
-        self.assertIs(network.pop("allowLocalBinding", None), True if sys.platform == "darwin" else None)
-        self.assertEqual(network, worker["network"])  # the lane's list, nothing else
-        self.assertEqual(box["filesystem"]["denyRead"], worker["filesystem"]["denyRead"])
-        for d in (self.desk.secrets_dir, self.desk.state_dir, self.desk.notes_dir, self.desk.root / "CLAUDE.md"):
-            self.assertIn(str(d), box["filesystem"]["denyRead"])
-        self.assertNotIn(wt, box["filesystem"]["denyRead"])  # its own worktree stays readable and writable
-        self.assertNotIn(wt, box["filesystem"]["denyWrite"])
-        self.assertEqual(box["credentials"], worker["credentials"])
-        for x in worker["filesystem"]["allowWrite"]:  # the lane's write list
-            self.assertIn(x, box["filesystem"]["allowWrite"])
-        self.assertEqual(env["TMPDIR"], env["CLAUDE_CODE_TMPDIR"])  # its own temporary folder, as a worker's
-        # it commits and merges into its own branch, so it writes what that takes in git's folders, no more
-        own = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=wt, capture_output=True,
-                                  text=True, check=True).stdout.strip()).resolve()
-        self.assertTrue(may_write(box, own / "index"))
-        self.assertFalse(may_write(box, own / "commondir"))
-        self.assertFalse(may_write(box, Path(wt) / ".git"))
-        # local binding on macOS only, whatever the lane's list says
-        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
-        on_mac = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), f"task/{tid}", mac=True)["sandbox"]["network"]
-        on_linux = run.design_sandbox(self.desk, lane, "claude", p, Path(wt), f"task/{tid}", mac=False)["sandbox"]["network"]
-        self.assertIs(on_mac["allowLocalBinding"], True)
-        self.assertNotIn("allowLocalBinding", on_linux)
-        self.assertEqual(on_linux, worker["network"])
-
-    @design_as_on_mac
-    def test_a_design_sessions_own_commits_and_its_end_commit_carry_the_lanes_identity(self):
-        from hansa import run
-        s = self.desk.settings()
-        s["lanes"]["a"]["identity"] = "Ada Lane <ada@example.org>"
-        self.assertEqual(self.desk.save_settings(s), [])
-        tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
-        wt = Path(self.design_worktree(tid))
-        base = self.git_out("rev-parse", "main")
-        self.desk.update(tid, lane="a", provider="claude", worktree=str(wt), session_id="sid-d", model_asked="sonnet",
-                         branch=f"task/{tid}", base=base)
-        _, env, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        ada = "Ada Lane <ada@example.org>"
-        self.assertEqual({k: env[k] for k in env if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))},
-                         {"GIT_AUTHOR_NAME": "Ada Lane", "GIT_AUTHOR_EMAIL": "ada@example.org",
-                          "GIT_COMMITTER_NAME": "Ada Lane", "GIT_COMMITTER_EMAIL": "ada@example.org"})
-        # the session's own commit, as git in it writes one with what it is given; then hansa's at its end
-        (wt / "own.txt").write_text("the session's own commit\n")
-        sh("git", "add", "own.txt", cwd=wt)
-        subprocess.run(["git", "commit", "-q", "-m", "own"], cwd=wt, check=True, capture_output=True,
-                       env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-                            **{k: v for k, v in env.items() if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}})
-        (wt / "left.txt").write_text("left uncommitted\n")
-        self.desk.update(tid, state="running")
-        m = run.finish(self.desk, tid, 0)
-        self.assertEqual(m["state"], "done", m)
-        self.assertEqual(m["commits"], 2, m)
-        self.assertEqual(self.git_out("log", "--format=%an <%ae>|%cn <%ce>", f"main..{m['head']}").splitlines(),
-                         [f"{ada}|{ada}"] * 2)
-
-    @design_as_on_mac
-    def test_a_design_session_may_write_in_git_only_what_its_own_commits_and_merges_take(self):
-        from hansa import run
-        first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))  # lane a's worktree
-        self.assertEqual(first["state"], "done", first)
-        sh("git", "tag", "v1", cwd=self.repo)
-        tid = self.desk.new_task("Make the badge bigger")
-        wt = Path(self.design_worktree(tid))
-        self.desk.update(tid, lane="a", provider="claude", worktree=str(wt), session_id="sid-d", model_asked="sonnet")
-        argv, env, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        box = self.sandbox_of(argv)
-        common = (self.repo / ".git").resolve()
-        own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt)).resolve()
-        other = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=first["worktree"])).resolve()
-        mine = common / "refs" / "heads" / "task" / tid
-        log = common / "logs" / "refs" / "heads" / "task" / tid
-        for p in (own / "index", own / "HEAD.lock", own / "MERGE_HEAD", own / "ORIG_HEAD", own / "logs" / "HEAD",
-                  common / "objects" / "ab" / "cdef", mine, Path(f"{mine}.lock"), log, Path(f"{log}.lock")):
-            self.assertTrue(may_write(box, p), p)
-        for p in (own / "HEAD",  # pointed at the base, it would lead hansa's commit at the session's end there
-                  common / "refs" / "heads" / "main", common / "logs" / "refs" / "heads" / "main",  # the base
-                  common / "packed-refs", common / "packed-refs.lock",
-                  common / "refs" / "heads" / "task" / first["id"], common / "refs" / "tags" / "v1",
-                  common / "refs" / "heads" / "task" / "t9999",  # a task's branch made after the session started
-                  common / "refs" / "heads" / "task" / f"{tid}-try1", common / "refs" / "heads" / "task" / f"{tid}x",
-                  common / "refs" / "heads" / "other", common / "refs" / "remotes" / "origin" / "main",
-                  common / "logs" / "refs" / "heads" / "task" / first["id"],
-                  other / "commondir", other / "gitdir", other / "HEAD", common / "worktrees" / "later" / "commondir",
-                  common / "config.worktree", common / "commondir", common / "config", common / "hooks" / "post-checkout",
-                  common / "HEAD", common / "index", common / "info" / "attributes",
-                  own / "commondir", own / "gitdir", own / "config.worktree", wt / ".git"):
-            self.assertFalse(may_write(box, p), p)
-        self.assertEqual({k: env[k] for k in run.DESIGN_GIT_ENV}, run.DESIGN_GIT_ENV)  # no gc of git's own accord
-        env_file = Path(env["CLAUDE_ENV_FILE"]).read_text()  # what its commands start with: the same settings
-        for k, v in run.DESIGN_GIT_ENV.items():
-            self.assertIn(f"export {k}={shlex.quote(v)}\n", env_file)
-        # added after git settings an environment has already, not over them
-        given = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.quotePath", "GIT_CONFIG_VALUE_0": "false"}
-        self.assertEqual(run.git_config_env(given, run.DESIGN_GIT_CONFIG),
-                         {**given, "GIT_CONFIG_COUNT": "4", **{f"GIT_CONFIG_{w}_{i + 1}": x[j] for i, x in
-                                                               enumerate(run.DESIGN_GIT_CONFIG)
-                                                               for j, w in enumerate(("KEY", "VALUE"))}})
-
-    def test_a_design_session_commits_and_merges_within_its_git_write_rules(self):
-        # the sandbox cannot be run inside the tests, so its write rules are checked on what git really wrote
-        from hansa import run
-        sh("git", "worktree", "add", "-q", "-b", "task/t0001", str(self.tmp / "wt-other"), cwd=self.repo)
-        wt = self.tmp / "wt-design"
-        sh("git", "worktree", "add", "-q", "-b", "task/t0002", str(wt), cwd=self.repo)
-        sh("git", "tag", "v1", cwd=self.repo)
-        (self.repo / "base.txt").write_text("moved on\n")
-        sh("git", "add", "base.txt", cwd=self.repo)
-        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base moves", cwd=self.repo)
-        sh("git", "pack-refs", "--all", cwd=self.repo)  # the session's branch then is in packed-refs alone
-        common = (self.repo / ".git").resolve()
-        self.assertFalse((common / "refs" / "heads" / "task").exists())
-        run.make_git_write_deny(wt, "task/t0002")
-        self.assertTrue((common / "refs" / "heads" / "task").is_dir())  # git could not make it in the sandbox
-        rules = (run.design_git_write(wt, "task/t0002"), run.git_write_deny(wt, "task/t0002"))
-
-        def state():
-            out = {}
-            for d, dirs, files in os.walk(common):
-                for n in [".", *dirs, *files]:
-                    st = os.lstat(os.path.join(d, n))
-                    out[os.path.normpath(os.path.join(d, n))] = (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns,
-                                                                 st.st_ino)
-            return out
-        holders = {str(Path(a).parent) for a in rules[0] if a.endswith(".lock")}  # where git makes and renames them
-        # what the rules let git make nothing new in is made read-only for the while, so git cannot make
-        # even what it would remove again (a .lock); what it changes in place is found by comparing
-        shut = [d for d, _, _ in os.walk(common) if not may_write({}, d, rules) and d not in holders]
-        before = state()
-        env = {**os.environ, **run.DESIGN_GIT_ENV, **run.GIT_ID}
-        (wt / "badge.txt").write_text("big\n")
-        said = ""
-        for d in shut:
-            os.chmod(d, 0o555)
-        try:
-            for c in (["add", "badge.txt"], ["commit", "-q", "-m", "t0002: a bigger badge"],
-                      ["merge", "-q", "--no-edit", "main"]):
-                r = subprocess.run(["git", *c], cwd=wt, env=env, capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0, r.stderr)
-                said += r.stderr
-        finally:
-            for d in shut:
-                os.chmod(d, 0o755)
-        # git tries to lock packed-refs on each ref update; refused, it goes on without it
-        self.assertFalse([x for x in said.splitlines() if x.strip() and "packed-refs.lock" not in x], said)
-        self.assertEqual(len(self.git_out("log", "-1", "--format=%P", cwd=wt).split()), 2)  # a real merge
-        self.assertEqual(self.git_out("rev-parse", "task/t0002"), self.git_out("rev-parse", "HEAD", cwd=wt))
-        after = state()
-        changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
-        self.assertTrue(changed)
-        for p in changed:
-            folder = stat.S_ISDIR((after.get(p) or before[p])[0])
-            self.assertTrue(may_write({}, p, rules) or folder and p in holders, p)
-        self.assertNotIn(str(Path(rules[0][0]).resolve() / "HEAD"), changed)  # git commits and merges without it
-        # what git wrote outside the session's own folder: objects, the branch's ref and log
-        self.assertEqual({str(Path(p).relative_to(common)).split("/")[0] for p in changed
-                          if not Path(p).is_relative_to(Path(rules[0][0]).resolve())}, {"objects", "refs", "logs"})
 
     def test_the_git_deny_patterns_keep_the_same_names_as_macos_reads_their_classes(self):
         from hansa import run
@@ -18659,13 +17863,10 @@ class DeskTest(unittest.TestCase):
             sh("git", "worktree", "add", "-q", "-b", f"task/t09{i}", str(self.tmp / name), cwd=self.repo)
         lane = self.desk.settings()["lanes"]["a"]
         wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
-        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
-        cases = [*run._git_open(wt), *run._git_open(dwt, "task/t0002")]
+        cases = run._git_open(wt)
         common = run.git_folders(wt)[0]
         self.assertIn((common, ("worktrees",)), cases)  # the common folder with worktrees open
         self.assertIn((common / "worktrees", (wt.name,)), cases)  # the worktree's folder among the others
-        self.assertIn((common / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)  # the session's branch
-        self.assertIn((common / "logs" / "refs" / "heads" / "task", ("t0002", "t0002.lock")), cases)
         chars = run.NAME_CHARS + "-" + "^!/ ~@é`{"  # and a few outside them, ~ ` { after the small letters
 
         def elements(cls):  # as macOS counts them: a character (\. too, a leading - too) or a range
@@ -18703,16 +17904,7 @@ class DeskTest(unittest.TestCase):
             self.assertFalse(kept(n), n)
         for n in ("b", "-x", ".x", "_x", "0x", "Zx", "Bx", "ab", "a-", "a.", "a_", "aB", "a9"):
             self.assertTrue(kept(n), n)
-        # a design session's common folder, with objects, refs, logs and worktrees open: one class of 18 elements
-        # would match nothing, and leave any new file at its top open; two patterns keep them
-        rules = run.others_than(Path("/C"), run.DESIGN_GIT_COMMON_OPEN)
-        self.assertEqual(rules[:2], ["/C/[-0-9A-KMNPQS-VX-Z._]*", "/C/[a-kmnpqs-vx-z]*"])
-        self.assertFalse(macos_match("/C/[-0-9A-KMNPQS-VX-Za-kmnpqs-vx-z._]*", "/C/commondir"))
-        kept = lambda n: any(macos_match(r, f"/C/{n}") for r in rules)
-        for n in ("objects/x", "logs/x", "refs/x", "worktrees/x"):
-            self.assertFalse(kept(n), n)
-        for n in ("commondir", "zz", "-x", "_x", ".x", "9x", "config", "objectsx", "Refs_"):
-            self.assertTrue(kept(n), n)
+
 
     def refusing_srt(self, rule: str) -> None:
         """The stand-in srt, refusing a try of a run's sandbox (on /usr/bin/true) whose `settings` hold for this
@@ -18763,7 +17955,7 @@ class DeskTest(unittest.TestCase):
         m = self.desk.meta(tid)
         self.assertEqual((m["state"], m["held"]["part"]), ("queued", "the deny-write patterns"), m)
 
-    @design_as_on_mac  # macOS's reading of the patterns, on every system; Linux's list at its end
+    @unittest.mock.patch.object(account, "LINUX", False)
     def test_a_sandbox_that_keeps_what_git_needs_open_holds_the_task_and_names_the_path(self):
         # the stand-in srt answers the write check with one more deny, of a new file in the worktree's own git
         # folder, as a deny pattern read otherwise than meant would keep it: the sandbox starts, and git add would fail
@@ -18782,15 +17974,9 @@ class DeskTest(unittest.TestCase):
         shown = views.status_text(views.status(self.desk))
         self.assertIn("UNABLE TO RUN", shown)
         self.assertIn("sandbox starts, but the deny-write patterns keep what git needs open", shown)
-        # a design session's try writes its branch's ref's .lock and a new file in objects/ too
-        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
-        common = run.git_folders(dwt)[0]
-        self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:],
-                         [common / "refs" / "heads" / "task" / "t0002.lock", common / "objects" / ".hansa-try"])
-        with unittest.mock.patch.object(account, "LINUX", True):  # on Linux, where no design session runs: none of these
-            self.assertEqual(run.git_needs_open(dwt, "task/t0002")[2:], [])
 
-    @design_as_on_mac  # macOS's reading of the patterns; on Linux new names are not tried: the next test
+
+    @unittest.mock.patch.object(account, "LINUX", False)
     def test_a_sandbox_whose_patterns_do_not_keep_a_new_name_holds_the_task_and_names_the_path(self):
         # the stand-in srt reads the deny patterns as macOS does: here one that matches nothing, as a class of more
         # than 15 elements does, stands in for those that keep new names next to the worktree's own folder
@@ -18811,14 +17997,7 @@ class DeskTest(unittest.TestCase):
         # with the patterns hansa makes, the same try passes and the task runs
         run.SANDBOX_TRIES.clear()
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
-        # what a try writes that must be kept: a new file atop the common folder, and the names next to the open
-        dwt = Path(self.design_worktree(self.desk.new_task("Design")))
-        common, own = run.git_folders(dwt)
-        heads = common / "refs" / "heads"
-        self.assertEqual(run.git_needs_kept(dwt, "task/t0002"),
-                         [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x", heads / "task" / "t0002x",
-                          heads / ".hansa-try-kept"])
-        self.assertEqual(run.git_needs_kept(self.repo), [])  # a main checkout: no patterns to try
+
 
     def test_on_linux_a_sandbox_whose_patterns_keep_nothing_runs_the_task_and_the_status_says_what_is_left(self):
         # srt on Linux drops every pattern, so the try there checks no new name: the same patterns as in the test
@@ -19027,15 +18206,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("UNABLE TO RUN", shown)
         self.assertNotIn("from earlier code", shown)
         self.desk.update(tid, state="cancelled")
-        # a design session's hold is tried with the sandbox a design session gets, in the lane's design worktree
-        self.design_worktree(tid)
-        run.write_json(held, {"lanes": {"a": {"design": {**stale, "kind": "design session", "task": tid}}}})
-        run.SANDBOX_TRIES.clear()
-        with unittest.mock.patch.object(account, "LINUX", False):
-            self.assertEqual(run.sandbox_retry(self.desk, self.desk.settings()), [("a", "design")])
-        h = run.sandbox_held(self.desk)["a"]["design"]
-        self.assertEqual((h["kind"], h["part"]), ("design session", "the deny-read list"))
-        self.assertEqual(Path(self.srt_calls(sandbox=True)[-1]["cwd"]).resolve(), (self.desk.worktrees_dir / "a-design").resolve())
+
 
     def test_two_lanes_held_for_the_same_reason_each_alert_once(self):
         from hansa import alert, run
@@ -19055,27 +18226,6 @@ class DeskTest(unittest.TestCase):
         self.assertIn("lane a cannot run", said[0])
         self.assertIn("lane b cannot run", said[1])
 
-    def test_a_refused_design_sessions_sandbox_holds_only_the_lanes_design_sessions(self):
-        from hansa import run
-        refused = run.SandboxRefused("sandbox-exec: sandbox_apply: Invalid argument", "the network", "design session")
-        did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
-        tid = self.desk.new_task("Add hello.txt")
-        with unittest.mock.patch("hansa.run.start_design", side_effect=refused):
-            d = Dispatcher(self.desk)
-            m = self.settle(d, tid)  # the lane's worker runs: its sandbox is another, with its own try
-            self.assertEqual(m["state"], "done", m)
-        self.assertEqual(self.desk.meta(did)["state"], "queued")
-        self.assertEqual(self.desk.meta(did)["held"]["kind"], "design session")
-        self.assertEqual(list(run.sandbox_held(self.desk)["a"]), ["design"])
-        shown = views.status_text(views.status(self.desk))
-        self.assertIn("free; its design sessions UNABLE TO RUN", shown)
-        self.assertIn("this holds its design sessions", shown)
-        self.assertIn("HELD: lane a cannot open a design session",
-                      waiting_reason(self.desk, self.desk.settings(), self.desk.meta(did), set()))
-        # a worker's refusal holds the workers and verifiers, and says so
-        run.hold(self.desk, self.desk.new_task("Add more"), "a", "the sandbox could not start: x", "", "worker")
-        self.assertEqual(sorted(run.sandbox_held(self.desk)["a"]), ["design", "work"])
-        self.assertIn("this holds its workers and verifiers", views.status_text(views.status(self.desk)))
 
     def test_a_bash_result_as_text_blocks_is_read_for_a_sandbox_that_could_not_start(self):
         from hansa import run
@@ -19126,9 +18276,7 @@ class DeskTest(unittest.TestCase):
         lane = s["lanes"]["a"]
         p = s["providers"][lane["providers"][0]]
         wt = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Work")))[0]
-        dwt = Path(self.design_worktree(self.desk.new_task("Design")))  # its branch, task/t0002, has a folder
         worker = run.sandbox_settings(self.desk, lane, "claude", p, wt)["sandbox"]
-        design = run.design_sandbox(self.desk, lane, "claude", p, dwt, "task/t0002", mac=True)["sandbox"]
         common = run.git_folders(wt)[0].resolve()
         heads = common / "refs" / "heads"
         kept_all = [common / "worktrees" / "other0" / "new", common / "config", common / "hooks" / "new",
@@ -19137,23 +18285,16 @@ class DeskTest(unittest.TestCase):
 
         def next_to(folder, name):  # the names next to an open one: longer, with a capital, a - or a _
             return [folder / f"{name}{x}" for x in ("b", "B", "-", "_", "9")] + [folder / f"{name[:-1]}-"]
-        for name, box, w, branch in (("worker", worker, wt, ""), ("verifier", worker, wt, ""),
-                                     ("design session", design, dwt, "task/t0002")):
+        for name, box, w in (("worker", worker, wt), ("verifier", worker, wt)):
             settings = functools.partial(run.sandbox_try_settings, box, w)
             r = in_srt(settings, "/usr/bin/true")
             self.assertEqual(r.returncode, 0, f"{name}: {r.stderr or r.stdout}")
             own = Path(run.git_folders(w)[1]).resolve()
-            opened = [own / "index", own / "new-file", *[Path(x) for x in run.git_needs_open(w, branch)]]
+            opened = [own / "index", own / "new-file", *[Path(x) for x in run.git_needs_open(w)]]
             kept = [*kept_all, *next_to(common / "worktrees", own.name)]
-            if branch:
-                ref = heads / branch
-                opened += [ref, ref.parent / f"{ref.name}.lock", common / "objects" / "new-file"]
-                kept += [*next_to(ref.parent, ref.name), ref.parent / f"{ref.name}.lockx", heads / "taskb",
-                         heads / "task" / "t0003"]
-            else:
-                kept += [heads / "task" / "new", common / "objects" / "new"]
+            kept += [heads / "task" / "new", common / "objects" / "new"]
             script = Path(tempfile.mkdtemp(dir=self.tmp)) / "writes.sh"
-            kept += [Path(x) for x in run.git_needs_kept(w, branch)]
+            kept += [Path(x) for x in run.git_needs_kept(w)]
             script.write_text(run.git_open_try(opened, kept))
             r = in_srt(settings, "/bin/sh", str(script))
             self.assertEqual(r.returncode, 0, f"{name}: the try's script exits 0 once it has run: {r.stderr}")
@@ -19162,9 +18303,10 @@ class DeskTest(unittest.TestCase):
             self.assertEqual([x for x in said if x.startswith("not kept: ")], [], f"{name}: left open what it keeps")
             # and hansa's own try of this sandbox passes
             with unittest.mock.patch.dict(os.environ, {"PATH": path}):
-                self.assertEqual(run.try_sandbox(box, w, branch), {"ok": True}, name)
+                self.assertEqual(run.try_sandbox(box, w), {"ok": True}, name)
             for x in kept:
                 self.assertFalse(x.exists() and x not in (common / "config",), (name, x))
+
 
     def test_a_workers_sandbox_keeps_the_common_git_folder_and_other_worktrees_folders(self):
         from hansa import run
@@ -19223,87 +18365,20 @@ class DeskTest(unittest.TestCase):
         (self.repo / ".git" / "commondir").unlink()
         self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Once more")))[0], wt)
 
-    @design_as_on_mac
-    def test_a_design_session_runs_no_command_outside_the_sandbox(self):
-        from hansa import run
-        s = self.desk.settings()
-        s["lanes"]["a"]["preview"] = "npm run dev"
-        self.assertEqual(self.desk.save_settings(s), [])
-        tid = self.desk.new_task("Make the badge bigger")
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet")
-        argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        box = self.sandbox_of(argv)
-        self.assertIs(box["allowUnsandboxedCommands"], False)  # dangerouslyDisableSandbox is refused
-        self.assertNotIn("excludedCommands", box)
-        # its permissions stay as they were: the lane's commands, the preview and its own git, not every command
-        self.assertIs(box["autoAllowBashIfSandboxed"], False)
-        self.assertNotIn("Bash", self.allowed_by(argv))
-        for r in ("Bash(npm run dev:*)", "Bash(git commit:*)", "Bash(git merge:*)"):
-            self.assertIn(r, self.allowed_by(argv))
-        self.assertFalse([r for r in self.denied_by(argv) if r.startswith("Bash(git")])
-        prompt = argv[argv.index("--append-system-prompt") + 1]
-        self.assertIn("Your commands run in the lane's sandbox", prompt)
-        self.assertIn("refuses does not run outside it", prompt)
 
-    def test_a_design_session_does_not_start_on_linux(self):
-        # there the sandbox drops the name patterns and cannot open a branch's folder beneath a refs/heads it keeps,
-        # so the session's commands could make a loose ref over a packed base
-        from hansa import account, run
-        s = self.desk.settings()
-        s["lanes"]["a"]["preview"] = "npm run dev"
-        self.assertEqual(self.desk.save_settings(s), [])
-        with unittest.mock.patch.object(account, "LINUX", True):
-            with self.assertRaises(SystemExit) as said:
-                main(["--desk", str(self.desk.root), "design", "Make the title bolder", "--lane", "a"])
-            self.assertEqual(str(said.exception), f"hansa: {run.DESIGN_ON_LINUX}")
-            self.assertEqual(len(str(said.exception).splitlines()), 1)
-            self.assertFalse([m for m in self.desk.tasks() if m.get("kind") == "design"])  # nothing queued
-            tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")  # one queued before
-            with self.assertRaisesRegex(RuntimeError, "design sessions do not run on Linux"):
-                run.start_design(self.desk, tid, "a")
-            self.assertEqual(self.desk.meta(tid)["state"], "queued")
-            self.assertFalse((self.desk.worktrees_dir / "a-design").exists())  # no worktree, no git
-            self.desk.update(tid, lane="a", provider="claude", worktree=str(self.desk.worktrees_dir / "a-design"),
-                             session_id="sid-d", model_asked="sonnet")
-            with self.assertRaisesRegex(RuntimeError, "design sessions do not run on Linux"):
-                run.design_command(self.desk, tid)
-        self.desk.update(tid, state="cancelled")
-        with unittest.mock.patch.object(account, "LINUX", False), contextlib.redirect_stdout(io.StringIO()) as out:
-            main(["--desk", str(self.desk.root), "design", "Make the title bolder", "--lane", "a"])
-        self.assertIn("queued", out.getvalue())
-        tid = next(m["id"] for m in self.desk.tasks() if m.get("kind") == "design" and m["state"] == "queued")
-        self.desk.update(tid, lane="a", provider="claude", worktree=self.design_worktree(tid), session_id="sid-d",
-                         model_asked="sonnet")
-        with unittest.mock.patch.object(account, "LINUX", False):
-            argv, _, _ = run.design_command(self.desk, tid)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-        self.assertIn("To look at the app, start it with `npm run dev`", argv[argv.index("--append-system-prompt") + 1])
-        self.desk.update(tid, state="cancelled")
-
-    @design_as_on_mac
     def test_hansa_commits_and_merges_only_on_the_branch_it_made_for_the_run(self):
-        # a design session's sandbox keeps its HEAD; and whatever points a worktree's HEAD at the base, hansa's
         # commit at the run's end (outside the sandbox) does not move the base
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual(first["state"], "done", first)
         lane = self.desk.settings()["lanes"]["a"]
-        for kind in ("design", "task"):
-            tid = self.desk.new_task("Make the badge bigger", **({"kind": "design", "lane": "a"} if kind == "design" else {}))
-            if kind == "design":
-                wt = Path(self.design_worktree(tid))
-            else:
-                wt = run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0]
+        for kind in ("task",):
+            tid = self.desk.new_task("Make the badge bigger", lane="a")
+            wt = run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0]
             base = self.git_out("rev-parse", "main")
             self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
                              model_asked="sonnet", branch=f"task/{tid}", base=base)
             own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt))
-            if kind == "design":
-                argv, _, _ = run.design_command(self.desk, tid)
-                self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-                self.assertFalse(may_write(self.sandbox_of(argv), own / "HEAD"))
             (own / "HEAD").write_text("ref: refs/heads/main\n")  # as though it could
             (wt / "left.txt").write_text("left uncommitted\n")
             m = run.finish(self.desk, tid, 0)
@@ -19373,27 +18448,21 @@ class DeskTest(unittest.TestCase):
         sh("git", "checkout", "-q", f"task/{m['id']}", cwd=wt)
         self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0], wt)  # put right: it works again
 
-    @design_as_on_mac
     def test_a_branch_ref_that_leads_to_another_ref_does_not_lead_hansas_commit_onto_it(self):
-        # a design session may write its branch's ref: 'ref: refs/heads/main' there would have git, which follows it,
         # commit hansa's end-of-session commit onto the base, while HEAD still names the session's branch
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual(first["state"], "done", first)
         lane = self.desk.settings()["lanes"]["a"]
         common = self.repo / ".git"
-        for kind in ("design", "task"):
-            tid = self.desk.new_task("Make the badge bigger", **({"kind": "design", "lane": "a"} if kind == "design" else {}))
-            wt = Path(self.design_worktree(tid)) if kind == "design" else run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0]
+        for kind in ("task",):
+            tid = self.desk.new_task("Make the badge bigger", lane="a")
+            wt = run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0]
             base = self.git_out("rev-parse", "main")
             self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
                              model_asked="sonnet", branch=f"task/{tid}", base=base)
             ref = common / "refs" / "heads" / "task" / tid
             tip = ref.read_text().strip()
-            if kind == "design":
-                argv, _, _ = run.design_command(self.desk, tid)
-                self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-                self.assertTrue(may_write(self.sandbox_of(argv), ref))  # it may: its own commits move it
             ref.write_text("ref: refs/heads/main\n")
             (wt / "left.txt").write_text("left uncommitted\n")
             m = run.finish(self.desk, tid, 0)
@@ -19423,14 +18492,13 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("ref:", (common / "refs" / "heads" / "task" / tid).read_text())
 
     def test_hansas_commit_refuses_a_branch_ref_made_a_link_while_it_commits(self):
-        # something a design session left running could make its branch's ref 'ref: refs/heads/main' after hansa
         # checked it: read through the link, the base's tip would pass for the branch's, and hansa's commit would
         # rewrite the branch as one commit on the base, dropping its own history
         from hansa import run
         first = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual(first["state"], "done", first)
-        tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
-        wt = Path(self.design_worktree(tid))
+        tid = self.desk.new_task("Make the badge bigger", lane="a")
+        wt = Path(run.prepare(self.desk, "a", self.desk.settings()["lanes"]["a"], self.desk.meta(tid))[0])
         base = self.git_out("rev-parse", "main")
         self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
                          model_asked="sonnet", branch=f"task/{tid}", base=base)
@@ -19482,8 +18550,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         lane = self.desk.settings()["lanes"]["a"]
         for when in ("next git", "last step"):
-            tid = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
-            wt = Path(self.design_worktree(tid))
+            tid = self.desk.new_task("Make the badge bigger", lane="a")
+            wt = Path(run.prepare(self.desk, "a", self.desk.settings()["lanes"]["a"], self.desk.meta(tid))[0])
             base = self.git_out("rev-parse", "main")
             self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
                              model_asked="sonnet", branch=f"task/{tid}", base=base)
@@ -19600,33 +18668,20 @@ class DeskTest(unittest.TestCase):
         sh("git", "checkout", "-q", "main", cwd=self.repo)
         side = self.git_out("rev-parse", "side")
         lane = self.desk.settings()["lanes"]["a"]
-        for kind in ("task", "verify", "design"):
-            tid = self.desk.new_task("Make the badge bigger", **({"kind": "design", "lane": "a"} if kind == "design" else {}))
-            if kind == "design":
-                wt = Path(self.design_worktree(tid))
-            else:
-                wt = run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0]
+        for kind in ("task", "verify"):
+            tid = self.desk.new_task("Make the badge bigger", lane="a")
+            wt = run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0]
             base = self.git_out("rev-parse", "main")
             self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
                              model_asked="sonnet", branch=f"task/{tid}", base=base,
                              **({"kind": "verify"} if kind == "verify" else {}))
             own = Path(self.git_out("rev-parse", "--absolute-git-dir", cwd=wt))
-            if kind == "design":
-                with unittest.mock.patch.object(account, "LINUX", False):  # as on a Mac: none runs on Linux
-                    argv, _, _ = run.design_command(self.desk, tid)
-                self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
-                self.assertTrue(may_write(self.sandbox_of(argv), own / "MERGE_HEAD"))  # it may merge
             (own / "MERGE_HEAD").write_text(side + "\n")
             (own / "MERGE_MODE").write_text("no-ff")
             (wt / "left.txt").write_text("left uncommitted\n")
             m = run.finish(self.desk, tid, 0)
             on_branch = subprocess.run(["git", "merge-base", "--is-ancestor", side, f"task/{tid}"], cwd=self.repo)
             self.assertNotEqual(on_branch.returncode, 0, kind)  # side is in no history of hansa's making
-            if kind == "design":  # its end commit is a plain one on its branch, and the merge's leftovers go
-                self.assertEqual(self.git_out("rev-list", "--parents", "-1", f"task/{tid}").split()[1:], [base])
-                self.assertEqual(self.git_out("show", "--name-only", "--format=", f"task/{tid}"), "left.txt")
-                self.assertFalse(os.path.lexists(own / "MERGE_HEAD"))
-                continue
             self.assertEqual(m["state"], "failed", m)
             self.assertIn("MERGE_HEAD was made", m["error"])
             self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), base)  # nothing committed or stashed
@@ -19950,9 +19005,9 @@ class DeskTest(unittest.TestCase):
                     self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
                     self.assertEqual((self.repo / "hello.txt").read_text(), f"hello from {tid}\n")
 
-    def test_retry_lane_carries_the_same_text_effort_model_and_browser(self):
+    def test_retry_lane_carries_the_same_text_effort_and_model(self):
         self.hansa("lane", "add", "b", "--like", "a")
-        tid = self.desk.new_task("Original task", lane="a", effort="high", model="earlier-model", browser=True)
+        tid = self.desk.new_task("Original task", lane="a", effort="high", model="earlier-model")
         self.ended(tid, "failed", "Earlier report", "does not hold", "Verification report")
         self.desk.update(tid, check={"command": "check-it", "ok": True})
         for effort in ((), ("--effort", "low")):
@@ -19964,7 +19019,7 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual((self.desk.tasks_dir / own / "task.md").read_text(),
                                  (self.desk.tasks_dir / other / "task.md").read_text())
                 for field, expected in (("effort", "low" if effort else "high"), ("model", "earlier-model"),
-                                        ("browser", True)):
+                                        ):
                     self.assertEqual(self.desk.meta(own)[field], expected)
                     self.assertEqual(self.desk.meta(other)[field], expected)
                 self.desk.update(tid, state="failed")
@@ -20373,486 +19428,6 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"\n- {new}: done, not verified; its note: \"upload with [key of mimo] as before\"; ", text)
         self.assertNotIn(later, text)
 
-    def test_browser_is_given_to_one_task_at_a_time(self):
-        with self.assertRaises(SystemExit):  # no browser set up: refuse, queue nothing
-            main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
-        self.assertEqual(self.desk.tasks(), [])
-        seen = self.tmp / "argv.jsonl"
-        s = self.desk.settings()
-        s["browser"] = "/usr/bin/env true"
-        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
-        self.assertEqual(self.desk.save_settings(s), [])
-        main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
-        main(["--desk", str(self.desk.root), "add", "Plain task"])
-        d = Dispatcher(self.desk)
-        for m in self.desk.tasks():
-            self.settle(d, m["id"])
-        with_browser, plain = [json.loads(x) for x in seen.read_text().splitlines()]
-        self.assertIn("--mcp-config", with_browser)
-        self.assertIn("mcp__browser", with_browser)
-        self.assertNotIn("--mcp-config", plain)
-        self.assertNotIn("mcp__browser", plain)
-        cfg = json.loads(Path(with_browser[with_browser.index("--mcp-config") + 1]).read_text())
-        self.assertEqual(cfg["mcpServers"]["browser"]["args"][1:], [str(self.desk.tasks_dir / "t0001" / "browser"),
-                                                                    "/usr/bin/env true"])
-        self.assertIn("with a browser", views.show_text(self.desk, "t0001"))
-
-    def preview_lane(self, preview: str, wait: int = 20, **env):
-        """Lane a with a browser on the desk, this preview, and the stand-in worker telling (FAKE_SEE_PREVIEW) whether
-        the preview runs as it works; the preview writes its pid to self.tmp/preview.pid. hansa starts the preview as
-        on macOS. Returns (the argv file, the file the worker writes what it saw to)."""
-        seen, saw = self.tmp / "argv.jsonl", self.tmp / "saw-preview.json"
-        s = self.desk.settings()
-        s["browser"] = "/usr/bin/env true"
-        s["lanes"]["a"].update(preview=f"echo $$ > {shlex.quote(str(self.tmp / 'preview.pid'))}; {preview}",
-                               preview_wait_s=wait, env={"FAKE_SHOW_ARGV": str(seen),
-                                                         "FAKE_SEE_PREVIEW": f"{self.tmp / 'preview.pid'}:{saw}", **env})
-        self.assertEqual(self.desk.save_settings(s), [])
-        starts = unittest.mock.patch("hansa.run.PREVIEW_STARTS", True)
-        starts.start()
-        self.addCleanup(starts.stop)
-        self.addCleanup(self.kill_preview)
-        return seen, saw
-
-    def preview_pid(self) -> int:
-        f = self.tmp / "preview.pid"
-        try:
-            return int(f.read_text())
-        except (FileNotFoundError, ValueError):
-            return 0
-
-    def kill_preview(self):
-        if self.preview_pid() > 0:  # never 0: that is this process's own group
-            try:
-                os.killpg(self.preview_pid(), signal.SIGKILL)
-            except OSError:
-                pass
-
-    def preview_gone(self, wait=15) -> bool:
-        from hansa import run
-        pid, end = self.preview_pid(), time.time() + wait
-        while time.time() < end:
-            if not run.alive(pid) or run._state(pid) == "Z":
-                return True
-            time.sleep(0.1)
-        return False
-
-    def add_browser_task(self) -> str:
-        with contextlib.redirect_stdout(io.StringIO()):
-            main(["--desk", str(self.desk.root), "add", "Look at the page", "--browser"])
-        return self.desk.tasks()[-1]["id"]
-
-    def test_preview_starts_in_srt_with_local_binding_for_it_alone_and_the_worker_gets_its_address(self):
-        seen, saw = self.preview_lane("echo booting; echo '  Local:   http://localhost:\x1b[1m5173\x1b[22m/'; exec sleep 600")
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "done", m)
-        [call] = [c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]
-        self.assertTrue(call["settings"]["network"]["allowLocalBinding"])  # for the preview's own process
-        self.assertEqual(call["settings"]["network"]["allowedDomains"], [])  # the lane's list, nothing added
-        self.assertEqual(Path(call["cwd"]).resolve(), (self.desk.worktrees_dir / "a").resolve())
-        self.assertEqual(call["env"].get("HANSA_TASK"), tid)
-        self.assertFalse({"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} & set(call["env"]))
-        argv = json.loads(seen.read_text().splitlines()[-1])
-        worker = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["network"]
-        self.assertNotIn("allowLocalBinding", worker)  # the worker's own sandbox stays as the lane sets it
-        prompt = argv[argv.index("--append-system-prompt") + 1]
-        self.assertIn("the app\nis at http://localhost:5173/. Open that address in the browser.", prompt)
-        self.assertEqual(json.loads(saw.read_text())["up"], True)  # it ran while the worker did, in a group of its own
-        self.assertNotEqual(json.loads(saw.read_text())["group"], json.loads(saw.read_text())["mine"])
-        self.assertTrue(self.preview_gone())  # and was stopped when the worker ended
-        self.assertEqual((m["preview"]["ready"], m["preview"]["address"]), (True, "http://localhost:5173/"))
-        shown = views.show_text(self.desk, tid)
-        self.assertIn("preview (started by hansa for the browser): ready at http://localhost:5173/", shown)
-        self.assertIn(str(self.desk.tasks_dir / tid / "preview.log"), shown)
-        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
-        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.json").exists())
-        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview-sandbox.json").exists())
-        plain = self.desk.new_task("No browser")  # a task without a browser gets no preview
-        self.settle(Dispatcher(self.desk), plain)
-        self.assertEqual(len([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]]), 1)
-        self.assertNotIn("preview", self.desk.meta(plain))
-
-    def test_preview_ready_once_a_port_it_names_answers(self):
-        skip_unless_ports(self)
-        self.preview_lane(f"exec {shlex.quote(sys.executable)} -u -c " + shlex.quote(
-            "import socket, time; s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(5); "
-            "print('listening on port', s.getsockname()[1]); time.sleep(600)"))
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertTrue(m["preview"]["ready"], m["preview"])
-        self.assertRegex(m["preview"]["address"], r"^http://localhost:\d+$")
-
-    def test_preview_not_ready_in_time_is_stopped_and_the_worker_told_with_its_last_lines(self):
-        seen, saw = self.preview_lane("echo installing; echo still compiling; exec sleep 600", wait=1)
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "done", m)  # the task goes on without it
-        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
-        self.assertIn("and it did not\nstart: it was not ready within 1 seconds", prompt)
-        self.assertIn("    installing\n    still compiling\n", prompt)
-        self.assertEqual(json.loads(saw.read_text())["up"], False)  # stopped before the worker started
-        self.assertTrue(self.preview_gone())
-        self.assertFalse(m["preview"]["ready"])
-        self.assertIn("did not start: it was not ready within 1 seconds", views.show_text(self.desk, tid))
-        self.preview_lane("echo no address; exit 3")  # one that ends first
-        tid = self.add_browser_task()
-        self.settle(Dispatcher(self.desk), tid)
-        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
-        self.assertIn("it ended (exit 3) before it was ready", prompt)
-        self.assertIn("    no address\n", prompt)
-
-    def test_preview_is_stopped_when_the_worker_fails_or_is_cancelled(self):
-        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_STOP_AT_TURNS="1")
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "failed", m)
-        self.assertTrue(self.preview_gone())
-        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"])
-        self.preview_lane("echo http://127.0.0.1:8123; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
-                          FAKE_TMP_WAIT="60")
-        (self.tmp / "preview.pid").unlink()
-        tid, d = self.add_browser_task(), Dispatcher(self.desk)
-        end = time.time() + 20
-        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
-            d.tick()
-            time.sleep(0.1)
-        self.assertTrue(self.preview_pid() and not self.preview_gone(wait=0.5))
-        self.desk.update(tid, cancel=True)
-        m = self.settle(d, tid)
-        self.assertEqual(m["state"], "cancelled", m)
-        self.assertTrue(self.preview_gone())
-
-    def test_preview_left_by_a_worker_an_earlier_server_started_is_stopped(self):
-        self.preview_lane("echo http://localhost:8124; exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"),
-                          FAKE_TMP_WAIT="60")
-        tid, d = self.add_browser_task(), Dispatcher(self.desk)
-        end = time.time() + 20
-        while not (self.preview_pid() and (self.tmp / "t.jsonl").exists()) and time.time() < end:
-            d.tick()
-            time.sleep(0.1)
-        pid = self.desk.meta(tid)["pid"]
-        os.killpg(pid, signal.SIGKILL)  # the worker and what hansa ran around it, gone with no chance to stop it
-        d.procs[tid].wait()
-        self.assertFalse(self.preview_gone(wait=0.5))  # the preview, in a group of its own, still runs
-        m = self.settle(Dispatcher(self.desk), tid)  # a server started again
-        self.assertNotIn(m["state"], ("queued", "running"))
-        self.assertTrue(self.preview_gone())
-        self.assertTrue(m["preview"]["stopped"])
-        self.assertTrue((self.desk.tasks_dir / tid / "preview.log").exists())
-
-    def test_preview_is_stopped_and_its_log_kept_when_the_detail_readers_at_the_end_break(self):
-        from hansa import run
-
-        def broken(*_):
-            raise RuntimeError("a reader broke")
-        for name in ("usage_of", "usage_from_record", "report_after_notices", "background_left"):
-            patch = unittest.mock.patch.object(run, name, broken)
-            patch.start()
-            self.addCleanup(patch.stop)
-        self.preview_lane("echo booting; echo http://localhost:8126/; exec sleep 600")
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertNotIn(m["state"], ("queued", "running"))
-        self.assertTrue(self.preview_gone())  # stopping it is not a detail: no reader's error keeps it running
-        self.assertTrue(m["preview"]["stopped"])
-        self.assertIn("booting", (self.desk.tasks_dir / tid / "preview.log").read_text())
-        events = [json.loads(x) for x in self.desk.events_path.read_text().splitlines()]
-        self.assertIn("usage", {e["what"] for e in events if e["event"] == "detail_unread"})
-
-    def test_preview_of_a_resumed_run_is_stopped_first_and_started_again_for_it(self):
-        # The first run leaves background work running and is resumed once: its preview is stopped before hansa
-        # reads the run's details and decides, and the resumed run gets a preview of its own, never two at once.
-        from hansa import run
-        pids, seen = self.tmp / "pids", self.tmp / "resumed.jsonl"
-        self.preview_lane(f"for p in $(cat {shlex.quote(str(pids))} 2>/dev/null); do kill -0 $p 2>/dev/null && "
-                          f"echo still running: $p; done; echo $$ >> {shlex.quote(str(pids))}; "
-                          "echo http://localhost:8127/; exec sleep 600",
-                          FAKE_TRANSCRIPT="bg-cmd", FAKE_RESUMED=str(seen))
-        s = self.desk.settings()
-        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
-        s["lanes"]["a"]["providers"] = ["mimo"]
-        self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.write_key("mimo", "sk-test-01")
-        order, ended, resumed = [], run.end_preview, run.resume
-        with unittest.mock.patch.object(run, "end_preview", lambda *a: (order.append("end_preview"), ended(*a))[1]), \
-                unittest.mock.patch.object(run, "resume", lambda *a: (order.append("resume"), resumed(*a))[1]):
-            tid = self.add_browser_task()
-            m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "done", m)
-        self.assertEqual(order[:2], ["end_preview", "resume"])  # stopped before the resume is decided
-        self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text(),
-                         "Report after the resume: the suite passes.\n")
-        first, second = [int(x) for x in pids.read_text().split()]  # one preview for each run
-        self.assertNotEqual(first, second)
-        for pid in (first, second):
-            self.assertTrue(not run.alive(pid) or run._state(pid) == "Z", pid)
-        [call] = [json.loads(x) for x in seen.read_text().splitlines()]
-        prompt = call["argv"][call["argv"].index("--append-system-prompt") + 1]
-        self.assertEqual(prompt.count("is at http://localhost:8127/. Open that address"), 1)  # its own, once
-        self.assertIn("Run a long build or test suite in the foreground", prompt)  # the Bash limits as well
-        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"])
-        d = self.desk.tasks_dir / tid
-        self.assertNotIn("still running", (d / "preview.log").read_text())  # the first was gone when it started
-        self.assertNotIn("still running", (d / run.PREVIEW_FIRST_LOG).read_text())
-        self.assertIn(str(d / run.PREVIEW_FIRST_LOG), views.show_text(self.desk, tid))
-
-    def test_preview_of_a_run_cancelled_while_its_resume_is_prepared_stays_the_runs_own(self):
-        # A cancel lands while hansa prepares the one resume (sweep can take seconds): the task ends cancelled, not
-        # resumed, and the first run's preview log and record stay as they were, its own.
-        from hansa import run
-        seen = self.tmp / "resumed.jsonl"
-        self.preview_lane("echo http://localhost:8131/; exec sleep 600", FAKE_TRANSCRIPT="bg-cmd", FAKE_RESUMED=str(seen))
-        s = self.desk.settings()
-        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
-        s["lanes"]["a"]["providers"] = ["mimo"]
-        self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.write_key("mimo", "sk-test-01")
-        real_sweep, starts = run.sweep, []
-
-        def cancelled_meanwhile(desk, tid):
-            desk.update(tid, cancel=True)
-            return real_sweep(desk, tid)
-
-        def counted(*a):
-            starts.append(1)
-            return real_preview(*a)
-        real_preview = run.with_preview
-        with unittest.mock.patch.object(run, "sweep", cancelled_meanwhile), \
-                unittest.mock.patch.object(run, "with_preview", counted):
-            tid = self.add_browser_task()
-            m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "cancelled", m)
-        self.assertIsNone(m.get("resumed"))
-        self.assertFalse(seen.exists())  # no resumed run
-        self.assertEqual(len(starts), 1)  # the first run's preview only
-        d = self.desk.tasks_dir / tid
-        self.assertFalse((d / run.PREVIEW_FIRST_LOG).exists())
-        self.assertIn("http://localhost:8131/", (d / "preview.log").read_text())
-        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
-        self.assertEqual(m["preview"]["address"], "http://localhost:8131/")
-        shown = views.show_text(self.desk, tid)
-        self.assertNotIn("before hansa resumed it", shown)
-        self.assertNotIn("did not start", shown)
-
-    def test_preview_output_is_kept_with_keys_removed(self):
-        key = "sk-registry-0123456789abcdef"
-        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
-        (self.desk.secrets_dir / "registry.key").write_text(key)
-        self.preview_lane(f"echo token {key}; echo http://localhost:8125/; exec sleep 600")
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        log = (self.desk.tasks_dir / tid / "preview.log").read_text()
-        self.assertIn("token [key of registry]", log)
-        self.assertNotIn(key, log)
-        self.assertNotIn(key, json.dumps(m))
-        self.assertFalse((self.desk.state_dir / "runs" / tid / "preview.log").exists())
-
-    def test_preview_not_ready_note_has_the_desks_keys_removed(self):
-        key = "sk-registry-0123456789abcdef"
-        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
-        (self.desk.secrets_dir / "registry.key").write_text(key)
-        seen, _ = self.preview_lane(f"echo token {key}; exec sleep 600", wait=1)
-        tid = self.add_browser_task()
-        self.settle(Dispatcher(self.desk), tid)
-        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
-        self.assertIn("    token [key of registry]\n", prompt)
-        self.assertNotIn(key, prompt)
-
-    def test_preview_flooding_its_output_keeps_a_bounded_log_and_does_not_hold_up_the_server(self):
-        from hansa import run
-        flood = ("import sys, time\nline = b'A' * 999 + b'\\n'\nend, n = time.time() + 3, 0\n"
-                 "while time.time() < end and n < 2 ** 30:\n    sys.stdout.buffer.write(line * 1024); n += 2 ** 20\n"
-                 "sys.stdout.buffer.flush()\nprint('the end of it', flush=True)\ntime.sleep(600)\n")
-        self.preview_lane(f"echo http://localhost:8128/; exec {shlex.quote(sys.executable)} -c {shlex.quote(flood)}",
-                          FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="5")
-        raw_log, sizes = self.desk.state_dir / "runs" / "t0001" / "preview.log", []
-        took, real_finish = [], run.finish
-
-        def timed(*a):
-            t = time.time()
-            try:
-                return real_finish(*a)
-            finally:
-                took.append(time.time() - t)
-        tid, d = self.add_browser_task(), Dispatcher(self.desk)
-        with unittest.mock.patch("hansa.run.finish", timed):
-            end = time.time() + 60
-            while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
-                d.tick()
-                if raw_log.exists():
-                    sizes.append(raw_log.stat().st_size)
-                time.sleep(0.2)
-        m = self.desk.meta(tid)
-        self.assertEqual(m["state"], "done", m)
-        self.assertLess(max(sizes), 2 ** 23)  # a few MB at most on disk, while it ran too
-        log = self.desk.tasks_dir / tid / "preview.log"
-        self.assertLess(log.stat().st_size, 2 ** 23)
-        text = log.read_text()
-        self.assertTrue(text.startswith("http://localhost:8128/\n"))
-        self.assertRegex(text, r"\n\[hansa: \d+ bytes of the preview's output left out here\]\nA{999}\n")
-        self.assertTrue(text.endswith("the end of it\n"))
-        self.assertLess(max(took), 30)  # unbounded preview work in serve
-        self.assertTrue(m["preview"]["ready"] and m["preview"]["stopped"], m["preview"])
-        big = self.tmp / "big.log"  # what publish reads of a log hansa did not write itself is bounded too
-        with open(big, "wb") as f:
-            f.write(b"first line\n")
-            f.truncate(2 ** 30)
-            f.seek(0, 2)
-            f.write(b"\nlast line\n")
-        text = run.read_bounded(big, 2 ** 20, 2 ** 20)
-        self.assertLess(len(text), 2 ** 21 + 200)
-        self.assertTrue(text.startswith("first line\n") and text.endswith("\nlast line\n"))
-
-    def test_preview_stops_what_it_started_that_left_its_group_and_cleared_its_environment(self):
-        from hansa import run
-        py, d1, d2 = shlex.quote(sys.executable), self.tmp / "d1.pid", self.tmp / "d2.pid"
-        away = (f"import os\nopen({str(d1)!r}, 'w').write(str(os.getpid()))\nos.setsid()\nos.chdir('/')\n"
-                "os.execve('/bin/sleep', ['sleep', '600'], {})\n")  # its own session, no environment, elsewhere
-        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
-                 f"open({str(d2)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
-        self.preview_lane(f"echo http://localhost:8129/; {py} -c {shlex.quote(away)} & {py} -c {shlex.quote(twice)} & "
-                          "exec sleep 600", FAKE_SEE_TMP=str(self.tmp / "t.jsonl"), FAKE_TMP_WAIT="3")
-
-        def pid_of(f):
-            return int(f.read_text()) if f.exists() and f.read_text() else 0
-
-        def kill_daemons():
-            for f in (d1, d2):
-                if pid_of(f):
-                    try:
-                        os.kill(pid_of(f), signal.SIGKILL)
-                    except OSError:
-                        pass
-        self.addCleanup(kill_daemons)
-        tid = self.add_browser_task()
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "done", m)
-        self.assertTrue(pid_of(d1) and pid_of(d2))
-        for f in (d1, d2):  # the first seen below the preview, the second working in its worktree
-            end = time.time() + 10
-            while run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z" and time.time() < end:
-                time.sleep(0.1)
-            self.assertFalse(run.alive(pid_of(f)) and run._state(pid_of(f)) != "Z", f.name)
-
-    def kept_preview_log(self, tid: str, *chunks: bytes) -> str:
-        """What the task's folder keeps of this preview output, as preview.py and hansa serve keep it."""
-        from hansa import preview, run
-        raw = self.desk.raw_dir(tid)
-        raw.mkdir(parents=True, exist_ok=True)
-        kept = preview.Kept(str(raw / "preview.log"), run.PREVIEW_KEEP // 2)
-        for c in chunks:
-            for i in range(0, len(c), 65536):  # as drain reads the pipe
-                kept.add(c[i:i + 65536])
-        kept.close()
-        run.publish(self.desk, tid, "preview.log", most=run.PREVIEW_KEEP + 4096)
-        return str(self.desk.tasks_dir / tid / "preview.log")
-
-    def test_preview_a_key_cut_inside_a_long_line_of_the_kept_log_leaves_no_part_of_it(self):
-        from hansa import run
-        key = b"sk-registry-0123456789abcdef"
-        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
-        (self.desk.secrets_dir / "registry.key").write_bytes(key)
-        half, tid = run.PREVIEW_KEEP // 2, self.desk.new_task("Keys at the cuts")
-
-        def only_filler(text):
-            body = re.sub(r"\n\[hansa: [^\]]*\]\n", "", text)
-            self.assertLessEqual(set(body), set("xyz\n"), "a part of the key is left")
-            self.assertIn(f"with {run.PREVIEW_MARGIN} bytes on each side of a cut inside a line", text)
-        # one line with no newline: a key across the end of the kept start, another across the start of the kept end
-        out = b"x" * (half - 10) + key + b"y" * (3 * half) + key + b"z" * (half - 10)
-        log = self.kept_preview_log(tid, out)
-        only_filler(Path(log).read_text())
-        big = self.tmp / "big.log"  # read_bounded cuts the same way
-        big.write_bytes(out)
-        only_filler(self.desk.redact(run.read_bounded(big, half, half)))
-        b2 = self.desk.new_task("A key just after the start's last line")  # its start ends at a line, its end not
-        only_filler(Path(self.kept_preview_log(b2, b"x" * 100 + b"\n" + b"y" * (half - 20) + key + b"z" * half)).read_text())
-
-    def test_preview_binary_output_is_kept_within_its_bound_on_disk(self):
-        from hansa import run
-        tid = self.desk.new_task("Binary output")
-        log = self.kept_preview_log(tid, os.urandom(3 * run.PREVIEW_KEEP))
-        self.assertLessEqual(Path(log).stat().st_size, run.PREVIEW_KEEP + 4096)
-        self.assertIn("left out here", Path(log).read_text(encoding="utf-8"))  # and it is UTF-8 still
-
-    def test_preview_kept_log_with_many_short_keys_stays_within_its_bound_on_disk(self):
-        from hansa import run
-        K = run.PREVIEW_KEEP
-        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
-        (self.desk.secrets_dir / "registry-of-the-team.key").write_bytes(b"k1234567")
-        tid = self.desk.new_task("Keys flood")
-        log = Path(self.kept_preview_log(tid, (b"\xff" + b"k1234567" + b"\xfe") * (3 * K // 10)))
-        self.assertLessEqual(log.stat().st_size, K + 4096)
-        text = log.read_bytes().decode("utf-8")
-        self.assertNotIn("k1234567", text)
-        self.assertIn("[key of registry-of-the-team]", text)
-        self.assertTrue(re.search(r"\n\[hansa: \d+ bytes left out here, after keys were removed\]\n", text))
-
-    def test_preview_end_stops_an_orphan_in_the_worktree_but_not_a_process_with_a_parent_there(self):
-        from hansa import run
-        tid, folder = self.desk.new_task("Look at the page"), self.tmp / "wt"
-        (folder / "sub").mkdir(parents=True)
-        orphan_pid = self.tmp / "orphan.pid"
-        raw = self.desk.raw_dir(tid)
-        raw.mkdir(parents=True, exist_ok=True)
-        (raw / "preview.json").write_text(json.dumps({"pgid": 2 ** 22 + 7, "started": time.time() - 1, "seen": {},
-                                                      "cwd": str(folder), "tmp": str(self.tmp / "ptmp")}))
-        self.desk.change(tid, lambda x: {"preview": {"started": True}})
-        shell = subprocess.Popen(["sleep", "600"], cwd=folder / "sub")  # the principal's own, its parent alive
-        self.addCleanup(lambda: (shell.kill(), shell.wait()))
-        twice = ("import os, sys\nif os.fork(): sys.exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\n"
-                 f"open({str(orphan_pid)!r}, 'w').write(str(os.getpid()))\nos.execve('/bin/sleep', ['sleep', '600'], {{}})\n")
-        subprocess.run([sys.executable, "-c", twice], cwd=folder, check=True)
-        end = time.time() + 10
-        while not (orphan_pid.exists() and orphan_pid.read_text()) and time.time() < end:
-            time.sleep(0.05)
-        orphan = int(orphan_pid.read_text())
-
-        def kill_orphan():
-            try:
-                os.kill(orphan, signal.SIGKILL)
-            except OSError:
-                pass
-        self.addCleanup(kill_orphan)
-        while run.process_table().get(orphan, (0,))[0] != 1 and time.time() < end:
-            time.sleep(0.05)
-        run.end_preview(self.desk, tid)
-        self.assertIsNone(shell.poll())  # left alone
-        self.assertFalse(run.alive(orphan) and run._state(orphan) != "Z")
-        events = self.desk.events_path.read_text()
-        self.assertIn(f"{orphan} (an orphan working in the preview's folders)", events)
-        self.assertNotIn(str(shell.pid), events)
-
-    def test_preview_is_not_started_on_linux_and_the_worker_is_told(self):
-        seen, _ = self.preview_lane("echo http://localhost:8126/; exec sleep 600")
-        with unittest.mock.patch("hansa.run.PREVIEW_STARTS", False):
-            tid = self.add_browser_task()
-            m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "done", m)
-        self.assertEqual([c for c in self.srt_calls() if "preview.pid" in c["argv"][-1]], [])
-        self.assertFalse(self.preview_pid())
-        prompt = (lambda a: a[a.index("--append-system-prompt") + 1])(json.loads(seen.read_text().splitlines()[-1]))
-        self.assertIn("hansa does not start it on Linux", prompt)
-        self.assertIn("not started: hansa does not start a preview on Linux", views.show_text(self.desk, tid))
-        lines = "\n".join(views.preview_text(False, self.desk.settings()["lanes"]["a"]))
-        self.assertIn("on Linux hansa does not start it", lines)
-        mac = "\n".join(views.preview_text(True, self.desk.settings()["lanes"]["a"]))
-        self.assertIn("can reach every service on this machine's loopback", mac)
-        self.assertIn("up to 20 s (preview_wait_s)", mac)
-        self.assertIn("preview: ", views.explain_text(self.desk, "lane", "a"))
-        self.hansa("lane", "set", "a", "preview_wait_s", "45")
-        self.assertEqual(self.desk.settings()["lanes"]["a"]["preview_wait_s"], 45)
-        with self.assertRaises(SystemExit):
-            self.hansa("lane", "set", "a", "preview_wait_s", "0")
-        self.hansa("lane", "set", "a", "preview_wait_s", "none")
-        self.assertNotIn("preview_wait_s", self.desk.settings()["lanes"]["a"])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
-            main(["lane", "set", "--help"])
-        said = " ".join(out.getvalue().split())
-        self.assertIn("On Linux hansa does not start it", said)
-        self.assertIn("can reach every service on the machine's loopback", said)
 
     def test_stopped_worker_still_hands_in_what_it_wrote(self):
         s = self.desk.settings()
@@ -20913,8 +19488,7 @@ class DeskTest(unittest.TestCase):
     # | waiting first, then the real report after a notice        | the same                                          |
     # | with a verdict only in the report, only in the correction, | test_a_verifications_verdict_is_the_last_in_its_report_and_what_followed_it |
     # |   in both (different), on no notice turn                  |                                                   |
-    # | stopped at the turn limit, on a notice turn               | test_a_stopped_run_and_a_design_session_keep_their_report_after_notices |
-    # | a design session, on a notice turn                        | the same                                          |
+    # | stopped at the turn limit, on a notice turn               | test_a_stopped_run_keeps_its_report_after_notices |
     # | on a notice turn in which a second notice came while it worked | test_a_notice_that_comes_while_the_worker_works_in_a_notice_turn_is_part_of_that_turn |
     # | the same, then a later notice turn                        | the same                                          |
     # | waiting first; its real work starts a job that ends mid-turn | the same                                       |
@@ -20979,8 +19553,7 @@ class DeskTest(unittest.TestCase):
                 if late:
                     self.assertTrue(text.endswith(f"VERDICT: {late}\n"), text)
 
-    @design_as_on_mac
-    def test_a_stopped_run_and_a_design_session_keep_their_report_after_notices(self):
+    def test_a_stopped_run_keeps_its_report_after_notices(self):
         from hansa import run
         self.transcript_run("plain")  # sets lane a up on mimo
         s = self.desk.settings()
@@ -20991,26 +19564,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((self.desk.tasks_dir / m["id"] / "result.md").read_text(), run.STOPPED_NOTE + "\n\n".join(
             ["Starting a watch.", "The watch said the tests pass.", "Report: fixed the badge; the tests pass.",
              "Reading the build's output.", "Correction: the build's output shows two tests fail."]) + "\n")
-        # a design session whose record ends on a notice turn with tool use: its last message, as before
-        did = self.desk.new_task("Make the badge bigger")
-        self.desk.update(did, lane="a", provider="mimo", worktree=self.design_worktree(did), session_id="sid-late",
-                         model_asked="mimo-x", kind="design")
-        rec = run.config_home(self.desk, "mimo", self.desk.settings()["providers"]["mimo"]) / "projects" / "-design" \
-            / "sid-late.jsonl"
-        rec.parent.mkdir(parents=True, exist_ok=True)
-        say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "content": [{"type": "text", "text": t}]}}
-        rows = [{"type": "user", "turnOrigin": "sdk", "message": {"role": "user", "content": "Shape it"}},
-                say("d1", "Here is the plan."),
-                {"type": "user", "turnOrigin": "task_notification", "message": {
-                    "role": "user", "content": "<task-notification> <task-id>bw1</task-id> completed"}},
-                {"type": "assistant", "message": {"id": "d2", "content": [
-                    {"type": "tool_use", "id": "u1", "name": "Bash", "input": {"command": "cat out.log"}}]}},
-                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "u1"}]}},
-                say("d3", "The build passed.")]
-        rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
-        with unittest.mock.patch("hansa.run.end_design"):
-            run.finish(self.desk, did, 0)
-        self.assertEqual((self.desk.tasks_dir / did / "result.md").read_text(), run.DESIGN_NOTE + "The build passed.\n")
+
 
     def test_without_a_session_record_the_report_is_the_last_message(self):
         tid = self.desk.new_task("Add hello.txt")
@@ -21018,7 +19572,6 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((self.desk.tasks_dir / tid / "result.md").read_text(),
                          "Added hello.txt. Checked it exists.\n")
 
-    @design_as_on_mac
     def test_workers_are_not_given_tools_that_need_someone_there(self):
         from hansa import run
         tools = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
@@ -21038,13 +19591,6 @@ class DeskTest(unittest.TestCase):
             for t in tools:
                 self.assertIn(t, self.denied_by(argv))
             self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
-        did = self.desk.new_task("Make the badge bigger")
-        self.desk.update(did, lane="a", provider="claude", worktree=self.design_worktree(did), session_id="sid-d",
-                         model_asked="sonnet")
-        argv, _, _ = run.design_command(self.desk, did)
-        self.addCleanup(run.remove_sandbox_tmp, self.desk, did)  # the run folder it made for the session
-        for t in tools:
-            self.assertNotIn(t, self.denied_by(argv))
 
     def test_background_work_still_running_when_the_worker_ended_is_said(self):
         line = ("the worker ended while its background work was still running ({}); its report may be "
@@ -21742,85 +20288,6 @@ class DeskTest(unittest.TestCase):
         tid = self.settle(Dispatcher(self.desk), self.desk.new_task("Add docs/conf.py"))["id"]
         self.assertIn(f"note: nothing verified this change: {tid} changed docs/conf.py", self.hansa("merge", tid))
 
-    # The session runs in tmux as a process of its own, which imports hansa afresh: design_as_on_mac patches
-    # only this process, so on Linux the session refuses (test_a_design_session_does_not_start_on_linux).
-    @unittest.skipIf(account.LINUX, "design sessions do not run on Linux, and the session's own process (in tmux) "
-                                    "cannot be patched from the test to run as on a Mac")
-    @design_as_on_mac
-    def test_design_session_opens_for_the_principal_and_comes_back_for_review(self):
-        try:
-            tmux = tmux_bin()
-        except RuntimeError:
-            self.skipTest("no tmux here")
-        sockets = unittest.mock.patch.dict(os.environ, {"TMUX_TMPDIR": str(self.tmp)})  # not /tmp, tmux's default
-        sockets.start()
-        self.addCleanup(sockets.stop)
-        probe = [tmux, "-L", tmux_socket(self.desk) + "-probe"]
-        subprocess.run(probe + ["new-session", "-d", "sleep 5"], capture_output=True, timeout=30)
-        if subprocess.run(probe + ["kill-server"], capture_output=True, timeout=30).returncode:
-            skip_in_sandbox(self, "tmux cannot make its socket here (a sandbox refuses to create Unix sockets)")
-        seen = self.tmp / "argv.jsonl"
-        s = self.desk.settings()
-        s["providers"]["claude"]["config_dir"] = str(self.tmp / "cc")
-        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen), "FAKE_DESIGN_SECONDS": "2"}
-        s["lanes"]["a"]["preview"] = "npm run dev"
-        s["lanes"]["a"]["check"] = "true && echo checked"
-        s["lanes"]["a"]["setup"] = "echo installing"
-        self.assertEqual(self.desk.save_settings(s), [])
-        self.addCleanup(subprocess.run, [tmux, "-L", tmux_socket(self.desk), "kill-server"], capture_output=True)
-        with contextlib.redirect_stdout(io.StringIO()):
-            main(["--desk", str(self.desk.root), "design", "Make the week badge bigger", "--lane", "a"])
-        tid = "t0001"
-        with self.assertRaises(SystemExit):  # one design session per lane at a time
-            main(["--desk", str(self.desk.root), "design", "Another one", "--lane", "a"])
-        d = Dispatcher(self.desk)
-        d.tick()
-        m = self.desk.meta(tid)
-        self.assertEqual((m["state"], m["kind"], Path(m["worktree"]).name), ("running", "design", "a-design"))
-        st = views.status(self.desk)
-        self.assertIn(f"attach -t design-{tid}", st["design"][0]["join"])
-        self.assertEqual(st["running"], [])  # it does not take the lane's worker slot
-        self.assertIn(f"design-{tid}", [a for a in st["asks"] if a["by"] == "hansa"][0]["text"])
-        work = self.desk.new_task("Add hello.txt", lane="a")
-        self.assertEqual(self.settle(d, work)["state"], "done")  # the lane kept working meanwhile
-        m = self.settle(d, tid)
-        self.assertEqual(m["state"], "done", m)
-        self.assertEqual((m["files"], m["turns"]), (["badge.txt"], 2))
-        self.assertEqual(m["usage"]["claude-x"]["in"], 200)
-        self.assertIn("installing", (self.desk.tasks_dir / tid / "setup.log").read_text())  # set up before it opened
-        shown = views.show_text(self.desk, tid)
-        self.assertIn("Hand-in: the badge is bigger", shown)
-        self.assertEqual([a for a in self.desk.asks() if a["by"] == "hansa" and not a["closed"]], [])
-        runs = [json.loads(x) for x in seen.read_text().splitlines()]
-        self.assertEqual(sum("-p" in a for a in runs), 1)  # the worker's; the design session is interactive
-        argv = next(a for a in runs if "-p" not in a)
-        self.assertIn("Make the week badge bigger", argv[1])
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
-        self.assertIn("Bash(npm run dev:*)", argv)
-        self.assertIn("Bash(git merge:*)", argv)
-        self.assertIn("Bash(git commit:*)", argv)  # the principal is there: the session commits each step itself
-        self.assertIn("Bash(echo checked:*)", argv)  # and may run the lane's check, one rule per command in it
-        self.assertIn("No browser is set up", argv[argv.index("--append-system-prompt") + 1])
-        self.assertIn("--strict-mcp-config", argv)  # a design session sees no more of the account than a worker
-        with contextlib.redirect_stdout(io.StringIO()):
-            main(["--desk", str(self.desk.root), "merge", tid])
-        self.assertTrue((self.repo / "badge.txt").exists())
-        self.assertEqual({r["task"]: r["seat"] for r in cost.worker_rows(self.desk, 0)}, {tid: "design", work: "worker"})
-
-    @design_as_on_mac
-    def test_a_design_session_tmux_did_not_open_fails_without_asking_the_principal(self):
-        fake = self.tmp / "tmux"  # like tmux that cannot make its socket: it says so, exits 0, and opens nothing
-        fake.write_text("#!/bin/sh\necho 'error creating /tmp/tmux-501/hansa-x (Operation not permitted)' >&2\nexit 0\n")
-        fake.chmod(0o755)
-        with unittest.mock.patch.dict(os.environ, {"HANSA_TMUX": str(fake)}), contextlib.redirect_stdout(io.StringIO()):
-            main(["--desk", str(self.desk.root), "design", "Make the week badge bigger", "--lane", "a"])
-            Dispatcher(self.desk).tick()
-        m = self.desk.meta("t0001")
-        self.assertEqual(m["state"], "failed", m)
-        self.assertIn("tmux did not open the design session; it printed: error creating /tmp/tmux-501/hansa-x "
-                      "(Operation not permitted)", m["error"])
-        self.assertEqual([a for a in self.desk.asks() if a["by"] == "hansa"], [])
-        self.assertEqual(views.status(self.desk)["design"], [])
 
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
         s = self.desk.settings()
@@ -21843,25 +20310,6 @@ class DeskTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "wait", tid, "--timeout", "0.001", "--every", "0.01"])
         self.assertIn(f"no task finished in 0.001 min\n{tid} running 10 min, so far: 2 model replies", out.getvalue())
 
-    def test_browser_tool_is_not_told_where_the_worker_works(self):
-        folder = self.tmp / "browser"
-        folder.mkdir()
-        fake = self.tmp / "fake_browser.py"
-        fake.write_text("import os, sys\nwith open('seen.txt', 'w') as f:\n"
-                        "    f.write(os.getcwd() + '\\n')\n    f.writelines(sys.stdin)\nprint('bye')\n")
-        init = {"jsonrpc": "2.0", "id": 0, "method": "initialize",
-                "params": {"capabilities": {"roots": {"listChanged": True}}, "clientInfo": {"name": "claude-code"}}}
-        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "browser_take_screenshot"}}
-        relay = Path(__file__).resolve().parent.parent / "hansa" / "relay.py"
-        out = subprocess.run([sys.executable, str(relay), str(folder), f"{sys.executable} {fake}"],
-                             input="".join(json.dumps(m) + "\n" for m in (init, call)),
-                             capture_output=True, text=True, timeout=30)
-        self.assertEqual((out.returncode, out.stdout), (0, "bye\n"))
-        cwd, *lines = (folder / "seen.txt").read_text().splitlines()
-        self.assertEqual(Path(cwd).resolve(), folder.resolve())
-        got = [json.loads(x) for x in lines]
-        self.assertEqual(got[0]["params"]["capabilities"], {})
-        self.assertEqual(got[1], call)
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
@@ -21877,7 +20325,6 @@ class DeskTest(unittest.TestCase):
     def test_waiting_reason_says_a_stuck_server_is_busy_or_stuck(self):
         from hansa import run
         tid = self.desk.new_task("Anything")
-        design = self.desk.new_task("Talk it over", lane="a", kind="design")
         held = cli.hold_server_lock(self.desk)
         self.addCleanup(held.close)
         for quiet, said in ((0, "starts when `hansa serve` next looks (within seconds)"),
@@ -21886,8 +20333,6 @@ class DeskTest(unittest.TestCase):
             self.round_at(quiet)
             why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
             self.assertIn(said, why)
-            self.assertEqual("within seconds" in why, quiet < run.STUCK_AFTER, why)
-            why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(design), set())
             self.assertEqual("within seconds" in why, quiet < run.STUCK_AFTER, why)
         self.assertIn("busy or stuck", why)
         held.close()
@@ -21899,7 +20344,7 @@ class DeskTest(unittest.TestCase):
         held = cli.hold_server_lock(self.desk)
         self.addCleanup(held.close)
         self.round_at(0)
-        ids = [self.desk.new_task(f"Task {i}") for i in range(4)] + [self.desk.new_task("Talk", lane="a", kind="design")]
+        ids = [self.desk.new_task(f"Task {i}") for i in range(4)]
         alone = {t: waiting_reason(self.desk, self.desk.settings(), self.desk.meta(t), set()) for t in ids}
         reads = {"tasks": 0, "paused": 0, "server": 0}
         tasks, paused, server = Desk.tasks, Desk.paused, run.server_state
@@ -21917,24 +20362,6 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(reads, {"tasks": 1, "paused": 2, "server": 1})  # paused: the status's own, and the waiting lines'
         self.assertEqual({m["id"]: m["waiting"] for m in st["queued"]}, alone)  # as each says it alone
 
-    @design_as_on_mac
-    def test_hansa_design_says_what_the_waiting_lines_say_when_the_server_does_not_look(self):
-        from hansa import run
-        held = cli.hold_server_lock(self.desk)
-        self.addCleanup(held.close)
-        for quiet, said in ((0, "hansa opens the design session in seconds and asks the principal to join it."),
-                            (run.STUCK_AFTER + 60, "hansa opens the design session once `hansa serve` gets through its "
-                                                   "rounds; `hansa serve` is busy or stuck: no round finished for 6 "
-                                                   "minutes. Then it asks the principal to join it.")):
-            self.round_at(quiet)
-            out = self.hansa("design", "Talk it over", "--lane", "a")
-            self.assertIn(said, out)
-            self.hansa("cancel", out.split()[0])
-        held.close()
-        out = self.hansa("design", "Talk it over", "--lane", "a")
-        self.assertIn("hansa opens the design session once `hansa serve` gets through its rounds; `hansa serve` is "
-                      "not running. Then it asks the principal to join it.", out)
-        self.assertNotIn("in seconds", out)
 
     def test_a_release_without_asking_says_what_its_waiting_text_says_when_the_server_does_not_look(self):
         from hansa import release, run
@@ -22219,16 +20646,11 @@ class DeskTest(unittest.TestCase):
         self.assertIn("changed while this check ran", r["detail"])
         self.assertFalse(provider_problem(self.desk, self.desk.settings(), "mimo"))  # the new key is not rested
 
-    def test_status_says_which_build_runs_and_whether_cost_is_audited(self):
+    def test_status_says_which_build_runs(self):
         st = views.status(self.desk)
         self.assertTrue(st["build"])
         self.assertIn(st["build"], views.status_text(st))
-        self.assertNotIn("cost audit on", views.status_text(st))
-        s = self.desk.settings()
-        s["coordinator"]["audits_cost"] = True
-        self.assertEqual(self.desk.save_settings(s), [])
-        self.assertIn("cost audit on", views.status_text(views.status(self.desk)))
-        self.assertIn("cost audit on", (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text())
+
 
     def test_status_names_the_same_build_as_version_even_as_the_desks_account(self):
         import hansa
@@ -22353,9 +20775,6 @@ class DeskTest(unittest.TestCase):
         ends = [r.index(m) + len(m) for r, (_, m) in zip(provs, models)]
         self.assertEqual(len({e + len(r[e:]) - len(r[e:].lstrip()) for r, e in zip(provs, ends)}), 1, provs)
 
-    def test_a_design_session_waiting_for_a_stopped_server_says_so(self):
-        self.desk.new_task("Shape the badge", kind="design", lane="a")
-        self.assertIn("`hansa serve` is not running", views.status(self.desk)["queued"][0]["waiting"])
 
     def test_helpers_name_only_tools_claude_code_has(self):
         code = Path(__file__).resolve().parent.parent / "hansa" / "agents"
@@ -22507,23 +20926,6 @@ class DeskTest(unittest.TestCase):
                 httpd.shutdown()
                 httpd.server_close()
 
-    def test_the_pages_status_gives_each_design_session_its_screenshots(self):
-        from hansa import web
-        did = self.desk.new_task("Make the badge bigger", kind="design", lane="a")
-        self.desk.update(did, state="running", started=now())
-        shots = self.desk.tasks_dir / did / "browser"
-        shots.mkdir()
-        (shots / "old.png").write_bytes(b"x")
-        os.utime(shots / "old.png", (1, 1))
-        (shots / "new.png").write_bytes(b"x")
-        (shots / "notes.txt").write_text("not a picture")
-        [row] = web._status(self.desk)["design"]
-        self.assertEqual((row["id"], row["shots"]), (did, ["new.png", "old.png"]))
-        self.assertNotIn("shots", views.status(self.desk)["design"][0])  # hansa status --json is as it was
-        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
-        block = ui[ui.index("function designBlock"):ui.index("async function loadStatus")]
-        self.assertIn("shotStrip(m.id, m.shots, 6)", block)
-        self.assertNotIn("/api/task", block)  # no request of its own at each poll
 
     def test_the_latest_events_are_read_from_the_end_of_the_log_as_the_whole_log_gives_them(self):
         from hansa import web
@@ -22947,7 +21349,7 @@ class DeskTest(unittest.TestCase):
         out = self.tmp / "released.txt"
         self.desk.write_key("demo", "sk-demo-release-123456")
         sha = self.commit_in_repo("deploy.sh", "echo deploying\n")
-        self.hansa("lane", "set", "a", "release", f"sh ./deploy.sh && echo $HANSA_RELEASE_COMMIT > {out} "
+        self.hansa("lane", "target", "a", "default", f"sh ./deploy.sh && echo $HANSA_RELEASE_COMMIT > {out} "
                                                   "&& echo token $DEMO_TOKEN")
         os.environ["DEMO_TOKEN"] = "sk-demo-release-123456"  # hansa's own environment: a push's login, say
         self.assertEqual([e["field"] for e in self.events("lane_command_changed")], ["release"])
@@ -23090,13 +21492,13 @@ class DeskTest(unittest.TestCase):
         # the command changed before the yes, and after it
         self.hansa("release", "a")
         r = release.get(self.desk, 3)
-        self.hansa("lane", "set", "a", "release", f"touch {out}; echo more")
+        self.hansa("lane", "target", "a", "default", f"touch {out}; echo more")
         told = release.answer(self.desk, 3, True, "", r["commit"], r["command"])
         self.assertIn("release command changed since it was asked", told["void"])
         self.hansa("release", "a")
         r = release.get(self.desk, 4)
         self.assertEqual(release.answer(self.desk, 4, True, "", r["commit"], r["command"]), {"ok": True})
-        self.hansa("lane", "set", "a", "release", f"touch {out}")
+        self.hansa("lane", "target", "a", "default", f"touch {out}")
         d.tick()
         self.assertIn("release command changed since it was asked", release.get(self.desk, 4)["void"])
         self.assertFalse(out.exists())  # none of them ran
@@ -23301,7 +21703,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.settings()["releases_without_asking"], [entry])  # hansa leaves the list as it is
         take_back_in()
         # its release command changed
-        self.hansa("lane", "set", "a", "release", f"touch {out}; true")
+        self.hansa("lane", "target", "a", "default", f"touch {out}; true")
         self.assertEqual(asked()["state"], "waiting")
         self.assertIn("release command changed", public_settings(self.desk)["release_unmatched"][0]["why"])
         take_back_in()
@@ -23313,7 +21715,7 @@ class DeskTest(unittest.TestCase):
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=other)
         self.hansa("lane", "remove", "a")
         self.hansa("lane", "add", "a", "--repo", str(other), "--base", "dev")
-        self.hansa("lane", "set", "a", "release", f"touch {out}; true")
+        self.hansa("lane", "target", "a", "default", f"touch {out}; true")
         [entry] = self.desk.settings()["releases_without_asking"]
         self.assertEqual((entry["base"], entry["command"]), ("dev", f"touch {out}; true"))
         r = asked()
@@ -23324,7 +21726,7 @@ class DeskTest(unittest.TestCase):
         take_back_in()
         rid = asked()["id"]
         self.assertEqual(release.get(self.desk, rid)["state"], "approved")
-        self.hansa("lane", "set", "a", "release", f"touch {out}")
+        self.hansa("lane", "target", "a", "default", f"touch {out}")
         Dispatcher(self.desk).tick()
         self.assertEqual(release.get(self.desk, rid)["state"], "waiting")
         self.assertFalse(out.exists())
@@ -23391,8 +21793,8 @@ class DeskTest(unittest.TestCase):
         self.assertIn("has 5.0 GB free", low["volumes"][0])
         said = self.hansa("status")
         self.assertIn("DISK LOW: ", said)
-        self.assertIn("(floor 10 GB): hansa serve starts no new task, verification, try, merge or merge check, design "
-                      "session or release until every volume has 11.0 GB free; what runs goes on", said)
+        self.assertIn("(floor 10 GB): hansa serve starts no new task, verification, try, merge or merge check or "
+                      "release until every volume has 11.0 GB free; what runs goes on", said)
         self.assertIn("disk: 500.0 GB free on the desk's volume · floor 10 GB (hansa disk-floor)", said)
         self.assertIn("waiting: hansa serve starts nothing new while free space is under the floor (10 GB)", said)
         self.assertIn("now: DISK LOW", self.hansa("explain", "server"))
@@ -24047,11 +22449,11 @@ class DeskTest(unittest.TestCase):
 
     def test_a_release_command_set_with_a_forbidden_word_is_said_at_once_and_kept(self):
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["maplebox"])), {"ok": True, "problems": []})
-        out = self.hansa("lane", "set", "a", "release", "scp target/app.jar /Users/MapleBox/deploy/")
+        out = self.hansa("lane", "target", "a", "default", "scp target/app.jar /Users/MapleBox/deploy/")
         self.assertIn("Warning: lane a's release target default holds \"maplebox\"", out)
         self.assertIn("scp target/app.jar /Users/MapleBox/deploy/", out)
         self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["default"]["command"], "scp target/app.jar /Users/MapleBox/deploy/")
-        self.assertNotIn("Warning", self.hansa("lane", "set", "a", "release", "none"))
+        self.assertNotIn("Warning", self.hansa("lane", "target", "a", "default", "none"))
         self.assertNotIn("Warning", self.hansa("lane", "target", "a", "push", "git push origin main"))
         out = self.hansa("lane", "target", "a", "test", "./install.sh /home/maplebox/test")
         self.assertIn("Warning: lane a's release target test holds \"maplebox\"", out)
@@ -24343,7 +22745,7 @@ class DeskTest(unittest.TestCase):
                     digest = hashlib.sha256(script.read_bytes()).hexdigest()
                     if row == 1:
                         warning(c, command, script)
-                        c.assertIn(path, c.hansa("lane", "set", "a", "release", command))
+                        c.assertIn(path, c.hansa("lane", "target", "a", "default", command))
                         c.assertIn(path, c.hansa("lane", "add", "b", "--like", "a"))
                     elif row == 2:
                         for cmd in (path + " prod", "$HOME/ops/deploy.sh prod", "${HOME}/ops/deploy.sh prod",
@@ -25598,7 +24000,7 @@ class DeskTest(unittest.TestCase):
 
     def test_a_release_command_holding_a_key_is_refused_on_saving(self):
         self.desk.write_key("demo", "sk-demo-release-123456")
-        said = self.refused("lane", "set", "a", "release", "curl -H 'Authorization: sk-demo-release-123456' https://x")
+        said = self.refused("lane", "target", "a", "default", "curl -H 'Authorization: sk-demo-release-123456' https://x")
         self.assertIn("the release command of target default holds the key of demo", said)
         self.assertIn("read the key from where the tool keeps it", said)
         self.assertNotIn("sk-demo-release-123456", said)
@@ -25606,7 +24008,7 @@ class DeskTest(unittest.TestCase):
         s = self.desk.settings()
         s["lanes"]["a"]["release"] = "deploy sk-demo-release-123456"
         self.assertTrue(any("holds the key of demo" in x for x in self.desk.save_settings(s)))
-        self.hansa("lane", "set", "a", "release", "./deploy --token-file ~/.config/deploy/token")  # a key read by the tool
+        self.hansa("lane", "target", "a", "default", "./deploy --token-file ~/.config/deploy/token")  # a key read by the tool
         self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["default"]["command"], "./deploy --token-file ~/.config/deploy/token")
 
     def test_the_page_looks_once_at_whether_a_waiting_release_still_applies_for_both_languages(self):
@@ -25653,7 +24055,7 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):
             self.assertIn("only the coordinator asks for a release", self.refused("release", "a"))
         self.assertEqual(release.releases(self.desk), [])
-        self.hansa("lane", "set", "a", "release", "none")
+        self.hansa("lane", "target", "a", "default", "none")
         self.assertIn("lane a has no release target", self.refused("release", "a"))
         self.assertIn("no releases yet", self.hansa("release"))
 
@@ -26165,16 +24567,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertIn(rule, css)
         self.assertNotIn("max-content 1fr", css)
 
-    def test_both_page_languages_name_ping_operator_and_the_design_sandbox(self):
+    def test_both_page_languages_name_ping_and_operator(self):
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
         for label in ('check:"Ping"', 'lastCheck:"last ping"', 'lastCheck:"上次 Ping"',
                       'helper_operator:"operator"', 'helper_operator:"操作"',
-                      'helper_verifier:"earlier helper: verifier"', 'helper_verifier:"早期助手：验收官"',
-                      'the preview command is run by the design session, in its own sandbox',
-                      '设计会话在自己的沙箱里'):
+                      'laneCommandsNote:'):
             self.assertIn(label, ui)
         self.assertEqual(ui.count('check:"Ping"'), 2)
         self.assertNotIn('release:T.laneRelease', ui)
+
 
     def principals_release_desk(self):
         """A desk with lane a and two release targets, one with a long command of few spaces,
@@ -26294,7 +24695,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_the_status_and_settings_tabs_show_no_null_for_sections_a_desk_has_not(self):
         # a desk with nothing running, queued or waiting: the sections it has not are left out, not shown as "null"
         status = views.status(self.desk)
-        self.assertEqual((status["running"], status["queued"], status["review"], status["design"]), ([], [], [], []))
+        self.assertEqual((status["running"], status["queued"], status["review"]), ([], [], []))
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
@@ -26359,7 +24760,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         # the page sets them, and the coordinator's own changes leave them as they are
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"], release_forbidden=["secret"])),
                          {"ok": True, "problems": []})
-        self.hansa("lane", "set", "a", "release", "git push origin main")
+        self.hansa("lane", "target", "a", "default", "git push origin main")
         self.hansa("concurrency", "2")
         s = self.desk.settings()
         self.assertEqual(([x["lane"] for x in s["releases_without_asking"]], s["release_forbidden"],
@@ -26703,32 +25104,6 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertIn("waits for the principal's yes", self.hansa("release", "a", "default"))
                 self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
 
-    def test_lane_set_release_forwards_to_default_including_none(self):
-        from hansa import release
-        self.hansa("lane", "target", "a", "prod", "true")
-        said = self.hansa("lane", "set", "a", "release", "echo hello")
-        self.assertIn("hansa lane target a default 'echo hello'", said)
-        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"],
-                         {"prod": {"command": "true"}, "default": {"command": "echo hello"}})
-        self.tick_targets("default")
-        self.hansa("lane", "set", "a", "release", "echo hello")
-        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "default"))
-        self.assertIn("hansa lane target a default none", self.hansa("lane", "set", "a", "release", "none"))
-        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"], {"prod": {"command": "true"}})
-
-    def test_lane_set_release_refuses_a_default_target_of_another_kind(self):
-        for options in ({"fixed": True}, {"after": "prod"}, {"timeout_min": 10}):
-            with self.subTest(options=options):
-                s = self.desk.settings()
-                s["lanes"]["a"]["targets"] = {"prod": {"command": "true"},
-                                                 "default": {"command": "true", **options}}
-                self.assertEqual(self.desk.save_settings(s), [])
-                before = self.desk.settings_path.read_bytes()
-                for command in ("echo hello", "none"):
-                    said = self.refused("lane", "set", "a", "release", command)
-                    self.assertIn("already has a default target with its own options", said)
-                    self.assertIn("hansa lane target a default", said)
-                    self.assertEqual(self.desk.settings_path.read_bytes(), before)
 
     def test_two_targets_one_listed_and_one_not(self):
         from hansa import release
@@ -27441,7 +25816,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertNotEqual(a["cwd"], str(self.desk.root))  # a folder of its own
         os.environ.pop("HANSA_TASK")
         # a release waits for the yes, and ends void
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a", "first")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
@@ -27455,7 +25830,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         d = Dispatcher(self.desk)
         for rid, command, end in ((2, "true", "done"), (3, "exit 4", "FAILED")):
             if command != "true":
-                self.hansa("lane", "set", "a", "release", command)
+                self.hansa("lane", "target", "a", "default", command)
             self.hansa("release", "a")
             r = release.get(self.desk, rid)
             self.assertEqual(release.answer(self.desk, rid, True, "", r["commit"], r["command"]), {"ok": True})
@@ -27467,7 +25842,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertIn("(exit 4)", self.alerted(out)[-1]["text"])
         # one refused for a forbidden word
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["unshippable"])), {"ok": True, "problems": []})
-        self.hansa("lane", "set", "a", "release", "echo unshippable")
+        self.hansa("lane", "target", "a", "default", "echo unshippable")
         self.refused("release", "a")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
@@ -27714,7 +26089,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_a_waiting_release_queues_an_alert_holding_a_one_time_code(self):
         from hansa import alert, release
         out = self.alert_fake()
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a", "first")
         code = self.queued_code(1)
         self.assertRegex(code, "^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$")
@@ -27783,7 +26158,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         from hansa import alert, release, web
         # a command that fails, writing back what it read: what is kept of its run has the code taken out
         self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "cat; exit 1"})), {"ok": True, "problems": []})
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a", "the note")
         code = self.queued_code(1)
         result = alert.send_due(self.desk, gather=0)
@@ -27813,7 +26188,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_the_right_release_code_approves_recorded_as_through_the_code(self):
         from hansa import alert, release
         self.alert_fake()
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         code = self.queued_code(1)
         alert.send_due(self.desk, gather=0)
@@ -27835,7 +26210,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_a_wrong_release_code_is_refused_and_three_void_it(self):
         from hansa import release
         self.alert_fake()
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         code = self.queued_code(1)
         wrong = "ABCDEF" if code != "ABCDEF" else "ABCDEG"
@@ -27902,7 +26277,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_without_an_alert_command_there_is_no_code_and_the_page_answers(self):
         from hansa import alert, release
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         self.assertEqual(alert.queued(self.desk), [])
         self.assertNotIn("code", release.get(self.desk, 1))
@@ -27920,7 +26295,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_hansa_release_no_with_the_code_refuses_the_release(self):
         from hansa import release
         self.alert_fake()
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         code = self.queued_code(1)
         said, refused = self.code_answer("no", "1", code, "not", "this", "week")
@@ -27938,7 +26313,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         cmd = (f"{shlex.quote(sys.executable)} -c \"import sys; t = sys.stdin.read(); "
                f"print('x' * 190 + t.title()); print(t.title().replace(' ', '-'))\"; exit 1")
         self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         code = self.queued_code(1)
         result = alert.send_due(self.desk, gather=0)
@@ -27972,7 +26347,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertNotEqual(where.resolve(), self.desk.root.resolve())
         self.assertEqual(where.resolve().parent, alert.runs_dir(self.desk).resolve())  # in secrets/, closed to agents
         self.assertFalse(where.exists())  # removed afterwards
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")  # with a code too
         alert.send_due(self.desk, gather=0)
         self.assertEqual(list(self.desk.root.rglob("alert-log.txt")), [])
@@ -27989,7 +26364,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertIn("yes and no (in any case) are not lane names", " ".join(self.desk.save_settings(s)))
         # a desk that already has such a lane: the answer form records nothing, and says to remove it first
         self.alert_fake()
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         code = self.queued_code(1)
         s = json.loads(self.desk.settings_path.read_text())
@@ -28039,7 +26414,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             child.wait()
         self.assertEqual((folder / "here.txt").read_text(), "say code AB3DE9")
         self.assertEqual(folder.resolve().parent, alert.runs_dir(self.desk).resolve())
-        # in secrets/: the coordinator's rules deny reading it, and workers, verifiers and design sessions too
+        # in secrets/: the coordinator's rules deny reading it, and workers and verifiers too
         self.assertIn(self.desk.secrets_dir.resolve(), folder.resolve().parents)
         self.assertIn(self.desk.secrets_dir, run.desk_private(self.desk))
         self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", cli.permissions(self.desk)["deny"])
@@ -28071,7 +26446,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_a_code_given_as_two_words_is_refused_without_counting_a_wrong_code(self):
         from hansa import release
         self.alert_fake()
-        self.hansa("lane", "set", "a", "release", "true")
+        self.hansa("lane", "target", "a", "default", "true")
         self.hansa("release", "a")
         code = self.queued_code(1)
         refused = self.code_answer("yes", "1", code[:3], code[3:])[1]
@@ -29458,7 +27833,6 @@ class OnlyUnsandboxedTest(unittest.TestCase):
     def test_a_test_is_marked_by_the_helper_it_calls(self):
         self.assertEqual([unsandboxed(f) for f in (Samples.test_port, Samples.test_socket_in_a_function,
                                                    Samples.test_other)], [True, True, False])
-        self.assertTrue(unsandboxed(DeskTest.test_design_session_opens_for_the_principal_and_comes_back_for_review))
         self.assertTrue(unsandboxed(DeskTest.test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should))
         self.assertTrue(unsandboxed(DeskTest.test_a_post_reaches_a_real_inbox))
         self.assertFalse(unsandboxed(PortSkipTest.test_a_refusing_sandbox_skips_with_its_reason))

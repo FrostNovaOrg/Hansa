@@ -3,7 +3,7 @@
 Every interactive Claude Code session listens on a local Unix socket, its inbox: one line of JSON posted
 there arrives in the session as a message from another session. A follower is a small background process
 per session and desk. It reads the desk's event log from where it left off, picks what the coordinator
-waits for (a task ended, a verification or design session ended, a queued merge check ended, the principal
+waits for (a task ended, a verification ended, a queued merge check ended, the principal
 answered a request, a provider an open request names became ready, the principal answered a release, a release
 ended or became void, the server stopped, free space went under the floor or came back over it), and posts it to
 that session's inbox. It ends when the session's process does.
@@ -25,7 +25,7 @@ Where things are kept:
 nor writes in the desk, so its follower asks the account's hansa for the log (`hansa notify-feed`) and keeps
 its own files under root's home.
 
-A task or request goes to the session that made it (`hansa add`, `retry`, `verify`, `merge`, `design` and
+A task or request goes to the session that made it (`hansa add`, `retry`, `verify`, `merge` and
 `ask` record it: its pid and start time), if that session has a live follower; otherwise to every follower
 of the desk. Desk-wide events go to every follower.
 """
@@ -191,8 +191,6 @@ def task_line(desk: Desk, m: dict) -> str:
     if m.get("kind") == "verify":
         head = (f"{tid}, the verification of {m.get('parent')}, ended: "
                 + (f"verdict: {m['verdict']}" if m.get("verdict") else f"{st}, without a verdict"))
-    elif m.get("kind") == "design":
-        head = f"design session {tid} ended ({st})"
     else:
         head = f"{tid} {st}"
     head += f": {m.get('title', '')}"
@@ -257,7 +255,7 @@ def _item(desk: Desk, e: dict):
             if memory:
                 line += " · " + " · ".join(memory)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
-    # hansa closes a design session's request itself, and the coordinator knows of one it closed (hansa ask --close)
+    # The coordinator knows of a request it closed itself (hansa ask --close)
     if kind == "ask_closed" and e.get("by") != "hansa" and not e.get("coordinator"):
         x = next((a for a in desk.asks() if a.get("id") == e.get("id")), None)
         if not x:
@@ -1090,12 +1088,8 @@ def remove_inbox(sock: str) -> None:
         os.rmdir(d)  # only when empty
 
 
-# What hansa notify on says when given --clear-daily, which it still takes so that start scripts keep working
-CLEAR_MOVED = "the daily clear now comes with hansa coordinator --clear-daily HH-HH; hansa notify on does not clear"
-
-
-def turn_on(desk: Desk, clear: bool = False) -> str:
-    """Start posting to the session this is run from. clear: --clear-daily was given, which only says where it went."""
+def turn_on(desk: Desk) -> str:
+    """Start posting to the session this is run from."""
     sess, sock = session_here(), session_value("CLAUDE_CODE_MESSAGING_SOCKET")
     if os.environ.get("HANSA_TASK"):
         raise SystemExit("hansa: notify is for the coordinator's session, not a worker's; nothing was started")
@@ -1105,17 +1099,16 @@ def turn_on(desk: Desk, clear: bool = False) -> str:
                          "started. Run it with the coordinator session's Bash tool")
     how = start(desk, sess, sock)  # its follower looks the name up; this command starts no claude
     name = next((r.get("name") or "" for r in records(desk) if same(r.get("session"), sess)), "")
-    moved = f"\n{CLEAR_MOVED}" if clear else ""
     if how == "already":
         return (f"hansa already notifies this session, {who(sess['pid'], name)}; nothing was started. hansa notify lists "
-                "the desk's followers" + moved)
+                "the desk's followers")
     if how == "unknown":
         raise SystemExit(f"hansa: the follower did not say it started within 10 s; see "
                          f"{private_dir(desk) / (key_of(sess) + '.log')}")
     said = (f"hansa now posts to this session, {who(sess['pid'], name)}, through its inbox: its own tasks and requests, and "
             "those no other session hears. Do not keep hansa wait running in the background meanwhile. "
             "Stop it with hansa notify off")
-    return said + moved
+    return said
 
 
 def turn_off(desk: Desk) -> str:

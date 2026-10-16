@@ -18,10 +18,10 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
-                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, read_split, refused_rule, resolved, stored, write_json,
+                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, write_text)
-from .run import (DESIGN_ON_LINUX, HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -34,8 +34,8 @@ DOCS = Path(__file__).resolve().parent.parent / "docs"  # where hansa help TOPIC
 # hansa help TOPIC: the topic's file under docs/, its heading (None: the whole file), and what it holds. No name
 # equals a command, a lane subcommand or an explain target, a plural of one or a prefix of one (a test holds it)
 TOPICS = {
-    "workers-sandbox": ("sandbox.md", "What workers, verifiers and design sessions may touch",
-                        "what workers, verifiers and design sessions may read, write and reach"),
+    "workers-sandbox": ("sandbox.md", "What workers and verifiers may touch",
+                        "what workers and verifiers may read, write and reach"),
     "git-folders": ("sandbox.md", "Git's folders", "what each run may write in git's folders, and what hansa checks "
                     "before it runs git in a worktree"),
     "sandbox-probe": ("sandbox.md", "The sandbox probe before a run", "the probe of the sandbox before a run, and "
@@ -63,8 +63,6 @@ TOPICS = {
     "check-output": ("tasks.md", "A check's output", "where a check's and a merge check's output is kept, and "
                      "how to read it"),
     "effort": ("tasks.md", "Effort", "which effort a run gets, and where it comes from"),
-    "browser": ("tasks.md", "Browser tasks and the preview", "a task with a browser, the browser tool and the "
-                "lane's preview"),
     "writing-tasks": ("tasks.md", "Writing a task a verification can judge", "how to write a task, and its "
                       "verification's text, so that the verification can judge it"),
     "merge-check": ("tasks.md", "Merging, the merge check and conflicts", "merging, the merge check and conflicts, "
@@ -89,16 +87,13 @@ TOPICS = {
     "session-identity": ("who-changes-what.md", "A Claude Code session's identity, and the page's token", "what "
                          "a process started from a Claude Code session inherits from it, and the page's token"),
 }
-# explain targets that moved to hansa help, and the form that replaces each: still answered, for one release
-EXPLAIN_RETIRED = {"states": "hansa help states"}
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
-COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close", "design")),
+COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "cost")),
                   ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "pause", "resume")),
                   ("the desk", ("init", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
-RETIRED_HELPERS = ("verifier.md", "verifier-high.md")  # read-only checks, replaced by hansa verify and the reviewer
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
 BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
@@ -354,8 +349,6 @@ def _waits(desk: Desk, tid: str) -> str:
     """The line for a task just queued that no provider of its lane can start now, in hansa status's words;
     '' when one can."""
     m = desk.meta(tid)
-    if m.get("kind") == "design":
-        return ""
     why = waiting_reason(desk, desk.settings(), m, set())
     return f"\n{tid} waits: {why}" if "no provider ready" in why else ""
 
@@ -385,13 +378,10 @@ def cmd_add(a):
     desk = Desk.find(a.desk)
     s = desk.settings()
     _work_lane(s, a.lane)
-    if a.browser and not s.get("browser"):
-        raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued. "
-                         + see_more("browser"))
     text = _text(a)
     _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
-                        title=a.title or "", max_turns=a.max_turns or 0, browser=a.browser or None,
+                        title=a.title or "", max_turns=a.max_turns or 0,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until it is added: hansa lane add {a.lane} --repo PATH")
@@ -408,38 +398,6 @@ def cmd_add(a):
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "")
           + (f". {_wait_for(desk, tid)}; hansa show {tid} says where it is" if notify.hears_of(desk, tid)
              else f". Follow it with: hansa show {tid}") + _waits(desk, tid))
-
-
-def cmd_design(a):
-    if account.LINUX:
-        try:
-            s = Desk.find(a.desk).settings()
-        except SystemExit:
-            s = {"lanes": {}}
-        _work_lane(s, a.lane or (next(iter(s["lanes"])) if len(s["lanes"]) == 1 else ""))
-        raise SystemExit(f"hansa: {DESIGN_ON_LINUX}")
-    desk = Desk.find(a.desk)
-    s = desk.settings()
-    lane = a.lane or (next(iter(s["lanes"])) if len(s["lanes"]) == 1 else "")
-    if lane not in s["lanes"]:
-        raise SystemExit("hansa: say which lane the design session is for: --lane L" if not lane
-                         else f"hansa: there is no lane {lane}")
-    _work_lane(s, lane)
-    text = _text(a)
-    _title_allowed(desk, s, a.title, text, lane)
-    with desk.lock():
-        open_ = [m["id"] for m in desk.tasks() if m.get("kind") == "design" and m.get("lane") == lane
-                 and m["state"] in ("queued", "running")]
-        if open_:
-            raise SystemExit(f"hansa: lane {lane} already has design session {open_[0]} open; one at a time per lane "
-                             f"(hansa show {open_[0]})")
-        tid = desk.new_task(text, kind="design", lane=lane, title=a.title or "",
-                            browser=bool(s.get("browser")) or None, **notify.recorded(notify.session_here()))
-    why_not = not_looking(desk)  # as the waiting lines say it (run.waiting_reason)
-    opens = (f"hansa opens the design session once `hansa serve` gets through its rounds; {why_not}. Then it"
-             if why_not else "hansa opens the design session in seconds and")
-    print(f"{tid} queued: {opens} asks the principal to join it. "
-          f"It comes back for review when they are done: {notify.wait_step(desk, tid)}")
 
 
 def cmd_status(a):
@@ -856,11 +814,8 @@ def _retry(desk: Desk, a) -> None:
         verdict = desk.meta(vid).get("verdict") or "none"
         text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
                  f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
-    if a.browser and not desk.settings().get("browser"):
-        raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued. "
-                         + see_more("browser"))
     opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
-            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80], "browser": a.browser or m.get("browser"),
+            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80],
             **notify.recorded(notify.session_here())}
     base = (own or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
@@ -994,9 +949,6 @@ def _verify(desk: Desk, a) -> None:
     if m["state"] != "done" or not m.get("commits"):
         raise SystemExit(f"hansa: only a finished task with changes can be verified; {a.id} is {m['state']}"
                          + ("" if m.get("commits") else ", with nothing to merge"))
-    if a.browser and not desk.settings().get("browser"):
-        raise SystemExit("hansa: this desk has no browser set up (the principal sets one on the page); nothing was queued. "
-                         + see_more("browser"))
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
@@ -1020,7 +972,7 @@ def _verify(desk: Desk, a) -> None:
             + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
     vid = desk.new_task(text, kind="verify", parent=a.id, lane=lane, effort=a.effort or "",
                         start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
-                        browser=a.browser or m.get("browser"), **notify.recorded(sess))
+                        **notify.recorded(sess))
     if v:
         close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
     desk.update(a.id, verify=vid, **notify.recorded(sess))
@@ -1052,8 +1004,8 @@ def _same_repo(x: str, y: str) -> bool:
 
 def _work_lane(s: dict, name) -> None:
     if s["lanes"].get(name, {}).get("merge_lane"):
-        raise SystemExit(f"hansa: lane {name} is a merge lane and takes no work: no tasks, verifications, design "
-                         "sessions or retries; nothing was queued")
+        raise SystemExit(f"hansa: lane {name} is a merge lane and takes no work: no tasks, verifications "
+                         "or retries; nothing was queued")
 
 
 def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
@@ -1091,7 +1043,7 @@ def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
 def _stop_release(desk: Desk, a) -> None:
     """hansa release --stop ID [reason]: call a release off."""
     if os.environ.get("HANSA_TASK"):
-        raise SystemExit("hansa: only the coordinator stops a release; a worker, verification or design session "
+        raise SystemExit("hansa: only the coordinator stops a release; a worker or verification "
                          "cannot. Say in your report why it should not go out")
     rid = a.stop.lstrip("#")
     if not rid.isdigit():
@@ -1193,9 +1145,9 @@ def cmd_wait(a):
 
 def cmd_ask(a):
     if a.close is not None:
-        if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: the requests are the coordinator's
-            raise SystemExit("hansa: only the coordinator closes a request; a worker, verification or design "
-                             "session cannot. Say in your report that it may be done")
+        if os.environ.get("HANSA_TASK"):  # a worker or verification: the requests are the coordinator's
+            raise SystemExit("hansa: only the coordinator closes a request; a worker or verification "
+                             "cannot. Say in your report that it may be done")
         Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
         print(f"ask #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the reason")
         return
@@ -1212,8 +1164,8 @@ def cmd_release(a):
     if not a.lane:
         print(desk.redact(release.list_text(desk)))
         return
-    if os.environ.get("HANSA_TASK"):  # a worker, verification or design session: releases are the coordinator's
-        raise SystemExit("hansa: only the coordinator asks for a release; a worker, verification or design session "
+    if os.environ.get("HANSA_TASK"):  # a worker or verification: releases are the coordinator's
+        raise SystemExit("hansa: only the coordinator asks for a release; a worker or verification "
                          "cannot. Say in your report that it may be ready to go out")
     if answer_name(a.lane) and a.note and a.note[0].lstrip("#").isdigit():  # always an answer, never a request
         taken = [n for n in desk.settings()["lanes"] if answer_name(n)]
@@ -1275,9 +1227,7 @@ def cmd_release(a):
 
 def cmd_notify(a):
     desk = Desk.find(a.desk)
-    if a.clear_daily is not None and a.action != "on":
-        raise SystemExit("hansa: --clear-daily goes with hansa coordinator (hansa notify on still takes it)")
-    print(notify.turn_on(desk, a.clear_daily is not None) if a.action == "on" else notify.turn_off(desk)
+    print(notify.turn_on(desk) if a.action == "on" else notify.turn_off(desk)
           if a.action == "off" else notify.list_text(desk))
 
 
@@ -1294,8 +1244,6 @@ def cmd_explain(a):
     if a.what == "task":
         print(f"hansa explain task {a.name or 'ID'} is now hansa show {a.name or 'ID'}; "
               "this form goes in the next release")
-    if a.what in EXPLAIN_RETIRED:  # for one release: the old form still answers, and says the new one
-        print(f"hansa explain {a.what} is now {EXPLAIN_RETIRED[a.what]}; this form goes in the next release")
     if a.all and a.what != "lane":
         raise SystemExit("hansa: --all is for hansa explain lane NAME: the whole built-in list of what its workers "
                          "may not read")
@@ -1332,10 +1280,6 @@ def cmd_cost(a):
         print(json.dumps(rep, ensure_ascii=False, indent=1))
     else:
         print(views.cost_text(rep, a.by or "day"))
-
-
-def cmd_check(a):
-    raise SystemExit("hansa: hansa check is now hansa ping [PROVIDER]; nothing was run")
 
 
 def cmd_ping(a):
@@ -1496,19 +1440,17 @@ def cmd_coordinator(a):
     repos = [r for r in plan["repos"] if os.path.isabs(r)]
     # the folders the principal lets it read without asking, given as the repositories are. Checked again as
     # whoever starts the session: the plan may be the account's to write, and root's home and login are not its
-    # what the principal keeps workers from reading: Read is denied there to this session too, and none of the
-    # folders it is let read may open one. Checked again as whoever starts the session, as those are
+    # What the principal keeps workers from reading: Read is denied there to this session too.
+    # Checked again as whoever starts the session, as those are
     kept, unkept = no_read_paths(desk, plan, theirs)
-    shut, said = read_folders(desk, plan, env, theirs, kept)
-    for line in [*unkept, *said]:
+    for line in unkept:
         print(f"hansa: {line}; skipped (the principal changes the list on the page, Settings)", file=sys.stderr)
     # and the built-in logins and keys under the home folder of whoever runs the session. Not the Claude Code
     # folders, as for workers: its own memory lives in one (own_folder_rules closes the login in it)
     home = env.get("HOME") or os.path.expanduser("~")
     no_read = no_read_rules([*kept, *(os.path.join(home, f) for f in home_secrets())])
-    dirs = [*repos, *(d for d in shut if d not in repos)]
-    shut = [*shut, *(r for r in (stored(resolved(d) or d) for d in shut) if r not in shut)]  # where a link leads, too
-    no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir, *shut]]
+    dirs = repos
+    no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
     claude = claude_bin()
     if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
@@ -1576,19 +1518,6 @@ def no_read_paths(desk: Desk, plan: dict, theirs: str = "") -> tuple:
     good, more, stops = deny_parts(given, desk.root, None)
     if stops:  # as coordinator_desk: a path the plan gives that cannot be written as a rule stops the session
         raise SystemExit(f"hansa: {stop_text(stops)}")
-    return good, [*said, *(m for m in more if m not in said)]
-
-
-def read_folders(desk: Desk, plan: dict, env: dict, theirs: str = "", denied=()) -> tuple:
-    """The folders of the plan the session may be given to read, and what was said of those it is not: what
-    the desk's owner found (coordinator_desk), then the same checks as the user starting the session, with the
-    Claude Code folder it runs from."""
-    given = plan.get("read") if isinstance(plan.get("read"), list) else []
-    refused = plan.get("read_refused") if isinstance(plan.get("read_refused"), list) else []
-    said = [x for x in refused if isinstance(x, str)]
-    own = [os.path.abspath(os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude"))]
-    # root does not read the account's settings: the account's hansa looked at the providers' folders
-    good, more = read_split(given, desk.root, None if theirs else desk.settings()["providers"], own, denied)
     return good, [*said, *(m for m in more if m not in said)]
 
 
@@ -1679,7 +1608,7 @@ def _notified(desk: Desk, rest: list) -> list:
 
 def coordinator_desk(desk: Desk, by: int) -> dict:
     """The coordinator's part in the desk, done as the desk's owner: the card, the helpers and the
-    permissions brought up to date, old helpers retired, and who runs the coordinator recorded. Returns
+    permissions brought up to date, who runs the coordinator recorded. Returns
     what starting it needs from the desk: the lanes' checkouts, model, effort and the provider's environment."""
     s = desk.settings()
     co = s["coordinator"]
@@ -1693,12 +1622,6 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     _bring(desk, json_text(cs), mine, "permissions_refreshed", keep_as="coordinator-settings.json")
     if not desk.notes_dir.exists() and not desk.notes_dir.is_symlink():  # a desk made before notes/
         desk.notes_dir.mkdir()
-    for name in RETIRED_HELPERS:
-        old = desk.root / ".claude" / "agents" / name
-        if old.is_file():
-            desk.state_dir.mkdir(exist_ok=True)
-            old.rename(desk.state_dir / f"{name}.{int(time.time())}")
-            desk.event("helper_retired", file=name)
     desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
     plugin.forget(desk)  # the earlier start's record of the mod, before this start prepares it
     started = now()  # and when: this start's record of the mod is tied to it (plugin.status)
@@ -1708,12 +1631,9 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
         raise SystemExit(f"hansa: {stop_text(stops)}")
     for line in unkept:
         desk.event("no_read_skipped", why=line)
-    read, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)
-    for line in refused:
-        desk.event("coordinator_read_skipped", why=line)
     return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
             "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p),
-            "read": read, "read_refused": refused, "no_read": kept, "no_read_refused": unkept,
+            "no_read": kept, "no_read_refused": unkept,
             "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started}
 
 
@@ -1765,14 +1685,14 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 
 LANE_LISTS = ("providers", "allow", "network", "write", "release_files")
-LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "preview_wait_s")
-LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "preview_wait_s", "note",
+LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "merge_batch")
+LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "setup",
+               "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane",
                *MESSAGE_FIELDS, "identity")
-# empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait,
+# empty (none) takes them out: the check's command and limit again, hansa's own message forms,
 # the identity of hansa's commits (then the repository's own, or hansa's)
-LANE_UNSET = ("merge_check", "merge_timeout_min", "merge_batch", "merge_lane", "preview_wait_s", *MESSAGE_FIELDS, "identity")
-OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
+LANE_UNSET = ("merge_check", "merge_timeout_min", "merge_batch", "merge_lane", *MESSAGE_FIELDS, "identity")
+OUTSIDE_WORKER = ("setup", "check", "merge_check")  # run by hansa itself, not by a worker
 
 
 def _shown(v) -> str:
@@ -2031,7 +1951,7 @@ def cmd_lane(a):
                     print(desk.redact(warning))
             if ln.get("allow"):
                 desk.event("lane_allow_changed", lane=a.name, old=[], new=ln["allow"])
-                print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, are "
+                print(f"The lane's allowed commands, which its workers and verifiers are given, are "
                       f"recorded: {_shown(ln['allow'])}. Tell the principal, in the conversation, what you listed "
                       f"and why.")
             if ln.get("setup") or ln.get("check") or ln.get("merge_check"):
@@ -2089,18 +2009,6 @@ def cmd_lane(a):
                   f"every worker in the lane gets them from its next task on")
             return
         value = _lane_value(a.field, a.values)
-        if a.field == "release":
-            t = new["lanes"][a.name].get("targets", {}).get("default")
-            if t and set(t) - {"command"}:
-                raise SystemExit(f"hansa: lane {a.name} already has a default target with its own options; "
-                                 f"use hansa lane target {a.name} default to change that kind of target; "
-                                 "nothing was changed")
-            command = value or "none"
-            result = _lane_target(desk, argparse.Namespace(name=a.name, target="default", command=[command],
-                                                          minutes=None, after=None, fixed=None, after_merge=None), new)
-            print(f"hansa lane set {a.name} release is now hansa lane target {a.name} default "
-                  f"{shlex.quote(command)}; this form goes in the next release")
-            return result
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
         if value is None:  # unset: the check's command and limit, hansa's own message forms
             new["lanes"][a.name].pop(a.field, None)
@@ -2127,7 +2035,7 @@ def cmd_lane(a):
             print(desk.redact(warning))
     if a.field == "allow" and set(old) != set(value):
         desk.event("lane_allow_changed", lane=a.name, old=old, new=value)
-        print(f"The lane's allowed commands, which its workers, verifiers and design sessions are given, changed: "
+        print(f"The lane's allowed commands, which its workers and verifiers are given, changed: "
               f"{_shown(old)} -> {_shown(value)}, so this change is recorded. Tell the principal, in the "
               f"conversation, what you changed and why.")
     if a.field == "write" and set(old) != set(value):
@@ -2144,17 +2052,10 @@ def cmd_lane(a):
               f"hansa lane try {a.name} --merge-check")
 
 
-def _lane_worktrees(desk: Desk, name: str, lanes: dict) -> list:
-    """The worktrees lane NAME made on the desk that are still there: its own and its design sessions'.
-    A folder another lane has by its name is that lane's: x-design is lane x's design worktree."""
-    out = []
-    for wt in (desk.worktrees_dir / name, desk.worktrees_dir / f"{name}-design"):
-        theirs = wt.name != name and wt.name in lanes
-        theirs = theirs or (wt.name == name and name not in lanes and name.endswith("-design")
-                            and name[:-len("-design")] in lanes)
-        if os.path.lexists(wt) and not theirs:
-            out.append(wt)
-    return out
+def _lane_worktrees(desk: Desk, name: str) -> list:
+    """The lane's worktree, when it is still on disk."""
+    wt = desk.worktrees_dir / name
+    return [wt] if os.path.lexists(wt) else []
 
 
 def _worktree_repo(desk: Desk, wt: Path, repos: list):
@@ -2374,7 +2275,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
     Work a worktree holds that no branch keeps is not lost: without --keep or --discard nothing is removed."""
     lanes, name = s["lanes"], a.name
     known = name in lanes
-    wts = _lane_worktrees(desk, name, lanes)
+    wts = _lane_worktrees(desk, name)
     if not known and not wts:
         raise SystemExit(f"hansa: there is no lane {name}, and no worktree of one; lanes: "
                          f"{', '.join(sorted(lanes)) or 'none'}")
@@ -2713,7 +2614,7 @@ def cmd_help(a):
     elif len(words) == 2 and words[0] == "lane" and words[1] in a.lane_commands:
         a.lane_commands[words[1]].print_help()  # hansa help lane add: what hansa lane add --help prints
     elif len(words) > 1:
-        raise SystemExit("hansa: one command or topic at a time, such as hansa help verify or hansa help browser "
+        raise SystemExit("hansa: one command or topic at a time, such as hansa help verify or hansa help effort "
                          "(lane takes its subcommand too: hansa help lane add)")
     elif words[0] == "card":
         print(CARD.read_text(encoding="utf-8"))
@@ -2795,13 +2696,7 @@ def main(argv=None):
     p.add_argument("--title")
     p.add_argument("--max-turns", type=int, metavar="N", help="this one task's ceiling of turns, instead of its "
                    "lane's max_turns")
-    p.add_argument("--browser", action="store_true", help="give this one task a browser (read pages, take screenshots)")
-    p.epilog = see_more("browser", "effort")
-    p = add("design", cmd_design, "open a session the principal joins to shape one feature on the real code")
-    p.add_argument("text", nargs="*")
-    p.add_argument("--file", help="a file with the text; - reads it from standard input")
-    p.add_argument("--lane")
-    p.add_argument("--title")
+    p.epilog = see_more("effort")
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
     p = add("show", cmd_show, "one task: its text, report, changes, refused commands, usage, next step")
@@ -2853,14 +2748,13 @@ def main(argv=None):
                      "repository where it ran; otherwise give the work again with hansa add --lane L.")
     p.add_argument("--lane", metavar="L", help="queue the follow-up on this work lane on the same repository "
                    "and base branch as the task's own lane, for example when that lane is busy; the task's "
-                   "start, text, effort, model and browser are carried as usual")
+                   "start, text, effort and model are carried as usual")
     p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the earlier task")
     p.add_argument("--update", action="store_true", help="continue from the earlier task with the base as it is "
                    "now merged into its branch; a conflict is left in the files for the worker to settle")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
-    p.add_argument("--browser", action="store_true", help="give the follow-up a browser")
-    p.epilog = see_more("browser", "effort")
+    p.epilog = see_more("effort")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
     p.description = ("have a worker run a finished task's change to see whether it holds (never merged). By default "
                      "it runs on the task's own lane, with that lane's provider and model, and waits there behind "
@@ -2869,11 +2763,10 @@ def main(argv=None):
     p.add_argument("id")
     p.add_argument("note", nargs="*", help="what to look at in particular")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
-    p.add_argument("--browser", action="store_true", help="give the verification a browser")
     p.add_argument("--lane", help="run the verification on this lane, with its provider, model, effort, sandbox and "
                    "lists; by default it runs on the task's own lane. A lane on the same repository as the task's; "
                    "use it to have another model check the task, or when the task's lane is busy")
-    p.epilog = see_more("browser", "effort")
+    p.epilog = see_more("effort")
     p = add("cancel", cmd_cancel, "stop a queued or running task or verification; on a merging task, stop its merge "
             "check and return it to review; finished work needs close")
     p.add_argument("id")
@@ -2941,9 +2834,6 @@ def main(argv=None):
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
             "Code session this is run from")
     p.add_argument("action", nargs="?", choices=["on", "off"])
-    p.add_argument("--clear-daily", metavar="HH-HH", help="taken and left: the daily clear comes with hansa "
-                   "coordinator --clear-daily HH-HH")
-    p.epilog = see_more("inbox")
     p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
             "background when hansa does not notify the session (hansa notify)")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
@@ -2955,12 +2845,12 @@ def main(argv=None):
                      "which closes it. When it is done some other way (the principal did it and said so in the "
                      "conversation, say), the coordinator closes it: hansa ask --close N \"why\"; the reason is "
                      "required, and the page shows it as closed by the coordinator, with the reason. Workers, "
-                     "verifications and design sessions cannot close requests")
+                     "verifications cannot close requests")
     p.add_argument("text", nargs="*", help="the request; with --close, why it is closed")
     p.add_argument("--close", type=int, metavar="N", help="close open request #N of this desk, saying why")
     p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | "
             "server | notify")
-    p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify", *EXPLAIN_RETIRED],
+    p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify"],
                    metavar="lane | provider | server | notify")
     p.epilog = "What a task's states mean: hansa help states; hansa help topics lists the other topics."
     p.add_argument("name", nargs="?")
@@ -2972,8 +2862,7 @@ def main(argv=None):
         "A new lane on a git checkout, stopped at 200 turns by default. A lane runs one task at a time, in its own full worktree (the repository's "
         "disk space again): to run tasks side by side add lanes on the same repository and base, up to hansa "
         "concurrency in all, and to split work among providers give each its own lane with its provider order. "
-        "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax; so write its preview "
-        "(started by a design session's Bash tool, or by hansa for a task with a browser) the same way. " +
+        "The lane's setup and check run with /bin/sh -c: POSIX shell only, no bash syntax. " +
         "The network list is the hosts the lane's workers, setup and check may reach, such as registry.npmjs.org or "
         "*.pypi.org. localhost on it differs by system. On Linux each sandbox has a loopback of its own: workers' "
         "own local servers need nothing on the list, and localhost adds nothing for them; what it does add is that "
@@ -2984,9 +2873,9 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
-                   "providers, setup, check, merge_check, merge_lane, preview, network, folders it may write, env, allow, limits "
-                   "with merge_timeout_min and preview_wait_s, commit_message, merge_message, identity, release "
-                   "targets, release_files, note) "
+                   "providers, setup, check, merge_check, merge_lane, network, folders it may write, env, allow, limits "
+                   "with merge_timeout_min, commit_message, merge_message, identity, release "
+                   "targets, release_files) "
                    "and standing instructions; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Standing instructions an earlier lane "
@@ -3007,9 +2896,8 @@ def main(argv=None):
                    "(default: none)")
     q.add_argument("--identity", metavar='"NAME <EMAIL>"', help="the author and committer of every commit hansa "
                    "makes for the lane (default: the repository's own user.name and user.email, else hansa's)")
-    q.add_argument("--allow", nargs="+", metavar="RULE", help="rules the lane's workers, verifiers and design "
-                   "sessions are given without asking: commands such as 'Bash(pnpm test:*)' (workers run any command "
-                   "in their sandbox and need none; design sessions do), and web tools: "
+    q.add_argument("--allow", nargs="+", metavar="RULE", help="rules the lane's workers and verifiers are given without asking: commands such as 'Bash(pnpm test:*)' (workers run any command "
+                   "in their sandbox and need none), and web tools: "
                    "'WebFetch(domain:docs.python.org)' or 'WebFetch(domain:*.python.org)' for each public site (a "
                    "bare WebFetch, an address, a local or private name or a wildcard over a shared suffix is "
                    "refused), WebSearch (it sends search queries out of the machine); each rule its own value")
@@ -3019,36 +2907,24 @@ def main(argv=None):
                    "a verification of it holds (hansa verify ID), and no flag overrides that")
     q.epilog = see_more("write-env", "network-list", "web-tools", "commits", "release-files", "java", "linux-sandbox")
     q = lane.add_parser("set", help="change one field of a lane", description=(
-        "allow is the rules the lane's workers, verifiers and design sessions are given without asking: commands "
-        "such as Bash(pnpm test:*) (workers run any command in their sandbox and need none; design sessions do), "
+        "allow is the rules the lane's workers and verifiers are given without asking: commands "
+        "such as Bash(pnpm test:*) (workers run any command in their sandbox and need none), "
         "and Claude Code's web tools, which reach the network from its own process, outside the sandbox's network "
         "list: WebFetch only as WebFetch(domain:HOST) for each site, HOST a public site's name as the network list "
         "writes it (*. in front allowed, and it opens every name under it; a bare WebFetch, one for every site, an IP "
         "address, localhost, a name for a local or private network such as .internal or .local, or a wildcard over "
         "a shared suffix such as *.co.uk or *.github.io is refused, as are names with no dot and names such as nip.io or lvh.me that come back as this machine; any listed name can still be pointed at any address, so list only sites you know), and WebSearch, which sends search queries out "
         "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
+        "lane's env; base, check, merge_check, setup, commit_message, merge_message and "
         "identity take "
-        "one value (none: empty); max_turns, timeout_min, merge_timeout_min, merge_batch and preview_wait_s take one whole number. "
+        "one value (none: empty); max_turns, timeout_min, merge_timeout_min and merge_batch take one whole number. "
         "merge_batch is 1 to 10 (default 4, none restores it): the check lane takes that many queued merges "
         "together, in order, stopping before an alone task, plain merge, different check lane or conflict. "
         "A failed or stopped batch returns to its old places, each checked alone. "
         "merge_lane takes true or false (unset: false): one lane per repository and base can serve their merge "
-        "checks in its own worktree and sandbox, taking no tasks, verifications, design sessions or retries; "
+        "checks in its own worktree and sandbox, taking no tasks, verifications or retries; "
         "a lane with work queued or running cannot become one. "
-        "preview is the command that starts the app (npm run dev, say). A design session starts it itself. For a task "
-        "or verification with a browser (hansa add --browser), hansa starts it on macOS before the worker: in the "
-        "worktree after the lane's setup, in srt with the lane's sandbox plus local binding for that one process "
-        "(the worker's own sandbox stays as the lane sets it); it waits up to preview_wait_s seconds (default 120; "
-        "none: back to that) for the first http://localhost:PORT or http://127.0.0.1:PORT address the preview prints, "
-        "or a port it names that answers, and tells the worker the address, or that it did not start, with its last "
-        "lines; it stops the preview, with its whole process group and each process seen below it (looked for every "
-        "half second), when the worker ends, however it ends; its output is kept in the task's folder, keys removed, "
-        "its first and last 2 MB at most (hansa show says where). On macOS such a preview can reach every "
-        "service on the machine's loopback while it runs, as a lane with localhost on its network list can: the price "
-        "of looking at the app in a browser on a Mac. On Linux hansa does not start it: srt gives the command a network "
-        "of its own, so the browser, outside the sandbox, could not reach the app; the worker is told so. check runs "
-        "after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
+        "check runs after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
         "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
         "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
         "lane's setup, before every merge of a task that changed something, and never after a task; a lane with only "
@@ -3058,14 +2934,12 @@ def main(argv=None):
         "merge_message is the form of the message of a task's merge into the base (unset: Merge t0001: <title>). "
         "Each is one line with {task}, {title} and {lane}, and needs {task} or {title}. A lane whose release goes "
         "to a public repository usually leaves {task} out of both. none takes merge_check, merge_timeout_min, "
-        "preview_wait_s, commit_message, merge_message or identity out again. identity is Name <email>, the author "
+        "commit_message, merge_message or identity out again. identity is Name <email>, the author "
         "and committer of every commit hansa makes for the lane: a task's commit, its merge into the base (the merge "
-        "check's merge too), the merge of the base into a task's branch, and a design session's commits. Unset, "
+        "check's merge too), and the merge of the base into a task's branch. Unset, "
         "hansa takes the repository's own user.name and user.email from its local config (git config --local), "
         "never the account's global one; with neither it writes hansa <hansa@localhost>. A lane whose release goes "
-        "to a public repository should have one, on the lane or in the repository's config. release forwards to "
-        "hansa lane target L default COMMAND (or none) until the next version, printing that form; a default target "
-        "with its own options is refused. A release target sends the base branch out (git push origin main, say), "
+        "to a public repository should have one, on the lane or in the repository's config. A release target sends the base branch out (git push origin main, say), "
         "after the principal's yes on the page (hansa release L). A release command (with hansa "
         "lane target) that holds one of the principal's forbidden words is kept, and hansa says the word and where at "
         "once; a release with it is refused. release_files is the list of files the lane's releases build and run "
@@ -3095,7 +2969,6 @@ def main(argv=None):
         "--after. Failed runs reach the coordinator as failed checks; only failure alerts the principal. "
         "Options alone change only those fields. hansa lane target "
         "L NAME none takes it out. An older unnamed release is now the target default, keeping its tick. "
-        "hansa lane set L release COMMAND (or none) still forwards to lane target L default until the next version. "
         "hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
         "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
         "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
@@ -3210,9 +3083,6 @@ def main(argv=None):
                    "each turn, its steps, the conversation's length at its first step, its worth and the tools it "
                    "called; then totals by what started them. No message text")
     p.epilog = see_more("cost-figures")
-    p = sub.add_parser("check", description="hansa check is now hansa ping [PROVIDER]; this form runs nothing")
-    p.set_defaults(fn=cmd_check)
-    p.add_argument("provider", nargs="?")
     p = add("ping", cmd_ping, "send one tiny request through a provider (or all)")
     p.add_argument("provider", nargs="?")
     p = add("serve", cmd_serve, "run the dispatcher and the web page (keep it running)")
@@ -3242,7 +3112,7 @@ def main(argv=None):
             "that topic; card: the whole card")
     p.add_argument("words", nargs="*", metavar="COMMAND | TOPIC | card | topics", help="a command, such as verify: "
                    "its help, as hansa verify --help prints it (lane add: that subcommand's); a topic, such as "
-                   "browser: its section of docs/; card: the whole card; topics: the topics, one line each")
+                   "effort: its section of docs/; card: the whole card; topics: the topics, one line each")
     p = sub.add_parser("coordinator-cleared")  # hidden: the coordinator's hook after a /clear, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_cleared)
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
@@ -3256,7 +3126,6 @@ def main(argv=None):
     p.add_argument("--pid", type=int, required=True)
     p.add_argument("--start", default="")
     p.add_argument("--name", default="")
-    p.add_argument("--clear-daily", default="")  # taken and left: an older follower restarting on this code gives it
     p = sub.add_parser("notify-feed")  # hidden: a follower's request to the desk, as the desk's owner
     p.set_defaults(fn=cmd_notify_feed)
 

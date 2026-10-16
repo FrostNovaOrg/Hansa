@@ -18,7 +18,7 @@ _handed = os.environ.pop("HANSA_BUILD", "")  # root's answer to build(), read on
 # What carries a Claude Code session's identity or messaging into a process started from it (its Bash tool, a
 # tmux it opened, the ! prefix): with the inbox's socket and token a process can post into other sessions as that
 # session. hansa takes every one of them out of its own environment as it starts, so nothing it starts (a release's
-# command, the alert command, a design session, the preview, the account's hansa, git and its hooks ...) gets
+# command, the alert command, the account's hansa, git and its hooks ...) gets
 # them, and keeps them here (SESSION) for what hansa's notifying needs, where it needs it (notify.py): the command
 # run from the session reads CLAUDE_PID, to record which session asked, and CLAUDE_CODE_MESSAGING_SOCKET, the
 # inbox `hansa notify on` gives its follower on the command line; the account's hansa is given CLAUDE_PID alone

@@ -42,7 +42,7 @@ in the conversation (this release only, once, 24 hours; send it nowhere else), o
 · #2 code M4R8TW", then one line each, those holding a code first.
 That folder is removed when the command ends, and what a stopped
 or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
-verifiers and design sessions, so a leftover that holds the alert's text is never theirs to read. The text is in English: the page has no language setting (it
+verifiers, so a leftover that holds the alert's text is never theirs to read. The text is in English: the page has no language setting (it
 follows the browser's language, which hansa does not know when it sends).
 """
 from __future__ import annotations
@@ -87,7 +87,7 @@ def last_file(desk: Desk) -> Path:
 
 
 def runs_dir(desk: Desk) -> Path:
-    """Where each run's own folder is made: in secrets/, which the coordinator, workers, verifiers and design sessions
+    """Where each run's own folder is made: in secrets/, which the coordinator, workers and verifiers
     may not read, as what the command writes there may hold the alert's text and its code."""
     return desk.secrets_dir / "alert-runs"
 

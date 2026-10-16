@@ -1,7 +1,6 @@
 # Who changes what
 
-What the principal sets on the web page, and what the coordinator sets with `hansa`. What workers and
-design sessions may touch is in [Workers and the sandbox](sandbox.md); the coordinator's own interface is
+What the principal sets on the web page, and what the coordinator sets with `hansa`. What workers may touch is in [Workers and the sandbox](sandbox.md); the coordinator's own interface is
 [hansa/card.md](../hansa/card.md), and `hansa help` for the rest.
 
 ## The principal, the coordinator, and what runs outside the worker
@@ -9,12 +8,9 @@ design sessions may touch is in [Workers and the sandbox](sandbox.md); the coord
 ### The principal
 
 The principal, on the page: providers, models, endpoints, keys, effort
-defaults, the models of the coordinator and of design sessions, when the
+defaults, the coordinator's model, when the
 coordinator's session compacts ([Compaction](desk.md#compaction)), prices,
-whether the coordinator audits cost, the browser tool a task given `--browser`
-uses, the folders the coordinator may read outside the desk without asking
-(`hansa explain` lists them), the folders and files workers may not read (the
-coordinator may add to them, below), the
+the folders and files workers may not read (the coordinator may add to them, below), the
 release targets that go out without asking (each ticked on its own), the words
 no release may send out, the mailbox rule and its address/domain allowlist
 ([Releases](releases.md#forbidden-words-before-a-release)), and the alert command
@@ -23,10 +19,10 @@ The page also shows what goes on, and asks the principal about each release
 ([Releases](releases.md)).
 
 What workers may not read, no worker, verifier, setup or check reads, and Read
-is denied there to the coordinator and to design sessions too. No lane's
+is denied there to the coordinator too. No lane's
 repository or write list may be such a folder, inside one or above one. What
 the page refuses on that list, and what a saved entry that can no longer be
-applied does, is in [Workers and the sandbox](sandbox.md#what-workers-verifiers-and-design-sessions-may-touch).
+applied does, is in [Workers and the sandbox](sandbox.md#what-workers-and-verifiers-may-touch).
 
 These are the principal's alone, but for one thing: the coordinator may add to
 what workers may not read with `hansa hide PATH [PATH ...]`, since an entry
@@ -51,14 +47,14 @@ needing to read, say), it asks with `hansa ask`; it never edits the desk's
 ### The coordinator
 
 The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
-provider order, allowed commands (for workers, verifiers and design sessions), network and write lists, environment,
-check, preview and setup commands, limits, and the merge check's own command and limit,
+provider order, allowed commands (for workers and verifiers), network and write lists, environment,
+check and setup commands, limits, and the merge check's own command and limit,
 `merge_check` and `merge_timeout_min` ([Merging, the merge check and conflicts](tasks.md#merging-the-merge-check-and-conflicts))) and how many tasks run at once (`hansa concurrency`:
 side by side means lanes on one repository; when they each add to a CHANGELOG, `CHANGELOG.md merge=union`
 in the repository's `.gitattributes` keeps their merges from conflicting there);
 each lane's standing instructions (`hansa lane brief`, kept in
 `lanes/<lane>/brief.md`); pause and resume; each lane's release command
-(`hansa lane set L release "git push origin main"`) or its named release
+(`hansa lane target L default "git push origin main"`) or its named release
 targets (`hansa lane target L NAME "<command>"`) and asking for a release
 (`hansa release L [TARGET] "note"`), never pushing or deploying by itself:
 its settings deny pushing and publishing from its own shell, whatever its
@@ -105,7 +101,7 @@ manual mode such a command asks the principal.
 
 ### What runs outside the worker, and what stays closed to the coordinator
 
-Setup, check, merge check and preview run outside the worker, so each change to them is
+Setup, check, merge check run outside the worker, so each change to them is
 recorded and the coordinator tells the principal about it. It is not a
 worker: it runs on this machine outside any sandbox, and besides `hansa` it
 may run other commands the principal's work needs, such as installing
@@ -145,7 +141,7 @@ cut, with the title that will be used: give one with `--title`.
 
 Every commit hansa makes for a lane (a task's commit, its merge into the
 base, the merge check's merge included, the merge of the base into a task's
-branch on `retry --update`, a design session's commits, and the commit
+branch on `retry --update`, and the commit
 `hansa lane remove --keep` makes) carries one
 identity as both author and committer: the lane's `identity` (`hansa lane set
 L identity "Name <email>"`, or `hansa lane add --identity`; copied by
@@ -168,8 +164,7 @@ by it.
 
 `hansa lane remove L --keep` puts what each of the lane's worktrees holds
 (changes not committed, or commits no branch keeps) on a new branch
-`hansa-kept/NAME-DATE` of its repository (NAME the worktree's folder: `L`, or
-`L-design` for its design worktree), in one commit, `Left in worktree NAME when
+`hansa-kept/NAME-DATE` of its repository (NAME the worktree's folder, `L`), in one commit, `Left in worktree NAME when
 lane L was removed`, with the identity the lane had before it was removed (else
 the repository's own, else `hansa <hansa@localhost>`), and then removes the
 worktree.
@@ -186,8 +181,7 @@ and others. Every `hansa` command takes them out of its own environment as it
 starts: by name, and by rule every `CLAUDE_CODE_MESSAGING_*`,
 `CLAUDE_CODE_SESSION_*` and `CLAUDE_CODE_CHILD_*` (the list is in
 [`hansa/__init__.py`](../hansa/__init__.py)). So nothing hansa starts gets
-them: not a release's command, the alert command, a design session, the
-preview, git and its hooks, the follower that posts to a session, nor the
+them: not a release's command, the alert command, git and its hooks, the follower that posts to a session, nor the
 desk's account on a Linux server. Workers and the lanes' setups and checks
 never had them, as hansa builds their environment itself. Only hansa's
 notifying uses them, in the command run from the session: `CLAUDE_PID` says
@@ -207,7 +201,7 @@ prints it only outside a Claude Code session: in one (any of the variables
 above set, the `!` prefix's shell included) it refuses, prints nothing of the
 address, and says how the principal opens the page from a terminal of their own, as the
 README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
-before. `--file` (`hansa add`, `design`, `retry`, `lane brief`) refuses a file
+before. `--file` (`hansa add`, `retry`, `lane brief`) refuses a file
 in the desk's `.hansa/` or `secrets/`, wherever a link leads, and a hard link
 to one of their files elsewhere; `--file -` refuses the same file redirected
 to standard input (`< .hansa/web-token`), found by its path or, where that

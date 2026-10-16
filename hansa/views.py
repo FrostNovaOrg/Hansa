@@ -3,7 +3,6 @@ Each view returns plain data; the *_text helpers turn it into short lines."""
 from __future__ import annotations
 
 import json
-import os
 import re
 import statistics
 import sys
@@ -11,11 +10,11 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release
-from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, kept_from_workers, web_sites, listed_targets, read_json,
-                   read_split, release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (disk_short, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, PREVIEW_FIRST_LOG, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, join_command, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
-                  markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, own_rest_minutes, progress_of,
-                  provider_problem, refused_by, rest_minutes, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+                   release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
+from .run import (disk_short, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
+                  markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
+                  provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_looks, waiting_reason, write_list)
 
 STATES = {
@@ -524,8 +523,7 @@ def status(desk: Desk) -> dict:
     tasks = desk.tasks()
     pst = desk.provider_state()
     ready = ready_now(desk, s)
-    designing = [m for m in tasks if m["state"] == "running" and m.get("kind") == "design"]
-    running = [m for m in tasks if m["state"] == "running" and m.get("kind") != "design"]
+    running = [m for m in tasks if m["state"] == "running"]
     merging = [m for m in tasks if m["state"] == "merging"]
     tried = tried_lanes(desk)
     busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried
@@ -543,7 +541,6 @@ def status(desk: Desk) -> dict:
         "installed": installed(),  # when the code this runs was put in place
         "serve_code": serve_code(desk, server),  # hansa serve on older code than is installed: what to do
         "serve_session": serve_session(desk, server),  # hansa serve started inside a Claude Code session: what it dropped
-        "audits_cost": bool(s["coordinator"].get("audits_cost")),
         "paused": desk.paused(),
         "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
         "server": server,
@@ -580,7 +577,7 @@ def status(desk: Desk) -> dict:
                    "held": held.get(n)}  # its runs whose sandbox could not start, by group (run.sandbox_held)
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
-                       "rest_minutes": rest_minutes(s, n), "rest_own": own_rest_minutes(s, n) is not None,
+                       "rest_minutes": s.get("cool_minutes", 30),
                        "problem": provider_status_problem(desk, s, n, queued), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
@@ -590,13 +587,9 @@ def status(desk: Desk) -> dict:
                                                 s["providers"].get(m.get("provider") or "")),
                      "checking": m.get("phase") == "checking", "starting": m.get("phase") == "starting",
                      "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
-                     "browser": bool(m.get("browser")),
+                     **({"browser": m["browser"]} if "browser" in m else {}),
                      "progress": None if m.get("phase") in ("checking", "starting") else progress_of(desk, m)}
                     for m in running],
-        "design": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "minutes": _mins(m.get("started")),
-                    "join": join_command(m), "checking": m.get("phase") == "checking",
-                    "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
-                    "progress": None if m.get("phase") == "checking" else progress_of(desk, m)} for m in designing],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
                     "waiting": waiting_reason(desk, s, m, busy, looks), **killed_last(m)} for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": merge_check_lane(s, m),
@@ -639,7 +632,6 @@ def status_text(st: dict) -> str:
     out = [f"desk {st['desk']}",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
            server_text(st.get("server") or {"state": "up" if st["server_up"] else "gone"})]
-    out += ["cost audit on"] if st.get("audits_cost") else []
     out = [" · ".join(out + [f"hansa {st['build']}", installed_text(st.get("installed") or 0) or "installed ?",
                               time.strftime("now %H:%M")])]
     out += [st["serve_code"]] if st.get("serve_code") else []  # what asks for action first, then information
@@ -670,7 +662,6 @@ def status_text(st: dict) -> str:
                                      "UNABLE TO RUN" if "work" in (ln.get("held") or {}) else "free"))
                    + (f" · merge lane for lanes {', '.join(ln['merge_for']) or '(none yet)'}; takes no work"
                       if ln.get("merge_lane") else "")
-                   + ("; its design sessions UNABLE TO RUN" if "design" in (ln.get("held") or {}) else "")
                    + "".join(f"\n      {sandbox_held_text(h)}" for h in (ln.get("held") or {}).values())
                    + ("\n      More: hansa help sandbox-probe" if ln.get("held") else ""))
     if st["running"]:
@@ -680,16 +671,10 @@ def status_text(st: dict) -> str:
                                                else "hansa is preparing it" if m.get("starting")
                                                else f"on {m['provider']} ({m['model']}"
                                                + (f", {m['effort_said']}" if m.get("effort_said") else "") + ")")
-                + (" with a browser" if m["browser"] else "")
+                + (" with a browser" if m.get("browser") else "")
                 + (f" ({m['minutes']} min in all)" if m["checking"] else f", {m['minutes']} min") + f": {m['title']}"
                 + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["running"]]
-    if st.get("design"):
-        out.append("design sessions (the principal works in them directly; each comes back for review when they end it):")
-        out += [f"  {m['id']} lane {m['lane']}, {m['minutes']} min: {m['title']}"
-                + (f"\n      ended; hansa is running the lane's check, {m['check_minutes']} min so far" if m["checking"] else
-                   f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
-                for m in st["design"]]
     if st["queued"]:
         out.append("queued:")
         out += [f"  {m['id']} lane {m['lane']}: {m['title']}\n      waiting: {m['waiting']}"
@@ -744,8 +729,6 @@ def provider_status_problem(desk: Desk, s: dict, name: str, queued: list) -> str
         return problem
     waiting = 0
     for m in queued:
-        if m.get("kind") == "design":
-            continue
         lanes = [m["lane"]] if m.get("lane") else s["lanes"]
         providers = {p for ln in lanes if ln in s["lanes"] and not s["lanes"][ln].get("merge_lane")
                      for p in task_providers(s, ln, m) if p not in refused_by(m)}
@@ -758,7 +741,7 @@ def rest_words(p: dict) -> str:
     """A provider's rest after a usage limit whose error gives no reset time, for hansa status."""
     if p.get("rest_minutes") is None:
         return ""
-    return f"rest {p['rest_minutes']} min" + ("" if p.get("rest_own") else " (desk)")
+    return f"rest {p['rest_minutes']} min" + " (desk)"
 
 
 def limit_wait(desk: Desk, m: dict) -> str:
@@ -955,8 +938,7 @@ def report_text(desk: Desk, tid: str) -> str:
     return "\n\n".join(out)
 
 
-EFFORT_FROM = {"task": "the task's --effort", "provider": "the provider's default", "design": "the desk's design "
-               "setting", "coordinator": "the coordinator's setting"}
+EFFORT_FROM = {"task": "the task's --effort", "provider": "the provider's default", "coordinator": "the coordinator's setting"}
 
 
 def effort_text(effort: str, came_from, provider: dict | None) -> str:
@@ -985,6 +967,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
     head = f"{tid} · {m['state']} · lane {m.get('lane') or 'any'}"
+    if m.get("kind") and m["kind"] not in ("task", "verify", "work"):
+        head += " · " + str(m["kind"])
     if m.get("provider"):
         head += (f" · {run_text(m, desk.settings()['providers'].get(m['provider']))}"
                  + (f" · {m['turns']} turns" if m.get("turns") else ""))
@@ -1000,10 +984,6 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         on = "runs" if m["state"] in ("queued", "running") else "ran"
         meaning += (f"; it {on} on lane {m.get('lane') or 'any'}"
                     + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
-    if m.get("kind") == "design":
-        meaning = ("a design session: the principal shapes this feature with it directly, on the real code; "
-                   + ("it is open now" if m["state"] == "running" and m.get("phase") != "checking"
-                      else "it comes back for review when they end it" if m["state"] == "queued" else meaning))
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
@@ -1040,7 +1020,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out += ["  " + x for x in oom_lines(a, "earlier run")]
         start = a.get("run_start")
         if (not start and a.get("kind") in ("network", "limit") and m.get("base")
-                and m.get("kind") not in ("verify", "design")):
+                and m.get("kind") != "verify"):
             start = {"commit": m.get("start_from") or m["base"],
                      "source": "earlier task's commit" if m.get("start_from") else "base"}
         if start:
@@ -1049,7 +1029,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"next run starts from: {started_from(m['restart'])}")
     elif m["state"] != "queued" and m.get("run_start"):
         out.append(f"run started from: {started_from(m['run_start'])}")
-    out += oom_lines(m, {"verify": "verification", "design": "design session"}.get(m.get("kind"), "worker"))
+    out += oom_lines(m, {"verify": "verification"}.get(m.get("kind"), "worker"))
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
     report = report_of(desk, tid)
@@ -1117,26 +1097,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if m.get("left_running"):
         out.append(f"left running, stopped by hansa when the task ended ({len(m['left_running'])}):")
         out += [f"  pid {x['pid']}: {x['command']}" for x in m["left_running"]]
-    shots = sorted((d / "browser").glob("*")) if (d / "browser").is_dir() else []
-    if shots:
-        out.append(f"browser files ({len(shots)}) in {d / 'browser'}: " + ", ".join(x.name for x in shots[:6])
-                   + (" ..." if len(shots) > 6 else ""))
-    pv = m.get("preview") or {}
-    if pv:
-        log = d / "preview.log"
-        where = f"; its output, keys removed: {log}" if log.exists() else ""
-        if not pv.get("started"):
-            out.append(f"preview (started by hansa for the browser): not started: {pv.get('why', '')}")
-        elif pv.get("ready"):
-            out.append(f"preview (started by hansa for the browser): ready at {pv.get('address')} after "
-                       f"{pv.get('waited', 0)} s, stopped when the worker ended{where}")
-        elif pv.get("stopped"):
-            out.append(f"preview (started by hansa for the browser): did not start: {pv.get('why') or 'no answer'}"
-                       f"{where}")
-        else:
-            out.append(f"preview (started by hansa for the browser): running now: {pv.get('command', '')}")
-        if (d / PREVIEW_FIRST_LOG).exists():
-            out.append(f"preview of the run before hansa resumed it, stopped then; its output: {d / PREVIEW_FIRST_LOG}")
+    if m.get("preview"):
+        out.append("preview: " + json.dumps(m["preview"], ensure_ascii=False))
     chk = m.get("check")
     if chk and chk.get("could_not_run"):
         out.append(f"check (run by hansa, not the worker): {chk['note']}: {chk['command']}")
@@ -1181,8 +1143,6 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append("so far: hansa is preparing it; the worker starts in a moment")
     elif m["state"] == "running" and m.get("phase") != "checking":
         out.append(f"so far: {_progress_line(progress_of(desk, m))} (turns and tokens are recorded when it ends)")
-        if m.get("kind") == "design":
-            out.append(f"the principal joins it with: {join_command(m)}")
     v = verification(desk, m)
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"
@@ -1316,35 +1276,13 @@ def tool_lines(mac: bool, env: dict) -> list:
     return [*(JAVA_LINES if "JAVA_HOME" in env else ()), *([MKTEMP_LINE] if mac else [])]
 
 
-def preview_text(mac: bool, ln: dict) -> list:
-    """What becomes of a lane's preview on this machine, for hansa explain lane: its lines."""
-    if not ln.get("preview"):
-        return ["  preview: none (a design session or a task with a browser has no app started for it)"]
-    head = (f"  preview: {ln['preview']} (a design session starts it itself with its Bash tool; for a task or"
-            " verification with a browser, hansa starts it")
-    if mac:
-        return [head + " before the worker, in the worktree after the lane's setup, in srt with the lane's sandbox"
-                " plus local binding for this one process, waits up to"
-                f" {ln.get('preview_wait_s', 120)} s (preview_wait_s) for the first http://localhost:PORT address it"
-                " prints or a port it names that answers, tells the worker the address, and stops it with its whole"
-                " process group, and each process seen below it (looked for every half second), when the worker"
-                " ends; its output is kept in the task's folder, keys removed, its first and last 2 MB at most)",
-                "    on macOS, while it runs this preview can reach every service on this machine's loopback, as a"
-                " lane with localhost on its network list can: the price of looking at the app in a browser on a Mac"]
-    return [head + " on macOS only)",
-            "    on Linux hansa does not start it: srt runs it with a network of its own (a namespace with its own"
-            " loopback), so the browser, outside the sandbox, could not reach a server bound there; the worker is"
-            " told so"]
-
-
 def web_lines(allow: list) -> list:
     """What a lane's allowed commands give of Claude Code's web tools, which reach the network from its own
     process, outside the sandbox's network list."""
     sites, search = web_sites(allow)
     if not sites and not search:
         return ["  web tools (Claude Code's own, outside the sandbox's network list): none"]
-    return ["  web tools (Claude Code's own, outside the sandbox's network list; workers, verifiers and design"
-            " sessions alike):",
+    return ["  web tools (Claude Code's own, outside the sandbox's network list; workers and verifiers alike):",
             *(["    WebFetch reaches only: " + ", ".join(sites) + " (unlike the network list, it runs in Claude"
                " Code's own process, outside the sandbox; a *. wildcard opens every name under it; any listed name can be pointed at any address, this"
                " machine included: list only sites you know, and the principal sees every change)"] if sites else []),
@@ -1453,7 +1391,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"  read them with hansa git {name} log|show|diff|grep ... (--worktree: the worktree), git commands that"
             " read only, run as the desk's account",
             f"  author and committer of every commit hansa makes for the lane (its tasks' commits, their merges into"
-            f" the base, merges of the base into a task's branch, design sessions' commits,"
+            f" the base, merges of the base into a task's branch,"
             f" the commit hansa lane remove --keep makes): {who} <{email}>, from"
             f" {where}" + ("" if ln.get("identity") else f"; a lane whose release goes to a public repository should"
                            f" have one: hansa lane set {name} identity \"Name <email>\", or user.name and user.email"
@@ -1502,7 +1440,6 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
                " setup, check, network or write list, or moving the desk to another machine)"
                + (f"; its merge check: hansa lane try {name} --merge-check" if own_merge_check(ln) else "")]
               if ln.get("setup") or ln.get("check") or ln.get("merge_check") else []),
-            *preview_text(sys.platform == "darwin", ln),
             *([f"  {x[0].upper()}{x[1:]}." for x in LINUX_SANDBOX_NOTES] if account.LINUX else []),
             "  environment set for workers: " + (", ".join(f"{k}={v}" for k, v in env.items()) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in env_left],
@@ -1523,9 +1460,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "  folders a worker may also write (a build or test tool's cache): "
             + (", ".join(may_write) or "none"),
             *["    a run leaves out " + x.removeprefix("left out of this run: ") for x in left_out],
-            "  allowed commands (given to the lane's workers, verifiers and design sessions; workers run any command"
-            " in their sandbox and need no Bash rule, design sessions run outside it and may run these plus their"
-            " own git add, commit and merge):" + ("" if ln.get("allow") else " none"),
+            "  allowed commands (given to the lane's workers and verifiers; workers run any command"
+            " in their sandbox and need no Bash rule):" + ("" if ln.get("allow") else " none"),
             *["    " + (r if isinstance(r, str) else json.dumps(r))
               + (f" (ignored: it {refused_rule(r)})" if refused_rule(r) else "") for r in ln.get("allow", [])],
             *(["    runs leave the ignored ones out; the coordinator removes them with: "
@@ -1551,16 +1487,14 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"provider {name} (set by the principal on the web page)",
             f"  kind: {p['kind']} · model: {p['model']} · effort: {p.get('effort') or 'default'}",
             f"  rest after a usage limit: until the reset time the error gives, and a minute; else "
-            f"{rest_minutes(s, name)} minutes"
-            + (" (its own rest_minutes)" if own_rest_minutes(s, name) is not None else " (the desk's cool_minutes)"),
+            f"{s.get('cool_minutes', 30)} minutes"
+            + " (the desk's cool_minutes)",
             f"  {'login' if p['kind'] == 'subscription' else 'endpoint'}: {where}"
             + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
             f"  last ping: {st.get('check') or 'never'}"])
     if what == "task":
         return show_text(desk, name)
-    if what == "states":
-        return "\n".join(f"{k:<10} {v}" for k, v in STATES.items())
     if what == "server":
         rec, server = srt_record(desk), server_state(desk)
         seen = ("hansa serve has not tried srt yet" if not rec else
@@ -1574,8 +1508,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "desk: a second one refuses to start.",
             f"  now: {server_text(server)}",
             f"  {page_text(page_of(desk, server))}",
-            "What it starts outside a worker's sandbox (a release's command, the alert command, design sessions, the "
-            "preview, git) runs with its environment, less what carries a Claude Code session's identity or "
+            "What it starts outside a worker's sandbox (a release's command, the alert command, "
+            "git) runs with its environment, less what carries a Claude Code session's identity or "
             f"messaging ({', '.join(p + '*' for p in SESSION_PREFIXES)}, {', '.join(SESSION_NAMES)}): with those a "
             "process could post into other sessions as that session. Every hansa command takes them out of its own "
             "environment as it starts, so started from a Claude Code session (its Bash tool, a tmux it opened, the "
@@ -1603,21 +1537,17 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "server's PATH, then restart hansa serve. Then, for a task whose "
             "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the merge check "
             "again and merges if it passes; a task whose setup could not run: hansa retry ID.",
-            "Before it starts a worker, a verifier or a design session, it probes that run's sandbox the same way: "
+            "Before it starts a worker or a verifier, it probes that run's sandbox the same way: "
             "srt with the settings Claude Code is given, on /usr/bin/true, then a write of what git needs open "
-            "there (the worktree's own index and git folder; for a design session, its branch's ref's .lock and "
-            "objects/), and of what it must keep, to see that the deny patterns match (a new file atop the "
-            "shared git folder, a name next to the worktree's own folder; for a design session, next to its "
-            "branch's ref and in refs/heads/; what such a write makes is removed), once for each set of settings "
+            "there (the worktree's own index and git folder), and of what it must keep, to see that the deny patterns match (a new file atop the "
+            "shared git folder, a name next to the worktree's own folder; what such a write makes is removed), once for each set of settings "
             "while it runs. When srt refuses them, keeps what git needs or lets through what it must keep (a "
             "sandbox that does not keep what it should runs no one), the run does not start: its task is held (queued, no try used) and its "
             "lane shows as unable to run in hansa status, with srt's first line and the part of the settings it "
             "refuses (found by trying each part alone, or the path written); the principal's alert is told once for each lane "
-            "and reason. Only what was refused is held: a design session's sandbox is another than its lane's "
-            "workers', so its refusal holds the lane's design sessions, and a worker's or a verifier's holds the "
-            "lane's workers and verifiers; hansa status says which. Held tasks start by themselves once a probe "
+            "and reason. A refusal holds the lane's workers and verifiers; hansa status says which. Held tasks start by themselves once a probe "
             "passes: after a fix, restart hansa serve, which as it starts probes again the sandbox of each held lane "
-            "(a worker's in the lane's worktree, a design session's in its design worktree), clears the hold when "
+            "(in the lane's worktree), clears the hold when "
             "the probe passes and keeps it with the new reason when it fails (so does a change of the settings, at "
             "the next task's start). Without srt the run starts as before, in Claude Code's own sandbox, "
             "which never runs a command outside it. Claude Code carries its own copy of the sandbox library, which "
@@ -1639,7 +1569,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "session it launches; hansa notify on starts one for the session it is run from; hansa notify off stops "
             "it; hansa notify lists them.",
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
-            "could not start), a verification's verdict, a design session that ended, a queued merge check that "
+            "could not start), a verification's verdict, a queued merge check that "
             "ended, a request the principal answered or closed (with the answer), the principal's answer to a release "
             "(hansa release), a release that ended (done, or failed with its exit code and last lines) or became void, "
             "a provider that an open request names "
@@ -1650,7 +1580,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
             "line per event and the next command; events seconds apart come in one message.",
             "Who hears what: a task or request goes to the session that made it (hansa add, retry, verify, merge, "
-            "design and ask record it) while that session has a follower; otherwise to every follower of the desk, "
+            "and ask record it) while that session has a follower; otherwise to every follower of the desk, "
             "as do desk-wide events. A cancel is not posted to the session whose hansa cancel made it (hansa cancel "
             "records it); others hear it, as all do one hansa made itself. A follower that starts after one ended "
             "first posts what was missed meanwhile, as it is now.",
@@ -1666,9 +1596,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
     return "\n".join([
         "What you can look up: hansa explain lane <name> | provider <name> | server | notify",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
-        f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']}) · "
-        f"cost audit by the coordinator: {'on' if s['coordinator'].get('audits_cost') else 'off'}",
-        *read_lines(desk, s),
+        f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']})",
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), the floor of free space under "
         "which nothing new starts (hansa disk-floor), lanes' standing instructions (hansa lane brief) and "
@@ -1721,22 +1649,9 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
             + built_in,
             "    folders and files the principal keeps from workers (the principal's, on the web page, Settings; you"
             " add to it with hansa hide, and only the principal removes an entry; Read is denied there to you, workers,"
-            " verifiers and design sessions as well; no lane's repository or write list may be one, inside one or"
+            " verifiers as well; no lane's repository or write list may be one, inside one or"
             " above one): " + (", ".join(x + hidden_note(s, x) for x in kept) or "none"),
             *("      " + x for x in no_read_unusable(s, desk.root))]
-
-
-def read_lines(desk: Desk, s: dict) -> list:
-    """For hansa explain: the folders outside the desk the coordinator reads without asking, and those listed
-    that it is not given."""
-    # as the start checks them (cli.read_folders): with the Claude Code folder this session runs from
-    own = [os.path.abspath(os.path.expanduser(os.environ["CLAUDE_CONFIG_DIR"]))] if os.environ.get("CLAUDE_CONFIG_DIR") else []
-    good, refused = read_split(s.get("coordinator_read", []), desk.root, s["providers"], own,
-                               kept_from_workers(s, desk.root)[0])
-    return ["folders outside the desk you (and your helpers) read without asking, besides the lanes' repositories: "
-            + (", ".join(good) or "none") + " (set by the principal on the web page; reading only: you cannot "
-            "edit there; a change holds from the next hansa coordinator start; when you keep needing one, hansa ask)",
-            *(f"  not given: {r.removeprefix('the coordinator cannot be let read ')}" for r in refused)]
 
 
 def try_text(lane: str, t: dict) -> str:
