@@ -16,7 +16,7 @@ for each release, or once for a release target the principal lets go out without
 | **Interfaces** | A local web page for the principal; the `hansa` command for the coordinator |
 | **License** | Apache-2.0 |
 
-[How it works](#how-it-works) · [Key terms](#key-terms) · [Quick start](#quick-start) ·
+[How it works](#how-it-works) · [Where hansa sits](#where-hansa-sits) · [Key terms](#key-terms) · [Quick start](#quick-start) ·
 [Commands](#everyday-commands) · [Safety](#what-keeps-it-safe) · [Limits](#limits) ·
 [Documentation](#documentation)
 
@@ -57,6 +57,14 @@ flowchart TB
    asks the principal, who answers on the page, or in the conversation with the one-time code their alert
    carried. Only after the yes (or for a target the principal ticked to go out without asking) does hansa
    run the lane's release command: a push, a wait for CI, a deploy.
+
+## Where hansa sits
+
+hansa is built around isolation. Workers run in the operating system's sandbox, each in its own worktree; the principal reaches them only through the coordinator and the page. The coordinator is the one session that talks to the principal, and it does not do the detailed work itself: it plans, queues, reviews and merges.
+
+Because of that, hansa is not the place to design a feature interactively. Design happens where real-time collaboration works well: a desktop assistant, a prototyping site, a design tool. When the design is settled, hand the result to hansa as the task's input: a published demo site, a document, a set of screens. The workers build from it.
+
+hansa also keeps running: its server dispatches work, runs checks and merges around the clock. It belongs on a machine that stays on, a Mac mini, a home server, a Linux box, not on the laptop you close at night.
 
 ## Key terms
 
