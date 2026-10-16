@@ -186,9 +186,9 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
   but the lane's network list; they cannot read the desk's keys and state, any provider's Claude Code folder
   or `~/.claude`, the logins, keys and histories hansa knows under the home folder, or what the principal
   lists on the page; and git history is left to hansa. The lane's setup and check run in the same sandbox.
-  A lane's allow list may give its workers Claude Code's web
-  tools (`WebFetch` site by site, `WebSearch`), which run in Claude Code's own process; every change of that
-  list is recorded. More: [Workers and the sandbox](docs/sandbox.md).
+  Ways out of the network list are the principal's to see: a lane's allow list may give its workers Claude
+  Code's web tools (`WebFetch` site by site, `WebSearch`), which run in Claude Code's own process; every
+  change of that list is recorded. More: [Workers and the sandbox](docs/sandbox.md).
 - **The coordinator works in the open.** It is not sandboxed, but Claude Code asks the principal before each
   command not already allowed. Its permission rules keep three things closed to it: reading the keys in
   `secrets/`; reading or editing the files directly in the Claude Code folder it runs from (its login among

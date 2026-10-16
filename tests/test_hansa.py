@@ -12116,7 +12116,23 @@ class DeskTest(unittest.TestCase):
             vid = self.desk.meta(tid)["verify"]
             self.assertEqual(self.settle(d, vid)["verdict"], "holds")
         self.assertEqual(retries, {tid: {"8"}, vid: {"8"}})  # a task and a verification
+        self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["env"]["CLAUDE_CODE_MAX_RETRIES"], "8")
 
+    def test_a_providers_rest_uses_the_desks_cool_minutes_and_names_it(self):
+        from hansa import run
+        for minutes in (30, 45):
+            with self.subTest(minutes=minutes):
+                s = self.desk.settings()
+                s["cool_minutes"] = minutes
+                self.assertEqual(self.desk.save_settings(s), [])
+                t0 = time.time()
+                until = run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)",
+                                          "API Error: 429 rate_limit_error")
+                self.assertAlmostEqual(until, t0 + 60 * minutes, delta=5)
+                self.assertRegex(views.status_text(views.status(self.desk)),
+                                 rf"\n  claude +subscription +opus +rest {minutes} min \(desk\) +resting until")
+                self.assertIn(f"else {minutes} minutes (the desk's cool_minutes)",
+                              views.explain_text(self.desk, "provider", "claude"))
 
     def test_the_provider_check_says_not_logged_in(self):
         from hansa import run
@@ -19650,6 +19666,50 @@ class DeskTest(unittest.TestCase):
         self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
         self.assertFalse(seen.exists())
 
+    def test_a_cancel_landing_while_a_resume_is_prepared_prevents_the_resume(self):
+        from hansa import run
+        seen = self.tmp / "resumed.jsonl"
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "bg-cmd", "FAKE_RESUMED": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        tid = self.desk.new_task("Fix the badge")
+        real_sweep, cancelled = run.sweep, []
+
+        def cancelled_meanwhile(desk, task):
+            # The worker has ended, but resume has not yet rechecked the task under the desk lock.
+            desk.update(task, cancel=True)
+            cancelled.append(task)
+            return real_sweep(desk, task)
+        with unittest.mock.patch.object(run, "sweep", side_effect=cancelled_meanwhile):
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertIn(tid, cancelled)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertIsNone(m.get("resumed"))
+        self.assertFalse(seen.exists())
+        self.assertEqual(self.events("task_resumed"), [])
+
+    def test_read_bounded_drops_a_margin_so_no_part_of_a_key_survives_a_cut(self):
+        from hansa import run
+        key = b"sk-registry-0123456789abcdef"
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "registry.key").write_bytes(key)
+        half, log = 8192, self.tmp / "bounded.log"
+        # Keys straddle both cuts in a line with no newline; redaction alone cannot remove their fragments.
+        body = b"x" * (half - 10) + key + b"y" * (3 * half) + key + b"z" * (half - 10)
+        for first, last in ((b"", b""), (b"x\n", b""), (b"", b"\nz"), (b"x\n", b"\nz")):
+            with self.subTest(first=first, last=last):
+                log.write_bytes(first + body + last)
+                text = self.desk.redact(run.read_bounded(log, half, half))
+                kept = re.sub(r"\n\[hansa: [^\]]*\]\n", "", text)
+                self.assertLessEqual(set(kept), set("xyz\n"), "a part of the key is left")
+                self.assertIn("bytes left out here", text)
+                self.assertLess(len(text), 2 * half + 300)
+                if not first or not last:
+                    self.assertIn(f"with {run.OUTPUT_MARGIN} bytes on each side of a cut inside a line", text)
+
     @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
     def test_a_retry_after_a_resumed_run_dropped_its_connection_keeps_its_own_record(self):
         # Resumed, the run ends on a dropped connection: the task is queued again, in a new session, which also
@@ -21080,7 +21140,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
                          "lane b (made with hansa lane add; not by the principal on the web page)")
         self.hansa("lane", "set", "b", "max_turns", "50")
-        self.hansa("lane", "set", "a", "max_turns", "50")
+        self.hansa("lane", "set", "a", "timeout_min", "50")
         self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
                          "lane b (made with hansa lane add; last changed with hansa lane set b max_turns; "
                          "not by the principal on the web page)")

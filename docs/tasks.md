@@ -311,7 +311,7 @@ are worth, not a bill. `hansa cost` gives them (`--days N` or `--since HH:MM`;
 `--rows` for every row). A task's turns and tokens are recorded when it ends.
 
 To say what one job cost, note the time `hansa status` shows when it starts,
-and run `hansa cost --since HH:MM --by seat` when it is done.
+and run `hansa cost --since HH:MM --by seat` when it is done. Spend no turns on cost.
 
 The coordinator's own session, with its helpers, is counted only when it runs
 with the workers' Claude login (the same config folder), because only then are

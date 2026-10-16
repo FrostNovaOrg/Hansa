@@ -295,7 +295,7 @@ code changes go to workers.
 - Nothing hansa starts gets a Claude Code session's identity. `hansa web` refuses in a Claude Code
   session; `--file` refuses the desk's `.hansa/` and `secrets/`. More: `hansa help session-identity`.
 - To say what one job cost, note the time `hansa status` shows when you start it, then run `hansa
-  cost --since HH:MM --by seat`. More: `hansa help cost-figures`.
+  cost --since HH:MM --by seat`. Spend no turns on cost. More: `hansa help cost-figures`.
 
 ## The project's own rules
 `notes/PROJECT.md` holds this project's own rules: how it builds, what may never go out, who decides

@@ -2834,6 +2834,7 @@ def main(argv=None):
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
             "Code session this is run from")
     p.add_argument("action", nargs="?", choices=["on", "off"])
+    p.epilog = see_more("inbox")
     p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
             "background when hansa does not notify the session (hansa notify)")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")

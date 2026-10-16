@@ -2733,19 +2733,16 @@ def cut_redacted(data: bytes, most: int) -> bytes:
     return (first.decode("utf-8", errors="ignore") + note + last.decode("utf-8", errors="ignore")).encode("utf-8")
 
 
-def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
-    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed. most: when given,
-    no more than about this many bytes of each is read and kept, its start and its end (read_bounded)."""
+def publish(desk: Desk, tid: str, *names: str) -> None:
+    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
         for name in names:
             src = raw / name if (raw / name).exists() else d / name  # in d: started before hansa kept them apart
             if src.exists():
-                text = read_bounded(src, most // 2, most // 2) if most else \
-                    src.read_text(encoding="utf-8", errors="replace")
-                # errors="replace": a byte read_bounded kept that is not UTF-8 is written as one "?", not three bytes
+                text = src.read_text(encoding="utf-8", errors="replace")
                 data = desk.redact(text).encode("utf-8", errors="replace")
-                write_bytes(d / name, cut_redacted(data, most) if most else data)
+                write_bytes(d / name, data)
                 if src.parent == raw:
                     src.unlink()
         try:
