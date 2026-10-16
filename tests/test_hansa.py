@@ -8470,9 +8470,9 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         said = " ".join(helped.getvalue().split())
+        # All it copies, said in its help (the card points there).
         for field in ("setup", "check", "merge_check", "network", "env", "allow", "merge_timeout_min",
-                      "commit_message", "merge_message", "identity", "release targets",
-                      "note"):  # all it copies, said in its help (the card points there)
+                      "commit_message", "merge_message", "identity", "release targets"):
             self.assertIn(field, said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
                                                                                  "brief.md").read_text())
@@ -18092,8 +18092,8 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(run.git_needs_open(wt), [own / "index", own / ".hansa-try"])
             self.assertEqual(run.git_needs_kept(wt), [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x"])
         with unittest.mock.patch.object(account, "LINUX", True):  # no new names: only what exact entries keep
-            self.assertEqual(run.git_needs_open(wt, "task/t0001"), [own / "index", own / ".hansa-try"])
-            self.assertEqual(run.git_needs_kept(wt, "task/t0001"),
+            self.assertEqual(run.git_needs_open(wt), [own / "index", own / ".hansa-try"])
+            self.assertEqual(run.git_needs_kept(wt),
                              [common / "config", *(common / "worktrees" / n / "HEAD" for n in others)])
             self.assertEqual(run.git_needs_kept(self.repo), [])
 
@@ -21025,11 +21025,11 @@ class DeskTest(unittest.TestCase):
         self.assertIn('allow: [] -> ["Bash(pnpm test:*)", "Bash(pnpm lint)"]', out)
         self.hansa("lane", "set", "b", "env", "NODE_ENV=test", "TZ=UTC")
         self.hansa("lane", "set", "b", "max_turns", "50")
-        self.hansa("lane", "set", "b", "note", "the shop front")
+        self.hansa("lane", "set", "b", "timeout_min", "90")
         b = self.desk.settings()["lanes"]["b"]
         self.assertEqual(b["allow"], ["Bash(pnpm test:*)", "Bash(pnpm lint)"])
         self.assertEqual(b["env"], {"NODE_ENV": "test", "TZ": "UTC"})
-        self.assertEqual((b["max_turns"], b["note"]), (50, "the shop front"))
+        self.assertEqual((b["max_turns"], b["timeout_min"]), (50, 90))
         self.hansa("lane", "set", "b", "allow")
         self.assertEqual(self.desk.settings()["lanes"]["b"]["allow"], [])
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
@@ -21080,7 +21080,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
                          "lane b (made with hansa lane add; not by the principal on the web page)")
         self.hansa("lane", "set", "b", "max_turns", "50")
-        self.hansa("lane", "set", "a", "note", "the shop front")
+        self.hansa("lane", "set", "a", "max_turns", "50")
         self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
                          "lane b (made with hansa lane add; last changed with hansa lane set b max_turns; "
                          "not by the principal on the web page)")
@@ -21197,7 +21197,7 @@ class DeskTest(unittest.TestCase):
         before = self.desk.settings_path.read_text()
         for field, values in (("network", ["none", "registry.npmjs.org"]), ("allow", ["Bash(ls)", "none"]),
                               ("write", ["none", "/x"]), ("providers", ["none,claude"]), ("env", ["A=1", "none"]),
-                              ("check", ["none", "make"]), ("note", ["x", "none"]), ("max_turns", ["none", "3"])):
+                              ("check", ["none", "make"]), ("max_turns", ["none", "3"])):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", field, *values])
             self.assertIn(f"none means an empty {field}, so it cannot come with other values", str(e.exception.code))
@@ -21234,7 +21234,7 @@ class DeskTest(unittest.TestCase):
             # localhost already on the list, the list the same or changed around it: told once is enough
             self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "registry.npmjs.org", "localhost"))
             self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "localhost", "*.pypi.org"))
-            self.assertNotIn("Warning", self.hansa("lane", "set", "a", "note", "x"))
+            self.assertNotIn("Warning", self.hansa("lane", "set", "a", "max_turns", "50"))
             self.assertNotIn("Warning", self.hansa("lane", "set", "a", "network", "registry.npmjs.org"))
             self.assertEqual(listeners.call_count, 1)
             listeners.return_value = None
@@ -21294,7 +21294,7 @@ class DeskTest(unittest.TestCase):
         [ev] = self.events("lane_command_changed")
         self.assertEqual((ev["lane"], ev["field"], ev["old"], ev["new"]),
                          ("a", "setup", "", "pnpm install --frozen-lockfile"))
-        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "note", "x"))
+        self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "max_turns", "50"))
         self.assertEqual(len(self.events("lane_command_changed")), 1)
 
     def test_concurrency(self):
@@ -23843,7 +23843,7 @@ class DeskTest(unittest.TestCase):
                             second = recorded_land()
                             ready()
                             c.assertEqual(len(c.events("release_after_merge_waits")), 2)
-                            c.hansa("lane", "set", "a", "note", "Reviewing the tick")
+                            c.hansa("lane", "set", "a", "max_turns", "50")
                             d.tick()
                             c.assertEqual(len(c.events("release_after_merge_waits")), 3)
                             c.assertEqual(release.releases(c.desk), [])
