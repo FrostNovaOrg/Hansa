@@ -5,3 +5,7 @@ hansa/BUILD
 # what Claude Code writes into a plugin's folder when it loads it
 hansa/mod/.claude-plugin/types/
 hansa/mod/tsconfig.json
+# the Codex adapter's settings (codex.env, or trial.env, its older name) and run logs
+contrib/codex/codex.env
+contrib/codex/trial.env
+contrib/codex/logs/

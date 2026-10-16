@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""A fake `codex`: records how it was called, then replays a recorded `codex exec --json` stream.
+
+FAKE_CODEX_FIXTURE: the JSONL to replay. Lines {"fake": "stderr", "text": ...} and {"fake": "exit", "code": n}
+are not printed: they write to stderr and set the exit code. @@LATER_DATE@@ and @@LATER_CLOCK@@ become a
+time three hours from now, as Codex prints a usage limit's reset. FAKE_CODEX_RECORD: where the record goes.
+FAKE_CODEX_DELAY: seconds between lines. FAKE_CODEX_DONE: a file made after the last line.
+FAKE_CODEX_HANG: start a child and a grandchild in a session of its own (pids in the record), then wait.
+FAKE_CODEX_NONBLOCK: set O_NONBLOCK on stdout and write as Rust's print does: EAGAIN is a panic (exit 101).
+FAKE_CODEX_BIG: after the first line, a command's item.completed line of about this many bytes.
+FAKE_CODEX_SPLIT: write each line in two parts, this many seconds apart. FAKE_CODEX_NO_LAST_NEWLINE: the last
+line without its newline.
+FAKE_CODEX_KILL: after the line FAKE_CODEX_KILL_AT (0 first, default 2), start a child (its pid in the record's
+"children"), then kill itself with this signal number.
+`codex login status`: as FAKE_CODEX_STATUS says: "in" (logged in, exit 0), "out" (not logged in, exit 1), "hang"
+(no answer; its pid and its child's in the record), "fail" (an error, exit 2); its call recorded in
+FAKE_CODEX_STATUS_RECORD.
+"""
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+
+argv = sys.argv[1:]
+if argv[:2] == ["login", "status"]:
+    status = {"argv": argv, "pid": os.getpid(), "codex_home": os.environ.get("CODEX_HOME"),
+              "stdin_tty": os.isatty(0), "session": os.getsid(0) == os.getpid()}
+    how = os.environ.get("FAKE_CODEX_STATUS") or "in"
+    if how == "hang":
+        status["child"] = subprocess.Popen(["sleep", "300"]).pid
+    if os.environ.get("FAKE_CODEX_STATUS_RECORD"):
+        with open(os.environ["FAKE_CODEX_STATUS_RECORD"], "w") as f:
+            json.dump(status, f)
+    if how == "in":
+        sys.stderr.write("Logged in using ChatGPT\n")
+        sys.exit(0)
+    if how == "out":
+        sys.stderr.write("Not logged in\n")
+        sys.exit(1)
+    if how == "hang":
+        time.sleep(300)
+    sys.stderr.write("Error: failed to read the auth store: permission denied\n")
+    sys.exit(2)
+
+stdin = sys.stdin.read()
+record = {"argv": argv, "stdin": stdin, "pid": os.getpid(), "cwd": os.getcwd(),
+          "env": {k: os.environ.get(k) for k in ("CODEX_HOME", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "TMPDIR",
+                                                  "HANSA_CODEX_BIN", "FROM_LANE_ENV", "CLAUDE_ENV_FILE",
+                                                  "CODEX_CA_CERTIFICATE", "TMPPREFIX")}}
+
+
+def save():
+    if os.environ.get("FAKE_CODEX_RECORD"):
+        with open(os.environ["FAKE_CODEX_RECORD"], "w") as f:
+            json.dump(record, f)
+
+
+if os.environ.get("FAKE_CODEX_HANG"):
+    child = subprocess.Popen(["sleep", "300"])
+    grandchild = subprocess.Popen([sys.executable, "-c", "import subprocess,time; "
+                                   "p=subprocess.Popen(['sleep','300'], start_new_session=True); "
+                                   "print(p.pid, flush=True); time.sleep(300)"], stdout=subprocess.PIPE, text=True)
+    record["children"] = [child.pid, grandchild.pid, int(grandchild.stdout.readline())]
+    save()
+    print(json.dumps({"type": "thread.started", "thread_id": "hang"}), flush=True)
+    time.sleep(300)
+    sys.exit(0)
+save()
+
+if os.environ.get("FAKE_CODEX_NONBLOCK"):
+    fcntl.fcntl(1, fcntl.F_SETFL, fcntl.fcntl(1, fcntl.F_GETFL) | os.O_NONBLOCK)
+
+
+def out(data: str):
+    data = data.encode()
+    while data:
+        try:
+            data = data[os.write(1, data):]
+        except BlockingIOError as e:
+            sys.stderr.write(f"thread 'codex-main' panicked: failed printing to stdout: {e}\n")
+            sys.exit(101)
+
+
+later = datetime.now() + timedelta(hours=3)
+day = later.day
+suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+subs = {"@@LATER_DATE@@": later.strftime(f"%b {day}{suffix}, %Y ") + later.strftime("%I:%M %p").lstrip("0"),
+        "@@LATER_CLOCK@@": later.strftime("%I:%M %p").lstrip("0")}
+code, last, delay = 0, "", float(os.environ.get("FAKE_CODEX_DELAY") or 0)
+split = float(os.environ.get("FAKE_CODEX_SPLIT") or 0)
+big = int(os.environ.get("FAKE_CODEX_BIG") or 0)
+with open(os.environ["FAKE_CODEX_FIXTURE"]) as f:
+    lines = [x for x in f if x.strip()]
+for n, line in enumerate(lines):
+    for k, v in subs.items():
+        line = line.replace(k, v)
+    ev = json.loads(line)
+    if "fake" in ev:
+        if ev["fake"] == "stderr":
+            sys.stderr.write(ev["text"] + "\n")
+        elif ev["fake"] == "exit":
+            code = ev["code"]
+        continue
+    if ev.get("type") == "turn.failed":
+        code = code or 1
+    item = ev.get("item") or {}
+    if ev.get("type") == "item.completed" and item.get("type") == "agent_message":
+        last = item["text"]
+    line = line.rstrip("\n")
+    if not (os.environ.get("FAKE_CODEX_NO_LAST_NEWLINE") and n == len(lines) - 1):
+        line += "\n"
+    if split:
+        out(line[:len(line) // 2])
+        time.sleep(split)
+        line = line[len(line) // 2:]
+    out(line)
+    if big and n == 0:
+        out(json.dumps({"type": "item.completed", "item": {
+            "id": "item_big", "type": "command_execution", "command": "bash -lc 'cat big.txt'",
+            "aggregated_output": "x" * big, "exit_code": 0, "status": "completed"}}) + "\n")
+    if os.environ.get("FAKE_CODEX_KILL") and n == int(os.environ.get("FAKE_CODEX_KILL_AT") or 2):
+        record["children"] = [subprocess.Popen(["sleep", "300"]).pid]
+        save()
+        os.kill(os.getpid(), int(os.environ["FAKE_CODEX_KILL"]))
+        time.sleep(30)
+    time.sleep(delay)
+if "-o" in argv and last:
+    with open(argv[argv.index("-o") + 1], "w") as f:
+        f.write(last)
+if os.environ.get("FAKE_CODEX_DONE"):
+    open(os.environ["FAKE_CODEX_DONE"], "w").close()
+sys.exit(code)

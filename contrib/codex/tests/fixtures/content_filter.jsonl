@@ -1,0 +1,4 @@
+{"type": "thread.started", "thread_id": "0199f3a2-0000-7000-8000-000000000010"}
+{"type": "turn.started"}
+{"type": "error", "message": "stream disconnected before completion: Incomplete response returned, reason: content_filter"}
+{"type": "turn.failed", "error": {"message": "stream disconnected before completion: Incomplete response returned, reason: content_filter"}}
