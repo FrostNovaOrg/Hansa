@@ -261,9 +261,9 @@ More: [The desk: files, keys and notes](docs/desk.md).
 - A worker's commands and the lane's setup and check run in the operating system's sandbox. The coordinator
   runs as the desk's user (or as root on a Linux server). Run a desk as a user, or on a machine, whose files
   you are content for that code to reach.
-- With the [Codex adapter](contrib/codex/README.md), a Codex run's own commands can read the Codex login, because
-  Codex and the commands it runs share one sandbox; other lanes' workers cannot read it, and the run's network
-  reaches only the lane's hosts and OpenAI's.
+- With the [Codex adapter](contrib/codex/README.md), a Codex run's commands can read the Codex login: Codex and
+  the commands it runs share one sandbox, and every Codex run, on any lane, uses that one login. Claude workers
+  cannot read it, and a Codex run's network reaches only the lane's hosts and OpenAI's.
 - A release's command runs outside the sandbox, as the desk's account, and so does what it builds and
   starts from the base branch: list a lane's build and release files as its `release_files`.
 - The coordinator's rules against pushing and publishing catch the plain forms only; a command run another

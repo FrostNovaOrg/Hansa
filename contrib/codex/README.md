@@ -122,8 +122,8 @@ srt's settings are built from the `--settings` hansa gives the worker, and check
 What it cannot close:
 
 - **Codex and the commands it runs share one sandbox**, so a run's own commands can read the Codex login and
-  write the rest of the home: Codex refreshes its token into `auth.json` during a run. Other lanes' workers cannot
-  read it (setup, step 3).
+  write the rest of the home: Codex refreshes its token into `auth.json` during a run. Claude workers cannot read
+  it (setup, step 3).
 - **No progress or notes while a task runs:** hansa reads them from Claude Code's session records, which Codex
   does not write. A task stopped at a ceiling has only Codex's last message.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
