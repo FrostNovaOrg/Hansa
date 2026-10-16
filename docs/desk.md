@@ -49,13 +49,11 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 |---|---|---|
 | A task's text, record, report and result | `tasks/<id>/task.md`, `meta.json`, `result.md`, `run.json` | a few KB to some tens of KB each; kept whole |
 | What a task's processes printed | `tasks/<id>/run.err` (the worker's errors), `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err` | whatever the lane's setup, check and merge check print: not capped while the task is open (a verbose build can print hundreds of MB) |
-| A preview's output | `tasks/<id>/preview.log`, `preview-before-resume.log` | at most 4 MB each, its first and last 2 MB |
-| A browser task's screenshots | `tasks/<id>/browser/` | as many as the worker takes; kept whole |
 | A lane's last try | `lanes/<lane>/try.log`, `merge-check-try.log` | at most 4 MB per step (its first and last 2 MB), replaced by the next try |
 | The event log | `events.jsonl` | a few hundred bytes per event, append-only; never trimmed |
 | A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
 | A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
-| Each lane's worktree | `worktrees/<lane>/`, `worktrees/<lane>-design/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |
+| Each lane's worktree | `worktrees/<lane>/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |
 | A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
 | A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |
 
@@ -64,7 +62,7 @@ first 32 KB and last 256 KB, with a line counting the bytes cut. Failed logs wai
 tasks ended (merged, cancelled, failed, replaced) or left at done that long, and ended releases' logs that
 old, keep their last 256 KB, under a line saying when and how big they were. Task cuts appear in the record
 and `hansa show`, release cuts only in the event; no log is cut twice. Text, records, reports, results,
-screenshots, the event log and all other logs stay whole.
+the event log and all other logs stay whole.
 
 ## Hearing from hansa
 
@@ -72,7 +70,7 @@ hansa posts to the coordinator's Claude Code session through the session's
 inbox (a local socket every interactive session listens on) when something
 needs the coordinator: a task ended (after hansa's own check), failed, was
 cancelled, stopped at its ceiling or could not start; a verification's verdict;
-a design session ended; a merge check ended; the principal answered or closed a
+a merge check ended; the principal answered or closed a
 request (with the answer); the principal answered a release; a release ended
 (done, or failed with its exit code and last lines) or became void; a provider
 an open request names became ready when it was not as the request was made
@@ -92,7 +90,7 @@ left off and ends when the session's process does; one that starts after
 another ended first posts what was missed meanwhile, as it is now.
 
 Which session hears what: a task or request goes to the session that made it
-(`hansa add`, `retry`, `verify`, `merge`, `design` and `ask` record it) while
+(`hansa add`, `retry`, `verify`, `merge` and `ask` record it) while
 that session has a follower; otherwise to every session hansa posts to, as do
 desk-wide events. A cancel or close is not posted to the session whose command
 made it. A session started with `hansa coordinator` is posted to by itself;
@@ -137,8 +135,7 @@ midnight) to its mod, for that start only, and the mod clears the session as
 minutes: no turn (hansa's posts and anyone's messages start one) and no
 background work waiting. It skips the window the session started in. Inside the window
 idle compaction waits for the clear. Without the mod there is no daily clear,
-and the start says why; `hansa notify on --clear-daily` is still taken but
-clears nothing.
+and the start says why.
 
 After any clear, the session is shown `hansa status`, and hansa records when.
 `hansa status` and the page show the window and the last clear, and warn once
@@ -157,7 +154,7 @@ headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 ### Compaction
 
 `hansa coordinator` loads hansa's mod, a Claude Code plugin, into the coordinator's session only (workers,
-verifications and design sessions never get it). The principal sets four values on the page, next to the
+verifications never get it). The principal sets four values on the page, next to the
 coordinator's model and effort; the coordinator cannot change them:
 
 - **Compact when idle at** (default 400,000 tokens): once a turn has ended with an answer and the session is idle
@@ -186,8 +183,7 @@ records among them. So `hansa serve` keeps a floor of free space. Each round it 
 volume it and its runs write on: the desk's folder, each lane's repository and worktree, the folder worker runs get
 their temporary folders in (`/tmp`) and its own TMPDIR (where the setups', checks' and tries' are made; on Linux
 their own TMPDIR is in the desk's `.hansa/tmp`, on the desk's volume, which is named as a place too). While any
-of them has less free than the floor, it starts no new task, verification, try, merge or merge check, design
-session or release. What already runs goes on, a running task's check and a resumed worker among it. It says why:
+of them has less free than the floor, it starts no new task, verification, try, merge or merge check, or release. What already runs goes on, a running task's check and a resumed worker among it. It says why:
 
 - `hansa status` has a line naming the volume, the places on it, its free space and the floor (`DISK LOW: ...`),
   and always one with the free space of the desk's volume and the floor, also when nothing is under it;

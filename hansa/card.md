@@ -29,7 +29,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 
 ## Tell the principal
 - In the conversation, what you changed and why, after each change to a lane's `allow`, network
-  list, write list, setup, check, merge check or preview, or to a release target: each is recorded.
+  list, write list, setup, check or merge check, or to a release target: each is recorded.
 - In the conversation: that a ticked target's release waits while the desk is paused; that `hansa
   serve` is better restarted from a plain shell of theirs when `hansa status` says it was started
   inside a Claude Code session.
@@ -61,14 +61,13 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | command | what it does |
 |---|---|
 | `hansa status` | whether `hansa serve` runs; what runs, waits (and why) or failed; lanes, providers, usage |
-| `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--browser] [--file PATH]` | queue a task |
+| `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH]` | queue a task |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
 | `hansa merge <id> [--recheck \| --despite-check]` | merge into the lane's base branch (Merging) |
 | `hansa retry <id> "<what to change>" [--lane L] [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
 | `hansa verify <id> ["what to look at"] [--lane L] [...]` | a worker runs the change to see whether it holds |
-| `hansa design "<what to shape>" [--lane L] [--title T]` | a design session the principal joins |
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
 | `hansa close <id>` | close a finished task or verification without merging |
 | `hansa notify [on \| off]` | the sessions hansa posts to; start or stop this one |
@@ -77,7 +76,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa explain [lane L [--all] \| provider P \| server \| notify]` | settings and state, and where each comes from |
 | `hansa lane` | one line per lane |
 | `hansa lane add L --repo PATH [--check "<cmd>"] [--setup "<cmd>"] [...]` | a new lane on a git checkout |
-| `hansa lane add L --like OTHER [...]` | a copy of lane OTHER: read the setup, check and preview it copied |
+| `hansa lane add L --like OTHER [...]` | a copy of lane OTHER: read the setup and check it copied |
 | `hansa lane set L FIELD [VALUE ...]` | change one field (`none`: empty; `--help` lists them) |
 | `hansa lane target L [NAME ["<command>" \| none] [...]]` | list, set or remove a release target |
 | `hansa lane try L [--merge-check] [--log]` | run the setup and check once where tasks run (the worktree at the base's tip, the lane's sandbox, the server's environment), with no worker: after changing them, the network or write list, or moving the desk |
@@ -99,18 +98,13 @@ Run one plain `hansa` command per call. Loops, variables, `$(...)`, pipes into `
 commands that read outside the desk (`find /`, say) each make Claude Code ask the principal. hansa's
 own options make them unneeded: `hansa git L show REV:A REV:B` shows several files in one call,
 `hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once.
-The principal can let you read folders outside the desk without asking (`hansa explain` lists them);
-ask with `hansa ask` when you keep needing one.
 
 ## Writing a task
 Say what to change, where, and how the worker can check it (a command, a file to look at). Keep one
 task to one goal, say what done looks like and what to report, and size it so one worker can finish
-it in one go; split anything bigger. Ask only for what the goal needs: each extra demand (a close-up
-screenshot of every finding, say) costs turns.
+it in one go; split anything bigger. Ask only for what the goal needs: each extra demand costs turns.
 - A worker needs no allowed commands: it may run any command inside its sandbox. What a lane's allow
   list adds for workers and verifiers is Claude Code's web tools. More: `hansa help web-tools`.
-- If a task has to look at web pages, add `--browser`: that task's worker alone gets a browser.
-  More: `hansa help browser`.
 - Workers change files only in their worktree, their temporary folder and the lane's write list,
   cannot read the desk's keys and state, logins or what the principal lists, reach only the lane's
   network list, and leave git history to hansa. More: `hansa help workers-sandbox`.
@@ -210,7 +204,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   for review; when they mention it, run `hansa status`. More: `hansa help alerts`.
 
 ## Hearing from hansa
-hansa posts to your session when something needs you: a task, verification, design session, merge
+hansa posts to your session when something needs you: a task, verification, merge
 check or release ended or failed, the principal answered, the server stopped or got stuck, free space
 went under the floor. Each message starts with `[hansa]` and the desk, one line per event with the
 next command. When a provider an open request names became ready, the request may be done: if so,
@@ -227,22 +221,6 @@ Keep the file you reread each time short: the current work and open items only. 
 out with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`). Do not `mv`, `cp` or `sed`
 them: a shell command there asks.
 
-## Shaping a feature with the principal
-Something a sentence or two can say is an ordinary task. A new feature, or an improvement the
-principal wants to shape by looking at it over a few rounds, gets a design session: `hansa design
-"<what to shape>" --lane L` (macOS only; on a Linux desk, shape it through small tasks). A system
-nearly all new is designed elsewhere and comes to you as a finished design.
-- hansa opens it in seconds, on its own branch in a separate directory, and asks the principal to
-  join. It changes the real code there and shows them screenshots; they talk to it directly, not
-  through you. The lane's workers keep working meanwhile. Brief it as you would a task, in the
-  principal's language: which feature, where it lives in the code, what must not change. Then leave
-  it to them.
-- While it is open, do not queue tasks that change the same part of the code. One per lane at a time.
-- When they end it, it comes back like a finished task: verify and merge as usual. How it looks and
-  works is the principal's decision: send back only what does not work or does not fit the code.
-- What is built is the reference: do not hold it against an older prototype or design, nor ask the
-  principal about differences from one. More: `hansa help git-folders`.
-
 ## Your helpers
 Three helpers run inside this session, on your model. `scout` (medium effort) answers one question
 about the desk or a repository with file:line; `reviewer` (high effort) reads one finished task's
@@ -251,7 +229,7 @@ does one hands-on job on this machine (installing software, setting up a tool) w
 command with the principal's permission; like you, it cannot read `secrets/` or edit the lanes'
 repositories. It reports what it changed, where, and how to undo it. Brief a helper as a task: one
 question, task id or job, and what you need back. Claude Code's general-purpose helpers are off;
-code changes and browsers go to workers.
+code changes go to workers.
 
 ## What you change, and what only the principal changes
 - Yours: tasks; the lanes (`hansa lane`) and their standing instructions, which you read and change
@@ -277,7 +255,7 @@ code changes and browsers go to workers.
   (`target/`, `build/`, `node_modules/`) or fill a cache of its own should clean them in its setup.
   More: `hansa help free-space`, `hansa help desk-files`.
 - The setup, check and merge check run with `/bin/sh -c`: POSIX shell only, no bash syntax (`[[ ]]`,
-  arrays, `source`); write the preview the same way.
+  arrays, `source`).
 - hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`), with node, on the `PATH` of
   `hansa serve` for a lane's setup and check; you may install it.
 - Network list: add a host only when the lane's work needs it. `localhost`: on Linux leave it off
@@ -289,7 +267,7 @@ code changes and browsers go to workers.
   More: `hansa help write-env`, `hansa help refused-paths`.
 - Java or Maven: `hansa help java`. Lane commands on Linux: `hansa help linux-sandbox`.
 - The principal's, on the page: providers, models, keys, effort defaults, when your session compacts,
-  prices and the cost audit, the browser tool, what you may read and workers may not, which targets
+  prices, what workers may not read, which targets
   go out without their yes, the forbidden words, the alert command. An entry workers may not read
   that cannot be applied stops every run (`hansa status`: `STOPPED:`) until the principal changes it;
   one that came to close a lane's repository, a worktree or a `PATH` folder is left out of runs:
@@ -297,7 +275,7 @@ code changes and browsers go to workers.
 
 ## Facts you can rely on
 - A provider out of quota or at its usage limit rests (until the reset time the error gives, else
-  its own `rest_minutes` or the desk's `cool_minutes`), and the task moves to the lane's next
+  the desk's `cool_minutes`), and the task moves to the lane's next
   provider without using a try (5 times); one that refuses a task (its content filter) does not
   rest. `hansa show` says until when. More: `hansa help provider-limits`.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
@@ -317,9 +295,7 @@ code changes and browsers go to workers.
 - Nothing hansa starts gets a Claude Code session's identity. `hansa web` refuses in a Claude Code
   session; `--file` refuses the desk's `.hansa/` and `secrets/`. More: `hansa help session-identity`.
 - To say what one job cost, note the time `hansa status` shows when you start it, then run `hansa
-  cost --since HH:MM --by seat`. When `hansa status` says cost audit on, end each report with what
-  that round cost, and point out anything unusual (one task far dearer than the others, a seat that
-  grew); otherwise spend no turns on cost. More: `hansa help cost-figures`.
+  cost --since HH:MM --by seat`. Spend no turns on cost. More: `hansa help cost-figures`.
 
 ## The project's own rules
 `notes/PROJECT.md` holds this project's own rules: how it builds, what may never go out, who decides
@@ -327,7 +303,7 @@ what. Claude Code loads it with this card at every start, after /clear and after
 line below imports it); hansa makes it once and changes it only through `hansa notes archive
 PROJECT.md HEADING`, while this card hansa replaces. It is yours and the principal's: write there,
 without asking, what you would otherwise be told again. Keep it short: every turn rereads it (More:
-`hansa help desk-files`). Workers do not see it, and no worker, verifier or design session may read
+`hansa help desk-files`). Workers do not see it, and no worker or verifier may read
 `notes/` or this card: rules for a lane's workers go in its standing instructions. A missing file
 loads nothing.
 
@@ -352,7 +328,6 @@ loads nothing.
 | `provider-limits` | dropped connections, usage limits |
 | `check-output` | a check's output |
 | `effort` | where a run's effort comes from |
-| `browser` | browser tasks, the preview |
 | `writing-tasks` | a task a verification can judge |
 | `merge-check` | merging, merge checks and lanes, conflicts, sending back |
 | `cost-figures` | what `hansa cost` counts |

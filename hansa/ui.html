@@ -44,7 +44,6 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .tick { display:flex; gap:6px; align-items:baseline; margin:2px 0; cursor:pointer; }
 .tick > input { flex:none; margin:0; }
 .tick > span { min-width:0; }
-img { max-width:100%; }
 @media (max-width:640px) { main { padding:10px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:5px 4px; } }
 </style>
 </head>
@@ -74,9 +73,9 @@ const T = ZH ? {
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"填在这里，只存在本机、谁也看不到内容", check:"Ping", checking:"Ping 中…",
-  restMinutes:"用到额度上限后歇几分钟（空＝用总体的设置）", restNote:"报错里写了额度何时恢复，就歇到那时再加一分钟（最多 31 天）；没写才按这里的分钟数。订阅的窗口常是几小时，API 密钥可能是每分钟，套餐可能按月：按这家的情况填。因额度停下的任务回到队列，不算一次尝试。", rest:"歇",
+  rest:"歇",
   ready:"可用", lastCheck:"上次 Ping", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
-  general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟（各家没单独设时）", coordinator:"协调席",
+  general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟", coordinator:"协调席",
   compactIdle:"空闲时压缩于（token）", compactLongIdle:"长时间空闲后压缩于（token）", longIdleMin:"长时间空闲指（分钟）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，协调席的 mod 压缩它：空闲一分钟后，若上下文达到第一个数（这时整个上下文还在提示缓存里）；长时间空闲（第三个数）后，若达到第二个数：赶在提示缓存（一小时）失效之前压缩，下一轮就从短的上下文开始，不必不走缓存地读一个长的。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第四个数时压缩（hansa coordinator 用 --autocompact 传给它）。token 数都在 100,000 到 1,000,000 之间，长时间空闲在 1 到 240 分钟之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或不小于第四个数），那个压缩就不会发生：Claude Code 自己先压缩了。第四个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。前三个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第四个数从会话下次启动起生效。协调席不能改它们。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modStarted:t => `协调席会话 ${t} 启动：`, modOn:"hansa 加载了协调席的 mod", modOff:why => `hansa 没有加载协调席的 mod，因为：${why}`,
@@ -86,15 +85,11 @@ const T = ZH ? {
   clearRoot:w => `每日清空 ${w}：上次清空不知道（root 在这个工作台上的会话，hansa 不记录它的清空）`,
   clearLastUnknown:w => `每日清空 ${w}：上次清空不知道`, clearLast:(w, t) => `每日清空 ${w}：上次清空在 ${t}`,
   clearNever:(w, t) => `每日清空 ${w}：自 ${t} 启动以来没有清空过`, clearMissed:n => `；此后已有 ${n} 个时段过去而没有清空`,
-  auditsCost:"让协调席参与成本审计", repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
+  repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
-  allow:"这条线的执行层、核验和设计会话不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
+  allow:"这条线的执行层和核验不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
   network:"执行层做活时能连的主机", write:"执行层还能写的文件夹（工作树以外）",
   laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_holds, with notes":"成立，附注", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）", progressFmt:(n, idle) => idle == null ? "模型还没回话" : `已回 ${n} 轮，${idle} 分钟前还有动作`,
-  browserCmd:"浏览器工具的启动命令（协调席派活时可以给单件活开浏览器；空＝不提供浏览器）",
-  coordinatorRead:"协调席（和它会话里的帮手）不用问就能读的文件夹（工作台以外；每行一个完整路径；只能读，不能改；下次启动 hansa coordinator 时生效）",
-  design:"设计会话（你直接在里面跟它改一件功能，结束后交回协调席核对、合并）", join:"接进去的命令（在这台机器上运行）", shots:"截图（最新在前）",
-  designSeat:"设计会话用的模型（空＝跟协调席一样）", preview:"起页面的命令：设计会话用它把应用跑起来看；带浏览器的活，hansa 在 macOS 上先替它跑起来（空＝没有）", previewWait:"起页面最多等几秒（空＝120）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
   providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
@@ -106,12 +101,11 @@ const T = ZH ? {
   diskFloorNote:"任一卷（桌面、各工作线的仓库和工作区、临时文件夹）剩余空间低于它时，后台不开始任何新的事，正在跑的照常跑完；每个卷都多出 1 GB 后自动恢复。小于下限四倍的卷（如 tmpfs 的 /tmp）以其大小的四分之一为下限，余量随之缩小（不超过该下限的四分之一）。由协调席用 hansa disk-floor 设定，这里只能看。",
   diskLow:"磁盘空间不足，不开始新的事",
   laneCommands:"工作线最近改过的命令、网络和可写文件夹（最新在前，最多 20 条）",
-  laneCommandsNote:"装依赖和验收命令由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟执行层一样的网络和可写范围）；起页面的命令由设计会话自己跑，设计会话在自己的沙箱里。网络和可写文件夹的改动，会放宽这条工作线的执行层（连同装依赖和验收）能做的事。",
-  f_setup:"装依赖", f_check:"验收命令", f_preview:"起页面", field:"哪一项", change:"原来 -> 现在", at:"时间",
+  laneCommandsNote:"装依赖和验收命令由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟执行层一样的网络和可写范围）。网络和可写文件夹的改动，会放宽这条工作线的执行层（连同装依赖和验收）能做的事。",
+  f_setup:"装依赖", f_check:"验收命令", field:"哪一项", change:"原来 -> 现在", at:"时间",
   prices:"价目（美元／每百万 token）", in:"输入", out:"输出", cacheRead:"读缓存", cacheWrite:"写缓存", cacheWrite1h:"写缓存（1 小时）",
   addPrice:"加一个模型", pricesNote:"缓存价空着就按常见倍数算；第三方模型请填全。",
-  coordinatorReadSkipped:"列表里这些现在不会给协调席（启动时跳过；请改掉或删掉）",
-  workersMayNotRead:"工作者不能读的文件夹和文件（每行一个完整路径；比如这台机器自己放密钥的文件夹。工作者、验证者、准备命令和检查命令的沙箱都读不到；hansa 启动的每个 Claude Code（协调席和设计会话也算）的 Read 工具也被拒绝。登录信息、密钥、浏览器数据等常见位置 hansa 已内置，不用再列。名字里或链接指向的地方含 ()[]{}*?\\ 的路径写不成规则：只要列表里有这样一条，hansa 就不启动任何工作者、验证者、设计会话或协调席，直到这里改掉它）",
+  workersMayNotRead:"工作者不能读的文件夹和文件（每行一个完整路径；比如这台机器自己放密钥的文件夹。工作者、验证者、准备命令和检查命令的沙箱都读不到；hansa 启动的每个 Claude Code（协调席也算）的 Read 工具也被拒绝。登录信息、密钥、浏览器数据等常见位置 hansa 已内置，不用再列。名字里或链接指向的地方含 ()[]{}*?\\ 的路径写不成规则：只要列表里有这样一条，hansa 就不启动任何工作者、验证者或协调席，直到这里改掉它）",
   workersMayNotReadAdded:"其中这些是协调席用 hansa hide 加的（它只能加，删只能由你在这里删）", addedByCoordinator:"协调席添加于",
   workersMayNotReadSkipped:"列表里这些现在没有生效：它们会挡住某条泳道的仓库、工作树或 PATH 上的文件夹，所以每次运行都跳过，这个文件夹对运行是开着的，直到你和协调席商定（请改掉或删掉）",
   noReadStop:"什么都不启动：工作者不能读的列表里有一条用不上",
@@ -122,7 +116,7 @@ const T = ZH ? {
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
   runs:"运行次数（每次尝试都算）", turns:"轮数",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
-  seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", seat_design:"设计会话", helper_reviewer:"复核", helper_scout:"侦察", helper_operator:"操作", helper_verifier:"早期助手：验收官", "helper_verifier-high":"早期助手：验收官（high）",
+  seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", helper_reviewer:"复核", helper_scout:"侦察", helper_operator:"操作",
   events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
   noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   mcBatch:(members, owner) => `与 ${members.join(", ")} 一起验收；运行 ${owner} 的合并验收`,
@@ -175,20 +169,16 @@ const T = ZH ? {
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Stored on this machine only; nobody can read it back", check:"Ping", checking:"pinging…",
-  restMinutes:"Rest after a usage limit (min; blank = the general setting)", restNote:"When the limit error says when the limit resets, the provider rests until then and a minute (31 days at most); these minutes count only when it does not. A subscription's window is often a few hours, an API key's limit may be per minute, a plan's may be monthly: set what fits this provider. A task stopped by a limit goes back to the queue without using a try.", rest:"rest",
+  rest:"rest",
   ready:"ready", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
-  general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a usage limit (min), for providers without their own", coordinator:"Coordinator",
+  general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a usage limit (min)", coordinator:"Coordinator",
   compactIdle:"Compact when idle at (tokens)", compactLongIdle:"Compact after a long idle at (tokens)", longIdleMin:"A long idle is (minutes)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it: after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache; after a long idle (the third figure) if it is at or above the second, before the prompt cache (an hour) lapses, so that the next turn starts from a short context instead of reading a long one uncached. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the fourth (hansa coordinator gives it with --autocompact). The token figures take 100,000 to 1,000,000; a long idle, 1 to 240 minutes. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or at or above the fourth, never comes: Claude Code compacts on its own first. A fourth figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first three applies from the session's next decision (when a turn ends, or a wait ends); a change to the fourth from the session's next start. The coordinator cannot change them. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
-  auditsCost:"Let the coordinator audit cost", repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
+  repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
-  allow:"Rules the lane's workers, verifiers and design sessions are given without asking (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
+  allow:"Rules the lane's workers and verifiers are given without asking (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
   network:"Hosts workers may reach during a task", write:"Extra folders workers may write to (besides the worktree)",
   laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_holds, with notes":"holds, with notes", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)", progressFmt:(n, idle) => idle == null ? "no reply from the model yet" : `${n} replies, active ${idle} min ago`,
-  browserCmd:"Browser tool command (the coordinator can give single tasks a browser; blank = none)",
-  coordinatorRead:"Folders the coordinator (and the helpers in its session) may read without asking, outside the desk (one full path per line; reading only, no editing; holds from the next hansa coordinator start)",
-  design:"Design sessions (you shape one feature in them directly; each goes back to the coordinator for checks and merge when you end it)", join:"Join with (on this machine)", shots:"Screenshots, newest first",
-  designSeat:"Model for design sessions (blank = the coordinator's)", preview:"Command that starts the app, so a design session can look at it; for a task with a browser, hansa starts it first, on macOS (blank = none)", previewWait:"Seconds the preview has to be ready (blank = 120)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
@@ -200,12 +190,11 @@ const T = ZH ? {
   diskFloorNote:"while any volume hansa writes on (the desk, each lane's repository and worktree, the temporary folders) has less free, hansa serve starts nothing new and lets what runs finish; it starts again once each has 1 GB more. A volume smaller than four times the floor (a tmpfs /tmp, say) has a quarter of its size as its floor, and a margin scaled with it (no more than a quarter of that floor). Set by the coordinator with hansa disk-floor; here you can only look.",
   diskLow:"disk space low, nothing new starts",
   laneCommands:"Recent changes to lane commands, networks and write folders (newest first, at most 20)",
-  laneCommandsNote:"hansa runs the setup and check commands itself, in srt with the lane's sandbox (the workers' network and folders); the preview command is run by the design session, in its own sandbox. Network and write changes widen what the lane's workers, and its setup and check, may do.",
-  f_setup:"setup", f_check:"check", f_preview:"preview", field:"Field", change:"old -> new", at:"When",
+  laneCommandsNote:"hansa runs the setup and check commands itself, in srt with the lane's sandbox (the workers' network and folders). Network and write changes widen what the lane's workers, and its setup and check, may do.",
+  f_setup:"setup", f_check:"check", field:"Field", change:"old -> new", at:"When",
   prices:"Prices (USD per million tokens)", in:"Input", out:"Output", cacheRead:"Cache read", cacheWrite:"Cache write", cacheWrite1h:"Cache write (1h)",
   addPrice:"Add model", pricesNote:"Blank cache prices use the usual multiples; fill them in for third-party models.",
-  coordinatorReadSkipped:"Listed but not given to the coordinator now (skipped at its start; change or remove them)",
-  workersMayNotRead:"Folders and files workers may not read (one full path per line; this machine's own folders of keys, say. The sandbox of every worker, verifier, setup and check refuses to read them, and so does the Read tool of every Claude Code run hansa starts, the coordinator and design sessions too. Common logins, keys and browsers' data are built in and need no entry. A path with one of ()[]{}*?\\ in a name, or where its link leads, cannot be written as a rule: while the list holds one, hansa starts no worker, verifier, design session or coordinator until it is changed here)",
+  workersMayNotRead:"Folders and files workers may not read (one full path per line; this machine's own folders of keys, say. The sandbox of every worker, verifier, setup and check refuses to read them, and so does the Read tool of every Claude Code run hansa starts, the coordinator too. Common logins, keys and browsers' data are built in and need no entry. A path with one of ()[]{}*?\\ in a name, or where its link leads, cannot be written as a rule: while the list holds one, hansa starts no worker, verifier or coordinator until it is changed here)",
   workersMayNotReadAdded:"Of these, the coordinator added (hansa hide; it can only add, and only you remove an entry, here)", addedByCoordinator:"added by the coordinator",
   workersMayNotReadSkipped:"Listed but not applied now: each would close a lane's repository, a worktree or a folder on the PATH, so it is left out of every run and that folder is open to them until you and the coordinator settle it (change or remove them)",
   noReadStop:"Nothing starts: an entry of what workers may not read cannot be applied",
@@ -215,7 +204,7 @@ const T = ZH ? {
   costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill. A task queued again for another try counts every try's tokens.",
   runs:"Runs (every try)", turns:"Turns",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
-  seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", seat_design:"design sessions", helper_reviewer:"reviewer", helper_scout:"scout", helper_operator:"operator", helper_verifier:"earlier helper: verifier", "helper_verifier-high":"earlier helper: verifier (high)",
+  seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", helper_reviewer:"reviewer", helper_scout:"scout", helper_operator:"operator",
   events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
   noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
   mcBatch:(members, owner) => `Checked with ${members.join(", ")}; ${owner}’s check runs`,
@@ -299,25 +288,13 @@ function err(e) { $("#state").textContent = String(e.message || e); $("#state").
 const detailOpen = new Set();
 function taskLink(id) {
   const box = h("div", {class:"mono", hidden:!detailOpen.has(id)});
-  const load = async () => { const r = await api("/api/task?id=" + id); box.replaceChildren(...shown([h("pre", {}, r.text), shotStrip(id, r.shots, 12)])); };
+  const load = async () => { const r = await api("/api/task?id=" + id); box.replaceChildren(...shown([h("pre", {}, r.text)])); };
   if (detailOpen.has(id)) load().catch(err);
   const btn = h("button", {class:"link", onclick: () => {
     if (detailOpen.has(id)) { detailOpen.delete(id); box.hidden = true; }
     else { detailOpen.add(id); box.hidden = false; load().catch(err); }
   }}, id);
   return [btn, box];
-}
-function shotStrip(id, names, n) {
-  if (!names || !names.length) return null;
-  return h("div", {}, h("div", {class:"muted"}, T.shots), h("div", {class:"row"}, names.slice(0, n).map(x => {
-    const src = `/api/file?task=${encodeURIComponent(id)}&name=${encodeURIComponent(x)}`;
-    return h("a", {href:src, target:"_blank", title:x}, h("img", {src, alt:x, style:"max-width:320px;max-height:220px;border:1px solid var(--line, #ccc)"}));
-  })));
-}
-function designBlock(m) {
-  return h("div", {class:"lane"}, h("div", {class:"row"}, taskLink(m.id), h("strong", {}, m.title), h("span", {class:"muted"}, `${m.lane} · ${m.minutes} ${T.minutes}`)),
-    m.progress ? h("div", {class:"muted"}, T.progressFmt(m.progress.replies, m.progress.idle_min)) : null,
-    h("div", {}, T.join + "：", h("code", {}, m.join)), shotStrip(m.id, m.shots, 6));
 }
 // What hansa did at the coordinator's start: whether it loaded the mod, and why not; and the --autocompact options of
 // the session's command line, as given (hansa/plugin.py)
@@ -338,7 +315,6 @@ function clearLine(m, line) {
 }
 async function loadStatus() {
   const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);
-  const designs = (st.design || []).map(designBlock);
   $("#state").textContent = (st.paused ? T.paused + ": " + st.paused : T.dispatchOn) + " · "
     + (st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
        : st.server_up ? T.serverUp : T.serverDown)
@@ -365,7 +341,6 @@ async function loadStatus() {
       st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""),
         m.checking ? T.checkMinutes(m.check_minutes, m.minutes) : m.minutes,
         m.progress ? h("span", {}, m.title, h("br"), h("span", {class:"muted"}, T.progressFmt(m.progress.replies, m.progress.idle_min))) : m.title]))) : null,
-    designs.length ? section(T.design, designs) : null,
     st.queued.length ? section(T.queued, table([T.task, T.lane, T.titleCol, T.waiting],
       st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : null,
     st.review.length || (st.merging || []).length ? section(T.review, (st.merging || []).length ? [h("h3", {}, T.merging),
@@ -392,7 +367,7 @@ async function loadStatus() {
       h("span", {}, a.text), h("span", {}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`)))]) : null,
     section(T.providers, table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
-      p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + (p.rest_own ? "" : ` (${T.general})`),
+      p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + ` (${T.general})`,
       p.problem ? h("span", {class:"warn"}, p.problem) : h("span", {class:"ok"}, T.ready),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
       checkButton(p.name, loadStatus)]))),
@@ -478,12 +453,12 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], READ_SKIPPED = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 /* the entries of what workers may not read that the coordinator added with hansa hide, as hansa recorded them */
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
 async function loadSettings(problems) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
-  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; READ_SKIPPED = r.read_skipped || []; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
+  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   renderSettings(problems && problems.length ? problems : r.problems);
@@ -505,10 +480,10 @@ function forbiddenExceptions() {
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
-  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, merge_check:T.laneMergeCheck, merge_timeout_min:T.mergeTimeout, preview:T.preview, preview_wait_s:T.previewWait, setup:T.setup,
+  env:T.env, allow:T.allow, network:T.network, write:T.write, check:T.laneCheck, merge_check:T.laneMergeCheck, merge_timeout_min:T.mergeTimeout, setup:T.setup,
   targets:T.laneTargets};
 /* The recent-changes list names the field briefly; a network or write change has no field, only its event. */
-const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, merge_check:T.f_merge_check, preview:T.f_preview, release:T.f_release, network:T.network, write:T.write};
+const CHANGE_LABELS = {setup:T.f_setup, check:T.f_check, merge_check:T.f_merge_check, release:T.f_release, network:T.network, write:T.write};
 const changedField = e => e.event === "lane_network_changed" ? "network" : e.event === "lane_write_changed" ? "write" : e.event === "lane_allow_changed" ? "allow" : e.field;
 function laneValue(k, v) {
   if (v == null || v === "" || (Array.isArray(v) && !v.length) || (typeof v === "object" && !Object.keys(v).length)) return T.none;
@@ -597,7 +572,6 @@ function renderSettings(problems) {
             h("button", {onclick: () => { delete S.providers[name]; renderSettings(); }}, T.remove)),
           h("div", {class:"grid"},
             T.kind, kindSel, T.model, bind(p, "model"), T.effort, pick(p, "effort", EFFORTS),
-            T.restMinutes, h("div", {}, bind(p, "rest_minutes", "number"), " ", h("span", {class:"muted"}, T.restNote)),
             ...(p.kind === "compatible"
               ? [T.endpoint, bind(p, "base_url"), T.key, h("div", {class:"row"},
                   h("span", {class: KEYS[name] ? "ok" : "warn"}, KEYS[name] ? T.keySet : T.keyMissing), keyBox,
@@ -630,14 +604,6 @@ function renderSettings(problems) {
         T.compactLongIdle, bind(S.coordinator_compact, "long_idle_at", "number"),
         T.longIdleMin, bind(S.coordinator_compact, "long_idle_min", "number"),
         T.compactWorking, h("div", {}, bind(S.coordinator_compact, "working_at", "number"), h("div", {class:"muted"}, T.compactNote))]),
-      T.auditsCost, bind(S.coordinator, "audits_cost", "bool"),
-      T.designSeat, (S.design = S.design || {provider:"", model:"", effort:""}, h("div", {class:"row"},
-        pick(S.design, "provider", ["", ...Object.keys(S.providers)], [T.effortDefault, ...Object.keys(S.providers)]),
-        T.model, bind(S.design, "model"), T.effort, pick(S.design, "effort", EFFORTS))),
-      T.browserCmd, bind(S, "browser"),
-      T.coordinatorRead, h("textarea", {placeholder:"/opt/include", oninput: e => {
-        S.coordinator_read = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.coordinator_read || []).join("\n")),
-      ...(READ_SKIPPED.length ? [T.coordinatorReadSkipped, h("ul", {}, READ_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []),
       T.workersMayNotRead, h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput: e => {
         S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.workers_may_not_read || []).join("\n")),
       ...(hiddenByCoordinator().length ? [T.workersMayNotReadAdded, h("ul", {}, hiddenByCoordinator().map(([p, v]) =>

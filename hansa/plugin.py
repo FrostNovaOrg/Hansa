@@ -3,7 +3,7 @@
 `hansa coordinator` starts the session with `--plugin-dir <a copy of hansa/mod>` and `--autocompact <working_at>`,
 both for that start only; hansa sets no environment variable but HANSA_MOD_SETTINGS, the path of the desk's own
 settings file, and HANSA_MOD_CLEAR_DAILY, the window of `--clear-daily HH-HH` when the start gives one, and changes no
-settings file, so no worker, design session or `claude` the session starts gets it from hansa. The mod compacts the context once a turn has ended and the session is idle, at idle_at tokens after a minute
+settings file, so no worker or `claude` the session starts gets it from hansa. The mod compacts the context once a turn has ended and the session is idle, at idle_at tokens after a minute
 and at long_idle_at after long_idle_min minutes (hooks/register.js says when exactly): it reads those three in the
 desk's settings file, the one the page saves, at each decision, so a change there needs nothing kept in step. While
 the session works, Claude Code's own auto-compact compacts it, at the window --autocompact gives (working_at, read

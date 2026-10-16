@@ -67,7 +67,6 @@ LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST = re.compile(rf"^(\*\.)?{LABEL}(\.{LABEL})*(:(?P<port>[0-9]{{1,5}}))?$")
 MAX_HOSTS = 50
 MAX_WRITE = 20
-MAX_READ = 20
 # Characters a folder the coordinator is let read may not have in its path: it goes into a permission rule,
 # Edit(//path/**), where these mean something else
 # and the backslash, which a pattern reads as "take the next character as it is"
@@ -229,9 +228,6 @@ CACHE_ENV = ("npm_config_cache", "npm_config_store_dir", "PIP_CACHE_DIR", "YARN_
              "COURSIER_CACHE")
 XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
-# Rules every lane's workers, verifiers and design sessions are given without asking: none. A lane's allowed
-# commands go to all three; workers run any command inside their sandbox and need no Bash rule, so a lane lists
-# what its design sessions run (its tests, say) and the web tools its runs may use (refused_rule).
 DEFAULT_ALLOW: list = []
 
 
@@ -240,7 +236,6 @@ def home_secrets() -> tuple:
     return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
 
 
-REST_MINUTES_MOST = 44640  # a provider's own rest after a usage limit: up to 31 days (a monthly allowance)
 # When the coordinator's session compacts (hansa/plugin.py): idle_at and long_idle_at, in tokens, by the coordinator's
 # mod once a turn has ended and the session has been idle for a minute or for long_idle_min minutes (the mod reads
 # them here, in the desk's settings file, and keeps the same defaults and ranges: hansa/mod/hooks/register.js);
@@ -269,25 +264,16 @@ def default_settings() -> dict:
         # (hansa disk-floor), as concurrency is
         "disk_floor": 10,
         "cool_minutes": 30,
-        "coordinator": {"provider": "claude", "model": "opus", "effort": "high", "audits_cost": False},
+        "coordinator": {"provider": "claude", "model": "opus", "effort": "high"},
         # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
         "coordinator_compact": dict(COMPACT_DEFAULTS),
         # When the principal is alerted that the coordinator's session cannot be reached (COORDINATOR_ALERT). The
         # principal's, on the page
         "coordinator_alert": dict(COORDINATOR_ALERT),
-        # Design sessions, which the principal works in directly (`hansa design`). Blank provider
-        # or model: the coordinator's.
-        "design": {"provider": "", "model": "", "effort": ""},
         "providers": {
             "claude": {"kind": "subscription", "model": "opus", "effort": "", "config_dir": ""},
         },
         "lanes": {},
-        # The command that starts a browser tool (an MCP server on stdio). The coordinator
-        # gives it to one task at a time with `hansa add --browser`. Empty: no browser.
-        "browser": "",
-        # Folders outside the desk the coordinator (and the helpers in its session) may read without
-        # asking, as it reads the lanes' repositories: full paths. The principal's, on the page.
-        "coordinator_read": [],
         # Folders and files no worker, verifier, setup or check may read, besides what hansa always keeps from
         # them (desk.HOME_SECRETS and the like): full paths, a machine's own folders of keys, say. Read is
         # denied there to every Claude Code run hansa starts, the coordinator too. The principal's, on the page.
@@ -586,6 +572,24 @@ def forbidden_exceptions_ok(exceptions) -> bool:
                                                 for lane in x["lanes"]) for x in exceptions)
 
 
+def current_settings(settings: dict) -> dict:
+    """Ignore retired settings from older desks, including malformed values, without changing the file."""
+    s = copy.deepcopy(settings)
+    for key in ("design", "browser", "coordinator_read", "audits_cost"):
+        s.pop(key, None)
+    co = s.get("coordinator")
+    if isinstance(co, dict):
+        co.pop("audits_cost", None)
+    for p in (s.get("providers", {}).values() if isinstance(s.get("providers"), dict) else ()):
+        if isinstance(p, dict):
+            p.pop("rest_minutes", None)
+    for lane in (s.get("lanes", {}).values() if isinstance(s.get("lanes"), dict) else ()):
+        if isinstance(lane, dict):
+            for key in ("preview", "preview_wait_s", "note"):
+                lane.pop(key, None)
+    return s
+
+
 def validate(s: dict, root=None, page: bool = False, before: dict | None = None, mailbox_key: str = "") -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
@@ -595,11 +599,11 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
-    s = dict(s)
+    s = current_settings(s)
     original_key = mailbox_settings(s)
     mailbox_key = mailbox_key or original_key
-    known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "design", "providers", "lanes", "prices",
-             "browser", "coordinator_read", "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
+    known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
+             "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
              "coordinator_alert"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
@@ -608,14 +612,6 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                                            and isinstance(v.get("at"), (int, float)) for v in by.values()):
         p.append(f"{HIDDEN_BY} must map each entry the coordinator added to what workers may not read to who added "
                  "it and when")
-    # which of them may be read is looked at when the page saves a changed list, and when the coordinator
-    # starts (read_split): one that went bad later (removed, a link pointed elsewhere) is skipped there and
-    # said on the page, and does not keep other settings or the coordinator's lane changes from saving
-    given = s.get("coordinator_read", [])
-    if not isinstance(given, list) or len(given) > MAX_READ or not all(isinstance(x, str) for x in given):
-        p.append(f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line")
-    # as the read list: which of them hold is looked at when the page saves a changed list, and when a run starts
-    # (deny_split), where one that no longer passes is left out and said in the task
     kept = s.get("workers_may_not_read", [])
     if not isinstance(kept, list) or len(kept) > MAX_DENY or not all(isinstance(x, str) for x in kept):
         p.append(DENY_LIST_WHY)
@@ -684,8 +680,6 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         p += [f"coordinator_alert: {COORDINATOR_ALERT_WHAT[k]} ({k}) must be a whole number from 0 (off) to "
               f"{COORDINATOR_ALERT_MOST}, not {json.dumps(v)}" for k, v in ca.items()
               if not _is_int(v, 0, COORDINATOR_ALERT_MOST)]
-    if not isinstance(s.get("browser", ""), str) or len(s.get("browser", "")) > 1000:
-        p.append("browser must be one command line (up to 1000 characters)")
     if not _is_int(s.get("concurrency"), 1, 8):
         p.append("concurrency must be a whole number from 1 to 8")
     fl = s.get("disk_floor", 10)
@@ -707,7 +701,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             continue
         if {"key", "api_key", "token"} & set(pv):
             p.append(f"{at}: keys are not kept in settings; use the key box on the page")
-        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "rest_minutes", "key", "api_key",
+        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "key", "api_key",
                            "token"}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
@@ -720,9 +714,6 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
             p.append(f"{at}: the endpoint address must start with https://")
-        if pv.get("rest_minutes") is not None and not _is_int(pv["rest_minutes"], 1, REST_MINUTES_MOST):
-            p.append(f"{at}: rest_minutes (its rest after a usage limit) must be a whole number from 1 to "
-                     f"{REST_MINUTES_MOST}, or empty for the desk's cool_minutes")
         cdir = pv.get("config_dir", "")
         if cdir and not str(cdir).startswith("/"):  # nothing expands ~ for a worker
             p.append(f"{at}: config_dir must be a full path starting with /")
@@ -740,8 +731,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             p.append(f"{at}: must be an object")
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
-                           "preview", "preview_wait_s", "setup", "release", "targets", "release_files", "max_turns",
-                           "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "note", "identity", *MESSAGE_FIELDS}
+                           "setup", "release", "targets", "release_files", "max_turns",
+                           "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "identity", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -785,7 +776,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             p.append(f"{at}: env must be an object")
         else:
             p += [f"{at}: env {k} {why}" for k, why in env_problems(env, root)]
-        for field in ("check", "merge_check", "preview", "setup", "release"):
+        for field in ("check", "merge_check", "setup", "release"):
             if not isinstance(ln.get(field, ""), str) or len(ln.get(field, "")) > 1000:
                 p.append(f"{at}: {field} must be one shell command line (up to 1000 characters)")
         p += [f"{at}: {f} {message_problem(ln[f])}" for f in MESSAGE_FIELDS if message_problem(ln.get(f, ""))]
@@ -805,8 +796,6 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             p.append(f"{at}: merge_timeout_min must be from 1 to 1440")
         if "merge_batch" in ln and not _is_int(ln["merge_batch"], 1, 10):
             p.append(f"{at}: merge_batch must be from 1 to 10")
-        if "preview_wait_s" in ln and not _is_int(ln["preview_wait_s"], 1, 1800):
-            p.append(f"{at}: preview_wait_s must be from 1 to 1800")
 
     co = s.get("coordinator")
     if not isinstance(co, dict):
@@ -816,18 +805,6 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             p.append("coordinator: unknown provider")
         if co.get("effort", "") not in EFFORTS:
             p.append("coordinator: effort is not a known level")
-        if not isinstance(co.get("audits_cost", False), bool):
-            p.append("coordinator: audits_cost must be true or false")
-    ds = s.get("design", {})
-    if not isinstance(ds, dict) or set(ds) - {"provider", "model", "effort"}:
-        p.append("design must be an object with provider, model and effort")
-    else:
-        if ds.get("provider") and ds["provider"] not in provs:
-            p.append("design: unknown provider")
-        if not isinstance(ds.get("model", ""), str):
-            p.append("design: model must be text")
-        if ds.get("effort", "") not in EFFORTS:
-            p.append("design: effort is not a known level")
 
     prices = s.get("prices")
     if not isinstance(prices, dict):
@@ -1059,24 +1036,11 @@ def _forms(path: str) -> set:
     return out
 
 
-def _in_library(path: str, lib: str) -> bool:
-    """Whether a full path, as given or where its link leads, is ~/Library, above it, or inside it anywhere
-    but in its Caches (where build tools keep theirs)."""
-    fence, caches = _chain(lib), _seen(os.path.join(lib, "Caches"))
-    libs = {_seen(w) for w in _forms(lib)}
-    for v in _forms(path):
-        ups = {_seen(u) for u in _ups(v)}
-        if (_seen(v) in fence or libs & ups) and caches not in ups:
-            return True
-    return False
-
-
-def _mac_fence(home: str, write: bool = False) -> list:
+def _mac_fence(home: str) -> list:
     """On macOS: the data volume and the folders above it hold everything, the home folder too; /Volumes
     holds a link to / and /.vol reaches any folder by its number; ~/Library holds the keychains, apps' own
-    data and what runs at login. write: for a lane's write list, which takes nothing in ~/Library (its
-    Caches hold what runs outside the sandbox: apps' updaters, what brew installs from); the coordinator's
-    read list takes its Caches."""
+    data and what runs at login. A lane's write list takes nothing in ~/Library: its
+    Caches hold what runs outside the sandbox, such as apps' updaters and what brew installs from."""
     if sys.platform != "darwin":
         return []
     lib = os.path.join(home, "Library")
@@ -1086,8 +1050,7 @@ def _mac_fence(home: str, write: bool = False) -> list:
                                  "(a folder on another volume, such as /Volumes/Build/cache, can be listed)"),
             ("/.vol", _overlaps, "it would open /.vol, where macOS reaches any folder by its number, the home folder too"),
             (lib, _overlaps, f"{held}, and caches shared with what runs outside the sandbox (nothing in it can "
-                             f"be listed; {OWN_FOLDER})") if write else
-            (lib, _in_library, f"{held} (only {os.path.join(lib, 'Caches')} and folders inside it can be listed)")]
+                             f"be listed; {OWN_FOLDER})")]
 
 
 # Other names for the whole disk. Some systems reach any folder under a folder at the top: macOS by path under
@@ -1101,8 +1064,8 @@ SYSTEM_TOPS = ("/System", "/dev", "/proc", "/sys")
 # device and number, as a folder met going up from the fenced one's path. The same disk mounted a second time
 # somewhere else with a root that is another file (another mount of the volume, a bind mount or a share of it
 # that the system shows under another device or number, a subvolume or a snapshot) is not known: a folder
-# listed there opens what is under it. The principal, who alone sets these lists for reading, must not list
-# one; the coordinator can put a lane's write list there only if such a mount already exists on the machine.
+# listed there opens what is under it. The coordinator can put a lane's write list there only if such a
+# mount already exists on the machine.
 
 
 # What a refusal of a cache folder says to list instead
@@ -1688,7 +1651,7 @@ HOME_STARTS = (
       ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc", ".login", ".config/fish", ".oh-my-zsh")),
     ("git's settings, where a hook or a monitor is a command git runs outside the sandbox",
      (".gitconfig", ".config/git")),
-    ("tmux's settings, which run commands where the coordinator's and the design sessions' tmux starts",
+    ("tmux's settings, which run commands where the coordinator's tmux starts",
      (".tmux.conf", ".tmux", ".config/tmux")),
     ("Claude Code's own files (its versions, or what it keeps between runs), which run outside the sandbox",
      (".local/share/claude", ".local/state/claude", ".cache/claude", ".cache/claude-cli-nodejs",
@@ -1913,7 +1876,7 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
         return []
     home = account_home()
     fenced = [(home, _above, f"it would open {home}, the home folder of the user hansa runs as"),
-              *_mac_fence(home, write=True)]
+              *_mac_fence(home)]
     if root:
         fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
     if isinstance(repo, str) and repo.startswith("/"):
@@ -1963,7 +1926,7 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
                                        f"{home_rule()}; {OWN_FOLDER}"))
     p = []
     for x in paths:
-        if _has_control(x):  # as the read list: a line break would split one entry into two where it is written
+        if _has_control(x):  # a line break would split one entry into two where it is written
             p.append(f"write cannot include {json.dumps(x)}: it has a line break or another control character")
             continue
         if _has_format(x):
@@ -1980,56 +1943,6 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
                 p.append(f"write cannot include {x}: {BREAKS_WHY}, which the sandbox may read as a pattern and "
                          "open more than the one folder")
     return p
-
-
-@_one_look
-def read_split(paths, root=None, providers=None, own=(), denied=()) -> tuple:
-    """The folders the principal lets the coordinator read without asking: (those it may be given, what is
-    wrong with the others, one line each). None may open what hansa keeps from it: the home folder as a
-    whole, the desk (its keys and state), a Claude Code folder (a provider's, and `own`: the one its own
-    session runs from, and ~/.claude always), a login or key, what the principal keeps workers from reading
-    (`denied`: no Claude Code run hansa starts reads it). Each is compared as the disk sees it (_above)."""
-    if not isinstance(paths, list) or len(paths) > MAX_READ:
-        return [], [f"the folders the coordinator may read must be a list of up to {MAX_READ} full paths, one per line"]
-    home = account_home()
-    fenced = [("/", _above, "it is the whole machine"),
-              (home, _above, f"it would open {home}, the home folder of the user hansa runs as"), *_mac_fence(home)]
-    if root:
-        fenced.append((str(root), _overlaps, f"it would open {root}, the desk, which holds the keys and hansa's state"))
-    for name, pv in (providers if isinstance(providers, dict) else {}).items():
-        if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
-                and (root or pv.get("kind") == "subscription"):
-            h = str(claude_home(Path(root or "/") / ".hansa", name, pv))
-            if h.startswith("/"):  # a relative config_dir is refused by validate
-                fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Claude Code folder"))
-    fenced += [(str(h), _overlaps, f"it would open {h}, the Claude Code folder the coordinator runs from")
-               for h in own]
-    mine = os.path.join(home, ".claude")  # whichever folder the providers and the session use
-    fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
-    fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key")
-               for f in home_secrets()]
-    fenced += [(d, _overlaps, f"it would open {d}, which is on the list of what workers may not read") for d in denied]
-    fenced += _top_fence()
-    good, p, seen = [], [], set()
-    for x in paths:
-        at = f"the coordinator cannot be let read {x if isinstance(x, str) else json.dumps(x)}"
-        if not isinstance(x, str) or not x.startswith("/") or _has_control(x) or len(x) > 1000:
-            p.append(f"{at}: it must be a full path starting with /, such as /opt/include")
-            continue
-        if _has_format(x):
-            p.append(f"the coordinator cannot be let read {json.dumps(x)}: {FORMAT_WHY}")
-            continue
-        why = next((_as_written(x, f, why) for f, hit, why in fenced if hit(x, f)), "") or unresolved_why(x)
-        if not why and _breaks(x):
-            why = f"{BREAKS_WHY}, which a permission rule cannot hold"
-        if not why and not os.path.isdir(x):
-            why = "it is a file, not a folder" if os.path.exists(x) else "there is no such folder"
-        if why:
-            p.append(f"{at}: {why}")
-        elif _seen(x) not in seen:  # one folder once, however it is spelled
-            seen.add(_seen(x))
-            good.append(stored(x))  # as the disk spells it: what Claude Code is given, and the Edit denial
-    return good, p
 
 
 DENY_LIST_WHY = (f"what workers may not read must be a list of up to {MAX_DENY} full paths, one per line")
@@ -2103,7 +2016,7 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
                            "write and read there") for d in dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir()))]
     if root:
         wts = Path(root) / "worktrees"
-        own = {wts / n for x in (lanes if isinstance(lanes, dict) else {}) for n in (x, f"{x}-design")}
+        own = {wts / x for x in (lanes if isinstance(lanes, dict) else {})}
         own |= set(wts.iterdir()) if wts.is_dir() else set()
         fenced += [(str(d), _above, f"it is {d}, the desk's worktrees folder or a lane's worktree in it, or a folder "
                                     "above it: workers work there") for d in [wts, *sorted(own)]]
@@ -2147,18 +2060,12 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
 
 
 def page_list_problems(new: dict, on_disk: dict, root=None) -> list:
-    """What a page save refuses first, of what workers may not read and the folders the coordinator may read."""
-    kept, changed = [], new.get("workers_may_not_read", []) != on_disk.get("workers_may_not_read")
+    """What a page save refuses first, of what workers may not read."""
+    changed = new.get("workers_may_not_read", []) != on_disk.get("workers_may_not_read")
     if isinstance(new.get("workers_may_not_read", []), list):
-        kept, bad = deny_split(new.get("workers_may_not_read", []), root, new.get("lanes"))
+        _, bad = deny_split(new.get("workers_may_not_read", []), root, new.get("lanes"))
         if bad and changed:  # each must hold now; one that went bad later does not keep the rest from saving
             return bad
-    # each must be there now; and none may open what the list above, when it changed, closes
-    if changed or new.get("coordinator_read", []) != on_disk.get("coordinator_read"):
-        gone = read_split(new.get("coordinator_read", []), root, new.get("providers"), denied=kept)[1]
-        if new.get("coordinator_read", []) == on_disk.get("coordinator_read"):  # only what the new list closes
-            gone = [g for g in gone if "what workers may not read" in g]
-        return gone
     return []
 
 
@@ -2224,14 +2131,14 @@ def no_read_parts_shown(s: dict, root=None) -> tuple:
 
 
 LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to the runs of that lane and every other (workers, "
-                 "verifiers, setups, checks, design sessions, the coordinator) until the principal and the coordinator "
+                 "verifiers, setups, checks, the coordinator) until the principal and the coordinator "
                  "settle it")
 # for one left out only as it covers a folder on the PATH: no lane is nearer to it than another
 PATH_LEFT_OUT_NOTE = ("; left out of every run, so that folder is open to every run (workers, verifiers, setups, "
-                      "checks, design sessions, the coordinator) until the principal and the coordinator settle it")
+                      "checks, the coordinator) until the principal and the coordinator settle it")
 
 
-NO_READ_STOP = ("hansa starts no worker, verifier, design session or coordinator while an entry of what workers may "
+NO_READ_STOP = ("hansa starts no worker, verifier or coordinator while an entry of what workers may "
                 "not read cannot be applied, as that folder would be open to them: {lines}. The principal changes "
                 "or removes it on the web page, Settings")
 
@@ -2247,7 +2154,7 @@ def stop_text(stops: list) -> str:
     return NO_READ_STOP.format(lines="; ".join(x.removeprefix(DENY_AT) for x in stops)) if stops else ""
 # Claude Code's own tools that reach the network from its own process, outside the sandbox's network list:
 # WebFetch only as WebFetch(domain:HOST), WebSearch as it is. The MCP tools reach servers that run outside the
-# sandbox too, and no rule holds them to listed sites: no lane lists them (hansa gives a task its browser itself).
+# sandbox too, and no rule holds them to listed sites: no lane lists them.
 MCP_TOOLS = ("ListMcpResourcesTool", "ReadMcpResourceTool")
 WEB_FETCH_HOW = ("list each site as WebFetch(domain:HOST), with HOST a public site's name as the network list writes "
                  "it, such as WebFetch(domain:docs.python.org) or WebFetch(domain:*.python.org)")
@@ -2452,7 +2359,7 @@ def web_rule_problem(rule: str) -> str:
         return web_host_problem(host)
     if tool.startswith("mcp__") or tool in MCP_TOOLS:
         return ("reaches an MCP server, which runs outside the sandbox and is not held to listed sites; a task that "
-                "needs a browser gets one with hansa add --browser")
+                "needs web access uses the lane's web tools")
     return ""
 
 
@@ -2557,6 +2464,7 @@ class Desk:
         if isinstance(loaded, dict):
             mailbox_settings(loaded)
             s.update(loaded)
+        s = current_settings(s)
         migrate_releases(s)
         for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
             # a merge_check of only spaces, written by hand, is unset, as hansa lane set makes it: never a command
@@ -2581,7 +2489,7 @@ class Desk:
             old = self.settings()
             mailbox_key = ""
             if isinstance(new, dict):
-                new = copy.deepcopy(new)
+                new = current_settings(new)
                 mailbox_key = mailbox_settings(new)
                 if by == "page" and isinstance(new.get("release_forbidden_except"), list):
                     new["release_forbidden_except"] = [x for x in new["release_forbidden_except"]
@@ -2890,7 +2798,7 @@ class Desk:
                 meta["repo"] = resolved(own["repo"]) or own["repo"]  # a lane made again elsewhere is not the task's
             write_json(d / "meta.json", meta)
             self.writes += 1
-        self.event("task_added", task=tid, lane=meta["lane"], **({"browser": True} if meta.get("browser") else {}))
+        self.event("task_added", task=tid, lane=meta["lane"])
         return tid
 
     def meta(self, tid: str) -> dict:
@@ -3018,9 +2926,7 @@ def public_settings(desk: Desk) -> dict:
         if isinstance(saved, dict):
             mailbox_key = mailbox_settings(saved)
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}
-    # saved folders the coordinator is no longer given (removed, or a link now leading where it may not read)
-    kept, not_kept, stops = no_read_parts_shown(s, desk.root)
-    skipped = read_split(s.get("coordinator_read", []), desk.root, s["providers"], denied=kept)[1]
+    _, not_kept, stops = no_read_parts_shown(s, desk.root)
     # saved entries of what workers may not read that no run applies now (a lane's repository under one, say)
     # lanes on the principal's list of lanes released without asking that are no longer what the list recorded:
     # their releases wait for the yes until the list is saved again
@@ -3033,7 +2939,7 @@ def public_settings(desk: Desk) -> dict:
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
-            "read_skipped": skipped, "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
+            "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",
                                              desk.root / "secrets", fingerprint=False,

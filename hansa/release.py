@@ -1,8 +1,7 @@
 """Releases: how a lane's base branch goes out (a push, a wait for CI, a deploy), run by hansa only after the
 principal says yes on the page.
 
-A lane has release targets: the ways its base branch goes out. Its release command (`hansa lane set L release
-"..."`) is its one unnamed target; or it has named ones (`hansa lane target L NAME "..."`), each with its own
+A lane has release targets: the ways its base branch goes out (`hansa lane target L NAME "..."`), each with its own
 command, time limit, and optionally another target of the lane that must have sent out the same commit first
 (after). The coordinator asks for a release of the base branch as it is now with `hansa release L [TARGET] [note]`
 (TARGET is needed when the lane has more than one). hansa records the request in .hansa/releases.json, which no
@@ -1172,7 +1171,7 @@ def _seen(r: dict) -> dict:
 
 
 def _record_started(desk: Desk, r: dict) -> dict:
-    """Record what a running release's command has started, also what left its process group (as a preview's
+    """Record what a running release's command has started, also what left its process group (as a command's
     is: run.record_descendants), so that it is stopped at the release's end; the record as it is now."""
     seen = _seen(r)
     if r.get("pid") and record_descendants(r["pid"], seen):

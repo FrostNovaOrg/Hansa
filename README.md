@@ -58,10 +58,6 @@ flowchart TB
    carried. Only after the yes (or for a target the principal ticked to go out without asking) does hansa
    run the lane's release command: a push, a wait for CI, a deploy.
 
-For a feature the principal wants to shape by looking at it over a few rounds, the coordinator opens a
-**design session** instead (`hansa design`, macOS only): the principal joins it in tmux and works with it
-directly, on its own branch, and it comes back like a finished task.
-
 ## Key terms
 
 | Term | What it is |
@@ -93,7 +89,6 @@ belong to, or are readable by, an ordinary account, and the steps below change a
   `npm install -g @anthropic-ai/sandbox-runtime`; srt is a node script, so node must be on the `PATH` of
   `hansa serve`. Without it, a lane's setup fails each task before its worker starts, and its check reads
   "could not run" without judging the task; `hansa status` says so.
-- **tmux** for design sessions.
 
 ### 2. Get hansa
 
@@ -153,7 +148,6 @@ cd ~/desk && hansa coordinator
 
 The first time Claude Code opens in a new desk, it asks whether you trust the folder: choose yes. Claude
 Code ignores the allowed commands of a folder it does not trust, and the coordinator could not run `hansa`.
-The same question comes up once for each lane's design worktree, in the first design session.
 
 Then tell the coordinator what you want built. It sets up the lanes and how many tasks run at once
 (`hansa lane`, `hansa concurrency`) and queues the work. hansa tells the coordinator's session when a task
@@ -172,13 +166,12 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
 | Command | What it does |
 |---|---|
 | `hansa status` | Whether `hansa serve` runs, the page's address, the lanes, what runs, waits or failed, the providers, the last 24 hours |
-| `hansa add "<task>" [--lane L] [--browser]` | Queue a task; `--browser` gives that one task a browser, once the principal has set a browser tool on the page |
+| `hansa add "<task>" [--lane L]` | Queue a task |
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
 | `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; never merged |
 | `hansa merge ID` | Merge a finished task into its lane's base branch |
 | `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task (`--fresh`: from the base; `--update`: with the base merged in) |
 | `hansa cancel ID`, `hansa close ID` | Stop queued, running or merging work; close finished work without merging |
-| `hansa design "<what to shape>" [--lane L]` | Open a session the principal joins to shape one feature (macOS) |
 | `hansa release L [TARGET] ["<note>"]` | Ask for a release of lane L's base branch; it runs after the principal's yes (a target ticked to go out without asking needs none) |
 | `hansa release yes\|no ID CODE` | Pass on the principal's answer to a release, given in the conversation with their alert's one-time code |
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
@@ -193,10 +186,9 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
   but the lane's network list; they cannot read the desk's keys and state, any provider's Claude Code folder
   or `~/.claude`, the logins, keys and histories hansa knows under the home folder, or what the principal
   lists on the page; and git history is left to hansa. The lane's setup and check run in the same sandbox.
-  Two ways out of the sandbox's network list are the principal's to see: a task given a browser reaches
-  pages through the principal's browser tool, and a lane's allow list may give its workers Claude Code's web
-  tools (`WebFetch` site by site, `WebSearch`), which run in Claude Code's own process; every change of that
-  list is recorded. More: [Workers and the sandbox](docs/sandbox.md).
+  Ways out of the network list are the principal's to see: a lane's allow list may give its workers Claude
+  Code's web tools (`WebFetch` site by site, `WebSearch`), which run in Claude Code's own process; every
+  change of that list is recorded. More: [Workers and the sandbox](docs/sandbox.md).
 - **The coordinator works in the open.** It is not sandboxed, but Claude Code asks the principal before each
   command not already allowed. Its permission rules keep three things closed to it: reading the keys in
   `secrets/`; reading or editing the files directly in the Claude Code folder it runs from (its login among
@@ -227,8 +219,6 @@ Each of these has limits; they are listed under [Limits](#limits) and in the doc
 | | macOS | Linux |
 |---|---|---|
 | Workers' sandbox | Built in | Needs `bubblewrap` and `socat`; AppArmor on Ubuntu 24.04 and later can stop it |
-| Design sessions | Yes | No: that sandbox cannot keep a session that commits from moving other branches. Shape a feature through small tasks instead |
-| The app's preview for a task with a browser | hansa starts it, and while it runs it can reach every service on the Mac's loopback | Not started: in the sandbox's own network namespace the browser could not reach it |
 | `localhost` on a lane's network list | Needed for workers' own local servers, but opens every service on the machine's loopback: list it only when nothing there must be kept from workers | Leave it off: each sandbox has a loopback of its own, and it would only open the machine's loopback through the sandbox's proxy |
 | What a build meets in the sandbox | `mktemp` ignores `TMPDIR` unless given a template there, and is refused: [Java and Maven in a lane](docs/java-and-maven.md) | The mount table can call a writable folder read-only, and git there leaves out the sandbox's placeholder files: [On a Linux server](docs/linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox) |
 | As root | — | The coordinator may run as root, with the desk owned by an ordinary account: [On a Linux server](docs/linux-server.md) |
@@ -258,17 +248,13 @@ More: [The desk: files, keys and notes](docs/desk.md).
 ## Limits
 
 - Alpha: settings, commands and files may still change between versions.
-- A worker's and a design session's commands (the lane's preview among them), and the lane's setup and check
-  commands, run in the operating system's sandbox, and so does the preview hansa starts for a task with a
-  browser (on macOS only, with local binding: it can reach every service on the machine's loopback while it
-  runs, as a design session's commands can). The coordinator does not: it runs as the desk's user (or as
-  root, on a Linux server). Run a desk as a user, or on a machine, whose files you are content for that
-  code to reach.
+- A worker's commands and the lane's setup and check run in the operating system's sandbox. The coordinator
+  runs as the desk's user (or as root on a Linux server). Run a desk as a user, or on a machine, whose files
+  you are content for that code to reach.
 - A release's command runs outside the sandbox, as the desk's account, and so does what it builds and
   starts from the base branch: list a lane's build and release files as its `release_files`.
 - The coordinator's rules against pushing and publishing catch the plain forms only; a command run another
   way waits for the principal only where Claude Code asks before running it.
-- There are no design sessions on Linux.
 - hansa replaces the principal's keys wherever it shows or records text, and will not merge a change that
   holds one. It cannot see into compressed files, and the event log keeps what it recorded before a key was
   saved.
@@ -287,8 +273,8 @@ fix that.
 |---|---|
 | [`hansa/card.md`](hansa/card.md) | What the coordinator needs on every turn: how work moves, every command, what it may change; `hansa help <topic>` prints the rest from `docs/`. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
-| [Workers and the sandbox](docs/sandbox.md) | What workers, verifiers and design sessions may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
-| [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits, browser tasks and the preview |
+| [Workers and the sandbox](docs/sandbox.md) | What workers and verifiers may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
+| [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits |
 | [Releases and alerts](docs/releases.md) | Release targets, answers by one-time code, files a release runs, stopping a release, the principal's alert command |
 | [On a Linux server](docs/linux-server.md) | The coordinator as root, the desk as an ordinary account; what a lane's commands meet in Linux's sandbox |
 | [Java and Maven in a lane](docs/java-and-maven.md) | What hansa sets up for Maven and Java in the sandbox, what that changes for a build script (`mktemp` on macOS too), and what a project and its lane need |

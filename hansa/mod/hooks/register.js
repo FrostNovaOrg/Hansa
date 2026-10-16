@@ -1,5 +1,5 @@
 // hansa's mod for the coordinator's session. `hansa coordinator` loads a copy of this folder with --plugin-dir,
-// for that session only; workers and design sessions never load it.
+// for that session only; workers never load it.
 //
 // Compaction when idle: once a turn of the main conversation has ended with an answer and the Stop that ended it
 // listed no background tasks and no session crons, the session is idle. Then it compacts after IDLE_MS with no new

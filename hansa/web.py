@@ -29,22 +29,6 @@ from .desk import Desk, KeyScrubError, event_record, lane_warnings, public_setti
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
-IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-
-
-def _shots(desk, tid: str) -> list:
-    """Pictures in a task's browser folder, newest first (names only; never a path)."""
-    if not tid.startswith("t") or not tid[1:].isdigit():
-        return []
-    d = desk.tasks_dir / tid / "browser"
-    files = [f for f in d.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_TYPES] if d.is_dir() else []
-    return [f.name for f in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)]
-
-
-def _status(desk: Desk) -> dict:
-    """hansa status for the page: each design session with its screenshots, which the page shows."""
-    st = views.status(desk)
-    return {**st, "design": [{**m, "shots": _shots(desk, m["id"])} for m in st["design"]]}
 
 
 def _last_lines(path, n: int, block: int = 65536) -> list:
@@ -147,7 +131,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if url.path == "/":
                 return self._send(200, UI.read_bytes(), "text/html; charset=utf-8", cookie=True)
             if url.path == "/api/status":
-                return self._send(200, _status(desk))
+                return self._send(200, views.status(desk))
             if url.path == "/api/settings":
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
@@ -167,13 +151,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
                     return self._send(404, {"error": "no such task"})
                 return self._send(200, {"meta": read_json(desk.tasks_dir / tid / "meta.json"),
-                                        "text": views.show_text(desk, tid, full=True), "shots": _shots(desk, tid)})
-            if url.path == "/api/file":  # a picture a task's browser saved, such as a screenshot
-                tid, name = q.get("task", [""])[0], q.get("name", [""])[0]
-                if name not in _shots(desk, tid):
-                    return self._send(404, {"error": "no such file"})
-                f = desk.tasks_dir / tid / "browser" / name
-                return self._send(200, f.read_bytes(), IMAGE_TYPES[f.suffix.lower()])
+                                        "text": views.show_text(desk, tid, full=True)})
             return self._send(404, {"error": "not found"})
 
         def do_POST(self):

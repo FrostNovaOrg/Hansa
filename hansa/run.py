@@ -33,7 +33,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   one_rule, refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
@@ -128,7 +128,7 @@ NETWORK = re.compile(r"^[ \t]*(?:[\w.]*Error:[ \t]+)?(?P<server>API Error:?[ \t]
 OVERLOADED_STATUS = 529
 PROBE_MINUTES = 3  # unreachable providers: one check per interval, outside serve's loop
 # A run the system killed (SIGKILL, as Linux's kernel kills the largest process when memory runs short): its exit as
-# Popen gives it, and as a shell or hansa/preview.py passes it on
+# Popen gives it, and as a shell passes it on
 KILLED_EXITS = (-9, 137)
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -366,39 +366,16 @@ GIT_COMMON_DENY = ("objects", "refs", "packed-refs", "HEAD", "config", "hooks", 
 # core.fsmonitor among them, which runs a command at the next git status there, hansa's own outside the sandbox
 # What says a merge, cherry-pick, revert or rebase is under way in a worktree's own folder: git commit takes a
 # MERGE_HEAD there as a second parent, so one a worker wrote would put a commit nobody reviewed into the history
-# of hansa's commit. Workers and verifiers never merge (hansa does), so they may not write them; a design session
-# may. hansa makes none of them when missing (an empty MERGE_HEAD says a merge is under way), so on Linux, where
+# of hansa's commit. Workers and verifiers never merge (hansa does), so they may not write them. hansa makes none of them when missing (an empty MERGE_HEAD says a merge is under way), so on Linux, where
 # the sandbox keeps only what is there when a command starts, the check before hansa commits (check_no_operation)
 # is what holds.
 GIT_OPS = ("MERGE_HEAD", "MERGE_MODE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer")
 GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir", "config.worktree", *GIT_OPS)
 GIT_DENY_DIRS = ("objects", "refs", "hooks", "info", "logs")  # the folders among them; the rest are files
 # What hansa clears from a worktree's own folder once it has committed there: what was left of a merge it made the
-# commit of, or of a merge a design session left under way (hansa's commit is a plain one, commit_work)
+# commit of (commit_work)
 GIT_MERGE_LEFT = ("MERGE_HEAD", "MERGE_MODE", "MERGE_MSG", "AUTO_MERGE")
 OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-# A design session commits and merges into its own branch, so its sandbox lets it write just what that takes
-# (design_git_write): its worktree's own folder, git's objects, and its branch's ref and log, each with the
-# .lock git takes on it. Not packed-refs, another ref or tag (the base among them), another worktree's
-# folder, git's settings and hooks, or the worktree's HEAD, commondir, gitdir and config.worktree. Git commits
-# and merges on a branch without writing HEAD (it locks it, HEAD.lock, and leaves it as it was); a HEAD the
-# session pointed elsewhere would lead hansa's commit at the session's end onto that branch, the base say.
-DESIGN_GIT_COMMON_DENY = ("config", "hooks", "info", "HEAD", "packed-refs", "config.worktree")
-DESIGN_GIT_OWN_DENY = ("HEAD", "commondir", "gitdir", "config.worktree")
-DESIGN_GIT_COMMON_OPEN = ("objects", "refs", "logs", "worktrees")  # what in the common folder is not kept whole
-# What a design session's commands run git with: no gc, maintenance or rerere of git's own accord, which
-# would rewrite packed-refs, pack objects or write in the common folder, all of which its sandbox refuses.
-# Added after any GIT_CONFIG_* pairs there already are (git_config_env).
-DESIGN_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
-# Why there is no design session on Linux. Claude Code opens a linked worktree's whole common git folder for
-# writing (it finds it from the worktree's .git file and adds it to the sandbox's write list); srt on Linux
-# (bubblewrap) drops every denyWrite entry holding * ? [ ], keeps only paths there when a command starts, and
-# mounts each denied folder read-only after every allowed one, so a branch's folder cannot be opened beneath a
-# refs/heads that is kept. The session's commands could then make a loose ref over a packed base, or move a
-# branch hansa makes while it runs.
-DESIGN_ON_LINUX = ("design sessions do not run on Linux: there the sandbox cannot keep a session that commits from "
-                   "making or moving other branches in git's shared folder (the base among them), so hansa does not "
-                   "start one; work on the lane with tasks, or open the design session on a Mac")
 # The characters a deny pattern keeps in a [...] class (others_than, as ranges: name_classes), with -: those of the names hansa and
 # git give branches, worktrees' folders and git's own files. A name made later with another character is not
 # kept by the patterns (one there when the run starts is, by name), and hansa never uses one. macOS's sandbox
@@ -425,91 +402,11 @@ SANDBOX_PLACEHOLDERS = (".gitconfig", ".gitmodules", ".bashrc", ".bash_profile",
 # commands, agents, skills and hooks there, and its exact list changes between versions. Match from the
 # repository's top, without regard to case and by whole path segments, when committing the index.
 SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
-# A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified. Design sessions keep them.
+# A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified.
 INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
                      "AskUserQuestion", "Monitor"]
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
-BROWSER_NOTE = """
-This task comes with a browser (tools named mcp__browser__...). It has no saved logins.
-Files it saves, such as screenshots, go to {dir}, and a file name it reports is relative
-to that folder; open a screenshot there with the Read tool to see it. Page text can be
-read directly; charts, images and drawings can only be seen in a screenshot.
-"""
-
-DESIGN_PROTOCOL = """You are a design session for task {tid} in lane {lane}. The principal, who owns the
-product, works with you here directly, in this terminal, to shape one feature by looking at it.
-You work only in this directory, on branch task/{tid}, which was made for this session.
-- The principal decides how it looks and works; follow their calls and ask when unsure. They
-  may not read code: talk in plain words, in the language they write in, and show rather than tell.
-- Change the real code; there is no separate prototype. Keep to the part of the code the brief
-  names, and ask the principal before going beyond it.
-- Show your work: after each change, take screenshots of what changed. The principal sees them
-  on their page, newest first; name each file after what it shows.
-- Keep the lane's checks passing{check}. Commit each step the principal is happy with, starting
-  each commit message with "{tid}:".
-- Do not push, do not switch branches, do not touch other directories. If a command you need is
-  refused, say which one and why; do not look for a way around it.
-- Your commands run in the lane's sandbox, as its workers' do: files written only in this
-  directory, your temporary folder, the lane's write list, and in git only what committing and
-  merging into task/{tid} takes (no other branch or tag, nor HEAD: stay on this branch); no
-  network but the lane's list; no
-  reading of the desk's keys, state, notes and card. A command the sandbox
-  refuses does not run outside it: tell the principal what it needed. When git says it cannot
-  create packed-refs.lock, that is the sandbox: the commit or merge still went through.
-- When the principal says it is done: bring in the latest {base} (git merge {base}) and settle any
-  conflict here, run the checks, commit, stop the app if you started it, then write your hand-in
-  report as one message (what changed, how it was checked, anything left) and ask the principal
-  to type /exit. hansa then hands the work to the coordinator, who checks it and merges it.
-"""
-DESIGN_START = """The coordinator's brief for this session:
-
-{brief}
-Before the principal joins: read the code the brief names and take screenshots of how it looks
-now. Then say in a few lines what you would change first, and wait for the principal.
-"""
-PREVIEW_NOTE = """
-To look at the app, start it with `{preview}` (the Bash tool's background option) and open
-the address it prints in the browser.
-"""
-# A task or verification with a browser, on a lane with a preview: hansa starts the preview before the worker
-# (with_preview, hansa/preview.py) and tells the worker how that went, with one of these.
-PREVIEW_READY_NOTE = """
-hansa started the lane's preview (`{preview}`) for you, in this worktree, before you started: the app
-is at @ADDRESS@. Open that address in the browser. It runs until you end, and hansa stops it then;
-do not start it again. It runs from this worktree, so a preview that reloads on changes shows
-yours. Your own commands may not reach it: look at it with the browser.
-"""
-PREVIEW_NOT_READY_NOTE = """
-hansa tried to start the lane's preview (`{preview}`) for you before you started, and it did not
-start: @WHY@ (it had {seconds} seconds to print an http://localhost:PORT address). hansa stopped it.
-Its last lines:
-@LINES@Do not try to start it yourself; say in your report that the preview did not start, with
-those lines, and do what you can without it.
-"""
-PREVIEW_LINUX_NOTE = """
-This lane has a preview (`{preview}`), but hansa does not start it on Linux: there the sandbox it would
-run in has a network of its own, so the browser, which runs outside it, could not reach the app. Do not
-try to start it yourself; say in your report that you could not look at the app, and do what you can
-without it.
-"""
-PREVIEW_FAILED_NOTE = """
-This lane has a preview (`{preview}`), but hansa could not start it: {why}. Do not try to start it
-yourself; say in your report that the preview did not start, and do what you can without it.
-"""
-PREVIEW_WAIT_S = 120  # how long a preview has to be ready when its lane sets no preview_wait_s
-PREVIEW_KEEP = 4 * 2 ** 20  # bytes of a preview's output kept, its first and last half (hansa/preview.py)
-PREVIEW_MARGIN = 4096  # bytes dropped on each side of a cut inside a line of kept output: longer than any key
-PREVIEW_LOOK_S = 0.5  # how often hansa/preview.py looks for what the preview started
-# Whether hansa starts a lane's preview for a task with a browser: on macOS only. There srt's local binding lets
-# the preview bind the machine's loopback, where the browser reaches it (and the preview reaches every service on
-# it). On Linux srt runs the command with a network namespace of its own (bubblewrap's --unshare-net), and local
-# binding does nothing: a server bound inside is on the sandbox's own loopback, which nothing outside can reach.
-PREVIEW_STARTS = sys.platform == "darwin"
-NO_BROWSER_NOTE = """
-No browser is set up on this desk, so you cannot take screenshots: tell the principal, and say
-in words what changed and where they can see it.
-"""
 UPDATE_NOTE = """
 Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
 work. The merge conflicts in these files, which now hold git's conflict markers (<<<<<<< this branch,
@@ -525,10 +422,6 @@ work; it merged without conflicts.
 # instructions whole; a longer one (saved some other way) is whole in a
 # file in the run's folder, which the instructions name (around_note)
 COMMAND_SHOWN = 4000
-DESIGN_NOTE = "(A design session: the principal shaped this directly with it. Its last message:)\n\n"
-# The principal is in the session, so it commits each step itself and brings in the base.
-DESIGN_ALLOW = ["Bash(git add:*)", "Bash(git commit:*)", "Bash(git merge:*)"]
-
 # A lane's turn and time limits are a circuit breaker, set high: a worker that reaches one
 # was given a task too big or unclear, or got stuck. Its notes show where it went.
 CEILING = "the task was probably too big or unclear, or the worker got stuck"
@@ -636,14 +529,14 @@ def try_srt_at_start(desk: Desk) -> dict:
     return srt_record(desk)
 
 
-# Before hansa starts a worker, a verifier or a design session it tries the run's sandbox: srt with the same
+# Before hansa starts a worker or a verifier it tries the run's sandbox: srt with the same
 # filesystem and network settings Claude Code is given, on /usr/bin/true, then a write of what git needs open
 # there (git_needs_open), since a sandbox that starts may still keep it, as patterns read otherwise than meant
 # would (name_classes), and of what it must keep (git_needs_kept), since a pattern may as silently match nothing;
 # sandbox_guard. Claude Code carries its
 # own copy of the sandbox library, which may differ from the srt installed, so a try that passes is a guard, not
 # proof: hansa also watches the run's first Bash calls (sandbox_start_failure). A try that fails holds the task
-# (not failed, no try used) and the lane's runs of that kind (sandbox_group): hansa status says why. Kept by a
+# (not failed, no try used) and the lane's workers and verifiers: hansa status says why. Kept by a
 # fingerprint of the settings in this process alone, so a lane's tasks do not each pay for it; a restart tries
 # again, the held lanes' at once (sandbox_retry).
 SANDBOX_HELD = "sandbox-held.json"  # in the desk's state: {"lanes": {lane: {group: {why, part, kind, at, task}}},
@@ -700,7 +593,7 @@ _GIT_FOLDERS: contextvars.ContextVar = contextvars.ContextVar("git_folders", def
 
 
 def git_folders_kept(fn):
-    """`fn`, one start of a run (worker, verifier, design session, setup and check, merge check, lane try): it builds
+    """`fn`, one start of a run (worker, verifier, setup and check, merge check, lane try): it builds
     the sandbox several times, and each build asks git_folders several times for the same two folders, so they
     are worked out once there. The .git file is still checked before each git command (check_git_file)."""
     @functools.wraps(fn)
@@ -716,8 +609,7 @@ def git_folders_kept(fn):
 
 
 def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
-    """srt's settings for a try of the sandbox Claude Code gets (`box`, the "sandbox" of sandbox_settings or
-    design_sandbox): its filesystem and network, the worktree and the temporary folder `tmp` written, and, in a
+    """srt's settings for a try of the sandbox Claude Code gets (`box`, the "sandbox" of sandbox_settings): its filesystem and network, the worktree and the temporary folder `tmp` written, and, in a
     linked worktree, the common git folder, which Claude Code opens for writing too."""
     fs, net = box["filesystem"], box["network"]
     common, own = git_folders(wt)
@@ -730,23 +622,18 @@ def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
                                                "denyWrite": list(fs.get("denyWrite", []))}}
 
 
-def git_needs_open(wt: Path, branch: str = "") -> list:
+def git_needs_open(wt: Path) -> list:
     """What a run's commands must be able to write in git's folders, for git add and git status: the worktree's
-    own index and a new file in its own git folder; for a design session, committing to `branch`, that branch's
-    ref's .lock in its ref folder and a new file in objects/ (not on Linux, where no design session runs)."""
+    own index and a new file in its own git folder."""
     common, own = git_folders(wt)
     out = [own / "index", own / ".hansa-try"]
-    if branch and not account.LINUX:
-        ref = common / "refs" / "heads" / branch
-        out += [ref.parent / f"{ref.name}.lock", common / "objects" / ".hansa-try"]
     return out
 
 
-def git_needs_kept(wt: Path, branch: str = "") -> list:
+def git_needs_kept(wt: Path) -> list:
     """What a run's sandbox must keep in git's folders, to see that its deny list keeps it. On macOS, new names
     only a pattern keeps, to see that its patterns match: a new file at the top of the common folder and, next to
-    the worktree's own folder under worktrees/, its name with an x after it; for a design session committing to
-    `branch`, also that branch's ref's name with an x after it and a new file in refs/heads/. On Linux, where srt
+    the worktree's own folder under worktrees/, its name with an x after it. On Linux, where srt
     drops every pattern and keeps only paths there when a command starts (LINUX_TRY_NOTE), what is there: the
     shared config and each other worktree's HEAD. None in a main checkout: there the patterns keep nothing."""
     common, own = git_folders(wt)
@@ -759,9 +646,6 @@ def git_needs_kept(wt: Path, branch: str = "") -> list:
             others = []
         return [x for x in [common / "config", *(common / "worktrees" / n / "HEAD" for n in others)] if x.is_file()]
     out = [common / ".hansa-try-kept", common / "worktrees" / f"{own.name}x"]
-    if branch:
-        ref = common / "refs" / "heads" / branch
-        out += [ref.parent / f"{ref.name}x", common / "refs" / "heads" / ".hansa-try-kept"]
     return out
 
 
@@ -812,12 +696,12 @@ def _srt_true(path: str, settings: dict, tmp: str, cwd, argv=("/usr/bin/true",))
     return False, f"{lines[0][:300] if lines else 'nothing'} (exit {r.returncode})", r.stdout
 
 
-def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
+def try_sandbox(box: dict, wt: Path) -> dict:
     """Try the sandbox `box` (sandbox_try_settings) with srt, once for each fingerprint of its settings in this
     process: {"ok": True}; {"ok": False, "said": srt's first line, "part": what of the settings it refuses, found
     by trying each part alone (SANDBOX_PARTS)}; or {"ok": None, "said": why} when srt is not there or does not run
     even with nothing in its settings: then Claude Code's own sandbox (failIfUnavailable) is all there is. A
-    sandbox that starts then writes what git needs open there (git_needs_open; `branch`, a design session's) and
+    sandbox that starts then writes what git needs open there (git_needs_open) and
     what it must keep (git_needs_kept): one that keeps the first or lets the second through is refused too, with
     "why". This fails closed: a sandbox whose patterns do not keep what they should runs no one."""
     path = shutil.which("srt")
@@ -826,8 +710,8 @@ def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
     tmp = tempfile.mkdtemp(prefix="hansa-try-")
     try:
         full = sandbox_try_settings(box, wt, tmp)
-        needs = [str(x) for x in git_needs_open(wt, branch)]
-        kept = [str(x) for x in git_needs_kept(wt, branch)]
+        needs = [str(x) for x in git_needs_open(wt)]
+        kept = [str(x) for x in git_needs_kept(wt)]
         if account.LINUX:  # only what an exact entry of the deny list keeps: srt there drops the patterns
             exact = [Path(x).resolve() for x in full["filesystem"]["denyWrite"] if not _glob(x)]
             kept = [x for x in kept if any(e == Path(x).resolve() or e in Path(x).resolve().parents for e in exact)]
@@ -868,26 +752,18 @@ def try_sandbox(box: dict, wt: Path, branch: str = "") -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path, branch: str = "") -> None:
-    """Try the sandbox a worker, a verifier or a design session (`kind`, committing to `branch`) of this lane is
+def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path) -> None:
+    """Try the sandbox a worker or a verifier (`kind`) of this lane is
     about to get (try_sandbox): raise SandboxRefused when srt refuses it. A try that passes clears what an
-    earlier one held the lane's runs of that kind for (sandbox_group)."""
-    r = try_sandbox(box, wt, branch)
+    earlier one held the lane's runs for."""
+    r = try_sandbox(box, wt)
     if r["ok"] is False:
         raise SandboxRefused(r["said"], r["part"], kind, r.get("why", ""))
     if r["ok"]:
-        sandbox_clear(desk, lane_name, sandbox_group(kind))
+        sandbox_clear(desk, lane_name, "work")
 
 
-# What a refused sandbox holds of its lane, by the kind of run refused: a design session's sandbox is another than
-# its lane's workers' (design_sandbox), so its refusal holds the lane's design sessions only, and a worker's or a
-# verifier's holds its workers and verifiers only
-SANDBOX_GROUPS = {"work": "its workers and verifiers", "design": "its design sessions"}
-
-
-def sandbox_group(kind: str) -> str:
-    """The group of runs (SANDBOX_GROUPS) a refused sandbox of a run of this kind holds."""
-    return "design" if kind in ("design session", "design") else "work"
+SANDBOX_GROUPS = {"work": "its workers and verifiers"}
 
 
 def sandbox_held(desk: Desk) -> dict:
@@ -899,7 +775,7 @@ def sandbox_held(desk: Desk) -> dict:
     for ln, v in lanes.items() if isinstance(lanes, dict) else []:
         if not isinstance(v, dict):
             continue
-        groups = {sandbox_group(v.get("kind") or ""): v} if "why" in v else \
+        groups = {"work": v} if "why" in v else \
             {g: h for g, h in v.items() if g in SANDBOX_GROUPS and isinstance(h, dict)}
         if groups:
             out[ln] = groups
@@ -913,7 +789,7 @@ def sandbox_held_text(h: dict) -> str:
     return (f"its {h.get('kind') or 'run'}'s "
             + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
                "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
-            + f"; this holds {SANDBOX_GROUPS[sandbox_group(h.get('kind') or '')]}, which start by themselves once a "
+            + f"; this holds {SANDBOX_GROUPS['work']}, which start by themselves once a "
               "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server)")
 
 
@@ -941,7 +817,7 @@ def _hold_lane(desk: Desk, lane_name: str, entry: dict) -> bool:
         told = [x for x in rec.get("told") or [] if isinstance(x, list)]  # [lane, why]; a reason alone was before lanes
         new = [lane_name, entry["why"]] not in told
         held = sandbox_held(desk)
-        held.setdefault(lane_name, {})[sandbox_group(entry.get("kind") or "")] = entry
+        held.setdefault(lane_name, {})["work"] = entry
         desk.state_dir.mkdir(exist_ok=True)
         write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, [lane_name, entry["why"]]] if new else told})
     return new
@@ -949,14 +825,14 @@ def _hold_lane(desk: Desk, lane_name: str, entry: dict) -> bool:
 
 def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: str = "") -> None:
     """A run whose sandbox could not start: its task goes back to the queue, held (no try used), and its lane's
-    runs of that kind (sandbox_group) are recorded as unable to run, for hansa status. The principal's alert is
+    workers and verifiers are recorded as unable to run, for hansa status. The principal's alert is
     told once for each lane and reason."""
     why = desk.redact(why)[:600]
     held = {"why": why, "part": part, "kind": kind, "lane": lane_name, "at": now()}
     desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
                 {"state": "cancelled", "phase": "", "error": "cancelled before it started", "finished": now()}
                 if m.get("cancel") else
-                {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None, "held": held,
+                {"state": "queued", "phase": "", "pid": None, "pid_start": "", "held": held,
                  "error": why, "sandbox_failed": None})
     remove_sandbox_tmp(desk, tid)
     new = _hold_lane(desk, lane_name, {**{k: held[k] for k in ("why", "part", "kind", "at")}, "task": tid})
@@ -966,7 +842,7 @@ def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: s
 @git_folders_kept
 def sandbox_retry(desk: Desk, s: dict) -> list:
     """As hansa serve starts: try again the sandbox of each lane's held runs (sandbox_held), a worker's in the
-    lane's worktree or a design session's in its design worktree, so a hold made by earlier code or settings
+    lane's worktree, so a hold made by earlier code or settings
     does not stay until a task of the lane makes a new try. A try that passes clears the hold; one that fails
     keeps it with the new reason, on the record and on the held tasks. What cannot be tried now (no worktree,
     no srt) is left as it is: a task's start tries it. Returns the (lane, group) still held by a try made here."""
@@ -974,24 +850,16 @@ def sandbox_retry(desk: Desk, s: dict) -> list:
     for ln, groups in sandbox_held(desk).items():
         lane = s["lanes"].get(ln)
         for g, h in groups.items() if lane else []:
-            kind = h.get("kind") or ("design session" if g == "design" else "worker")
-            branch = ""
+            kind = h.get("kind") or "worker"
             try:
-                if g == "design":
-                    if account.LINUX:
-                        continue
-                    pname = (s.get("design") or {}).get("provider") or s["coordinator"]["provider"]
-                    wt, branch = desk.worktrees_dir / f"{ln}-design", f"task/{h.get('task') or 'design'}"
-                else:
-                    pname = next((x for x in lane["providers"] if x in s["providers"]), "")
-                    wt = desk.worktrees_dir / ln
+                pname = next((x for x in lane["providers"] if x in s["providers"]), "")
+                wt = desk.worktrees_dir / ln
                 p = s["providers"].get(pname)
                 if not p or not wt.is_dir():
                     continue
                 check_git_file(desk, wt)  # the sandbox's settings ask git in the worktree
-                box = (design_sandbox(desk, lane, pname, p, wt, branch) if g == "design"
-                       else sandbox_settings(desk, lane, pname, p, wt))["sandbox"]
-                r = try_sandbox(box, wt, branch)
+                box = sandbox_settings(desk, lane, pname, p, wt)["sandbox"]
+                r = try_sandbox(box, wt)
             except Exception as e:  # noqa: BLE001 - left held as it is: the next start of a task tries it
                 desk.event("sandbox_retry_failed", lane=ln, group=g, error=desk.redact(str(e))[:300])
                 continue
@@ -1004,7 +872,7 @@ def sandbox_retry(desk: Desk, s: dict) -> list:
                 new = _hold_lane(desk, ln, entry)
                 for m in desk.tasks():
                     if m["state"] == "queued" and m.get("held") and (m["held"].get("lane") or m.get("lane")) == ln \
-                            and sandbox_group(m.get("kind") or "") == g:
+                            and "work" == g:
                         desk.change(m["id"], lambda x: None if x["state"] != "queued" or not x.get("held") else
                                     {"held": {**x["held"], **{k: entry[k] for k in ("why", "part", "at")}},
                                      "error": why})
@@ -1078,31 +946,6 @@ def srt_problem(desk: Desk, s: dict) -> str:
         return f"srt MISSING (as hansa serve saw it{when}): {SRT_MISSING}"
     return (f"srt CANNOT RUN (as hansa serve saw it{when}): it is at {rec.get('path')}, but a sandboxed `true` "
             f"failed: {rec.get('said')}. Setups and checks do not run until this is fixed (hansa explain server)")
-
-
-def tmux_bin() -> str:
-    for c in program_candidates("tmux"):
-        if c and os.access(c, os.X_OK):
-            return c
-    raise RuntimeError("tmux was not found; a design session runs in tmux so the principal can join it")
-
-
-def tmux_socket(desk: Desk) -> str:
-    """One tmux server per desk, so session names never meet another desk's."""
-    import hashlib
-    return "hansa-" + hashlib.sha1(str(desk.root).encode()).hexdigest()[:6]
-
-
-def tmux_socket_path(sock: str) -> str:
-    """The full path of the socket tmux makes for `-L sock`: in $TMUX_TMPDIR or /tmp, under tmux-<uid>."""
-    return os.path.join(os.environ.get("TMUX_TMPDIR") or "/tmp", f"tmux-{os.getuid()}", sock)
-
-
-def join_command(m: dict) -> str:
-    """By the socket's full path, so root, as a principal on a server usually is, can join a session
-    the desk's account runs: tmux admits its owner and root."""
-    sock, name = m.get("tmux") or ["", ""]
-    return f"tmux -u -S {tmux_socket_path(sock)} attach -t {name}"
 
 
 _NO_HOOKS = []  # the empty folder hansa's git in a worktree takes its hooks from, made once (no_hooks)
@@ -1320,22 +1163,10 @@ def _reset_time(text, at):
     return found
 
 
-def own_rest_minutes(s: dict, name: str) -> int | None:
-    """The provider's own rest after a usage limit, in minutes, as the principal set it; None: the desk's."""
-    v = (s["providers"].get(name) or {}).get("rest_minutes")
-    return v if isinstance(v, int) and not isinstance(v, bool) else None
-
-
-def rest_minutes(s: dict, name: str) -> int:
-    """How long the provider rests after a usage limit whose error gives no reset time."""
-    own = own_rest_minutes(s, name)
-    return own if own is not None else s.get("cool_minutes", 30)
-
-
 def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float:
     """Rest a provider that cannot be used ("quota" or a key or login problem, unusable_reason) and return
     until when. After a usage limit: until the reset time its error gives (reset_time) and a minute, at most
-    REST_CAP; else for its rest_minutes."""
+    REST_CAP; else for the desk's cool_minutes."""
     t = time.time()
     if kind != "quota":
         until = t + 60 * KEY_REST_MINUTES
@@ -1350,7 +1181,7 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         until = min(max(reset, t) + 60, t + REST_CAP)
         desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
     else:
-        minutes = rest_minutes(s, name)
+        minutes = s.get("cool_minutes", 30)
         until = t + 60 * minutes
         desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
     return until
@@ -1638,18 +1469,15 @@ def full_paths(paths) -> list:
     return list(dict.fromkeys(str(x) for q in paths for x in (Path(q), Path(resolved(str(q)) or q))))
 
 
-def git_write_deny(wt: Path, committing: str = "") -> list:
+def git_write_deny(wt: Path) -> list:
     """The paths in git's folders for the worktree `wt` that a sandboxed worker may not write, worked
     out now: Claude Code opens a linked worktree's shared git folder for writing. The worktree's own
     .git file is among them: pointed at a git folder of the worker's making, it would run the worker's
     hooks and settings the next time hansa runs git there, outside the sandbox. Then patterns
-    (others_than) for what is made in those folders later, while the run lasts. `committing` (a design
-    session), the branch it commits to: what design_git_write opens is left out."""
-    common, own = git_folders(wt)
-    linked = own.resolve() != common.resolve()
-    dot = [Path(wt) / ".git"] if not committing or linked else []
-    kept = full_paths([*_git_folder_deny(wt, committing), *_git_others(wt, committing), *dot])
-    return kept + [p for p in _git_patterns(wt, committing) if p not in kept]
+    (others_than) for what is made in those folders later, while the run lasts."""
+    dot = [Path(wt) / ".git"]
+    kept = full_paths([*_git_folder_deny(wt), *_git_others(wt), *dot])
+    return kept + [p for p in _git_patterns(wt) if p not in kept]
 
 
 def git_folders(wt: Path) -> tuple:
@@ -1692,41 +1520,33 @@ def _git_folders_key(wt: Path):
     return str(wt), held, there
 
 
-def _git_folder_deny(wt: Path, committing: str = "") -> list:
+def _git_folder_deny(wt: Path) -> list:
     """The named paths of git_write_deny in git's folders: the repository's common folder and the worktree's
     own. make_git_write_deny makes the missing ones."""
     common, own = git_folders(wt)
     linked = own.resolve() != common.resolve()
-    in_common, in_own = (DESIGN_GIT_COMMON_DENY, DESIGN_GIT_OWN_DENY) if committing else (GIT_COMMON_DENY, GIT_OWN_DENY)
-    # a design session in a main checkout may move its HEAD: that HEAD is its own. GIT_OPS on Linux only when there:
+    in_common, in_own = GIT_COMMON_DENY, GIT_OWN_DENY
+    # GIT_OPS on Linux only when there:
     # the sandbox there would put a device where one is missing, and git would take that for a merge under way
-    return [*(common / f for f in in_common if linked or not committing or f != "HEAD"),
+    return [*(common / f for f in in_common),
             *(own / f for f in in_own if linked and not (account.LINUX and f in GIT_OPS and not os.path.lexists(own / f)))]
 
 
-def _git_open(wt: Path, committing: str = "") -> list:
+def _git_open(wt: Path) -> list:
     """What of the common folder git_write_deny does not keep whole, as (folder, the names in it left open):
-    the worktree's own folder under worktrees/ and, for a design session, its branch's ref and log, step by
-    step down from the folders it may write in (DESIGN_GIT_COMMON_OPEN)."""
+    the worktree's own folder under worktrees/."""
     common, own = git_folders(wt)
     if own.resolve() == common.resolve():
         return []
-    out = [(common, DESIGN_GIT_COMMON_OPEN if committing else ("worktrees",)), (common / "worktrees", (own.name,))]
-    if committing:
-        for top in ("refs", "logs/refs"):
-            parts = f"{top}/heads/{committing}".split("/")
-            for i in range(len(parts) - 1):
-                last = i == len(parts) - 2
-                out.append((common.joinpath(*parts[:i + 1]),
-                            (parts[-1], parts[-1] + ".lock") if last else (parts[i + 1],)))
+    out = [(common, ("worktrees",)), (common / "worktrees", (own.name,))]
     return out
 
 
-def _git_others(wt: Path, committing: str = "") -> list:
+def _git_others(wt: Path) -> list:
     """Every entry there is now in a folder of _git_open but the names left open: other worktrees' folders,
     other refs and tags, other branches' logs, and what else git keeps in the common folder."""
     out = []
-    for folder, names in _git_open(wt, committing):
+    for folder, names in _git_open(wt):
         try:
             out += [folder / n for n in sorted(os.listdir(folder)) if n not in names]
         except OSError:  # not there (no tags yet, say): nothing in it to keep
@@ -1788,29 +1608,19 @@ def name_classes(left_out) -> list:
     return [x for x in out if x]
 
 
-def _git_patterns(wt: Path, committing: str = "") -> list:
+def _git_patterns(wt: Path) -> list:
     """others_than for each folder of _git_open, as given and with links resolved: what is made there while
     the run lasts (another task's branch, another worktree's folder, git's commondir) is kept too."""
-    return [p for folder, names in _git_open(wt, committing) for f in full_paths([folder])
+    return [p for folder, names in _git_open(wt) for f in full_paths([folder])
             for p in others_than(Path(f), names)]
 
 
-def design_git_write(wt: Path, branch: str) -> list:
-    """What a design session may write in git's folders, to commit and merge into `branch` (its own): the
-    worktree's own folder (git_write_deny keeps its commondir, gitdir and config.worktree), git's objects,
-    and the branch's ref and log, each with the .lock git takes on it."""
-    common, own = git_folders(wt)
-    ref, log = common / "refs" / "heads" / branch, common / "logs" / "refs" / "heads" / branch
-    return full_paths([own, common / "objects", ref, Path(f"{ref}.lock"), log, Path(f"{log}.lock")])
-
-
-def make_git_write_deny(wt: Path, committing: str = "") -> None:
+def make_git_write_deny(wt: Path) -> None:
     """Create each path of git_write_deny that is missing, empty. On Linux the sandbox (bwrap) puts a device
     nobody can open where a listed path does not exist, and git then fails reading it: packed-refs, say,
     which a repository made with git init has only once refs are packed. Git takes an empty packed-refs
-    as none. A path that exists is left as it is. For a design session, also the folders that hold its
-    branch's ref and log: git could not make them there."""
-    for f in _git_folder_deny(wt, committing):
+    as none. A path that exists is left as it is."""
+    for f in _git_folder_deny(wt):
         if os.path.lexists(f) or f.name in GIT_OPS:  # an empty MERGE_HEAD would say a merge is under way
             continue
         try:
@@ -1820,12 +1630,6 @@ def make_git_write_deny(wt: Path, committing: str = "") -> None:
                 os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
         except FileExistsError:  # made meanwhile, by git say
             pass
-    if committing:
-        common = git_folders(wt)[0]
-        for top in (common / "refs" / "heads", common / "logs" / "refs" / "heads"):
-            (top / committing).parent.mkdir(parents=True, exist_ok=True)
-
-
 # A linked worktree's .git is a one-line file (gitdir: <folder>) that tells git where the worktree's
 # history and settings live. Whatever runs in the worktree could point it at a git folder with hooks
 # or settings of its own, which the next git command hansa runs there would obey, outside any sandbox.
@@ -1895,7 +1699,7 @@ def check_git_folder(wt: Path, line: str) -> None:
     if os.path.lexists(common / "commondir"):  # git would take the repository's settings and hooks from there
         raise GitFolderChanged(wt, common / "commondir", "was made", None)
     # settings of this worktree's own, which git obeys once extensions.worktreeConfig is on: hansa makes it
-    # empty (make_git_write_deny), and no worker or design session may write it
+    # empty (make_git_write_deny), and no worker may write it
     if os.path.lexists(admin / "config.worktree"):
         text, what = _plain_text(admin / "config.worktree")
         if text is None or text:
@@ -1963,7 +1767,7 @@ def check_branch_ref(desk: Desk, wt: Path, branch: str) -> str:
     """The id `branch`'s ref holds, read as a plain file and never through a link: a plain commit id, or, when there
     is none, the one packed-refs (which nothing sandboxed may write) holds. Raise GitFolderChanged otherwise: a ref
     holding 'ref: refs/heads/main' would lead git, which follows it, from the run's branch onto the base, while HEAD
-    still names the run's branch (check_head). A design session may write its branch's ref. After check_git_file.
+    still names the run's branch (check_head). After check_git_file.
     Put right (git_file_changed) to the last id the branch's log names, where it names one."""
     check_git_file(desk, wt)
     common = own_git_folder(desk, wt).resolve().parent.parent
@@ -2532,31 +2336,14 @@ def in_sandbox(desk: Desk, lane: dict, command: str) -> str:
             + " /bin/sh -c " + shlex.quote(with_prelude(command)))
 
 
-def git_config_env(env: dict, pairs) -> dict:
-    """The GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n that give git the settings `pairs` after
-    those `env` gives it already, which are kept: the new ones are numbered on from its count."""
-    n = str(env.get("GIT_CONFIG_COUNT") or "0")
-    n = int(n) if n.isdigit() else 0
-    out = {k: v for k, v in env.items() if re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", k) and int(k.rsplit("_", 1)[1]) < n}
-    for i, (k, v) in enumerate(pairs, n):
-        out.update({f"GIT_CONFIG_KEY_{i}": k, f"GIT_CONFIG_VALUE_{i}": v})
-    return {"GIT_CONFIG_COUNT": str(n + len(pairs)), **out}
-
-
-DESIGN_GIT_ENV = git_config_env({}, DESIGN_GIT_CONFIG)  # as a session gets them when nothing else sets any
-
-
-def env_file(desk: Desk, tid: str, lane: dict, git_config=()) -> dict:
+def env_file(desk: Desk, tid: str, lane: dict) -> dict:
     """How a worker's Bash commands get the lane's env and sandbox_prelude: {"CLAUDE_ENV_FILE": a file of
     `export K='V'` lines, then the prelude}. Claude Code reads the file itself (it is in the task's raw folder,
     .hansa, which no worker can write or read) and runs its content in front of each Bash command, in the same
     shell, inside its sandbox, where the sandbox's proxy variables and the command's TMPDIR are set. Claude
     Code starts without the lane's env, so its own lookups (git, the sandbox's helpers, its shell, MCP servers)
-    use hansa's environment. `git_config`: settings for git added after any GIT_CONFIG_* the env has (a design
-    session's, git_config_env)."""
+    use hansa's environment."""
     env = sandbox_env(desk, lane)
-    if git_config:
-        env = {**env, **git_config_env(env, git_config)}
     f = desk.raw_dir(tid) / "lane-env.sh"
     write_text(f, "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()) + sandbox_prelude(), mode=0o600)
     return {"CLAUDE_ENV_FILE": str(f)}
@@ -2572,7 +2359,7 @@ def no_read(desk: Desk) -> tuple:
     close other folders."""
     moved = desk_paths_problem(desk, run_homes())
     if moved:  # the deny rules for the desk's own folders and the logins would close other folders
-        raise RuntimeError(f"hansa starts no run (worker, verifier, design session, setup or check): {moved}")
+        raise RuntimeError(f"hansa starts no run (worker, verifier, setup or check): {moved}")
     good, said, stops = no_read_parts(desk.settings(), desk.root)
     if stops:
         raise RuntimeError(stop_text(stops))
@@ -2581,15 +2368,14 @@ def no_read(desk: Desk) -> tuple:
 
 
 def desk_private(desk: Desk) -> list:
-    """What of the desk no worker, verifier or design session may read: its keys and state, and the
+    """What of the desk no worker or verifier may read: its keys and state, and the
     coordinator's notes (notes/) and card (CLAUDE.md), the project's and the principal's working knowledge,
     which a task does not need."""
     return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md"]
 
 
 def paths_problem(desk: Desk, wt) -> str:
-    """path_rule_problem for the folders hansa writes rules for when it starts a worker, verifier or design
-    session: the desk's private ones (desk_private), the worktree, what the principal keeps from workers; '' for
+    """path_rule_problem for the folders hansa writes rules for when it starts a worker or verifier: the desk's private ones (desk_private), the worktree, what the principal keeps from workers; '' for
     none. One that would split is never dropped: nothing starts until it moves."""
     for x in full_paths([*desk_private(desk), wt, *no_read(desk)[0]]):
         why = path_rule_problem(x)
@@ -2603,19 +2389,18 @@ def desk_read_rules(desk: Desk) -> list:
     return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
 
 
-def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, committing: str = "") -> tuple:
+def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
     check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), every provider's Claude
     Code folder (the login and the session records of whoever runs on it) and ~/.claude, whichever provider
     this run uses, the built-in logins and keys, and what the principal keeps from workers, "denyWrite":
     git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
-    may be written. `committing` (a design session), the branch it commits to: what design_git_write opens in
-    git's folders may be written too."""
+    may be written."""
     moved = next((w for x, what in ((wt, "the worktree"), (lane.get("repo"), "the lane's repository")) if x
                   for w in [pattern_path_problem(x, what, "git's data in it")] if w), "")
     if moved:  # git_write_deny's rules there would close another folder
-        raise RuntimeError(f"hansa starts no run (worker, verifier, design session, setup or check): {moved}")
-    make_git_write_deny(wt, committing)  # before anything starts in the sandbox
+        raise RuntimeError(f"hansa starts no run (worker, verifier, setup or check): {moved}")
+    make_git_write_deny(wt)  # before anything starts in the sandbox
     home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
     homes = [config_home(desk, pname, p)]
     homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
@@ -2623,17 +2408,17 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, committi
     deny = full_paths([*desk_private(desk), *homes, home / ".claude",
                        *(home / f for f in home_secrets()), *no_read(desk)[0]])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
-    allow = full_paths([*write_list(desk, lane)[0], *(design_git_write(wt, committing) if committing else ())])
-    return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt, committing),
+    allow = full_paths(write_list(desk, lane)[0])
+    return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
                                            "allowWrite": allow}
 
 
-def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, committing: str = "") -> dict:
+def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
     """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
     any command, but files changed only in the worktree (and the lane's write list) and never git's
     history, no reading of keys and logins, no network but the lane's list, and no keys in the environment. It never falls back to
-    running unsandboxed. `committing`: the branch it may commit to (design_sandbox)."""
-    hosts, fs = lane_sandbox(desk, lane, pname, p, wt, committing)
+    running unsandboxed."""
+    hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
         # macOS: a worker may bind ports and reach the whole loopback (Seatbelt allows outbound to localhost:*,
@@ -2652,29 +2437,14 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, comm
     }}
 
 
-def design_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, branch: str,
-                   mac: bool | None = None) -> dict:
-    """A design session's Bash sandbox: its lane's workers' (network, write list, what may not be read, the keys
-    kept from the environment, nothing run outside it), but it may commit and merge into `branch`, its own
-    (design_git_write), and its
-    commands are not let through by being sandboxed: its allowed commands stay what they were. On macOS it may
-    bind local ports, so a preview it starts serves the principal's browser. There is no design session on
-    Linux (DESIGN_ON_LINUX); `mac` False gives what the sandbox would be elsewhere."""
-    settings = sandbox_settings(desk, lane, pname, p, wt, committing=branch)
-    settings["sandbox"]["autoAllowBashIfSandboxed"] = False
-    if _ON_MAC if mac is None else mac:
-        settings["sandbox"]["network"]["allowLocalBinding"] = True
-    return settings
-
-
-def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str, local: bool = False,
+def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str,
                  own: str = "") -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
     worktree, the temporary folder `tmp`, the command's own on disk (`own`, run_tmp) and the lane's write list.
-    local: with local binding whatever the lane's network list says (a preview hansa starts, and nothing else)."""
+"""
     hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
-    if local or any(is_local(h) for h in hosts):
+    if any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True
     mine = [wt, tmp, *([own] if own and own != tmp else [])]
     return {"network": network, "filesystem": {"allowWrite": full_paths(mine) + fs["allowWrite"],
@@ -2682,7 +2452,7 @@ def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str
 
 
 def run_tmp(desk: Desk, name: str) -> tuple:
-    """The temporary folders of one lane command (`name`: setup, check, preview), each made for it alone (mode 700):
+    """The temporary folders of one lane command (`name`: setup, check), each made for it alone (mode 700):
     (the run's folder, in the system's temporary folder, for srt and the command's CLAUDE_CODE_TMPDIR; the folder
     for its TMPDIR). On Linux the second is on disk, in the desk's .hansa/RUN_TMP_DIR, which every run's sandbox
     hides, and the run's folder links to it as RUN_TMP_LINK, which LINUX_PRELUDE follows (see RUN_TMP_DIR); both
@@ -2702,15 +2472,14 @@ def run_tmp(desk: Desk, name: str) -> tuple:
     return tmp, own
 
 
-def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path, local: bool = False) -> tuple:
-    """What a lane's setup, check or preview (`name`) runs in: (srt, its settings file in the task's raw folder,
+def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
+    """What a lane's setup or check (`name`) runs in: (srt, its settings file in the task's raw folder,
     a temporary folder made for this run, the command's own (run_tmp: on Linux on disk, the TMPDIR LINUX_PRELUDE
     gives it; elsewhere the same folder)). srt ignores the TMPDIR it is given and sets its own from
     CLAUDE_CODE_TMPDIR (else /tmp/claude), so the caller sets both to the run's folder. Whoever runs the command
     removes both after it; finish and finish_check remove what is left behind (sandbox_tmp); both stay on the
     task as run_folders, which outlives the run, so sweep finds what the command left by them. srt is tried first
-    with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs. local: local binding for
-    this one command (srt_settings)."""
+    with these settings (try_srt): when it cannot run, SrtCannotRun, and nothing runs."""
     try:
         check_git_file(desk, wt)  # lane_sandbox asks git in the worktree
     except GitFileChanged as e:
@@ -2719,7 +2488,7 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), *dict.fromkeys([tmp, own])],
                                 "run_folders": [*(m.get("run_folders") or []), *dict.fromkeys([tmp, own])]})
-    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, local, own))
+    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, own=own))
     try:
         srt = try_srt(desk, f, tmp, wt)
     except SrtCannotRun:
@@ -2730,9 +2499,9 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 
 
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
-    """The srt settings of a task's setup, check and preview, once they have ended, the lane's env file, and their temporary folders
+    """The srt settings of a task's setup and check, once they have ended, the lane's env file, and their temporary folders
     still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
-    for name in ("setup", "check", "preview"):
+    for name in ("setup", "check"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
     m = desk.meta(tid)
@@ -2780,38 +2549,12 @@ def commands_tmp(tmp: str) -> str:
 
 
 def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
-    """The worktree's files plus the lane's own commands, for its workers, verifiers and design sessions alike.
+    """The worktree's files plus the lane's own commands, for its workers and verifiers alike.
     Git rules a lane still lists from before are left out: hansa does the committing, and read-only git needs
     no rule. So are the other rules saved before they were refused (refused_rule): a bare WebFetch, one that would
     reach Claude Code as several."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
     return files + ["TodoWrite"] + list(dict.fromkeys(r for r in lane.get("allow", []) if not refused_rule(r)))
-
-
-def command_rules(command: str) -> list:
-    """One allow rule per command in a shell line such as `pnpm test && pnpm typecheck`; quoted
-    text and pipelines stay whole."""
-    parts, cur, quote, i = [], "", "", 0
-    while i < len(command):
-        c = command[i]
-        if quote:
-            cur += c
-            if c == quote:
-                quote = ""
-            elif c == "\\" and quote == '"' and i + 1 < len(command):
-                cur, i = cur + command[i + 1], i + 1
-        elif c in "'\"":
-            cur, quote = cur + c, c
-        elif c == "\\" and i + 1 < len(command):
-            cur, i = cur + c + command[i + 1], i + 1
-        elif command.startswith(("&&", "||"), i):
-            parts, cur, i = parts + [cur], "", i + 1
-        elif c in ";\n":  # a pipeline stays one rule: its stages alone (| sh, say) would allow far more
-            parts, cur = parts + [cur], ""
-        else:
-            cur += c
-        i += 1
-    return [f"Bash({p.strip()}:*)" for p in parts + [cur] if p.strip()]
 
 
 def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None, lane_name: str = "") -> list:
@@ -2899,16 +2642,19 @@ def markers_text(markers: dict) -> str:
                      + (" ..." if len(ns) > 12 else "") for f, ns in markers.items())
 
 
+OUTPUT_MARGIN = 4096  # bytes dropped around a cut inside a line, longer than any key
+
+
 def margin_said(margin: bool) -> str:
-    """What the line saying how much output was left out adds when a cut fell inside a line (PREVIEW_MARGIN)."""
-    return (f", with {PREVIEW_MARGIN} bytes on each side of a cut inside a line, so that no key is left in part"
+    """What the line saying how much output was left out adds when a cut fell inside a line (OUTPUT_MARGIN)."""
+    return (f", with {OUTPUT_MARGIN} bytes on each side of a cut inside a line, so that no key is left in part"
             if margin else "")
 
 
 def read_bounded(path: Path, head: int, tail: int) -> str:
     """A file's text, or of a longer one its first `head` and last `tail` bytes, cut at whole lines, with a line
     in between saying how much was left out: never more of it read than that. A cut that falls inside a line drops
-    PREVIEW_MARGIN bytes more on its side, so no key is left there in part (desk.redact replaces whole keys only).
+    OUTPUT_MARGIN bytes more on its side, so no key is left there in part (desk.redact replaces whole keys only).
     Bytes that are not UTF-8 stay one character each (surrogateescape): written back with errors="replace", each is
     one byte again."""
     with open(path, "rb") as f:
@@ -2919,8 +2665,8 @@ def read_bounded(path: Path, head: int, tail: int) -> str:
         f.seek(size - tail)
         last = f.read(tail)
     a, b = first.rfind(b"\n"), last.find(b"\n")
-    first = first[:a + 1] if a >= 0 else first[:max(0, len(first) - PREVIEW_MARGIN)]
-    last = last[b + 1:] if b >= 0 else last[PREVIEW_MARGIN:]
+    first = first[:a + 1] if a >= 0 else first[:max(0, len(first) - OUTPUT_MARGIN)]
+    last = last[b + 1:] if b >= 0 else last[OUTPUT_MARGIN:]
     return (first.decode("utf-8", errors="surrogateescape")
             + f"\n[hansa: {size - len(first) - len(last)} bytes left out here{margin_said(a < 0 or b < 0)}]\n"
             + last.decode("utf-8", errors="surrogateescape"))
@@ -2987,19 +2733,16 @@ def cut_redacted(data: bytes, most: int) -> bytes:
     return (first.decode("utf-8", errors="ignore") + note + last.decode("utf-8", errors="ignore")).encode("utf-8")
 
 
-def publish(desk: Desk, tid: str, *names: str, most: int = 0) -> None:
-    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed. most: when given,
-    no more than about this many bytes of each is read and kept, its start and its end (read_bounded)."""
+def publish(desk: Desk, tid: str, *names: str) -> None:
+    """Move what a task's processes wrote from .hansa/runs/<id>/ into its folder, keys removed."""
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     with desk.lock():  # a key saved meanwhile is either known here or scrubbed from it after (Desk.scrub)
         for name in names:
             src = raw / name if (raw / name).exists() else d / name  # in d: started before hansa kept them apart
             if src.exists():
-                text = read_bounded(src, most // 2, most // 2) if most else \
-                    src.read_text(encoding="utf-8", errors="replace")
-                # errors="replace": a byte read_bounded kept that is not UTF-8 is written as one "?", not three bytes
+                text = src.read_text(encoding="utf-8", errors="replace")
                 data = desk.redact(text).encode("utf-8", errors="replace")
-                write_bytes(d / name, cut_redacted(data, most) if most else data)
+                write_bytes(d / name, data)
                 if src.parent == raw:
                     src.unlink()
         try:
@@ -3486,8 +3229,8 @@ def run_recorded(m: dict) -> dict:
 
 
 def record_run(desk: Desk, m: dict, table: dict) -> None:
-    """Record on a running task what its run (worker, verifier, design session, or its check) now runs below
-    it, also what left its process group, cleared its environment or works in another folder (as a preview's
+    """Record on a running task what its run (worker, verifier, or its check) now runs below
+    it, also what left its process group, cleared its environment or works in another folder (as a command's
     is: record_descendants), and the group its own process leads, with that process's start: on the task, so
     that a restarted hansa serve still stops them at the run's end (sweep). Only while the run's process is
     still the one started (pid_start): once its number may be another's, nothing more is added. One that ended
@@ -3700,18 +3443,18 @@ def update_branch(desk: Desk, wt: Path, tid: str, name: str, tip: str, message: 
         return files
 
 
-def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict, wt: Path | None = None):
-    """Put the lane's worktree (or the one given) on a fresh task branch. Returns (worktree, base sha).
+def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
+    """Put the lane's worktree on a fresh task branch. Returns (worktree, base sha).
     A follow-up made with --update gets the base's current tip merged into it (update_branch)."""
     repo = Path(lane["repo"])
     tid = meta["id"]
     desk.update(tid, repo=resolved(str(repo)) or str(repo))  # where its branch is, whatever the lane is later
-    restart = meta.get("restart") if meta.get("kind") not in ("verify", "design") else None
+    restart = meta.get("restart") if meta.get("kind") != "verify" else None
     carrying = bool(restart and restart.get("source") == "earlier run's commit")
     updating = bool(meta.get("update") and meta.get("start_from") and not carrying)
     base = git("rev-parse", lane.get("base") or "main", cwd=repo) if updating or not meta.get("base") else meta["base"]
     start = restart["commit"] if carrying else meta.get("start_from") or base
-    wt = wt or desk.worktrees_dir / lane_name
+    wt = desk.worktrees_dir / lane_name
     ready_worktree(desk, repo, wt, tid, start)
     branch = f"task/{tid}"
     if wgit(desk, wt, "branch", "--list", branch):
@@ -3746,67 +3489,6 @@ def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict
             line, tmp, srt, settings, own, *argv]
 
 
-def with_preview(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
-    """The worker command for a task or verification with a browser on a lane with a preview: preceded by
-    hansa/preview.py, which starts the preview in srt with the lane's sandbox and local binding for it alone, waits
-    up to the lane's preview_wait_s for its address, tells the worker (PREVIEW_READY_NOTE, PREVIEW_NOT_READY_NOTE)
-    and stops it when the worker ends (end_preview, should it not). Where hansa does not start it (Linux, see
-    PREVIEW_STARTS) or cannot (srt does not run), the worker command alone, told why. Recorded on the task
-    (preview), for hansa show."""
-    shown = desk.redact(lane["preview"])
-    i = argv.index("--append-system-prompt") + 1
-    raw = desk.raw_dir(tid)
-    for f in ("preview.log", "preview.json"):
-        (raw / f).unlink(missing_ok=True)  # an earlier try's
-    if not PREVIEW_STARTS:
-        argv[i] += PREVIEW_LINUX_NOTE.format(preview=shown)
-        desk.update(tid, preview={"command": shown, "started": False,
-                                  "why": "hansa does not start a preview on Linux (hansa explain lane)"})
-        return argv
-    try:
-        srt, settings, tmp, _ = in_srt(desk, tid, "preview", lane, pname, p, wt, local=True)  # macOS: one folder
-    except Exception as e:  # noqa: BLE001 - the task goes on without it, told why
-        why = desk.redact(str(e))[:600]
-        argv[i] += PREVIEW_FAILED_NOTE.format(preview=shown, why=why)
-        desk.update(tid, preview={"command": shown, "started": False, "why": f"it could not start: {why}"})
-        return argv
-    seconds = lane.get("preview_wait_s", PREVIEW_WAIT_S)
-    desk.update(tid, preview={"command": shown, "started": True, "seconds": seconds})
-    return [sys.executable, str(Path(__file__).with_name("preview.py")), str(raw / "preview.log"),
-            str(raw / "preview.json"), str(seconds), srt, settings, tmp, tid, str(desk.root), in_sandbox(desk, lane, lane["preview"]),
-            PREVIEW_READY_NOTE.format(preview=shown),
-            PREVIEW_NOT_READY_NOTE.format(preview=shown, seconds=seconds), "--", *argv]
-
-
-def end_preview(desk: Desk, tid: str) -> None:
-    """Stop the preview hansa started for this task, with its whole process group, if it still runs: the worker's
-    end stops it (hansa/preview.py), and this makes sure, also for a worker an earlier server started; so with each
-    process preview.py saw below it that still runs (the same start), and any orphan started since that works in
-    the worktree or the preview's temporary folder (working_in). Then its output goes into the task's folder, keys removed, no more
-    than PREVIEW_KEEP of it read, and what became of it onto the task (preview)."""
-    raw = desk.raw_dir(tid)
-    rec = read_json(raw / "preview.json", {}) or {}
-    pgid = rec.get("pgid")
-    if pgid and group_running(pgid):  # a group with a process in it keeps its number, so it is still the preview's
-        stop_group(pgid)
-    left, seen = [], rec.get("seen") or {}
-    if pgid:  # what left the group: each process preview.py saw below it, and the orphans working in its folders since
-        left = stop_recorded({**working_in([rec.get("cwd"), rec.get("tmp")], rec.get("started") or time.time()),
-                              **seen}, SWEEP_GRACE)
-    (raw / "preview.json").unlink(missing_ok=True)
-    m = desk.meta(tid)
-    if not (m.get("preview") or {}).get("started"):
-        return
-    if left:
-        desk.event("left_running_stopped", task=tid, processes=[
-            f"{p} (left by the preview)" if str(p) in seen else f"{p} (an orphan working in the preview's folders)"
-            for p in left])
-    publish(desk, tid, "preview.log", most=PREVIEW_KEEP + 4096)  # bounded by preview.py already: this makes sure
-    desk.change(tid, lambda x: {"preview": {**(x.get("preview") or {}), "stopped": True,
-                                            **{k: rec[k] for k in ("ready", "address", "waited") if k in rec},
-                                            **({"why": desk.redact(rec["why"])} if rec.get("why") else {})}})
-
-
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
     """A task cancelled while hansa prepared it ends there, and its worker never starts."""
     m = desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled before it started",
@@ -3827,18 +3509,6 @@ def not_started(desk: Desk, tid: str, e: Exception) -> None:
     remove_sandbox_tmp(desk, tid)
     desk.event("task_not_started", task=tid, error=why)
     desk.failed_starts.pop(("task", tid, desk.meta(tid).get("launch")), None)
-
-
-def browser_for(desk: Desk, tid: str, command: str):
-    """The principal's browser tool for this one task, started in the task's own folder
-    and not told where the worker works, so what it saves (screenshots, also the ones
-    given a name) lands there and never in the repository."""
-    d = desk.tasks_dir / tid / "browser"
-    d.mkdir(parents=True, exist_ok=True)
-    cfg = desk.tasks_dir / tid / "browser-mcp.json"
-    write_text(cfg, json.dumps({"mcpServers": {"browser": {
-        "command": sys.executable, "args": [str(Path(__file__).with_name("relay.py")), str(d), command]}}}))
-    return cfg, ["mcp__browser", rule("Read", d)]
 
 
 def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: str = "") -> str:
@@ -3921,11 +3591,6 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             "--model", model, "--append-system-prompt", system]
     if effort:
         argv += ["--effort", effort]
-    extra = []
-    if meta.get("browser") and s.get("browser"):
-        cfg, extra = browser_for(desk, tid, s["browser"])
-        argv[argv.index("--append-system-prompt") + 1] += BROWSER_NOTE.format(dir=cfg.parent / "browser")
-        argv += ["--mcp-config", str(cfg)]
     conflicts = desk.meta(tid).get("update_conflicts") if meta.get("update") and not carrying else None
     if conflicts is not None:
         note = UPDATE_NOTE if conflicts else UPDATE_CLEAN_NOTE
@@ -3952,17 +3617,15 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
     argv += ["--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
-    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *extra, *WORKER_ALLOW,
+    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
     unsplit = argv_rules_problem(argv)
     if unsplit:  # a deny rule Claude Code would split leaves its folder open: no worker starts with one
         raise RuntimeError(f"hansa started no {'verifier' if verifying else 'worker'}: {unsplit}")
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
-    # no key in it: keys are in env only. Without the preview around it: a resume starts its own (resume)
+    # No key in it: keys are in env only; a resume reuses this command.
     write_text(raw / RESUME_ARGV, json.dumps(argv))
-    if meta.get("browser") and s.get("browser") and lane.get("preview"):  # started after the setup, and any merge
-        argv = with_preview(desk, tid, argv, lane, pname, p, wt)
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
@@ -3973,7 +3636,6 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             return None
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
-        (d / PREVIEW_FIRST_LOG).unlink(missing_ok=True)  # an earlier try's
         desk.change(tid, lambda x: {"launch": sid, "session_id": sid, "base": base, "branch": f"task/{tid}",
                                    "worktree": str(wt), "setup_ran": bool(lane.get("setup")), "resumed": None,
                                    "check_retry": None, **oom_begin(x)})
@@ -4002,7 +3664,6 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
 # and the task says what was left running. The worker's own command line, without the lane's setup around it,
 # is kept in the run's raw folder (RESUME_ARGV) for this; its time limit still counts from the task's start.
 RESUME_ARGV = "worker-argv.json"
-PREVIEW_FIRST_LOG = "preview-before-resume.log"  # the first run's preview output, when a resume starts another
 RESUME_NOTE = """Your turn ended while work you started in the background was still running: {left}.
 hansa stopped it when your turn ended. Run what you still need of it again in the foreground, in one
 Bash call with a long enough timeout (the Bash tool's timeout, in milliseconds, up to {bash_ms}: {bash_min}
@@ -4015,7 +3676,7 @@ def resume(desk: Desk, tid: str):
     """Resume a task or verification worker whose run ended well while background work it started was still
     running, once (see RESUME_ARGV): its new process, or None when it is not resumed."""
     meta = desk.meta(tid)
-    if meta.get("kind") == "design" or meta.get("resumed") or meta.get("cancel") or meta.get("timed_out"):
+    if meta.get("resumed") or meta.get("cancel") or meta.get("timed_out"):
         return None
     s = desk.settings()
     lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
@@ -4045,14 +3706,6 @@ def resume(desk: Desk, tid: str):
         if now_meta.get("cancel") or now_meta.get("resumed") or now_meta.get("timed_out") \
                 or now_meta.get("state") != "running" or now_meta.get("session_id") != sid:
             return None
-        if meta.get("browser") and s.get("browser") and lane.get("preview"):
-            # the first run's preview was stopped with it (end_preview, before this): the resumed run gets one of
-            # its own, started again from the same worktree, and the first one's output is kept beside it. Only
-            # here, once the resume is certain, so a run that ends instead keeps its preview's log and record
-            first = desk.tasks_dir / tid / "preview.log"
-            if first.exists():
-                first.replace(first.with_name(PREVIEW_FIRST_LOG))
-            argv = with_preview(desk, tid, argv, lane, pname, p, wt)
         desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
                                   "rows": len(_rows(home, sid) or []),
                                   "usage": usage_of(run) or read_detail(desk, tid, "usage", {}, usage_from_record, home, sid),
@@ -4081,144 +3734,6 @@ def add_usage(a: dict, b: dict) -> dict:
         cost = (t.get("claude_code_usd"), u.get("claude_code_usd"))
         t["claude_code_usd"] = None if None in cost else cost[0] + cost[1]
     return out
-
-
-@git_folders_kept
-def design_command(desk: Desk, tid: str):
-    """The interactive Claude Code run for a design session: (argv, env, directory).
-    Built inside the session's own terminal (hansa.session), so no key is on a command line."""
-    if account.LINUX:
-        raise RuntimeError(DESIGN_ON_LINUX)
-    no_read(desk)  # an entry that cannot be applied: the session does not start
-    s, meta = desk.settings(), desk.meta(tid)
-    lane_name = meta["lane"]
-    lane, pname = s["lanes"][lane_name], meta["provider"]
-    p, wt = s["providers"][pname], Path(meta["worktree"])
-    system = DESIGN_PROTOCOL.format(tid=tid, lane=lane_name, base=lane.get("base") or "main",
-                                    check=f" ({lane['check']})" if lane.get("check") else "")
-    brief = desk.lanes_dir / lane_name / "brief.md"
-    if brief.is_file() and brief.read_text(encoding="utf-8").strip():
-        system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
-    start = DESIGN_START.format(brief=(desk.tasks_dir / tid / "task.md").read_text(encoding="utf-8"))
-    argv = [claude_bin(), start, "--session-id", meta["session_id"], "--model", meta["model_asked"],
-            "--permission-mode", "dontAsk"]
-    if meta.get("effort_used"):
-        argv += ["--effort", meta["effort_used"]]
-    extra = []
-    if s.get("browser"):
-        cfg, extra = browser_for(desk, tid, s["browser"])
-        system += BROWSER_NOTE.format(dir=cfg.parent / "browser").replace("This task comes", "This session comes")
-        argv += ["--mcp-config", str(cfg)]
-    else:
-        system += NO_BROWSER_NOTE
-    if lane.get("preview"):
-        system += PREVIEW_NOTE.format(preview=lane["preview"])
-    if lane.get("preview"):
-        extra.append(f"Bash({lane['preview']}:*)")
-    if lane.get("check"):  # it is told to keep the checks passing, so it may run them
-        extra += command_rules(lane["check"])
-    extra = [r for r in extra if one_rule(r)]  # a command whose rule Claude Code would read as several gets none
-    try:
-        check_git_file(desk, wt)  # design_sandbox asks git in the worktree
-    except GitFileChanged as e:
-        raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    argv += isolated(wt, design_sandbox(desk, lane, pname, p, wt, meta.get("branch") or f"task/{tid}"))
-    tmp = make_worker_tmp(desk, tid)  # its own, as a worker's: what it leaves running there is found at its end (sweep)
-    kept, not_kept = no_read(desk)
-    desk.update(tid, no_read_left_out=not_kept)
-    argv += ["--append-system-prompt", system,
-             "--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
-             "--allowedTools", *lane_allow(desk, lane, wt), *extra, *DESIGN_ALLOW,
-             *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")]]
-    unsplit = argv_rules_problem(argv)
-    if unsplit:  # as for workers (start)
-        raise RuntimeError(f"hansa started no design session: {unsplit}")
-    env = {**provider_env(desk, pname, p), **env_file(desk, tid, lane, DESIGN_GIT_CONFIG),
-           **git_config_env(sandbox_env(desk, lane), DESIGN_GIT_CONFIG), "HANSA_TASK": tid,
-           "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp,
-           "TMPDIR": tmp, "TERM": os.environ.get("TERM") or "xterm-256color",  # a terminal the principal types into
-           **identity_env(lane)}  # its own commits are the lane's, as hansa's are
-    return with_setup(desk, tid, argv, lane, pname, p, wt), env, wt
-
-
-@git_folders_kept
-def start_design(desk: Desk, tid: str, lane_name: str) -> None:
-    """Open a design session: an interactive Claude Code run in tmux, in the lane's design
-    worktree, which the principal joins. It ends when they leave it with /exit."""
-    if account.LINUX:
-        raise RuntimeError(DESIGN_ON_LINUX)
-    s = desk.settings()
-    lane = s["lanes"][lane_name]
-    ds, co = s.get("design") or {}, s["coordinator"]
-    pname = ds.get("provider") or co["provider"]
-    p = s["providers"][pname]
-    prob = provider_problem(desk, s, pname)
-    if prob:
-        raise RuntimeError(f"the design provider {pname} cannot be used now: {prob}")
-    tmux = tmux_bin()
-    if lane.get("setup"):
-        srt_bin()  # the session runs the lane's setup in srt, so it could not start without it
-    if p["kind"] == "subscription":
-        model = ds.get("model") or (co.get("model") if pname == co["provider"] else "") or p["model"]
-    else:
-        model = p["model"]
-    sock, name = tmux_socket(desk), f"design-{tid}"
-    meta = desk.transition(
-        tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname, model_asked=model,
-        effort_used=ds.get("effort") or (co.get("effort", "") if pname == co["provider"] else "") or p.get("effort", ""),
-        effort_from="design" if ds.get("effort") else "coordinator" if pname == co["provider"] and co.get("effort")
-        else "provider" if p.get("effort") else "",
-        started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False, cancel=False,
-        tmux=[sock, name], setup_ran=bool(lane.get("setup")), held=None, sandbox_failed=None)
-    if not meta:
-        return
-    no_read(desk)  # as a worker's start
-    wt, base = prepare(desk, lane_name, lane, meta, wt=desk.worktrees_dir / f"{lane_name}-design")
-    desk.update(tid, base=base, branch=f"task/{tid}", worktree=str(wt), session_id=str(uuid.uuid4()))
-    try:
-        check_git_file(desk, wt)  # design_sandbox asks git in the worktree
-    except GitFileChanged as e:
-        raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    unsplit = paths_problem(desk, wt)
-    if unsplit:  # found before the session starts, as design_command would find it too late (in tmux)
-        raise RuntimeError(f"hansa started no design session: {unsplit}")
-    sandbox_guard(desk, lane_name, "design session", design_sandbox(desk, lane, pname, p, wt, f"task/{tid}")["sandbox"], wt,
-                  f"task/{tid}")
-    if cancelled_before_start(desk, tid):
-        return
-    env = {k: v for k, v in without_session(os.environ).items() if k != "TMUX"}
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
-    # -P prints the pane's process id once the session exists: tmux may exit 0 without making it
-    # (when it cannot create its socket, say), and a session that ends at once still printed it
-    r = subprocess.run([tmux, "-L", sock, "new-session", "-d", "-P", "-F", "#{pane_pid}", "-s", name,
-                        "-x", "200", "-y", "50", "-c", str(wt), sys.executable, "-m", "hansa.session", str(desk.root), tid],
-                       env=env, capture_output=True, text=True, timeout=30)
-    if r.returncode or not r.stdout.strip().isdigit():
-        said = " ".join((r.stdout + r.stderr).split())[:300] or "nothing"
-        raise RuntimeError(f"tmux did not open the design session; it printed: {said}")
-    pid = int(r.stdout.strip())
-    with recording_start(desk, ("task", tid, meta.get("launch")), pid, cleanup=lambda: end_design(desk, meta)):
-        meta = desk.update(tid, phase="", pid=pid, pid_start=proc_start(pid))
-    ask = desk.add_ask(f"Design session {tid} is waiting for you: {meta['title']}. Join it on this machine with "
-                       f"`{join_command(meta)}`; leave it running with Ctrl-b then d, end it with /exit (if it "
-                       f"then asks about background work, press Enter: the first choice stops it). The first "
-                       f"session in a new folder asks whether you trust it: choose \"Yes, I trust this folder\" "
-                       f"(the default, No, ends the session). "
-                       f"Its screenshots show under {tid} on this page.", by="hansa")
-    desk.update(tid, ask=ask)
-    desk.event("design_started", task=tid, lane=lane_name, provider=pname, model=model)
-
-
-def end_design(desk: Desk, meta: dict) -> None:
-    """Close what a design session left open: its tmux session and its request to the principal."""
-    sock, name = meta.get("tmux") or ["", ""]
-    if name:
-        try:
-            subprocess.run([tmux_bin(), "-L", sock, "kill-session", "-t", name], capture_output=True, timeout=30)
-        except (RuntimeError, OSError, subprocess.SubprocessError):
-            pass
-    if meta.get("ask") and any(a["id"] == meta["ask"] and not a["closed"] for a in desk.asks()):
-        desk.close_ask(meta["ask"], "the design session ended", by="hansa")
 
 
 def usage_of(run: dict) -> dict:
@@ -4354,7 +3869,7 @@ def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
     A run began with an update's conflicts to settle when its preparation merged the base in and
     left conflicts (update_conflicts not empty). Such a run is never carried on, whatever git left
     in the files: a modify/delete, rename or binary conflict leaves no markers.
-    Verifications, design sessions and other stops keep their existing retry behavior.
+    Verifications and other stops keep their existing retry behavior.
     """
     run_start = meta.get("run_start") or {}
     start = run_start.get("commit") or meta.get("start_from") or meta["base"]
@@ -4383,18 +3898,17 @@ def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
 
 def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.meta(tid)
-    memory = oom_result(meta.get("oom_start")) if meta.get("kind") != "design" else {}
+    memory = oom_result(meta.get("oom_start"))
     d = desk.tasks_dir / tid
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
     done.unlink(missing_ok=True)
     (done.parent / RESUME_ARGV).unlink(missing_ok=True)
-    end_preview(desk, tid)  # before its temporary folder goes, and before the check runs in the worktree
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
     # killed by the system once the lane's setup had finished, before the worker wrote its result; hansa's own stops
-    # (a changed .git file, cancel, sandbox_failed, timed_out) and design sessions keep their branches, which come first.
+    # (a changed .git file, cancel, sandbox_failed, timed_out) keep their branches, which come first.
     # Then the kill, before its stderr is read for the provider's quota, key, login or refusal (unusable_reason)
     killed = not run and set_up and returncode in KILLED_EXITS
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
@@ -4410,22 +3924,15 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     resumed = meta.get("resumed") or {}
     if resumed.get("usage"):  # the first run's, before hansa resumed it
         usage = add_usage(resumed["usage"], usage)
-    designing = meta.get("kind") == "design"
     late = read_detail(desk, tid, "report after notices", None, report_after_notices,
                        config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
-        if p and not designing and not stopped else None
+        if p and not stopped else None
     if late:
         report = late[0] + "".join(LATE_NOTE + x for x in late[1])
     if stopped and not result.strip() and p:
         notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
                             meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
-    if designing:
-        texts, replies, _, _ = _record(config_home(desk, meta["provider"], p), meta.get("session_id", "")) if p \
-            else ([], 0, None, {})
-        report = DESIGN_NOTE + texts[-1] if texts else ""
-        run = {"num_turns": replies}
-        end_design(desk, meta)
     report = desk.redact(report)
     denied = run.get("permission_denials") or []
     reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
@@ -4439,7 +3946,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                                  for x in denied],
               "background_left": [desk.redact(x) for x in read_detail(
                   desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
-                  meta.get("session_id", ""), resumed.get("rows", 0))] if p and not designing else []}
+                  meta.get("session_id", ""), resumed.get("rows", 0))] if p else []}
     if resumed.get("turns") and isinstance(fields["turns"], int):
         fields["turns"] += resumed["turns"]
     if meta.get("kind") == "verify":
@@ -4457,9 +3964,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         branch = meta.get("branch") or f"task/{tid}"
         check_head(desk, wt, branch)  # what hansa commits or stashes on is the task's
         head = check_branch_ref(desk, wt, branch)  # and that branch's ref leads nowhere else
-        # a design session may merge: hansa's commit at its end is a plain one on its branch all the same
-        # (commit_work); a worker's or a verification's run may hold only the merge hansa made (retry --update)
-        merged = "" if designing else check_no_operation(
+        # A run may hold only the merge hansa made (retry --update).
+        merged = check_no_operation(
             desk, wt, meta.get("base", "") if meta.get("update") and meta.get("update_conflicts") else "")
         if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
@@ -4499,7 +4005,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                                    f"changed after hansa committed: it {what or 'now holds ' + now_at}, not {head}, "
                                    f"the task's work, which is kept: the ref is put back to it", head, aside=True)
     except SandboxPathChanged as e:
-        changed = str(e)  # full path list, including for a design session's end
+        changed = str(e)  # full path list
         fields.update(head="", commits=0, files=[], stat="")
         restart = None
     except GitFileChanged as e:
@@ -4525,9 +4031,6 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     elif setup:
         state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
                                   f"started; hansa show {tid} has the setup's last lines")
-    elif designing:
-        lines = err.strip().splitlines()
-        state, error = ("done", "") if report or not lines else ("failed", f"the design session did not start: {lines[-1][:200]}")
     elif meta.get("timed_out"):
         lane = desk.settings()["lanes"].get(meta.get("lane"), {})
         state, error = "failed", f"stopped at the ceiling of {lane.get('timeout_min', 240)} minutes: {CEILING}"
@@ -4619,7 +4122,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             kept = {"usage": {}, "turns": None}
         again = {"resumed": None, "restart": None} if final == "queued" else {}
         if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
-                and meta.get("kind") not in ("verify", "design")
+                and meta.get("kind") != "verify"
                 and (kind == "quota" or net or attempts[-1].get("kind") == "killed")):
             again["restart"] = restart or interrupted_restart(desk, wt, meta, fields)
         if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
@@ -4631,7 +4134,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     meta = desk.change(tid, decide)
     if meta["state"] == "queued" and meta.get("sandbox_failed"):
         hold(desk, tid, meta.get("lane") or "", meta["error"], "",
-             {"verify": "verifier", "design": "design session"}.get(meta.get("kind"), "worker"))
+             {"verify": "verifier"}.get(meta.get("kind"), "worker"))
         meta = desk.meta(tid)
     desk.event("task_finished", task=tid, state="checking" if meta.get("phase") == "checking" else meta["state"],
                provider=meta.get("provider"), error=meta["error"])
@@ -4656,7 +4159,7 @@ def keep_lost_run(desk: Desk, m: dict) -> dict:
     Kept by launch, as each start of a task has its own; of a session resumed (resumed), the part before the resume
     is in resumed's numbers and only the part after it is read from the record."""
     sid, launch = m.get("session_id") or "", m.get("launch") or ""
-    if not sid or launch != sid or m.get("kind") == "design":
+    if not sid or launch != sid:
         return {}
     if any(x.get("launch", x.get("session_id")) == launch  # records made before launch was kept: their session
            for x in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])] if isinstance(x, dict)):
@@ -4867,7 +4370,7 @@ def merge_needs_check(lane: dict, m: dict, repo, tip: str, check_lane: dict | No
 
 def lane_occupied(m: dict) -> bool:
     """Whether this task holds its lane's worktree now: a worker or check on it, or its merge check."""
-    return (m["state"] == "running" and m.get("kind") != "design") or \
+    return (m["state"] == "running") or \
         (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running"))
 
 
@@ -5554,7 +5057,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
 # detached at the base's tip, and puts the worktree back clean at that tip after. .hansa/tries/<lane>.json holds
 # the try: {id, phase: queued | running | done, ...}, and when done its result, which the command waits for.
 TRY_STEPS = ("setup", "check", "merge_check")
-TRY_KEEP = PREVIEW_KEEP  # bytes of each step's output kept, its first and last half (try_log)
+TRY_KEEP = 4 * 2 ** 20  # bytes of each step's output kept, its first and last half (try_log)
 
 
 def try_file(desk: Desk, lane_name: str) -> Path:
@@ -5834,7 +5337,7 @@ def stop(pid, start: str = "", proc=None) -> None:
 
 
 @contextlib.contextmanager
-def recording_start(desk: Desk, key, pid, proc=None, cleanup=None):
+def recording_start(desk: Desk, key, pid, proc=None):
     """A launched process may run only if its pid can be recorded. Keep a failed start for later
     when even that record cannot be written; the key includes its launch, so a later run is left alone."""
     try:
@@ -5842,16 +5345,12 @@ def recording_start(desk: Desk, key, pid, proc=None, cleanup=None):
     except Exception as e:
         if key is not None:
             desk.failed_starts[key] = e  # mark BEFORE stopping, even when no disk write is possible
-        try:
-            stop(pid, proc=proc)
-            if proc is None:
-                try:
-                    os.waitpid(pid, os.WNOHANG)  # stop already waited; normally another server's child
-                except ChildProcessError:
-                    pass
-        finally:
-            if cleanup is not None:
-                cleanup()
+        stop(pid, proc=proc)
+        if proc is None:
+            try:
+                os.waitpid(pid, os.WNOHANG)  # stop already waited; normally another server's child
+            except ChildProcessError:
+                pass
         raise
 
 
@@ -5931,15 +5430,15 @@ class Dispatcher:
             self.read = (self.desk.writes, self.desk.tasks())
         return self.read[1]
 
-    def sandbox_waits(self, ln: str, s: dict, group: str = "work") -> bool:
-        """Whether a lane's tasks of this group (sandbox_group) wait for their sandbox: held by this server (hold)
+    def sandbox_waits(self, ln: str, s: dict) -> bool:
+        """Whether a lane's tasks wait for their sandbox: held by this server (hold)
         with the settings as they are. Changed settings, or a restart, try it again: the task starts once a try
         passes."""
-        return self.held.get((ln, group)) == json.dumps(s, sort_keys=True, default=str)
+        return self.held.get((ln, "work")) == json.dumps(s, sort_keys=True, default=str)
 
     def hold(self, tid: str, ln: str, s: dict, e: SandboxRefused) -> None:
         hold(self.desk, tid, ln, str(e), e.part, e.kind)
-        self.held[(ln, sandbox_group(e.kind))] = json.dumps(s, sort_keys=True, default=str)
+        self.held[(ln, "work")] = json.dumps(s, sort_keys=True, default=str)
 
     def sandbox_watch(self, s: dict) -> None:
         """Stop a run whose session record says its sandbox could not start before any of its Bash calls succeeded
@@ -5960,7 +5459,7 @@ class Dispatcher:
                 if not line:
                     continue
                 self.desk.update(m["id"], sandbox_failed=self.desk.redact(line))
-                self.held[(m.get("lane"), sandbox_group(m.get("kind") or ""))] = json.dumps(s, sort_keys=True, default=str)
+                self.held[(m.get("lane"), "work")] = json.dumps(s, sort_keys=True, default=str)
                 self.desk.event("sandbox_failed", task=m["id"], lane=m.get("lane"), line=self.desk.redact(line))
                 stop(m.get("pid"), m.get("pid_start", ""), self.procs.get(m["id"]))
 
@@ -5970,8 +5469,7 @@ class Dispatcher:
         if self.desk.meta(tid).get("phase") == "checking":
             finish_check(self.desk, tid)
         else:
-            try:  # the preview first: a resume starts its own, and finish reads the details after it too
-                end_preview(self.desk, tid)
+            try:
                 proc = resume(self.desk, tid)
             except Exception as e:  # noqa: BLE001 - the run ends as it did, and the event log says why
                 self.desk.event("resume_failed", task=tid, error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
@@ -6008,8 +5506,7 @@ class Dispatcher:
         if retry_start_failure(self.desk, key, lambda e: not_started(self.desk, m["id"], e)):
             return
         found, since = self.look(m["id"], m.get("launch", ""), m.get("started"), m.get("lookup_failing_since"),
-                                  "worker") \
-            if m.get("kind") != "design" else (None, None)
+                                  "worker")
         if since:
             why = self.gave_up(since)
             if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
@@ -6025,17 +5522,11 @@ class Dispatcher:
             except Exception as e:
                 not_started(self.desk, m["id"], e)
             return
-        if m.get("tmux"):  # a design session it may have opened, which nobody was asked to join yet
-            try:
-                subprocess.run([tmux_bin(), "-L", m["tmux"][0], "kill-session", "-t", m["tmux"][1]],
-                               capture_output=True, timeout=30)
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                pass
         lost = keep_lost_run(self.desk, m)  # read before the lock: a session record can be long
         if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
                             {"state": "cancelled", "phase": "", "error": "cancelled before it started",
                              "finished": now(), **lost} if x.get("cancel") else
-                            {"state": "queued", "phase": "", "pid": None, "pid_start": "", "tmux": None,
+                            {"state": "queued", "phase": "", "pid": None, "pid_start": "",
                              "lookup_failing_since": None, **lost}):
             remove_sandbox_tmp(self.desk, m["id"])  # what it made for a worker that never started
 
@@ -6339,7 +5830,7 @@ class Dispatcher:
         return rec["low"]
 
     def record(self, tasks: list) -> None:
-        """Record what each running worker, verifier, design session and check runs below it (record_run), once
+        """Record what each running worker, verifier and check runs below it (record_run), once
         each round: what it starts that leaves every marker sweep finds is still stopped at its end."""
         running = [m for m in tasks if m["state"] == "running" and m.get("pid") and m.get("phase") != "starting"]
         table = process_table() if running else {}
@@ -6411,8 +5902,8 @@ class Dispatcher:
                 limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
                 began = ((m.get("check_started") or time.time()) if m.get("phase") == "checking" and m.get("check_retry")
                          else m.get("started", time.time()))
-                over = time.time() - began > limit and m.get("kind") != "design"
-                if m.get("cancel") or over:  # a design session waits on the principal, so it has no time ceiling
+                over = time.time() - began > limit
+                if m.get("cancel") or over:
                     proc = self.procs.get(m["id"])
                     if not run_running(m, proc):
                         continue  # an end whose record failed, or one just before this observation
@@ -6435,20 +5926,6 @@ class Dispatcher:
             beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
         if desk.paused() or low:  # free space under the floor: what runs goes on, nothing new starts
             return
-        designing = {m["lane"] for m in self.tasks() if m["state"] == "running" and m.get("kind") == "design"}
-        for m in self.tasks():  # a design session has its own worktree and waits on the principal
-            with serve_step():
-                if m["state"] == "queued" and m.get("kind") == "design" and m.get("lane") in s["lanes"] \
-                        and not s["lanes"][m["lane"]].get("merge_lane") \
-                        and m["lane"] not in designing and not self.sandbox_waits(m["lane"], s, "design"):
-                    try:
-                        start_design(desk, m["id"], m["lane"])
-                    except SandboxRefused as e:  # held, not failed: it starts once a try passes
-                        self.hold(m["id"], m["lane"], s, e)
-                    except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
-                        not_started(desk, m["id"], e)
-                    else:
-                        designing.add(m["lane"])
         running = [m for m in self.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
         busy = {occupied_lane(m) for m in running} | tried_lanes(desk)
@@ -6456,7 +5933,7 @@ class Dispatcher:
             with serve_step():
                 if free <= 0:
                     break
-                if m["state"] != "queued" or m.get("kind") == "design":
+                if m["state"] != "queued":
                     continue
                 for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
                     if ln in busy or ln not in s["lanes"] or s["lanes"][ln].get("merge_lane") or self.sandbox_waits(ln, s):
@@ -6602,7 +6079,7 @@ def record_serve_locale(desk: Desk) -> None:
 
 
 def lane_locale(desk: Desk, lane: dict, st: dict = None) -> str:
-    """The locale a lane's setup, check, merge check, preview and workers get, and where it comes from, in a
+    """The locale a lane's setup, check, merge check and workers get, and where it comes from, in a
     line: the lane's env when it sets one, else hansa serve's environment (as it recorded it when it started),
     else, when serve does not run, this shell's (which a serve started here would give them). hansa passes on
     only LANG and LC_ALL of its own; a lane's env may set any LC_ variable, and LC_ALL, when set and not
@@ -6745,16 +6222,6 @@ def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict |
 def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None = None) -> str:
     """Why a queued task is not running yet, in one line. looks: waiting_looks, for many tasks at once."""
     lk = looks or waiting_looks(desk, s)
-    if m.get("kind") == "design":
-        other = [x["id"] for x in lk["tasks"] if x.get("kind") == "design" and x["state"] == "running"
-                 and x.get("lane") == m.get("lane")]
-        held = lk["held"].get(m.get("lane"), {}).get("design")
-        return (f"lane {m.get('lane')} already has design session {other[0]} open" if other
-                else f"lane {m.get('lane')} is not in settings" if m.get("lane") not in s["lanes"]
-                else f"HELD: lane {m.get('lane')} cannot open a design session, {sandbox_held_text(held)}" if held
-                else lk["disk"] if lk["disk"]
-                else "opens when `hansa serve` next looks (within seconds)" if not lk["not_looking"]
-                else f"opens once `hansa serve` gets through its rounds; {lk['not_looking']}")
     if lk["paused"]:
         return "dispatch is paused"
     if lk["disk"]:

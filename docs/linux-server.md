@@ -27,9 +27,7 @@ from util-linux). Run `hansa coordinator` as root: it stays root, uses root's ow
 Claude Code login and folder (the first time, log in inside the session), and
 writes nothing in the desk as root: hansa does the coordinator's part there as
 the account. Its own usage then is not in `hansa cost`,
-because Claude Code keeps root's records where the account cannot read them. A
-design session runs under the account's tmux; root joins it with the command the
-page gives.
+because Claude Code keeps root's records where the account cannot read them.
 
 `hansa` commands run as the account by themselves, but the coordinator stays
 root: it changes the desk only through `hansa`, never with its own tools. Git
@@ -90,7 +88,7 @@ What a lane's commands meet in the sandbox there (bubblewrap), which
   `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.vscode`, `.idea`)
   for as long as it runs. So that a build script that refuses a tree with
   untracked files still builds, the prelude gives git in the sandbox (setup,
-  check, merge check, preview and a worker's Bash) an excludes file in the
+  check, merge check and a worker's Bash) an excludes file in the
   command's TMPDIR: the excludes git would read (`core.excludesFile` from the
   system's and the account's config, else `~/.config/git/ignore`), then those
   names anchored at the top. With git 2.32 or later it does so through
@@ -150,7 +148,7 @@ Workers, verifications, checks, merge checks, lane tries and releases keep a pos
 difference on their records; `hansa show` and end notices say how many processes the kernel killed while
 the run ran. This is the whole machine's count, so another run can account for it. macOS, a missing or
 unreadable file, or a file without `oom_kill` leaves no count and does not interrupt the run.
-Setups belong to those runs and are covered by their counts; design sessions run only on macOS.
+Setups belong to those runs and are covered by their counts.
 
 A failed check or merge check runs once more only with a readable Linux count that rose while it ran,
 and only if hansa did not stop it itself. A merge check whose lane setup fails is not run again and shows
