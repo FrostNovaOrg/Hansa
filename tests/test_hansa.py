@@ -13828,6 +13828,17 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(plugin.version("claude"), "")
         self.assertEqual(ran.call_args.kwargs["timeout"], 10)
 
+    def test_the_fake_worker_asked_its_version_writes_nothing_where_it_is_asked(self):
+        # hansa asks claude --version from the folder it runs in, a checkout when the coordinator starts as root:
+        # the fake the tests give it answers no version and leaves no file there (no hello.txt)
+        scratch = self.tmp / "asked-here"
+        scratch.mkdir()
+        here = os.getcwd()
+        os.chdir(scratch)
+        self.addCleanup(os.chdir, here)
+        self.assertEqual(plugin.version(os.environ["HANSA_CLAUDE"]), "")
+        self.assertEqual(os.listdir(scratch), [])
+
     def test_hansa_does_not_foretell_whether_hooks_run(self):
         # settings that turn hooks off, in each place this test owns (the user's, the desk's, the command line), and
         # claude's own options and variable that do: hansa reads none of them, passes the mod all the same, and
