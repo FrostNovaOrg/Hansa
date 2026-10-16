@@ -932,6 +932,11 @@ def cmd_cancel(a):
                 desk.update(a.id, state="done", merge_check=None)
             else:
                 desk.update(a.id, merge_check={**mc, "cancel": True})
+                if mc.get("leader") and mc["leader"] != a.id:
+                    leader = desk.meta(mc["leader"])
+                    desk.update(mc["leader"], merge_check={**leader["merge_check"], "batch_cancel": True})
+                owner = mc.get("leader", a.id)
+                stopping_merge = desk.meta(owner).get("merge_check") or {}
         else:
             raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running or merging tasks "
                              f"can be cancelled")
@@ -942,8 +947,11 @@ def cmd_cancel(a):
     if m["state"] == "merging":
         mc = m.get("merge_check") or {}
         if mc.get("phase") != "queued":
-            stop(mc.get("pid"), mc.get("pid_start", ""))
-            finish_merge_check(desk, a.id)  # hansa serve would too; this is only quicker
+            stop(stopping_merge.get("pid"), stopping_merge.get("pid_start", ""))
+            with desk.lock():
+                current = desk.meta(owner).get("merge_check") or {}
+                if current.get("launch") == stopping_merge.get("launch"):
+                    finish_merge_check(desk, owner)  # serve may already have split the batch and started its next check
         desk.event("merge_check_cancel", task=a.id)
         print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
         return
@@ -1757,13 +1765,13 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 
 LANE_LISTS = ("providers", "allow", "network", "write", "release_files")
-LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "preview_wait_s")
+LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "preview_wait_s")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "preview", "setup",
-               "release", "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_lane", "preview_wait_s", "note",
+               "release", "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "preview_wait_s", "note",
                *MESSAGE_FIELDS, "identity")
 # empty (none) takes them out: the check's command and limit again, hansa's own message forms, the preview's wait,
 # the identity of hansa's commits (then the repository's own, or hansa's)
-LANE_UNSET = ("merge_check", "merge_timeout_min", "merge_lane", "preview_wait_s", *MESSAGE_FIELDS, "identity")
+LANE_UNSET = ("merge_check", "merge_timeout_min", "merge_batch", "merge_lane", "preview_wait_s", *MESSAGE_FIELDS, "identity")
 OUTSIDE_WORKER = ("setup", "check", "merge_check", "preview")  # run by hansa itself, not by a worker or design session
 
 
@@ -3021,7 +3029,10 @@ def main(argv=None):
         "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, preview, setup, release, note, commit_message, merge_message and "
         "identity take "
-        "one value (none: empty); max_turns, timeout_min, merge_timeout_min and preview_wait_s take one whole number. "
+        "one value (none: empty); max_turns, timeout_min, merge_timeout_min, merge_batch and preview_wait_s take one whole number. "
+        "merge_batch is 1 to 10 (default 4, none restores it): the check lane takes that many queued merges "
+        "together, in order, stopping before an alone task, plain merge, different check lane or conflict. "
+        "A failed or stopped batch returns to its old places, each checked alone. "
         "merge_lane takes true or false (unset: false): one lane per repository and base can serve their merge "
         "checks in its own worktree and sandbox, taking no tasks, verifications, design sessions or retries; "
         "a lane with work queued or running cannot become one. "

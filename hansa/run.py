@@ -4791,8 +4791,10 @@ def killed_twice(first: dict, last: dict) -> str:
 # timeout_min (merge_minutes).
 # The task is "merging" meanwhile, with merge_check {phase: queued | starting | running, ...}; hansa serve
 # runs it when the lane is free, in the lane's worktree, and it ends in "merged", or back in "done" with
-# merge_check_result saying why nothing was merged. One runs at a time per repository and base branch, in
-# the order the merges were asked (merge_check.queued); others wait for it (merge_check_ahead). A merge that
+# merge_check_result saying why nothing was merged. One check runs at a time per repository and base branch,
+# taking consecutive queued tasks up to the execution lane's merge_batch. Followers have phase batched and
+# leader naming the task that owns the process and output; members records their order. Unsuccessful batches
+# return to their original merge_check.queued positions with alone=True. A merge that
 # needs no check, asked while one runs or waits there, joins the same line (merge_check {plain: True}, plain_merge).
 # A configured merge_lane on that repository and base takes the checks instead. It is selected at start and
 # recorded as merge_check.lane: only that lane is held, and its commands and sandbox run the check, while the
@@ -4892,7 +4894,7 @@ def merge_lane(s: dict, lane_name):
 def merge_check_lane(s: dict, m: dict):
     """Where a merge check runs now, or would start now if queued. Plain merges keep their task lane."""
     mc = m.get("merge_check") or {}
-    if mc.get("phase") in ("starting", "running"):
+    if mc.get("phase") in ("starting", "running", "batched"):
         return occupied_lane(m)
     return m.get("lane") if mc.get("plain") else merge_lane(s, m.get("lane"))
 
@@ -5061,6 +5063,8 @@ def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
     needed no check and waited its turn (plain) says so in its result (waited): no check ran for it."""
     meta = desk.meta(tid)
     mc = meta.get("merge_check") or {}
+    if len(mc.get("members", [])) > 1:
+        return split_merge_batch(desk, mc.get("leader", tid), result)
     plain, check_lane = mc.get("plain"), mc.get("lane")
     if result:
         if mc.get("retried") and not result.get("retried"):
@@ -5077,6 +5081,26 @@ def end_merge_check(desk: Desk, tid: str, result: dict | None) -> dict | None:
                    **({"waited": True} if plain else {}),
                    **({"command": result["command"]} if (result or {}).get("command") else {}))
     return m
+
+
+def split_merge_batch(desk: Desk, tid: str, result: dict | None) -> dict:
+    """Keep every surviving member's place, but check it alone from now on. A cancellation ends only its task."""
+    with desk.lock():
+        leader = desk.meta(tid)
+        mc = leader.get("merge_check") or {}
+        for member in mc.get("members", [tid]):
+            m = desk.meta(member)
+            own = m.get("merge_check") or {}
+            if m["state"] != "merging":
+                continue
+            queued = {k: own[k] for k in ("queued", "recheck", "by") if k in own}
+            desk.update(member, merge_check={**queued, "phase": "queued", "moves": 0, "alone": True},
+                        merge_check_result={**(result or {}), "batch": mc.get("members", []), "output_task": tid})
+            if own.get("cancel"):
+                end_merge_check(desk, member, None)
+        desk.event("merge_batch_split", task=tid, members=mc.get("members", [tid]),
+                   note=(result or {}).get("note", "stopped on request"))
+        return desk.meta(tid)
 
 
 def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
@@ -5198,6 +5222,40 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         commit = wgit(desk, wt, "rev-parse", "HEAD")
         said = message_fallback(task_lane, m["lane"], "merge_message")  # the message this merge commit was given
         command = merge_command(lane)
+        entries = [{"task": tid, "onto": tip, "commit": commit, "message_note": said}]
+        if command and not mc.get("alone"):
+            waiting = sorted((x for x in desk.tasks() if x["state"] == "merging"
+                              and merge_target(s, x.get("lane")) == merge_target(s, m["lane"])
+                              and merge_order(x) > merge_order(m)), key=merge_order)
+            for other in waiting[:lane.get("merge_batch", 4) - 1]:
+                omc = other.get("merge_check") or {}
+                if (omc.get("phase") != "queued" or omc.get("alone") or omc.get("plain")
+                        or merge_check_lane(s, other) != lane_name or branch_holds(repo, other)):
+                    break
+                other_lane = s["lanes"][other["lane"]]
+                before = entries[-1]["commit"]
+                try:
+                    wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m",
+                         merge_message(other_lane, other["lane"], other["id"], other["title"]), other["head"],
+                         env=identity_env(other_lane))
+                except GitFileChanged:
+                    raise
+                except RuntimeError:
+                    if merge_in_progress(desk, wt):
+                        wgit(desk, wt, "merge", "--abort")
+                    break  # this task gets the usual conflict report when its own turn comes
+                entries.append({"task": other["id"], "onto": before,
+                                "commit": wgit(desk, wt, "rev-parse", "HEAD"),
+                                "message_note": message_fallback(other_lane, other["lane"], "merge_message")})
+        if len(entries) > 1:
+            members = [e["task"] for e in entries]
+            mc = {**mc, "members": members, "leader": tid, "batch_commits": entries, "phase": "starting"}
+            desk.update(tid, merge_check=mc)  # publish membership before anything that can fail to launch
+            for member in members[1:]:
+                omc = desk.meta(member)["merge_check"]
+                desk.update(member, merge_check={**omc, "phase": "batched", "leader": tid,
+                                                 "members": members, "lane": lane_name})
+            commit = entries[-1]["commit"]
         if not command:  # the check and merge check were taken away meanwhile: nothing to run
             land_merge(desk, tid, {"ok": True, "onto": tip, "commit": commit, "command": "", "note": "",
                                    "at": now(), "seconds": 0, "tail": [], "message_note": said,
@@ -5228,7 +5286,8 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         with recording_start(desk, ("merge", tid, token), proc.pid, proc):
             desk.update(tid, merge_check={**mc, "phase": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)},
                         **({"merge_check_result": {**mc["retried"], "rerun_started": True}} if mc.get("retried") else {}))
-    desk.event("merge_check_started", task=tid, lane=lane_name, onto=tip, command=command)
+    desk.event("merge_check_started", task=tid, lane=lane_name, onto=tip, command=command,
+               members=mc.get("members", [tid]))
     return proc
 
 
@@ -5261,7 +5320,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
         return (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).exists() else ""
     err = read("merge-check.err").strip()
     setup = SETUP_FAILED.search(err)
-    note = ("stopped on request" if mc.get("cancel") else "stopped at the lane's time ceiling" if mc.get("timed_out")
+    note = ("stopped on request" if mc.get("cancel") or mc.get("batch_cancel") else "stopped at the lane's time ceiling" if mc.get("timed_out")
             else f"the lane's setup failed (exit {setup.group(1)}), so the check did not run" if setup
             else "" if code is not None else (err.splitlines()[-1] if err else "the check was interrupted"))
     changed = False
@@ -5279,6 +5338,21 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
+    if len(mc.get("members", [])) > 1:
+        result.update(batch=mc["members"], output_task=tid, batch_commits=mc["batch_commits"],
+                      checked_commit=mc.get("commit"))
+        desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note, command=result["command"],
+                   members=mc["members"],
+                   **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
+        if result["ok"]:
+            try:
+                return land_merge_batch(desk, tid, result)
+            finally:
+                ended = desk.meta(tid)
+                if ended["state"] != "merging" or (ended.get("merge_check") or {}).get("phase") == "queued":
+                    (raw / "merge-check.exit").unlink(missing_ok=True)
+        (raw / "merge-check.exit").unlink(missing_ok=True)
+        return split_merge_batch(desk, tid, result)
     stopped = mc.get("cancel") or mc.get("timed_out") or changed or setup
     if check_killed(result, stopped):
         if not result.get("retried"):
@@ -5313,6 +5387,120 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
             (raw / "merge-check.exit").unlink(missing_ok=True)
 
 
+def merge_landing_problem(desk: Desk, m: dict, repo, name: str, onto: str, commit: str) -> str:
+    """Each task's own landing checks, against only what its merge adds."""
+    why = branch_holds(repo, m)
+    current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+    if why:
+        return why
+    if current != name:
+        return f"the checkout at {repo} is on {current}, not {name}; the principal needs to switch it back"
+    if git("status", "--porcelain", "--untracked-files=no", cwd=repo):
+        return f"the checkout at {repo} has uncommitted changes"
+    leaked = keys_in_change(desk, repo, m["base"], m["head"])
+    words = [] if leaked else words_in_merge(desk, repo, onto, commit, lane_name=m["lane"])
+    if leaked:
+        desk.update(m["id"], leaked=leaked)
+        return f"the change holds the key of {', '.join(leaked)}"
+    if words:
+        desk.event("merge_forbidden", task=m["id"], found=len(words))
+        return desk.redact(words_text(m["id"], words))
+    return ""
+
+
+def record_batch_landing(desk: Desk, saved: dict, journal: Path) -> dict:
+    """The base already holds the checked commit. Finish metadata after an interrupted landing too."""
+    result, tid = saved["result"], saved["leader"]
+    for entry in result["batch_commits"]:
+        member = entry["task"]
+        m = desk.meta(member)
+        mc = m.get("merge_check") or {}
+        if m["state"] == "merged" and m.get("merge_commit") == entry["commit"]:
+            continue
+        own = {**result, "onto": entry["onto"], "commit": entry["commit"]}
+        m = desk.update(member, state="merged", merged=now(), merge_commit=entry["commit"], merge_check=None,
+                        merge_repo=saved["repo"], merge_base=saved["base"], merge_check_result=own,
+                        unverified=unverified_note(desk, m) or None, merge_message_note=entry["message_note"] or None)
+        close_verification(desk, m, f"closed: {member} was merged")
+        desk.event("task_merged", task=member, into=saved["base"], merge_checked=True, onto=entry["onto"],
+                   command=result["command"], members=result["batch"], check_task=tid,
+                   **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
+    journal.unlink(missing_ok=True)
+    return desk.meta(tid)
+
+
+def land_merge_batch(desk: Desk, tid: str, result: dict) -> dict:
+    """Check every member before advancing the base once. Journal the passed batch before the git move."""
+    with desk.lock():
+        s = desk.settings()
+        members = result["batch"]
+        if any((desk.meta(x).get("merge_check") or {}).get("cancel") for x in members):
+            return split_merge_batch(desk, tid, {**result, "ok": False, "note": "stopped on request"})
+        lane = s["lanes"].get(desk.meta(tid).get("lane"))
+        if not lane:
+            return split_merge_batch(desk, tid, {**result, "ok": False, "note": "the task lane was removed"})
+        repo, name = lane["repo"], lane.get("base") or "main"
+        tip = git("rev-parse", name, cwd=repo)
+        if tip != result["onto"]:
+            desk.event("merge_check_base_moved", task=tid, onto=result["onto"], now=tip, members=members)
+            return split_merge_batch(desk, tid, {**result, "note": "the base moved before landing"})
+        failures = {}
+        for entry in result["batch_commits"]:
+            m = desk.meta(entry["task"])
+            if m.get("lane") not in s["lanes"]:
+                why = f"lane {m.get('lane')} is no longer in settings"
+            else:
+                why = merge_landing_problem(desk, m, repo, name, entry["onto"], entry["commit"])
+            if why:
+                failures[m["id"]] = {**result, "ok": False, "onto": entry["onto"], "commit": entry["commit"],
+                                       "note": f"its merge passed the check, but {why}; nothing was merged"}
+        if failures:
+            split_merge_batch(desk, tid, result)
+            for member, failure in failures.items():
+                end_merge_check(desk, member, failure)
+            return desk.meta(tid)
+        saved = {"leader": tid, "repo": str(Path(repo).resolve()), "base": name, "result": result}
+        journal = desk.state_dir / "merge-batches" / f"{tid}.json"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        write_json(journal, saved)
+        try:
+            git("merge", "--ff-only", "-q", result["commit"], cwd=repo, env={"HANSA_MERGING": "1"})
+        except RuntimeError as e:
+            journal.unlink(missing_ok=True)
+            return split_merge_batch(desk, tid, {**result, "ok": False,
+                                               "note": f"moving {name} to the checked merge failed ({str(e)[:200]})"})
+        return record_batch_landing(desk, saved, journal)
+
+
+def recover_merge_batches(desk: Desk, tasks: list) -> None:
+    """A durable landing proves exactly which commit passed, including after git moved but metadata did not."""
+    with desk.lock():
+        for journal in sorted((desk.state_dir / "merge-batches").glob("*.json")):
+            saved = read_json(journal)
+            result = saved["result"]
+            tip = git("rev-parse", saved["base"], cwd=saved["repo"])
+            if not base_moved(saved["repo"], result["checked_commit"], tip):
+                record_batch_landing(desk, saved, journal)
+            else:
+                split_merge_batch(desk, saved["leader"], {**result, "note": "the server stopped before landing"})
+                journal.unlink(missing_ok=True)
+        for m in tasks:
+            mc = m.get("merge_check") or {}
+            if m["state"] != "merging" or mc.get("phase") != "batched":
+                continue
+            m = desk.meta(m["id"])  # a journal above may just have finished this member
+            mc = m.get("merge_check") or {}
+            if m["state"] != "merging" or mc.get("phase") != "batched":
+                continue
+            leader = desk.meta(mc["leader"])
+            lmc = leader.get("merge_check") or {}
+            if leader["state"] != "merging" or m["id"] not in lmc.get("members", []):
+                desk.update(m["id"], merge_check={"phase": "queued", "queued": mc.get("queued"),
+                                                 "alone": True, "moves": 0})
+                if mc.get("cancel"):
+                    end_merge_check(desk, m["id"], None)
+
+
 def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
     """Move the base to exactly the merge commit that passed, and only if the base is still where it was merged
     onto; otherwise check once more on the new tip, and after the base's second move, stop."""
@@ -5335,27 +5523,12 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
                     f"its merge passed the check twice, but {name} moved each time before hansa could merge it; "
                     f"nothing was merged. Merge it again when {name} is quiet: hansa merge {tid}")})
             desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": moves,
+                                          **({"alone": True} if mc.get("alone") else {}),
                                           "passed_onto": result["onto"],
                                           **({"retried": result["retried"]} if result.get("retried") else {}),
                                           **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {})})
             return desk.meta(tid)
-        why = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
-        current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-        if why:
-            pass
-        elif current != name:
-            why = f"the checkout at {repo} is on {current}, not {name}; the principal needs to switch it back"
-        elif git("status", "--porcelain", "--untracked-files=no", cwd=repo):
-            why = f"the checkout at {repo} has uncommitted changes"
-        else:
-            leaked = keys_in_change(desk, repo, m["base"], m["head"])  # a key saved meanwhile counts too
-            words = [] if leaked else words_in_merge(desk, repo, tip, result["commit"], lane_name=m["lane"])  # the merge commit too
-            if leaked:
-                desk.update(tid, leaked=leaked)
-                why = f"the change holds the key of {', '.join(leaked)}"
-            elif words:
-                desk.event("merge_forbidden", task=tid, found=len(words))
-                why = desk.redact(words_text(tid, words))
+        why = merge_landing_problem(desk, m, repo, name, tip, result["commit"])
         if not why:
             try:
                 git("merge", "--ff-only", "-q", result["commit"], cwd=repo, env={"HANSA_MERGING": "1"})
@@ -5926,10 +6099,14 @@ class Dispatcher:
         they use no provider; neither they nor a merge without a check while starting is False, with free space
         under the floor)."""
         desk = self.desk
+        recover_merge_batches(desk, self.tasks())
         for tid, proc in list(self.merge_procs.items()):
             with serve_step():
                 if has_ended(proc):
                     stop(proc.pid, "", proc)
+                    if desk.meta(tid)["state"] != "merging":
+                        del self.merge_procs[tid]
+                        continue
                     mc = self.desk.meta(tid).get("merge_check") or {}
                     save_stopped(self.pending_stops, ("merge", tid), mc,
                                  lambda fields: desk.update(tid, merge_check={**mc, **fields}))
@@ -5962,7 +6139,9 @@ class Dispatcher:
                     except Exception as e:
                         merge_not_started(desk, m["id"], e)
                 elif not found and not alive(mc.get("pid"), mc.get("pid_start", "")):
-                    if mc.get("phase") == "starting":  # it never started: once more from the start
+                    if mc.get("members") and mc.get("phase") == "starting":
+                        split_merge_batch(desk, m["id"], {"ok": False, "note": "the server could not finish the batch"})
+                    elif mc.get("phase") == "starting":  # it never started: once more from the start
                         desk.change(m["id"], lambda x: {"merge_check": {**x["merge_check"], "phase": "queued",
                                                                         "lookup_failing_since": None}}
                                     if x["state"] == "merging" else None)
@@ -5985,7 +6164,7 @@ class Dispatcher:
                                      lambda fields: desk.update(m["id"], merge_check={**mc, **fields}), {"timed_out": True})
                     finally:
                         stop(mc.get("pid"), mc.get("pid_start", ""), proc)
-                elif mc.get("cancel") and run_running(mc, self.merge_procs.get(m["id"])):
+                elif (mc.get("cancel") or mc.get("batch_cancel")) and run_running(mc, self.merge_procs.get(m["id"])):
                     stop(mc.get("pid"), mc.get("pid_start", ""), self.merge_procs.get(m["id"]))
         if not starting:
             return
@@ -6002,6 +6181,7 @@ class Dispatcher:
         releasing = {r.get("repo") for r in releases(desk) if holds_repo(r)}
         for m in sorted(tasks, key=merge_order):
             with serve_step():
+                m = desk.meta(m["id"])  # an earlier start may have taken this task into its batch
                 if m["state"] != "merging" or (m.get("merge_check") or {}).get("phase") != "queued":
                     continue
                 ln = m.get("lane")
