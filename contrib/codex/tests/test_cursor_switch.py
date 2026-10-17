@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .codexkit import FAKES, WRAPPER, shim
+from .codexkit import FAKES, WRAPPER, cursor_root, shim
 from .test_cursor import CURSOR_URL, ONLY_MACOS, VERSION, CursorScratch, status
 
 # The switch unset, empty (unset, as every setting is when empty), and set to values other than `on`
@@ -83,6 +83,8 @@ class Switch(unittest.TestCase):
     def test_on_a_check_runs_cursor(self):
         if sys.platform != "darwin":
             self.skipTest(ONLY_MACOS)
+        # the check's workspace goes in TMPDIR: where none of the files the backend refuses above it is
+        self.tmp = cursor_root(self, "cursor-switch-tmp-")
         p, out, err, _ = self.call(CHECK, "on")
         self.assertIsNone(recorded(self.record), "the real claude was not called")
         run = json.loads(out)

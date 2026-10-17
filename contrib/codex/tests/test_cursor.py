@@ -7,13 +7,12 @@ import pwd
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
-from .codexkit import FAKES, WRAPPER, Scratch, git, hansa_run, shim
+from .codexkit import FAKES, WRAPPER, Scratch, cursor_root, git, hansa_run, shim
 
 CURSOR_URL = "http://cursor.invalid"
 VERSION = "2026.10.01-e373342"  # the fake's -v, as measured
@@ -48,6 +47,10 @@ class CursorScratch(Scratch):
         # if a stop test kills it before it or its watchdog puts the modes back, give the owner write again so
         # the scratch can be removed
         self.addCleanup(subprocess.run, ["chmod", "-R", "u+rwX", str(self.root / "repo")], stderr=subprocess.DEVNULL)
+
+    def make_root(self) -> Path:
+        # the backend refuses a run with a CLAUDE.md or the like above its workspace, so the scratch is where none is
+        return cursor_root(self, "codex-adapter-")
 
     def cursor_env(self, script="", **extra):
         env = self.env()
@@ -952,8 +955,9 @@ class CursorCalls(unittest.TestCase):
         self.assertIn("resume is not supported on the Cursor provider", run["result"])
 
     def test_provider_check_without_cursor(self):
-        logs = Path(tempfile.mkdtemp(prefix="cursor-logs-")).resolve()
-        self.addCleanup(shutil.rmtree, logs, True)
+        if sys.platform != "darwin":
+            self.skipTest(ONLY_MACOS)
+        logs = cursor_root(self, "cursor-logs-")
         run, code = self.call(["-p", "--output-format", "json", "--max-turns", "1", "--model", "cursor", "--tools", ""],
                               HANSA_CURSOR_BIN=str(logs / "no-cursor-agent"), HANSA_CURSOR_VERSION=VERSION,
                               HANSA_CURSOR_LOGS=str(logs), TMPDIR=str(logs))
