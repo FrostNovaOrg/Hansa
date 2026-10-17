@@ -12650,7 +12650,7 @@ class DeskTest(unittest.TestCase):
         started = time.time() - 10
         os.utime(lock, (started, started))
         at = time.time() - run.STUCK_AFTER - 600  # an earlier server's
-        for heartbeat in (at, {"at": at, "monotonic": time.monotonic()}):
+        for heartbeat in (at, {"at": at, "monotonic": run._server_clock()}):
             write_json(self.desk.state_dir / "heartbeat", heartbeat)
             st = run.server_state(self.desk)
             self.assertEqual(st["state"], "up")
@@ -12674,7 +12674,10 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(held.read(), "1")  # what the reader opened was never emptied
         recorded = json.loads(hb.read_text())
         self.assertAlmostEqual(recorded["at"], time.time(), delta=5)
-        self.assertAlmostEqual(recorded["monotonic"], time.monotonic(), delta=5)
+        if run._server_clock() is None:
+            self.assertNotIn("monotonic", recorded)
+        else:
+            self.assertAlmostEqual(recorded["monotonic"], run._server_clock(), delta=5)
         self.assertEqual([f.name for f in self.desk.state_dir.iterdir() if f.name.startswith("heartbeat")],
                          ["heartbeat"])
 
@@ -12687,12 +12690,121 @@ class DeskTest(unittest.TestCase):
         write_json(self.desk.state_dir / "heartbeat", {"at": at, "monotonic": mono})
         write_json(self.desk.state_dir / "pulse", {"pid": os.getpid(), "at": at, "monotonic": mono})
 
+    def test_server_clock_uses_the_platforms_shared_sleep_stopping_clock(self):
+        from hansa import run
+        for platform, clock in (("darwin", 8), ("linux", 1), ("other", None)):
+            with self.subTest(platform=platform), \
+                    unittest.mock.patch.object(sys, "platform", platform), \
+                    unittest.mock.patch.object(time, "CLOCK_UPTIME_RAW", 8, create=True), \
+                    unittest.mock.patch.object(time, "CLOCK_MONOTONIC", 1, create=True), \
+                    unittest.mock.patch.object(time, "clock_gettime", return_value=1234.5) as get:
+                self.assertEqual(run._server_clock(), 1234.5 if clock is not None else None)
+                if clock is not None:
+                    get.assert_called_once_with(clock)
+                else:
+                    get.assert_not_called()
+
+    def test_server_records_use_wall_time_when_the_sleep_stopping_clock_is_unavailable(self):
+        from hansa import alert, run
+        at = 1700000000.0
+        self.server_recorded_at(at, 1000.0)
+        for platform, name in (("darwin", "CLOCK_UPTIME_RAW"), ("linux", "CLOCK_MONOTONIC")):
+            for clock, error in ((None, None), (8, AttributeError()), (8, OSError()), (8, ValueError())):
+                with self.subTest(platform=platform, clock=clock, error=error), \
+                        unittest.mock.patch.object(sys, "platform", platform), \
+                        unittest.mock.patch.object(time, name, clock, create=True), \
+                        unittest.mock.patch.object(time, "clock_gettime", side_effect=error) as get, \
+                        unittest.mock.patch.object(time, "time", return_value=at + 960), \
+                        unittest.mock.patch.object(threading, "Thread") as thread, \
+                        unittest.mock.patch.object(time, "sleep", side_effect=InterruptedError), \
+                        unittest.mock.patch.object(alert, "add") as add:
+                    # Also fall back when reading a record written where the clock was available.
+                    write_json(self.desk.state_dir / "heartbeat", {"at": at, "monotonic": 1000.0})
+                    write_json(self.desk.state_dir / "pulse", {"pid": os.getpid(), "at": at, "monotonic": 1000.0})
+                    self.assertEqual(run.server_state(self.desk),
+                                     {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": False})
+                    self.assertEqual(views.status(self.desk)["server_seconds_ago"], 960)
+                    self.assertEqual(alert.stuck_check(self.desk, 0.0), at + 960)
+                    self.assertIn("no round for 16 minutes", add.call_args.args[2])
+                    run.beat(self.desk)
+                    run.pulse(self.desk)
+                    with self.assertRaises(InterruptedError):
+                        thread.call_args.kwargs["target"]()
+                    self.assertEqual(json.loads((self.desk.state_dir / "heartbeat").read_text()), {"at": at + 960})
+                    self.assertEqual(json.loads((self.desk.state_dir / "pulse").read_text()),
+                                     {"pid": os.getpid(), "at": at + 960})
+                    if clock is None:
+                        get.assert_not_called()
+
+    def test_server_state_reads_real_heartbeat_and_pulse_in_older_and_younger_processes(self):
+        from hansa import run
+        if run._server_clock() is None:
+            self.skipTest("the platform has no shared clock that stops during sleep")
+        script = textwrap.dedent('''\
+            import json, sys, time
+            from pathlib import Path
+            from hansa import cli, run
+            from hansa.desk import Desk
+
+            desk, role, ready = Desk(Path(sys.argv[1])), sys.argv[2], Path(sys.argv[3])
+            if role == "writer":
+                held = cli.hold_server_lock(desk)
+                assert held is not None
+                run.beat(desk)
+                # A rounded wall timestamp must be newer than the lock, so this heartbeat is used.
+                lock_at = (desk.state_dir / "serve.lock").stat().st_mtime
+                deadline = time.time() + 10
+                while run.last_round(desk) <= lock_at:
+                    assert time.time() < deadline, "heartbeat did not advance past serve.lock"
+                    time.sleep(.001)
+                    run.beat(desk)
+                run.pulse(desk)
+                sys.stdin.read()  # hold the lock until the parent closes stdin
+            else:
+                if role == "older":
+                    # The age gap exposes Python 3.9's per-process monotonic epoch on macOS.
+                    old_enough = time.time() + 5
+                    while time.time() < old_enough:
+                        time.sleep(.01)
+                ready.touch()
+                assert sys.stdin.readline().strip() == "read"
+                print(json.dumps(run.server_state(desk)))
+            ''')
+
+        def start(role):
+            proc = subprocess.Popen([sys.executable, "-c", script, str(self.desk.root), role,
+                                     str(self.tmp / (role + "-ready"))],
+                                    cwd=Path(__file__).resolve().parent.parent,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            def finish():
+                if proc.poll() is None:
+                    proc.kill()
+                proc.communicate()
+            self.addCleanup(finish)
+            return proc
+
+        older = start("older")
+        self.soon(lambda: (self.tmp / "older-ready").exists(), timeout=30)
+        writer = start("writer")
+        self.soon(lambda: (self.desk.state_dir / "heartbeat").exists()
+                  and (self.desk.state_dir / "pulse").exists(), timeout=30)
+        # Read while the writer holds the actual serve lock; neither clock is faked.
+        for reader in (older, start("younger")):
+            out, err = reader.communicate("read\n", timeout=30)
+            self.assertEqual(reader.returncode, 0, err)
+            state = json.loads(out)
+            self.assertEqual((state["state"], state["pid"], state["answers"]), ("up", writer.pid, True))
+            self.assertLessEqual(state["quiet"], 2, state)
+        writer.communicate(timeout=30)
+        self.assertEqual(writer.returncode, 0)
+
     def test_sleep_does_not_make_server_state_stuck_or_server_news_post_a_notice(self):
         from hansa import run
         at = 1700000000.0
         self.server_recorded_at(at, 1000.0)
         with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60), \
-                unittest.mock.patch.object(time, "monotonic", return_value=1005.0) as mono:
+                unittest.mock.patch.object(time, "clock_gettime", return_value=1005.0) as mono:
             self.assertEqual(run.server_state(self.desk),
                              {"state": "up", "pid": os.getpid(), "quiet": 5, "answers": True})
             st = views.status(self.desk)
@@ -12712,7 +12824,7 @@ class DeskTest(unittest.TestCase):
         at = 1700000000.0
         self.server_recorded_at(at, 1000.0)
         with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60), \
-                unittest.mock.patch.object(time, "monotonic", return_value=1960.0):
+                unittest.mock.patch.object(time, "clock_gettime", return_value=1960.0):
             self.assertEqual(run.server_state(self.desk),
                              {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": False})
             st = views.status(self.desk)
@@ -12728,7 +12840,7 @@ class DeskTest(unittest.TestCase):
         at = 1700000000.0
         self.server_recorded_at(at, 1000.0)
         with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60) as wall, \
-                unittest.mock.patch.object(time, "monotonic", return_value=100.0):
+                unittest.mock.patch.object(time, "clock_gettime", return_value=100.0):
             self.assertEqual(run.server_state(self.desk),
                              {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": False})
             st = views.status(self.desk)
@@ -12745,7 +12857,7 @@ class DeskTest(unittest.TestCase):
         self.server_recorded_at(at, 1000.0)
         write_json(self.desk.state_dir / "heartbeat", at)
         with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60) as wall, \
-                unittest.mock.patch.object(time, "monotonic", return_value=1005.0):
+                unittest.mock.patch.object(time, "clock_gettime", return_value=1005.0):
             self.assertEqual(run.server_state(self.desk),
                              {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": True})
             items, _, _ = notify.server_news(views.status(self.desk), [], True, 0.0, 0.0)
@@ -12757,11 +12869,11 @@ class DeskTest(unittest.TestCase):
                              {"state": "up", "pid": os.getpid(), "quiet": 5, "answers": True})
             self.assertEqual(notify.server_news(views.status(self.desk), [], True, 0.0, 0.0), ([], 0.0, 0.0))
 
-    def test_the_pulse_records_wall_and_monotonic_time(self):
+    def test_the_pulse_records_wall_and_boot_time(self):
         from hansa import run
         with unittest.mock.patch.object(threading, "Thread") as thread, \
                 unittest.mock.patch.object(time, "time", return_value=1700000000.0), \
-                unittest.mock.patch.object(time, "monotonic", return_value=1000.0), \
+                unittest.mock.patch.object(time, "clock_gettime", return_value=1000.0), \
                 unittest.mock.patch.object(time, "sleep", side_effect=InterruptedError):
             run.pulse(self.desk)
             thread.return_value.start.assert_called_once_with()
@@ -26049,11 +26161,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 ("awake", heartbeat, 16 * 60, 1960.0, 16),
                 ("awake and asleep", heartbeat, 32 * 60, 1960.0, 16),
                 ("before reboot", heartbeat, 16 * 60, 100.0, 16),
+                ("clock unavailable", heartbeat, 16 * 60, None, 16),
                 ("legacy heartbeat", at, 16 * 60, 1005.0, 16)):
             with self.subTest(case=case):
                 write_json(self.desk.state_dir / "heartbeat", record)
                 with unittest.mock.patch.object(time, "time", return_value=at + wall_elapsed), \
-                        unittest.mock.patch.object(time, "monotonic", return_value=mono), \
+                        unittest.mock.patch.object(time, "clock_gettime", return_value=mono), \
                         unittest.mock.patch.object(alert, "add") as add:
                     told = alert.stuck_check(self.desk, 0.0)
                     if minutes is None:

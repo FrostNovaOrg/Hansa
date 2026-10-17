@@ -6000,10 +6000,31 @@ def _exists(pid, start: str) -> bool:
     return alive(pid, start)
 
 
+def _server_clock():
+    """Seconds awake since boot, shared across processes (unlike monotonic on macOS Python < 3.12)."""
+    if sys.platform == "darwin":
+        name = "CLOCK_UPTIME_RAW"
+    elif sys.platform.startswith("linux"):
+        name = "CLOCK_MONOTONIC"
+    else:
+        return None
+    clock = getattr(time, name, None)
+    if clock is not None:
+        try:
+            return time.clock_gettime(clock)
+        except (AttributeError, OSError, ValueError):
+            pass  # unavailable: write and read wall time only
+    return None
+
+
 def beat(desk: Desk) -> None:
     """hansa serve got through a round, or a step of one: the heartbeat server_state reads."""
     desk.state_dir.mkdir(exist_ok=True)
-    write_json(desk.state_dir / "heartbeat", {"at": now(), "monotonic": time.monotonic()})  # replaced whole
+    record = {"at": now()}
+    clock = _server_clock()
+    if clock is not None:
+        record["monotonic"] = clock
+    write_json(desk.state_dir / "heartbeat", record)  # replaced whole
 
 
 def pulse(desk: Desk, every: float = 5.0) -> None:
@@ -6014,8 +6035,11 @@ def pulse(desk: Desk, every: float = 5.0) -> None:
     def run():
         while True:
             try:
-                write_json(desk.state_dir / "pulse", {"pid": os.getpid(), "at": time.time(),
-                                                       "monotonic": time.monotonic()})
+                record = {"pid": os.getpid(), "at": time.time()}
+                clock = _server_clock()
+                if clock is not None:
+                    record["monotonic"] = clock
+                write_json(desk.state_dir / "pulse", record)
             except OSError:
                 pass
             time.sleep(every)
@@ -6047,8 +6071,8 @@ def _last_round(desk: Desk) -> tuple:
 
 def _server_elapsed(at, mono=None) -> float:
     """Elapsed time without sleep; old records and monotonic times from before a reboot use wall time."""
-    current = time.monotonic()
-    if not isinstance(mono, bool) and isinstance(mono, (int, float)) and 0 <= mono <= current:
+    current = _server_clock()
+    if current is not None and not isinstance(mono, bool) and isinstance(mono, (int, float)) and 0 <= mono <= current:
         return current - mono
     return time.time() - (at or 0)
 
