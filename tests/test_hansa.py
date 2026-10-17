@@ -19693,6 +19693,45 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual(text.count(said), 1, text)
                 self.assertLess(text.index(said), text.index(f"## Task {m['id']} as it was given"))
 
+    def test_a_verification_of_a_follow_up_judges_the_original_and_this_rounds_note(self):
+        from hansa.run import VERIFY_TASK
+        d = Dispatcher(self.desk)
+        phrases = ("This task is a follow-up", "original task together with this round's note",
+                   "restates what still holds of earlier rounds' notes", "Where the two differ, the note stands",
+                   "judge each of those asks against the whole change")
+        for mode in (None, (), ("--fresh",)):
+            with self.subTest(mode=mode):
+                m = self.settle(d, self.desk.new_task("Add hello.txt"))
+                self.assertEqual(m["state"], "done", m)
+                self.assertNotIn("verify", m)  # the original asks have not been verified
+                if mode is not None:
+                    tid, _ = self.follow_up(m["id"], *mode, "Also add a second line")
+                    m = self.settle(d, tid)
+                    self.assertEqual(m["state"], "done", m)
+                    self.assertTrue(m["parent"])
+                tid = m["id"]
+                self.hansa("verify", tid, "Check both lines")
+                text = (self.desk.tasks_dir / self.desk.meta(tid)["verify"] / "task.md").read_text()
+                task = (self.desk.tasks_dir / tid / "task.md").read_text().strip()
+                report = (self.desk.tasks_dir / tid / "result.md").read_text().strip()
+                prefix = (VERIFY_TASK.format(id=tid, base=m["base"][:12], head=m["head"][:12])
+                          + f"\nTask {tid} has no check: hansa ran none on it.\n"
+                          + "\nLook in particular at: Check both lines\n")
+                suffix = (f"\n## Task {tid} as it was given\n{task}\n\n"
+                          f"## The report of the worker who did it\n{report}\n")
+                if mode is None:
+                    self.assertEqual(text, prefix + suffix)  # ordinary verification stays word for word
+                    for phrase in phrases:
+                        self.assertNotIn(phrase, text)
+                else:
+                    self.assertTrue(text.startswith(prefix), text)
+                    self.assertTrue(text.endswith(suffix), text)
+                    heading = text.index(f"## Task {tid} as it was given")
+                    for phrase in phrases:
+                        self.assertEqual(text.count(phrase), 1, text)
+                        self.assertGreaterEqual(text.index(phrase), len(prefix))
+                        self.assertLess(text.index(phrase), heading)
+
     def test_a_key_saved_after_a_note_that_held_it_is_removed_from_the_note(self):
         later = "sk-noted-later-0731"
         tid = self.desk.new_task(self.ORIGINAL, lane="a")

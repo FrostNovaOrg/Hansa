@@ -289,6 +289,10 @@ what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
 
+A verification of a follow-up judges each ask in the original task together with
+this round's note, which restates what still holds of earlier rounds' notes and
+takes precedence where they differ, against the whole change.
+
 `hansa show` of a follow-up says which round it is, the earlier rounds' ids,
 oldest first, and how many of them a verification found do not hold. When a
 verification of a follow-up finds that it does not hold, and that is the second

@@ -969,6 +969,9 @@ def _verify(desk: Desk, a) -> None:
     sess = notify.session_here()
     text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12]) + _check_ran(desk, m)
             + (f"\nLook in particular at: {note}\n" if note else "")
+            + ("\nThis task is a follow-up: what it asked is the original task together with this round's note, "
+               "which restates what still holds of earlier rounds' notes. Where the two differ, the note stands; "
+               "judge each of those asks against the whole change.\n" if m.get("parent") else "")
             + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
     vid = desk.new_task(text, kind="verify", parent=a.id, lane=lane, effort=a.effort or "",
                         start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
