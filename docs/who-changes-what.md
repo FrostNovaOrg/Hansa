@@ -8,7 +8,8 @@ What the principal sets on the web page, and what the coordinator sets with `han
 ### The principal
 
 The principal, on the page: providers, models, endpoints, keys, effort
-defaults, the coordinator's model, when the
+defaults, the coordinator's model and effort (a new desk starts it on `opus` at
+effort `max`), when the
 coordinator's session compacts ([Compaction](desk.md#compaction)), prices,
 the folders and files workers may not read (the coordinator may add to them, below), the
 release targets that go out without asking (each ticked on its own), the words

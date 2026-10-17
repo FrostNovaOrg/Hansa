@@ -263,7 +263,7 @@ def default_settings() -> dict:
         # (hansa disk-floor), as concurrency is
         "disk_floor": 10,
         "cool_minutes": 30,
-        "coordinator": {"provider": "claude", "model": "opus", "effort": "high"},
+        "coordinator": {"provider": "claude", "model": "opus", "effort": "max"},
         # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
         "coordinator_compact": dict(COMPACT_DEFAULTS),
         # When the principal is alerted that the coordinator's session cannot be reached (COORDINATOR_ALERT). The
