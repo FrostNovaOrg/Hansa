@@ -12649,11 +12649,14 @@ class DeskTest(unittest.TestCase):
         lock = self.desk.state_dir / "serve.lock"
         started = time.time() - 10
         os.utime(lock, (started, started))
-        (self.desk.state_dir / "heartbeat").write_text(str(time.time() - run.STUCK_AFTER - 600))  # an earlier server's
-        st = run.server_state(self.desk)
-        self.assertEqual(st["state"], "up")
-        self.assertLess(st["quiet"], 20)
-        self.assertLess(views.status(self.desk)["server_seconds_ago"], 20)
+        at = time.time() - run.STUCK_AFTER - 600  # an earlier server's
+        for heartbeat in (at, {"at": at, "monotonic": time.monotonic()}):
+            write_json(self.desk.state_dir / "heartbeat", heartbeat)
+            st = run.server_state(self.desk)
+            self.assertEqual(st["state"], "up")
+            self.assertLess(st["quiet"], 20)
+            self.assertLess(views.status(self.desk)["server_seconds_ago"], 20)
+            self.assertEqual(run.last_round(self.desk), started)
         started = time.time() - run.STUCK_AFTER - 60  # this one, up long enough to be stuck by its own count
         os.utime(lock, (started, started))
         self.assertEqual(run.server_state(self.desk)["state"], "stuck")
@@ -12669,9 +12672,103 @@ class DeskTest(unittest.TestCase):
         run.beat(self.desk)
         self.assertNotEqual(hb.stat().st_ino, before)  # a new file renamed over the old one
         self.assertEqual(held.read(), "1")  # what the reader opened was never emptied
-        self.assertAlmostEqual(float(hb.read_text()), time.time(), delta=5)  # a plain number, as readers expect
+        recorded = json.loads(hb.read_text())
+        self.assertAlmostEqual(recorded["at"], time.time(), delta=5)
+        self.assertAlmostEqual(recorded["monotonic"], time.monotonic(), delta=5)
         self.assertEqual([f.name for f in self.desk.state_dir.iterdir() if f.name.startswith("heartbeat")],
                          ["heartbeat"])
+
+    def server_recorded_at(self, at, mono):
+        """A held server lock older than the round, and that round and pulse on both clocks."""
+        held = cli.hold_server_lock(self.desk)
+        self.assertIsNotNone(held)
+        self.addCleanup(held.close)
+        os.utime(self.desk.state_dir / "serve.lock", (at - 120, at - 120))
+        write_json(self.desk.state_dir / "heartbeat", {"at": at, "monotonic": mono})
+        write_json(self.desk.state_dir / "pulse", {"pid": os.getpid(), "at": at, "monotonic": mono})
+
+    def test_sleep_does_not_make_server_state_stuck_or_server_news_post_a_notice(self):
+        from hansa import run
+        at = 1700000000.0
+        self.server_recorded_at(at, 1000.0)
+        with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60), \
+                unittest.mock.patch.object(time, "monotonic", return_value=1005.0) as mono:
+            self.assertEqual(run.server_state(self.desk),
+                             {"state": "up", "pid": os.getpid(), "quiet": 5, "answers": True})
+            st = views.status(self.desk)
+            self.assertEqual(st["server_seconds_ago"], 5)
+            self.assertEqual(notify.server_news(st, [], True, 0.0, 0.0), ([], 0.0, 0.0))
+            self.assertIn("server up ·", self.hansa_out("status"))
+            self.assertIn("now: server up", self.hansa_out("explain", "server"))
+            self.assertEqual(run.last_round(self.desk), at)  # still a wall-clock timestamp
+            mono.return_value = 1045.0
+            self.assertEqual((run.server_state(self.desk)["state"], run.server_state(self.desk)["quiet"]),
+                             ("busy", 45))
+            self.assertIn("no round finished for 45 seconds", self.hansa_out("status"))
+            self.assertIn("no round finished for 45 seconds", self.hansa_out("explain", "server"))
+
+    def test_sixteen_minutes_awake_makes_server_state_stuck_and_server_news_post_a_notice(self):
+        from hansa import run
+        at = 1700000000.0
+        self.server_recorded_at(at, 1000.0)
+        with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60), \
+                unittest.mock.patch.object(time, "monotonic", return_value=1960.0):
+            self.assertEqual(run.server_state(self.desk),
+                             {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": False})
+            st = views.status(self.desk)
+            self.assertEqual(st["server_seconds_ago"], 960)
+            items, down, stuck = notify.server_news(st, [], True, 0.0, 0.0)
+            self.assertEqual((len(items), down, stuck), (1, 0.0, at + 960))
+            for said in (items[0]["line"], self.hansa_out("status"), self.hansa_out("explain", "server")):
+                self.assertIn("16 minutes: busy or stuck", said)
+            self.assertIn("hansa explain server", items[0]["line"])
+
+    def test_server_state_and_server_news_use_wall_time_for_records_from_before_a_reboot(self):
+        from hansa import run
+        at = 1700000000.0
+        self.server_recorded_at(at, 1000.0)
+        with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60) as wall, \
+                unittest.mock.patch.object(time, "monotonic", return_value=100.0):
+            self.assertEqual(run.server_state(self.desk),
+                             {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": False})
+            st = views.status(self.desk)
+            self.assertEqual(st["server_seconds_ago"], 960)
+            items, _, _ = notify.server_news(st, [], True, 0.0, 0.0)
+            self.assertIn("16 minutes: busy or stuck", items[0]["line"])
+            wall.return_value = at + 5
+            self.assertEqual(run.server_state(self.desk),
+                             {"state": "up", "pid": os.getpid(), "quiet": 5, "answers": True})
+
+    def test_server_state_and_server_news_still_read_a_bare_heartbeat_and_an_old_pulse(self):
+        from hansa import run
+        at = 1700000000.0
+        self.server_recorded_at(at, 1000.0)
+        write_json(self.desk.state_dir / "heartbeat", at)
+        with unittest.mock.patch.object(time, "time", return_value=at + 16 * 60) as wall, \
+                unittest.mock.patch.object(time, "monotonic", return_value=1005.0):
+            self.assertEqual(run.server_state(self.desk),
+                             {"state": "stuck", "pid": os.getpid(), "quiet": 960, "answers": True})
+            items, _, _ = notify.server_news(views.status(self.desk), [], True, 0.0, 0.0)
+            self.assertIn("16 minutes: busy or stuck", items[0]["line"])
+            write_json(self.desk.state_dir / "pulse", {"pid": os.getpid(), "at": at})
+            self.assertFalse(run.server_state(self.desk)["answers"])
+            wall.return_value = at + 5
+            self.assertEqual(run.server_state(self.desk),
+                             {"state": "up", "pid": os.getpid(), "quiet": 5, "answers": True})
+            self.assertEqual(notify.server_news(views.status(self.desk), [], True, 0.0, 0.0), ([], 0.0, 0.0))
+
+    def test_the_pulse_records_wall_and_monotonic_time(self):
+        from hansa import run
+        with unittest.mock.patch.object(threading, "Thread") as thread, \
+                unittest.mock.patch.object(time, "time", return_value=1700000000.0), \
+                unittest.mock.patch.object(time, "monotonic", return_value=1000.0), \
+                unittest.mock.patch.object(time, "sleep", side_effect=InterruptedError):
+            run.pulse(self.desk)
+            thread.return_value.start.assert_called_once_with()
+            with self.assertRaises(InterruptedError):  # one write, without starting a background thread
+                thread.call_args.kwargs["target"]()
+        self.assertEqual(json.loads((self.desk.state_dir / "pulse").read_text()),
+                         {"pid": os.getpid(), "at": 1700000000.0, "monotonic": 1000.0})
 
     def server_posts(self, sock) -> str:
         return "".join(self.posts(sock))

@@ -81,6 +81,7 @@ finished no round for 5 minutes (busy or stuck), and then that it runs again;
 srt not running; free space went under the floor (`hansa disk-floor`), and then
 that it is back over it. A server busy for less than that is not news, and
 nothing the coordinator did itself and saw is posted to it.
+Time the machine sleeps does not count toward a server being busy or stuck.
 
 Each message starts with `[hansa]` and the desk, with one line per event and the
 next command; events seconds apart come in one message, and past 10 lines the

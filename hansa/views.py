@@ -530,6 +530,9 @@ def status(desk: Desk) -> dict:
     held = sandbox_held(desk)
     last = last_round(desk)
     server = server_state(desk)
+    seconds_ago = server["quiet"]
+    if seconds_ago is None and last:
+        seconds_ago = int(time.time() - last)
     day = time.time() - 86400  # the last 24 h, each thing by when it happened: not reset at midnight
     rows = cost.worker_rows(desk, day, s, tasks)  # by when the run ended
     no_read = no_read_parts_shown(s, desk.root)
@@ -545,7 +548,7 @@ def status(desk: Desk) -> dict:
         "server_up": server["state"] != "gone",  # alive, busy or not: run.server_state is the one rule
         "server": server,
         "page": page_of(desk, server),  # where the web page is, and whether it is served now
-        "server_seconds_ago": int(time.time() - last) if last else None,
+        "server_seconds_ago": seconds_ago,
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
@@ -1521,7 +1524,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"take a while, when a worker's processes are stopped (up to 20 s each) or what a task left is swept "
             f"on a busy machine. Quiet for {ROUND_QUIET} s, it counts as busy, still running; quiet for "
             f"{STUCK_AFTER // 60} minutes, hansa status and the posts to the coordinator's session say it is "
-            f"busy or stuck, with its pid. Stuck for good (a task it waits on that never ends, a terminal stopped "
+            f"busy or stuck, with its pid. Time the machine sleeps does not count. "
+            f"Stuck for good (a task it waits on that never ends, a terminal stopped "
             f"with Ctrl-Z): see what it is doing, e.g. with `ps -p PID` and its terminal, before stopping it; "
             f"stop it with Ctrl-C and start it again, and tasks running meanwhile are taken over.",
             "It runs each lane's setup and check in srt (Anthropic's sandbox runtime), with its own PATH, which can "
