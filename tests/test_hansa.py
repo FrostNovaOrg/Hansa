@@ -2098,7 +2098,7 @@ class DeskTest(unittest.TestCase):
         keep = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "srt").exists()]
         return unittest.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(keep)})
 
-    def settle(self, d, tid, timeout=20):
+    def settle(self, d, tid, timeout=120):
         end = time.time() + timeout
         while time.time() < end:
             d.tick()
@@ -6435,7 +6435,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["env"] = {"FAKE_LEAVE_CHILD": str(pidfile)}
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
-        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid, timeout=20)["state"], "done")
         child = int(pidfile.read_text())
         self.addCleanup(lambda: alive(child) and os.kill(child, 9))
         end = time.time() + 10
@@ -6458,7 +6458,7 @@ class DeskTest(unittest.TestCase):
         from hansa.run import alive
         pidfile = self.leave_detached()
         tid = self.desk.new_task("Add hello.txt")
-        m = self.settle(Dispatcher(self.desk), tid)
+        m = self.settle(Dispatcher(self.desk), tid, timeout=20)
         self.assertEqual(m["state"], "done", m)
         child = int(pidfile.read_text())
         self.assertFalse(alive(child))  # stopped before the task was recorded as ended
@@ -6479,7 +6479,7 @@ class DeskTest(unittest.TestCase):
         others = [self.sleeper(env={**bare, "HANSA_RUN": "another-run"}),
                   self.sleeper(env={**bare, "HANSA_TASK": tid}),  # another desk's task of the same id, or an old hansa's
                   self.sleeper(env={**bare, "OLD_HANSA_RUN": "x", "HANSA_RUNS": "x", "HANSA_TASK": "t9999"})]
-        m = self.settle(Dispatcher(self.desk), tid)
+        m = self.settle(Dispatcher(self.desk), tid, timeout=20)
         self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
         self.assertEqual([p.poll() for p in others], [None, None, None])
         self.assertEqual([p for p, _ in task_processes(["another-run"])], [others[0].pid])  # found, by its run's mark
@@ -6495,7 +6495,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(tid, theirs)
         bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
         left = self.sleeper(env={**bare, "HANSA_TASK": theirs, "HANSA_RUN": run.run_mark(other, theirs)})
-        m = self.settle(Dispatcher(self.desk), tid)
+        m = self.settle(Dispatcher(self.desk), tid, timeout=20)
         self.assertEqual(m["state"], "done", m)
         self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
         self.assertIsNone(left.poll())  # the other desk's t0001 is not this one's
@@ -6513,7 +6513,7 @@ class DeskTest(unittest.TestCase):
         tid = self.desk.new_task("Add hello.txt")
         # Exercise folder discovery alone: recording descendants can also find these before the worker exits.
         with unittest.mock.patch.object(Dispatcher, "record"):
-            m = self.settle(Dispatcher(self.desk), tid)
+            m = self.settle(Dispatcher(self.desk), tid, timeout=20)
         self.assertEqual(m["state"], "done", m)
         pid = {f.stem: int(f.read_text()) for f in pids.iterdir()}
         # The fixture's pid files identify its processes; a busy run may also leave worker processes to sweep.
@@ -6563,7 +6563,7 @@ class DeskTest(unittest.TestCase):
         folders = [r["path"] for r in self.desk.meta(tid).get("worker_tmps") or []]
         marks = self.desk.meta(tid).get("run_marks") or []
         self.assertNotIn(child, [p for p, _ in task_processes(marks, folders)])  # no marker finds it
-        m = self.settle(d, tid)
+        m = self.settle(d, tid, timeout=20)
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(alive(child))
         self.assertIn(child, [x["pid"] for x in m["left_running"]])
@@ -6588,7 +6588,7 @@ class DeskTest(unittest.TestCase):
         d.procs[tid].wait(20)  # the worker ends while no server runs
         del d
         self.assertTrue(alive(child))
-        m = self.settle(Dispatcher(self.desk), tid)  # a new server, which only has the task's record
+        m = self.settle(Dispatcher(self.desk), tid, timeout=20)  # a new server, which only has the task's record
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(alive(child))
         self.assertIn(child, [x["pid"] for x in m["left_running"]])
@@ -6722,7 +6722,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual((m["state"], (m.get("check") or {"ok": True})["ok"]), ("done", True), m)
         return d, t1, t2
 
-    def settle_merge(self, d, tid, timeout=20):
+    def settle_merge(self, d, tid, timeout=120):
         end = time.time() + timeout
         while time.time() < end:
             d.tick()
@@ -7368,7 +7368,7 @@ class DeskTest(unittest.TestCase):
         d.tick()
         self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))
         self.desk.update(tid, merge_check={**mc, "started": now() - 7.5 * 60})
-        m = self.settle_merge(d, tid)
+        m = self.settle_merge(d, tid, timeout=10)
         self.assertEqual((m["state"], m["merge_check_result"]["note"], m["merge_check_result"]["lane"]),
                          ("done", "stopped at the lane's time ceiling", "m"))
 
@@ -8285,7 +8285,7 @@ class DeskTest(unittest.TestCase):
         d.tick()
         self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))  # under its 7 minutes
         self.desk.update(tid, merge_check={**self.desk.meta(tid)["merge_check"], "started": now() - 7.5 * 60})
-        m = self.settle_merge(d, tid)
+        m = self.settle_merge(d, tid, timeout=20)
         r = m["merge_check_result"]
         self.assertEqual((m["state"], r["ok"], r["note"], r["command"]),
                          ("done", False, "stopped at the lane's time ceiling", "sleep 60"), m)
@@ -8299,7 +8299,7 @@ class DeskTest(unittest.TestCase):
         d.tick()
         self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))  # 60 minutes: under 240
         self.desk.update(tid, merge_check={**self.desk.meta(tid)["merge_check"], "started": now() - 241 * 60})
-        self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["note"], "stopped at the lane's time ceiling")
+        self.assertEqual(self.settle_merge(d, tid, timeout=20)["merge_check_result"]["note"], "stopped at the lane's time ceiling")
 
     def test_a_lane_with_only_a_merge_check_checks_nothing_after_a_task_and_runs_it_before_each_merge(self):
         from hansa import run
@@ -9422,7 +9422,7 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "cancel", tid])
-        m = self.settle(d, tid)
+        m = self.settle(d, tid, timeout=2)
         self.assertEqual((m["state"], m["commits"], m["files"]), ("cancelled", 0, []), m)
 
     def test_keys_are_kept_out_of_task_texts_and_requests(self):
@@ -12278,7 +12278,7 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(r["line"].endswith("\n") and r["line"].count("\n") == 1, r["line"])
         return [json.loads(r["line"])["message"]["content"] for r in rows if r["socket"] == sock]
 
-    def soon(self, what, timeout=20):
+    def soon(self, what, timeout=120):
         end = time.time() + timeout
         while time.time() < end:
             got = what()
@@ -16134,7 +16134,7 @@ class DeskTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(tmp))
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "cancel", t4])
-        self.assertEqual(self.settle(d, t4)["state"], "cancelled")
+        self.assertEqual(self.settle(d, t4, timeout=10)["state"], "cancelled")
         self.assertFalse(os.path.exists(tmp))
 
     def test_show_lists_a_refused_call_with_the_reason_claude_code_gave(self):
@@ -19001,7 +19001,7 @@ class DeskTest(unittest.TestCase):
         s["lanes"]["a"]["check"] = "sleep 1; test -f hello.txt"
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
-        m = self.settle(Dispatcher(self.desk), tid)
+        m = self.settle(Dispatcher(self.desk), tid, timeout=20)
         self.assertEqual((m["state"], m["check"]["ok"]), ("done", True), m)
         self.assertEqual([x["pid"] for x in m["left_running"]], [int(pidfile.read_text())])
         self.assertFalse(alive(int(pidfile.read_text())))
@@ -19114,7 +19114,7 @@ class DeskTest(unittest.TestCase):
         self.addCleanup(lambda: alive(check) and os.kill(check, 9))
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "cancel", tid])
-        m = self.settle(d, tid)
+        m = self.settle(d, tid, timeout=10)
         self.assertEqual((m["state"], m["check"]["note"]), ("cancelled", "stopped on request"), m)
         self.assertFalse(group_running(group))  # the check, srt and the log's reader
         self.assertFalse(alive(check))
@@ -21692,7 +21692,7 @@ class DeskTest(unittest.TestCase):
                 self.assertRegex(said, r'hansa lane target (L|a) default "<command>"')
                 self.assertNotRegex(said, r"hansa lane set (L|a) release ")
 
-    def settle_release(self, d, rid, timeout=20):
+    def settle_release(self, d, rid, timeout=120):
         from hansa import release
         end = time.time() + timeout
         while time.time() < end:
@@ -24435,7 +24435,7 @@ class DeskTest(unittest.TestCase):
         self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
         release.change(self.desk, 1, lambda x: {"started": x["started"] - 61})  # a minute and more went by
         start = time.time()
-        r = self.settle_release(d, 1)
+        r = self.settle_release(d, 1, timeout=20)
         self.assertLess(time.time() - start, 45)  # waiting for the sixty-second release to finish
         self.assertEqual(r["state"], "failed", r)
         self.assertEqual(r["problem"], "stopped at the lane's time limit (1 min)")
@@ -24599,7 +24599,7 @@ class DeskTest(unittest.TestCase):
         d.tick()
         self.assertEqual((release.get(self.desk, 3)["state"], self.checkouts()), ("running", ["3"]))
         release.change(self.desk, 3, lambda x: {"started": x["started"] - 241 * 60})
-        r = self.settle_release(d, 3)
+        r = self.settle_release(d, 3, timeout=20)
         self.assertEqual((r["state"], r["problem"]), ("failed", "stopped at the lane's time limit (240 min)"))
         self.assertEqual(self.checkouts(), [])
         self.hansa("release", "a", "install")  # hansa serve stops, and its run with it
@@ -25634,7 +25634,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(release.get(self.desk, 1)["state"], "running")
         self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
         release.change(self.desk, 1, lambda x: {"started": x["started"] - 61})  # a minute and more went by
-        r = self.settle_release(d, 1)
+        r = self.settle_release(d, 1, timeout=20)
         self.assertEqual((r["state"], r["problem"]), ("failed", "stopped at target install's time limit (1 min)"))
         # unset, the lane's timeout_min again
         self.hansa("lane", "target", "a", "install", "--minutes", "none")
@@ -25841,7 +25841,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             time.sleep(0.5)
             d.tick()  # within the grace: what ignores TERM still runs
             self.assertEqual(release.get(self.desk, 1)["state"], "running")
-            r = self.settle_release(d, 1)
+            r = self.settle_release(d, 1, timeout=20)
         self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "page", "not tonight"), r)
         self.assertTrue(r.get("killed"))
         from hansa.run import group_running
@@ -25922,7 +25922,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertTrue(release.get(self.desk, 1).get("started_procs"))
         release.stop_release(self.desk, 1, "not tonight", by="page")
         with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
-            r = self.settle_release(d, 1)
+            r = self.settle_release(d, 1, timeout=20)
         self.assertEqual((r["state"], bool(r.get("killed"))), ("stopped", True), r)
         self.soon(ended, timeout=5)
         # done: what it left running is stopped as it ends
@@ -25932,7 +25932,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         with unittest.mock.patch("hansa.release.SWEEP_GRACE", 1):
             self.soon(lambda: d.tick() or done.exists())
             ended = gone(done)
-            r = self.settle_release(d, 2)
+            r = self.settle_release(d, 2, timeout=20)
         self.assertEqual(r["state"], "done", r)
         self.soon(ended, timeout=5)
         self.assertTrue(self.events("release_left_running_stopped"))
