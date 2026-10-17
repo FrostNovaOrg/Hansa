@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
-                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, title_forms, read_json, refused_rule, resolved, write_json,
+                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
@@ -815,7 +815,7 @@ def _retry(desk: Desk, a) -> None:
         text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
                  f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
     opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
-            "parent": a.id, "title": f"{m['title']} (retry of {a.id})"[:80],
+            "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
             **notify.recorded(notify.session_here())}
     base = (own or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)

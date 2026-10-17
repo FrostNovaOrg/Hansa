@@ -279,7 +279,9 @@ if the task recorded its repository, still on that repository, or give the work
 again with `hansa add --lane L`.
 
 `hansa retry ID "<what to change>"` queues a follow-up with a new id from the
-earlier task's last commit; the earlier task becomes replaced. The follow-up's worker gets the
+earlier task's last commit; the earlier task becomes replaced. Its title keeps the earlier
+task's own title whole, followed by ` (retry of ID)`, naming only the immediately
+earlier task; another follow-up replaces that suffix. The follow-up's worker gets the
 original task, one line per earlier round (its id, how it ended, the start of
 its note), this round's note, the previous report and the latest
 verification's report, with its verdict. Earlier notes are not carried, so

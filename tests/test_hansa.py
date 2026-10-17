@@ -7716,6 +7716,26 @@ class DeskTest(unittest.TestCase):
         self.assertIn('merge_message (the form of the message of a task\'s merge into the base): "Merge: {title}"',
                       shown)
 
+    LONG_RETRY_TITLE = ("Preserve the complete task title when retrying work from review "
+                        "(from a pull request Org/repo#3)")
+
+    def test_a_long_retry_title_is_whole_in_its_commit_and_merge_message_forms(self):
+        title = self.LONG_RETRY_TITLE
+        self.assertEqual(len(title), 96)
+        self.hansa("lane", "set", "a", "commit_message", "{title}")
+        self.hansa("lane", "set", "a", "merge_message", "Merge: {title}")
+        self.hansa("add", "--lane", "a", "--title", title, "Add hello.txt")
+        tid = self.desk.tasks()[-1]["id"]
+        self.desk.update(tid, state="done")
+        retry, _ = self.follow_up(tid, "--fresh", "Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), retry)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(self.git_out("log", "-1", "--format=%s", m["head"]), title)
+        self.hansa("merge", retry)
+        m = self.desk.meta(retry)
+        self.assertEqual(m["state"], "merged", m)
+        self.assertEqual(self.git_out("log", "-1", "--format=%s", m["merge_commit"]), f"Merge: {title}")
+
     def test_message_forms_that_would_read_badly_are_refused_on_lane_set(self):
         before = self.desk.settings()["lanes"]["a"]
         for field, form, why in (("commit_message", "{title} {when}", "an unknown placeholder {when}"),
@@ -7748,7 +7768,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(task_message({"commit_message": "{task}"}, "a", "t0007", "x"), "t0007")
         self.assertEqual(merge_message({"merge_message": "{{{lane}}} {title}"}, "a", "t0007", "x"), "{a} x")
         self.assertEqual(update_message({}, "a", "t0007", "x", "dev"), "Merge dev into task/t0007")
-        long = "x" * 75 + " (retry of t0006)"  # cut at 80 by hansa retry
+        long = "x" * 75 + " (retry of t0006)"  # older retries cut titles at 80
         self.assertEqual(task_message({"commit_message": "{title}"}, "a", "t0007", long[:80]), "x" * 75)
         self.assertEqual(task_message({"commit_message": "{task} {title}"}, "a", "t0007", long[:80]),
                          "t0007 " + long[:80])
@@ -18991,6 +19011,26 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(old["state"], "replaced")
         self.assertNotIn(m["id"], [r["id"] for r in views.status(self.desk)["review"]])
         self.assertEqual(self.desk.meta(old["replaced_by"])["parent"], m["id"])
+
+    def test_retry_keeps_a_long_explicit_title_whole(self):
+        title = self.LONG_RETRY_TITLE
+        self.assertEqual(len(title), 96)
+        self.hansa("add", "--lane", "a", "--title", title, "Add hello.txt")
+        tid = self.desk.tasks()[-1]["id"]
+        self.assertEqual(self.desk.meta(tid)["title"], title)
+        self.desk.update(tid, state="done")
+        retry, _ = self.follow_up(tid, "--fresh")
+        self.assertEqual(self.desk.meta(retry)["title"], f"{title} (retry of {tid})")
+
+    def test_retry_of_a_retry_names_only_the_latest_earlier_task(self):
+        title = "Add hello.txt"
+        tid = self.desk.new_task(title, lane="a")
+        self.desk.update(tid, state="done")
+        retry, _ = self.follow_up(tid)
+        self.assertEqual(self.desk.meta(retry)["title"], f"{title} (retry of {tid})")
+        self.desk.update(retry, state="done")
+        third, _ = self.follow_up(retry)
+        self.assertEqual(self.desk.meta(third)["title"], f"{title} (retry of {retry})")
 
     def test_retry_lane_preserves_the_start_and_merges_for_plain_update_and_fresh(self):
         self.hansa("lane", "add", "b", "--like", "a")
