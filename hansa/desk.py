@@ -1501,8 +1501,8 @@ def parse_identity(v) -> tuple | None:
 
 
 def own_title(title: str) -> str:
-    """A title without the " (retry of t0001)" a retry adds to it (hansa retry, which cuts titles at 80
-    characters, perhaps within that), for a form that names no task."""
+    """A title without the " (retry of t0001)" a retry adds to it, including partial suffixes from older
+    retries that cut titles at 80 characters. Used for follow-up titles and forms that name no task."""
     found = re.search(r" \(retry of t\d", title)
     if found:
         return title[:found.start()]
