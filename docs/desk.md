@@ -2,9 +2,6 @@
 
 ## A desk's files
 
-A new desk's coordinator starts on `opus` with effort `max`. Existing desks keep
-their saved effort; the principal can change it on the page under Settings.
-
 ### Where a desk's files are
 
 Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
