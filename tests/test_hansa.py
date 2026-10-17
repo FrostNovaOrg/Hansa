@@ -26040,6 +26040,33 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(len(self.alerted(out)), count)
         self.assertEqual(len(self.events("alert_sent")), count)
 
+    def test_the_stuck_server_alert_counts_awake_time_with_wall_clock_fallbacks(self):
+        from hansa import alert
+        at = 1700000000.0
+        heartbeat = {"at": at, "monotonic": 1000.0}
+        for case, record, wall_elapsed, mono, minutes in (
+                ("sleep", heartbeat, 16 * 60, 1005.0, None),
+                ("awake", heartbeat, 16 * 60, 1960.0, 16),
+                ("awake and asleep", heartbeat, 32 * 60, 1960.0, 16),
+                ("before reboot", heartbeat, 16 * 60, 100.0, 16),
+                ("legacy heartbeat", at, 16 * 60, 1005.0, 16)):
+            with self.subTest(case=case):
+                write_json(self.desk.state_dir / "heartbeat", record)
+                with unittest.mock.patch.object(time, "time", return_value=at + wall_elapsed), \
+                        unittest.mock.patch.object(time, "monotonic", return_value=mono), \
+                        unittest.mock.patch.object(alert, "add") as add:
+                    told = alert.stuck_check(self.desk, 0.0)
+                    if minutes is None:
+                        self.assertEqual(told, 0.0)
+                        self.assertEqual(alert.stuck_check(self.desk, at), 0.0)
+                        add.assert_not_called()
+                    else:
+                        self.assertEqual(told, at + wall_elapsed)
+                        self.assertEqual(alert.stuck_check(self.desk, told), told)
+                        add.assert_called_once()
+                        self.assertEqual(add.call_args.args[:2], (self.desk, "server_stuck"))
+                        self.assertIn(f"no round for {minutes} minutes", add.call_args.args[2])
+
     def test_alerts_that_come_close_together_go_out_in_one_run_one_run_at_a_time(self):
         from hansa import alert
         out = self.alert_fake()

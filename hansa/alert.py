@@ -390,9 +390,9 @@ def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
 def stuck_check(desk: Desk, told: float) -> float:
     """hansa serve's rounds quiet for STUCK_ALERT seconds: alert once, until a round comes again. told: when that
     was alerted, 0 if not; returns it as it is now."""
-    from .run import last_round
-    last = last_round(desk)
-    quiet = time.time() - last if last else 0
+    from .run import _last_round, _server_elapsed
+    last, mono = _last_round(desk)
+    quiet = _server_elapsed(last, mono) if last else 0
     if quiet < STUCK_ALERT:
         return 0.0
     if not told:
