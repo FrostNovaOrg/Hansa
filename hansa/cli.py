@@ -1470,7 +1470,7 @@ def cmd_coordinator(a):
     if effort:
         argv += ["--effort", effort]
     # when the session compacts while working: the account's plan may be the account's to write, so only a number in
-    # range counts. The mod reads the other three in the desk's settings file at each decision
+    # range counts. The mod reads the other, idle_at, in the desk's settings file at each decision
     given = plan.get("compact") if isinstance(plan.get("compact"), dict) else {}
     working_at = compact_settings({"coordinator_compact": given})["working_at"]
     # preparing the mod never stops the start: a step that fails leaves it off

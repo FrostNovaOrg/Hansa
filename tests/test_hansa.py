@@ -13861,9 +13861,8 @@ class DeskTest(unittest.TestCase):
     def mod_record(self):
         return json.loads((self.desk.mod_dir / "start.json").read_text())
 
-    MOD_WORDS = ("coordinator's compaction, the desk's settings: compact when idle at 400,000 tokens, compact after a "
-                 "long idle at 200,000 tokens, a long idle is 50 minutes (the mod reads these); compact while working at "
-                 "550,000 tokens (hansa passes it as --autocompact at a start)")
+    MOD_WORDS = ("coordinator's compaction, the desk's settings: compact when idle at 400,000 tokens (the mod reads it); "
+                 "compact while working at 550,000 tokens (hansa passes it as --autocompact at a start)")
     MOD_UNKNOWN = ("whether hansa loaded the coordinator's mod: not known; --autocompact options of its command line: not "
                    "known")
     MOD_LOADED = "hansa loaded the coordinator's mod; --autocompact options of its command line: --autocompact 550000."
@@ -13909,17 +13908,16 @@ class DeskTest(unittest.TestCase):
         self.start_with_mod()
         self.assertNotEqual(self.mod_copy(), copy)
         self.assertFalse(copy.exists())
-        # the page's save: the first three in the file the mod reads at each decision, with nothing else written;
+        # the page's save: compact when idle at in the file the mod reads at each decision, with nothing else written;
         # while working, from the next start
-        changed = {"idle_at": 300000, "long_idle_at": 150000, "long_idle_min": 30, "working_at": 700000}
+        changed = {"idle_at": 300000, "working_at": 700000}
         before = sorted(self.desk.mod_dir.iterdir())
         self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact=changed)), {"ok": True, "problems": []})
         self.assertEqual(json.loads(Path(env["HANSA_MOD_SETTINGS"]).read_text())["coordinator_compact"], changed)
         self.assertEqual(sorted(self.desk.mod_dir.iterdir()), before)
         # status: what hansa did at the start, and the desk's settings as they are now
         self.assertIn(self.MOD_LOADED, self.mod_line())
-        self.assertIn("compact when idle at 300,000 tokens, compact after a long idle at 150,000 tokens, a long idle is 30 "
-                      "minutes (the mod reads these); compact while working at 700,000 tokens",
+        self.assertIn("compact when idle at 300,000 tokens (the mod reads it); compact while working at 700,000 tokens",
                       views.status(self.desk)["compact_line"])
         argv, _, _ = self.start_with_mod()
         self.assertEqual(argv[argv.index("--autocompact") + 1], "700000")
@@ -13927,7 +13925,7 @@ class DeskTest(unittest.TestCase):
     def test_the_start_records_what_was_passed_even_when_the_page_saves_meanwhile(self):
         # the page saves while the start asks Claude Code its version: the start passes and records the window it
         # read first, and the page's save stands, whole, in the file the mod reads
-        changed = {"idle_at": 300000, "long_idle_at": 150000, "long_idle_min": 30, "working_at": 700000}
+        changed = {"idle_at": 300000, "working_at": 700000}
         probe = plugin.version
 
         def saving(claude):
@@ -14321,8 +14319,7 @@ class DeskTest(unittest.TestCase):
                 self.assertNotIn("hansa help", page["text"])  # for the coordinator, not on the page
                 self.assertEqual(page["warn"], warn, (version, lang))
                 if lang == "en":  # the settings name the thresholds in the words status uses
-                    for w in ("Compact when idle at (tokens)", "Compact after a long idle at (tokens)",
-                              "A long idle is (minutes)", "Compact while working at (tokens)"):
+                    for w in ("Compact when idle at (tokens)", "Compact while working at (tokens)"):
                         self.assertIn(w, page["settings"])
 
     # -- the daily clear: hansa hands the window to the mod, and records each clear ---------------------------------
@@ -25070,43 +25067,103 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_the_principal_sets_when_the_coordinators_session_compacts_and_the_coordinator_cannot(self):
         from hansa.desk import compact_settings
-        defaults = {"idle_at": 400000, "long_idle_at": 200000, "long_idle_min": 50, "working_at": 550000}
+        defaults = {"idle_at": 400000, "working_at": 550000}
         self.assertEqual(self.desk.settings()["coordinator_compact"], defaults)
         s = self.desk.settings()
         for bad in ({"idle_at": 99_999}, {"working_at": 1_000_001}, {"idle_at": "400000"}, {"idle_at": True},
-                    {"working_at": 550000.5}, {"when_idle": 400000}, [400000], {"long_idle_at": 99_999},
-                    {"long_idle_at": 1_000_001}, {"long_idle_min": 0}, {"long_idle_min": 241}, {"long_idle_min": 50.5},
-                    {"long_idle_min": 200000}):
+                    {"working_at": 550000.5}, {"when_idle": 400000}, [400000], {"idle_at": 1_000_001},
+                    {"working_at": 99_999}):
             s["coordinator_compact"] = bad
             self.assertTrue(any(x.startswith("coordinator_compact: ") for x in validate(s)), bad)
-        edges = {"idle_at": 100000, "long_idle_at": 1_000_000, "long_idle_min": 240, "working_at": 1_000_000}
+        edges = {"idle_at": 100000, "working_at": 1_000_000}
         self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact=edges)), {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["coordinator_compact"], edges)
-        self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact={**edges, "long_idle_min": 1})),
-                         {"ok": True, "problems": []})
+        edges = {"idle_at": 1_000_000, "working_at": 100000}
+        self.assertEqual(self.page_save(lambda s: s.update(coordinator_compact=edges)), {"ok": True, "problems": []})
         self.assertFalse(self.page_save(lambda s: s.update(coordinator_compact={"idle_at": 50_000}))["ok"])
         s = self.desk.settings()
         s["coordinator_compact"] = {"idle_at": 100000, "working_at": 100000}
         said = self.desk.save_settings(s, by="coordinator")
         self.assertEqual(said, ["coordinator_compact is the principal's, set only on the web page (Settings); ask with "
                                 "hansa ask"])
-        self.assertEqual(self.desk.settings()["coordinator_compact"], {**edges, "long_idle_min": 1})
+        self.assertEqual(self.desk.settings()["coordinator_compact"], edges)
         # a figure left blank on the page is its default
         self.assertEqual(compact_settings({"coordinator_compact": {"idle_at": 300000}}), {**defaults, "idle_at": 300000})
-        # the mod reads the same three from the same file, with the same defaults and ranges
+        # the mod reads idle_at from the same file, with the same default and range, and nothing of a long idle
         from hansa.desk import COMPACT_MOST
         mod = (Path(__file__).resolve().parent.parent / "hansa" / "mod" / "hooks" / "register.js").read_text()
-        for k in ("idle_at", "long_idle_at", "long_idle_min"):
-            self.assertIn(f"  {k}: [{defaults[k]:_}, {COMPACT_MOST[k][0]:_}, {COMPACT_MOST[k][1]:_}],", mod)
+        self.assertIn(f"  idle_at: [{defaults['idle_at']:_}, {COMPACT_MOST['idle_at'][0]:_}, "
+                      f"{COMPACT_MOST['idle_at'][1]:_}],", mod)
+        self.assertNotIn("long_idle", mod)
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
-        for x in ('bind(S.coordinator_compact, "idle_at", "number")', 'bind(S.coordinator_compact, "long_idle_at", "number")',
-                  'bind(S.coordinator_compact, "long_idle_min", "number")',
+        for x in ('bind(S.coordinator_compact, "idle_at", "number")',
                   'bind(S.coordinator_compact, "working_at", "number")', "suit a model with a 1M-token window",
-                  "A fourth figure above the model's window is taken as that window",
-                  "never comes: Claude Code compacts on its own first", "The token figures take 100,000 to 1,000,000; a "
-                  "long idle, 1 to 240 minutes", "A change to the first three applies from the session's next decision",
-                  "a change to the fourth from the session's next start", "The coordinator cannot change them"):
+                  "A second figure above the model's window is taken as that window",
+                  "never comes: Claude Code compacts on its own first", "Both figures take 100,000 to 1,000,000 tokens",
+                  "A change to the first applies from the session's next decision",
+                  "a change to the second from the session's next start", "The coordinator cannot change them",
+                  "Claude Code (2.1.299 or later) also compacts by itself", "200,000 tokens or more",
+                  "idle about 54 minutes", "hansa neither sets nor reads that",
+                  "Claude Code（2.1.299 或更新的版本）还会自己压缩", "200,000 token 或更多", "约 54 分钟",
+                  "hansa 既不设置也不读取"):
             self.assertIn(x, ui)
+        self.assertNotIn("long_idle", ui)
+
+    def test_a_settings_file_that_still_holds_the_long_idle_is_accepted_and_shows_it_nowhere(self):
+        # a desk saved while the mod still compacted after a long idle (Claude Code does that itself now): read without
+        # complaint and without a change to the file, the two values ignored, the page's save taken
+        kept = {"idle_at": 300000, "working_at": 700000}
+        old = {**json.loads(self.desk.settings_path.read_text()),
+               "coordinator_compact": {**kept, "long_idle_at": 123000, "long_idle_min": 37}}
+        write_json(self.desk.settings_path, old)
+        before = self.desk.settings_path.read_bytes()
+        self.assertEqual(validate(old, self.desk.root), [])
+        self.assertEqual(self.desk.settings()["coordinator_compact"], kept)
+        public = public_settings(self.desk)
+        self.assertEqual((public["problems"], public["settings"]["coordinator_compact"]), ([], kept))
+        self.start_with_mod()
+        status = views.status_text(views.status(self.desk))
+        self.assertIn("compact when idle at 300,000 tokens (the mod reads it); compact while working at 700,000 tokens",
+                      status)
+        for x in ("long idle", "123,000", "37 minutes"):
+            self.assertNotIn(x, status)
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        # a save from a page that still sends them, as an older one would
+        self.assertEqual(save_from_page(self.desk, {"settings": old, "rev": self.desk.settings_rev()}),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["coordinator_compact"], kept)
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS.replace("console.log(JSON.stringify(nulls));", """
+  const numbers = [];
+  let save = null;
+  walk(ids["#tab-settings"], el => {
+    if (el.tag === "input" && el.attrs.type === "number") numbers.push(el.value);
+    if (el.tag === "button" && el.className === "primary") save = el;
+  });
+  const settings = ids["#tab-settings"].textContent;
+  save.on.click().then(() => console.log(JSON.stringify({nulls, settings, numbers, posted})));"""))
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for lang, label in (("en", "Compact when idle at (tokens)"), ("zh-CN", "空闲时压缩于（token）")):
+            write_json(self.desk.settings_path, old)
+            given = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk),
+                     "/api/events": []}
+            r = subprocess.run(["node", str(harness), str(page), "nulls", lang], input=json.dumps(given),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertEqual(out["nulls"], [])
+            self.assertIn(label, out["settings"])
+            for x in ("long idle", "长时间空闲", "123000", "123,000"):
+                self.assertNotIn(x, out["settings"].lower())
+            self.assertIn(300000, out["numbers"])
+            self.assertIn(700000, out["numbers"])
+            self.assertFalse({123000, 37} & set(out["numbers"]))
+            # the page's own save, over the file that still holds them
+            self.assertEqual(out["posted"]["settings"]["coordinator_compact"], kept)
+            self.assertEqual(save_from_page(self.desk, out["posted"]), {"ok": True, "problems": []})
+            self.assertEqual(json.loads(self.desk.settings_path.read_text())["coordinator_compact"], kept)
 
     def test_the_coordinator_cannot_change_the_principals_release_settings(self):
         s = self.desk.settings()
