@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""A fake `cursorsandbox`, as Cursor runs each of its commands: `cursorsandbox --policy <file> -- <command>...` runs
+the command (stdout to /dev/null), prints its pid, and waits for it, so that the command stays in this one's process
+group, below it."""
+import subprocess
+import sys
+
+argv = sys.argv[1:]
+p = subprocess.Popen(argv[argv.index("--") + 1:], stdout=subprocess.DEVNULL)
+print(p.pid, flush=True)
+sys.exit(p.wait())

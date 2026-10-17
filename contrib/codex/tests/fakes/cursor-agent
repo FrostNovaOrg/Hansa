@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""A fake `cursor-agent`. `-v` prints FAKE_CURSOR_VERSION (default the version measured, 2026.10.01-e373342).
+`worker-server` sleeps 300 s, as the real `node index.js worker-server` stays after a run.
+
+A run (`-p ... --workspace <ws> ... <prompt>`) looks at what it was given: its argv, working folder and environment,
+the workspace's entries, its HOME's and where Library/Keychains leads, $HOME/.cursor/sandbox.json and
+$CURSOR_CONFIG_DIR/cli-config.json. FAKE_CURSOR_LEAVE: first it starts what the real Cursor leaves running, the fake
+cursorsandbox beside this one with --policy under $HOME/.cursor/sandbox-policies, in a group of its own, running a
+long sleep; and a worker-server, detached (its parent gone, a session of its own), the workspace its working folder.
+Then it runs FAKE_CURSOR_SCRIPT with /bin/sh in the workspace, as its commands would run (their output on stderr).
+The fake runs no sandbox: the copy's git boundary is the shim's own hold of the git folders outside the copy, which
+a script can even take the write bits back on — the shim's after-run check of the boundary's refs and objects is
+the net then (README, "The copy's git boundary").
+FAKE_CURSOR_PIDS, once that has started: the pids of this one, the script, the sandbox and its sleep, and the
+worker-server (JSON). Then it adds its own keys to cli-config.json, as Cursor does, and records all that in
+FAKE_CURSOR_RECORD, with the script's exit code. Then stream-json, one object a line: init, then FAKE_CURSOR_TOOLS
+tool calls (default 2), each an assistant line "Doing step <n>." and the call started and completed,
+FAKE_CURSOR_DELAY seconds apart (FAKE_CURSOR_STEPS: step-<n>.txt made in the workspace before each;
+FAKE_CURSOR_HOLD, `<n>:<seconds>`: that long a pause after call n), then an
+assistant line and the result line, FAKE_CURSOR_RESULT (default RESULT below), unless FAKE_CURSOR_NO_RESULT;
+FAKE_CURSOR_FAILED: the result line says it failed. FAKE_CURSOR_DONE: a file made after the last line.
+FAKE_CURSOR_STDERR: written to stderr. FAKE_CURSOR_EXIT: its exit code (default 0).
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+VERSION = "2026.10.01-e373342"
+SESSION = "c0ffee00-cafe-4bad-8000-000000000001"
+RESULT = "Did as the task said; nothing left undone."
+USAGE = {"inputTokens": 1200, "outputTokens": 340, "cacheReadTokens": 5000, "cacheWriteTokens": 60}
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+argv = sys.argv[1:]
+if argv == ["-v"]:
+    print(os.environ.get("FAKE_CURSOR_VERSION") or VERSION)
+    sys.exit(0)
+if argv == ["worker-server"]:
+    time.sleep(300)
+    sys.exit(0)
+
+home, cfg = os.environ.get("HOME", ""), os.environ.get("CURSOR_CONFIG_DIR", "")
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+entries = []
+for folder, dirs, files in os.walk(home):
+    entries += [os.path.relpath(os.path.join(folder, n), home) for n in dirs + files]
+link = os.path.join(home, "Library", "Keychains")
+record = {"argv": argv, "cwd": os.getcwd(), "home": sorted(entries),
+          "keychains": os.readlink(link) if os.path.islink(link) else None,
+          "sandbox": read_json(os.path.join(home, ".cursor", "sandbox.json")),
+          "cli_config": read_json(os.path.join(cfg, "cli-config.json")),
+          "env": {k: os.environ.get(k) for k in (
+              "HOME", "CURSOR_CONFIG_DIR", "TMPDIR", "TMPPREFIX", "FROM_LANE_ENV", "ANTHROPIC_AUTH_TOKEN",
+              "ANTHROPIC_BASE_URL", "HANSA_CURSOR_BIN", "HANSA_CURSOR_VERSION", "CLAUDE_ENV_FILE", "CLAUDE_CONFIG_DIR",
+              "HANSA_TASK")}}
+ws = argv[argv.index("--workspace") + 1] if "--workspace" in argv else os.getcwd()
+record["workspace"] = sorted(os.listdir(ws))
+pids = {"cursor": os.getpid()}
+if os.environ.get("FAKE_CURSOR_LEAVE"):
+    policy = os.path.join(home, ".cursor", "sandbox-policies", "fake.sb")
+    box = subprocess.Popen([os.path.join(HERE, "cursorsandbox"), "--policy", policy, "--", "sleep", "300"],
+                           stdout=subprocess.PIPE, text=True, start_new_session=True)
+    pids["sandbox"] = [box.pid, int(box.stdout.readline())]
+    box.stdout.close()
+    detach = ("import subprocess, sys; print(subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, "
+              "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True).pid)")
+    pids["worker_server"] = int(subprocess.run([sys.executable, "-c", detach, sys.executable, os.path.abspath(__file__),
+                                                "worker-server"], cwd=ws, capture_output=True, text=True).stdout)
+script = os.environ.get("FAKE_CURSOR_SCRIPT") or ""
+commands = subprocess.Popen(["/bin/sh", "-c", script], cwd=ws, stdout=2) if script else None
+pids["script"] = commands.pid if commands else None
+if os.environ.get("FAKE_CURSOR_PIDS"):
+    with open(os.environ["FAKE_CURSOR_PIDS"] + ".part", "w") as f:
+        json.dump(pids, f)
+    os.rename(os.environ["FAKE_CURSOR_PIDS"] + ".part", os.environ["FAKE_CURSOR_PIDS"])
+record["script_exit"] = commands.wait() if commands else None
+if record["cli_config"] is not None:
+    with open(os.path.join(cfg, "cli-config.json"), "w") as f:
+        json.dump({**record["cli_config"], "model": {"modelId": "fake"}, "authInfo": {"email": "x@example.com"}}, f)
+if os.environ.get("FAKE_CURSOR_RECORD"):
+    with open(os.environ["FAKE_CURSOR_RECORD"], "w") as f:
+        json.dump(record, f)
+
+model = argv[argv.index("--model") + 1] if "--model" in argv else ""
+
+
+def line(**ev):
+    print(json.dumps(ev), flush=True)
+
+
+def said(text):
+    line(type="assistant", message={"role": "assistant", "content": [{"type": "text", "text": text}]},
+         session_id=SESSION)
+
+
+line(type="system", subtype="init", session_id=SESSION, model=model, cwd=ws, permissionMode="default")
+line(type="user", message={"role": "user", "content": [{"type": "text", "text": argv[-1][:40]}]}, session_id=SESSION)
+line(type="thinking", subtype="delta", text="Looking.", session_id=SESSION)
+hold = os.environ["FAKE_CURSOR_HOLD"].split(":") if os.environ.get("FAKE_CURSOR_HOLD") else None
+for n in range(int(os.environ.get("FAKE_CURSOR_TOOLS") or 2)):
+    if n:
+        time.sleep(float(os.environ.get("FAKE_CURSOR_DELAY") or 0))
+    if os.environ.get("FAKE_CURSOR_STEPS"):
+        with open(os.path.join(ws, f"step-{n}.txt"), "w") as f:
+            f.write(f"step {n}\n")
+    said(f"Doing step {n}.")
+    call = {"shellToolCall": {"args": {"command": f"step {n}"}}}
+    line(type="tool_call", subtype="started", call_id=f"call-{n}", tool_call=call, session_id=SESSION)
+    line(type="tool_call", subtype="completed", call_id=f"call-{n}", tool_call=call, session_id=SESSION)
+    if hold and int(hold[0]) == n:
+        time.sleep(float(hold[1]))
+result = os.environ.get("FAKE_CURSOR_RESULT") or RESULT
+said(result)
+if not os.environ.get("FAKE_CURSOR_NO_RESULT"):
+    failed = bool(os.environ.get("FAKE_CURSOR_FAILED"))
+    line(type="result", subtype="error" if failed else "success", is_error=failed, duration_ms=1234,
+         duration_api_ms=1200, result=result, session_id=SESSION, request_id="r-1", usage=USAGE)
+if os.environ.get("FAKE_CURSOR_STDERR"):
+    sys.stderr.write(os.environ["FAKE_CURSOR_STDERR"] + "\n")
+if os.environ.get("FAKE_CURSOR_DONE"):
+    open(os.environ["FAKE_CURSOR_DONE"], "w").close()
+sys.exit(int(os.environ.get("FAKE_CURSOR_EXIT") or 0))

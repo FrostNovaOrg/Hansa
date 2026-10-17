@@ -7,7 +7,9 @@ PLACEHOLDER) runs `codex exec` in srt, with the sandbox hansa gave the worker in
 stdout in the shape hansa reads from `claude -p --output-format json`. hansa's provider check on it (the same, but
 no --session-id) runs `codex exec` once, the same way, in a new empty folder and a sandbox of the shim's own making,
 and answers the same way. Every other call is the real claude's:
-this process execs it, with the same arguments, stdin and environment.
+this process execs it, with the same arguments, stdin and environment. A call on the Cursor provider (base URL
+CURSOR_PLACEHOLDER) is hansa_cursor's, beside this file, when the settings turn the Cursor backend on
+(CURSOR_ENABLE); while it is off, such a call is the real claude's too.
 
 Python 3.9, standard library only. It never imports hansa: the tests do, to check the answers against hansa's
 own readings (unusable_reason, network_reason, usage_of, reset_time).
@@ -29,14 +31,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 PLACEHOLDER = "http://codex.invalid"  # the Codex provider's base URL (a `compatible` provider): a Codex worker run
+CURSOR_PLACEHOLDER = "http://cursor.invalid"  # another's: a Cursor worker run (hansa_cursor.py), when it is on
+# The Cursor backend's switch: a call on CURSOR_PLACEHOLDER is hansa_cursor's only while the settings say this
+# value; unset or any other, the call is the real claude's, as on any other provider
+CURSOR_ENABLE, CURSOR_ON = "HANSA_CURSOR_ENABLE", "on"
 # What the sandbox lets through besides the lane's list: what a ChatGPT login and Codex's API need
 CODEX_HOSTS = ("chatgpt.com", "auth.openai.com", "api.openai.com")
 DEFAULT_MODEL = "gpt-6.1-sol"
 DEFAULT_EFFORT = "high"
 DEFAULT_MAX_TURNS = 300  # hansa always gives --max-turns; its own default
+CURSOR_SETTINGS = (CURSOR_ENABLE, "HANSA_CURSOR_BIN", "HANSA_CURSOR_VERSION", "HANSA_CURSOR_MODEL",
+                   "HANSA_CURSOR_READ", "HANSA_CURSOR_LOGS")
 SETTINGS = ("HANSA_CODEX_BIN", "HANSA_CODEX_HOME", "HANSA_CODEX_MODEL", "HANSA_CODEX_EFFORT", "HANSA_CODEX_LOGS",
             "HANSA_CODEX_SRT", "HANSA_REAL_CLAUDE", "HANSA_CODEX_CA_FILE", "HANSA_CODEX_WEB_SEARCH",
-            "HANSA_CODEX_DISABLE")
+            "HANSA_CODEX_DISABLE", *CURSOR_SETTINGS)
 # The certificates Codex checks TLS against (CODEX_CA_CERTIFICATE): macOS's own check, its default, does not
 # complete inside srt. HANSA_CODEX_CA_FILE, else this when it exists; set but empty, none is given.
 CA_SETTING = "HANSA_CODEX_CA_FILE"
@@ -81,6 +89,7 @@ COUNTED_ITEMS = ("command_execution", "file_change")  # what counts against --ma
 STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 5 before its own SIGKILL
 POLL = 0.2  # seconds between looks at Codex's log, while it writes nothing new
 WATCHDOG = "--hansa-codex-watchdog"
+CURSOR_WATCHDOG = "--hansa-cursor-watchdog"  # hansa_cursor's, started through this file
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 # The project folders at the top of the worktree Codex may not write, whole: Claude Code's (.claude) and Codex's
 # (.codex, .agents) settings, hooks, rules and skills, which a later run on the branch would obey, its hooks outside
@@ -188,18 +197,30 @@ def parse(argv: list) -> dict:
     return out
 
 
-def call_kind(argv: list, env) -> str:
+def cursor_on(conf: dict) -> bool:
+    """Whether the Cursor backend is on: CURSOR_ENABLE is CURSOR_ON in the settings (the environment, else
+    codex.env). Off unless a desk turns it on."""
+    return conf.get(CURSOR_ENABLE) == CURSOR_ON
+
+
+def call_kind(argv: list, env, conf=None) -> str:
     """"codex" (a worker run on the Codex provider), "check" (hansa's provider check on it: no session id; its
-    --tools, any value, the empty one too, is not looked at), "resume" (a resume on it), or "pass" (the real
-    claude's)."""
-    if (env.get("ANTHROPIC_BASE_URL") or "").rstrip("/") != PLACEHOLDER:
+    --tools, any value, the empty one too, is not looked at), "resume" (a resume on it), the same on the Cursor
+    provider as "cursor", "cursor-check" and "cursor-resume" while the Cursor backend is on (cursor_on: in `conf`,
+    else in settings(env)), or "pass" (the real claude's)."""
+    url = (env.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    if url not in (PLACEHOLDER, CURSOR_PLACEHOLDER):
         return "pass"
+    if url == CURSOR_PLACEHOLDER and not cursor_on(settings(env) if conf is None else conf):
+        return "pass"  # the Cursor backend is off: the real claude's, as a call on any other provider is
     a = parse(argv)
     if "--resume" in a:
-        return "resume"
-    if a["print"] and a.get("--output-format") == "json":
-        return "codex" if a.get("--session-id") else "check"
-    return "pass"  # an interactive session, --version
+        kind = "resume"
+    elif a["print"] and a.get("--output-format") == "json":
+        kind = "codex" if a.get("--session-id") else "check"
+    else:
+        return "pass"  # an interactive session, --version
+    return kind if url == PLACEHOLDER else {"codex": "cursor"}.get(kind, f"cursor-{kind}")
 
 
 def real_claude(env: dict, conf: dict) -> str:
@@ -662,43 +683,44 @@ def one_line(text: str, n: int = 400) -> str:
     return whole if len(whole) <= n else whole[:n - 1] + "…"
 
 
-def classify(text: str) -> dict:
+def classify(text: str, who: str = "Codex") -> dict:
     """Codex's failure as hansa reads Claude Code's: the fields of an error answer ("result", maybe
     "api_error_status" or "stop_reason"), worded so hansa's unusable_reason and network_reason class it as they
-    would Claude's. Classed on the whole text; only what is shown is cut."""
+    would Claude's. Classed on the whole text; only what is shown is cut. `who`: the program named in the words
+    (hansa_cursor's failures are classed here too)."""
     whole = " ".join(str(text).split())
     said = one_line(whole)
     if REFUSAL_TEXT.search(whole):
-        return {"result": f"Codex: the provider refused the request (content_filter): {said}",
+        return {"result": f"{who}: the provider refused the request (content_filter): {said}",
                 "stop_reason": "content_filter"}
     if LIMIT_TEXT.search(whole) or QUOTA_WORDS.search(whole):
         reset = reset_at(whole)
-        return {"result": f"API Error: 429 usage limit reached (Codex: {said})"
+        return {"result": f"API Error: 429 usage limit reached ({who}: {said})"
                           + (f" · resets_at: {reset}" if reset else ""), "api_error_status": 429}
     if LOGIN_FAILED_TEXT.search(whole):
-        return {"result": f"Not logged in · Please run /login (Codex: the login failed; sign in again: {said})"}
+        return {"result": f"Not logged in · Please run /login ({who}: the login failed; sign in again: {said})"}
     if NO_MODEL_TEXT.search(whole):
-        return {"result": f"API Error: 404 the model is not available (Codex: {said})", "api_error_status": 404}
+        return {"result": f"API Error: 404 the model is not available ({who}: {said})", "api_error_status": 404}
     if OVERLOADED_TEXT.search(whole):
-        return {"result": f"API Error: Repeated 529 Overloaded errors (Codex: {said})", "api_error_status": 529}
+        return {"result": f"API Error: Repeated 529 Overloaded errors ({who}: {said})", "api_error_status": 529}
     if DROPPED_TEXT.search(whole):
-        return {"result": f"API Error: Connection dropped (Codex: {said})"}
+        return {"result": f"API Error: Connection dropped ({who}: {said})"}
     if CONFIG_TEXT.search(whole):
         return {"result": f"hansa-codex-shim: Codex refused its configuration (a -c key or --disable feature this "
                           f"codex does not know): {said}"}
     if LOGIN_WORDS.search(whole) and not re.search(r"\b40[13]\b", whole):
-        return {"result": f"Not logged in · Please run /login (Codex: {said})"}
+        return {"result": f"Not logged in · Please run /login ({who}: {said})"}
     if AUTH_WORDS.search(whole):
         status = 403 if re.search(r"\b403\b|forbidden", whole, re.I) else 401
-        return {"result": f"API Error: {status} authentication_error (Codex: {said})", "api_error_status": status}
+        return {"result": f"API Error: {status} authentication_error ({who}: {said})", "api_error_status": status}
     if m := SERVER_STATUS.search(whole):
         status = int(m.group(1) or m.group(2))
-        return {"result": f"API Error: {status} (Codex: {said})", "api_error_status": status}
+        return {"result": f"API Error: {status} ({who}: {said})", "api_error_status": status}
     if STREAM_WORDS.search(whole):
-        return {"result": f"API Error: Connection dropped (Codex: {said})"}
+        return {"result": f"API Error: Connection dropped ({who}: {said})"}
     if CONNECT_WORDS.search(whole):
-        return {"result": f"API Error: Connection error (Codex: {said})"}
-    return {"result": f"Codex failed: {said or 'no message'}"}
+        return {"result": f"API Error: Connection error ({who}: {said})"}
+    return {"result": f"{who} failed: {said or 'no message'}"}
 
 
 def answer(subtype: str, result: str, sid: str, turns: int = 0, model: str = "", usage=None, **extra) -> dict:
@@ -1020,15 +1042,31 @@ def given_env() -> dict:
     return dict(os.environ)
 
 
+def cursor_backend():
+    """hansa_cursor, beside this file (python -I leaves its folder off the path), importing this module as it is
+    running, not a second copy."""
+    sys.modules.setdefault("hansa_codex_shim", sys.modules[__name__])
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import hansa_cursor
+    return hansa_cursor
+
+
 def main(argv: list) -> int:
     if argv[:1] == [WATCHDOG]:
         watchdog(int(argv[1]), int(argv[2]))
         return 0
+    if argv[:1] == [CURSOR_WATCHDOG]:
+        cursor_backend().watchdog(int(argv[1]), *argv[2:6])
+        return 0
     env = given_env()
     conf = settings(env)
-    kind = call_kind(argv, env)
+    kind = call_kind(argv, env, conf)  # a call on the Cursor provider is "pass" while the Cursor backend is off
     if kind == "pass":
         pass_through(argv, env, conf)
+    if kind.startswith("cursor"):
+        return cursor_backend().main(kind, argv, env, conf)
     if kind == "resume":
         return emit(answer("error_during_execution", "hansa-codex-shim: resume is not supported on the Codex "
                                                      "provider", parse(argv).get("--resume") or ""))
