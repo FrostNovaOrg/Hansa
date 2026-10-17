@@ -6000,10 +6000,31 @@ def _exists(pid, start: str) -> bool:
     return alive(pid, start)
 
 
+def _server_clock():
+    """Seconds awake since boot, shared across processes (unlike monotonic on macOS Python < 3.12)."""
+    if sys.platform == "darwin":
+        name = "CLOCK_UPTIME_RAW"
+    elif sys.platform.startswith("linux"):
+        name = "CLOCK_MONOTONIC"
+    else:
+        return None
+    clock = getattr(time, name, None)
+    if clock is not None:
+        try:
+            return time.clock_gettime(clock)
+        except (AttributeError, OSError, ValueError):
+            pass  # unavailable: write and read wall time only
+    return None
+
+
 def beat(desk: Desk) -> None:
     """hansa serve got through a round, or a step of one: the heartbeat server_state reads."""
     desk.state_dir.mkdir(exist_ok=True)
-    write_json(desk.state_dir / "heartbeat", now())  # replaced whole: a reader never finds it emptied
+    record = {"at": now()}
+    clock = _server_clock()
+    if clock is not None:
+        record["monotonic"] = clock
+    write_json(desk.state_dir / "heartbeat", record)  # replaced whole
 
 
 def pulse(desk: Desk, every: float = 5.0) -> None:
@@ -6014,7 +6035,11 @@ def pulse(desk: Desk, every: float = 5.0) -> None:
     def run():
         while True:
             try:
-                write_json(desk.state_dir / "pulse", {"pid": os.getpid(), "at": time.time()})
+                record = {"pid": os.getpid(), "at": time.time()}
+                clock = _server_clock()
+                if clock is not None:
+                    record["monotonic"] = clock
+                write_json(desk.state_dir / "pulse", record)
             except OSError:
                 pass
             time.sleep(every)
@@ -6025,16 +6050,31 @@ def last_round(desk: Desk):
     """When the hansa serve that holds serve.lock last finished a round, by its heartbeat; when it started (the
     time serve.lock was written) where the heartbeat is missing, unreadable or older than this server, which
     it then says nothing about. None when neither is there."""
+    return _last_round(desk)[0]
+
+
+def _last_round(desk: Desk) -> tuple:
+    """The last round's wall and monotonic times; a start from serve.lock has only a wall time."""
     try:
         start = (desk.state_dir / "serve.lock").stat().st_mtime  # written once, as the server takes the lock
     except OSError:
         start = None
     hb = read_json(desk.state_dir / "heartbeat")
+    mono = hb.get("monotonic") if isinstance(hb, dict) else None
+    hb = hb.get("at") if isinstance(hb, dict) else hb  # older servers wrote a bare number
     if isinstance(hb, bool) or not isinstance(hb, (int, float)) or hb <= 0:
         hb = None
-    if hb is None or start is None:
-        return hb if start is None else start
-    return max(hb, start)
+    if hb is None or start is not None and hb < start:
+        return start, None
+    return hb, mono
+
+
+def _server_elapsed(at, mono=None) -> float:
+    """Elapsed time without sleep; old records and monotonic times from before a reboot use wall time."""
+    current = _server_clock()
+    if current is not None and not isinstance(mono, bool) and isinstance(mono, (int, float)) and 0 <= mono <= current:
+        return current - mono
+    return time.time() - (at or 0)
 
 
 def server_state(desk: Desk) -> dict:
@@ -6042,11 +6082,12 @@ def server_state(desk: Desk) -> dict:
     process the number in it names now; where the lock cannot be asked, the process it names is gone or is
     another one started since, or it names none. up: alive, and it finished a round in the last ROUND_QUIET seconds. busy: alive, quiet for
     longer (a round waiting on a worker to stop, say). stuck: alive, quiet for STUCK_AFTER seconds or more.
-    quiet: seconds since its last round; answers: whether its process still wrote its pulse lately (a
+    quiet: seconds since its last round, excluding sleep where its heartbeat records monotonic time;
+    answers: whether its process still wrote its pulse lately (a
     process stopped with Ctrl-Z, say, does not)."""
     pid, start = server_holder(desk)
-    last = last_round(desk)
-    quiet = max(0, int(time.time() - last)) if last else 0  # none: no lock either, so gone below
+    last, mono = _last_round(desk)
+    quiet = max(0, int(_server_elapsed(last, mono))) if last else 0  # none: no lock either, so gone below
     held = lock_held(desk)
     if held is None:  # the lock cannot be asked: the process it names, and when that one started
         held = bool(pid) and _exists(pid, start) and (bool(start) or quiet < ROUND_QUIET)  # a number alone:
@@ -6054,7 +6095,7 @@ def server_state(desk: Desk) -> dict:
     if not held:
         return {"state": "gone", "pid": None, "quiet": None, "answers": False}
     pulse = read_json(desk.state_dir / "pulse", {}) or {}
-    answers = pulse.get("pid") == pid and time.time() - (pulse.get("at") or 0) < ROUND_QUIET
+    answers = pulse.get("pid") == pid and _server_elapsed(pulse.get("at"), pulse.get("monotonic")) < ROUND_QUIET
     return {"state": "up" if quiet < ROUND_QUIET else "busy" if quiet < STUCK_AFTER else "stuck",
             "pid": pid, "quiet": quiet, "answers": answers}
 
