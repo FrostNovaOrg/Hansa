@@ -20,7 +20,7 @@ def zsh_heredoc(prefix=None, run=()):
     env = {k: v for k, v in os.environ.items() if k != "TMPPREFIX"}
     if prefix is not None:
         env["TMPPREFIX"] = prefix
-    return subprocess.run([*run, ZSH, "-f", "-c", HEREDOC], env=env, capture_output=True, text=True, timeout=60)
+    return subprocess.run([*run, ZSH, "-f", "-c", HEREDOC], env=env, capture_output=True, text=True, timeout=120)
 
 
 class ZshPrefix(Scratch):

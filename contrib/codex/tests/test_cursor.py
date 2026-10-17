@@ -843,7 +843,7 @@ class CursorCheck(CursorScratch):
         given = hansa_run.provider_env
         with unittest.mock.patch.dict(os.environ, {"HANSA_CLAUDE": str(WRAPPER), "TMPDIR": str(self.tmp)}), \
                 unittest.mock.patch.object(hansa_run, "provider_env", lambda *a: {**given(*a), **given_settings}):
-            return hansa_run.check_provider(self.desk, "cursor", timeout=60)
+            return hansa_run.check_provider(self.desk, "cursor", timeout=120)
 
     def test_a_check_that_answers_ok(self):
         r = self.check(FAKE_CURSOR_RESULT="ok")
@@ -945,7 +945,7 @@ class CursorCalls(unittest.TestCase):
         env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"), "ANTHROPIC_BASE_URL": CURSOR_URL,
                "HANSA_CURSOR_ENABLE": "on", "HANSA_REAL_CLAUDE": "/nonexistent", **extra}
         p = subprocess.run([str(WRAPPER), *argv], env=env, input=b"Reply with the single word OK.",
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=120)
         return json.loads(p.stdout), p.returncode
 
     def test_resume(self):

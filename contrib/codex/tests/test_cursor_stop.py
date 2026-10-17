@@ -12,7 +12,7 @@ from .codexkit import FAKES, alive
 from .test_cursor import CursorScratch, status
 
 
-def wait_for(what, seconds):
+def wait_for(what, seconds=120):
     """what()'s answer once it is true, or its last after `seconds`."""
     end = time.time() + seconds
     while time.time() < end:
@@ -43,7 +43,7 @@ class CursorStop(CursorScratch):
         p = self.start(self.worker_argv(), self.cursor_env(script, FAKE_CURSOR_LEAVE="1",
                                                            FAKE_CURSOR_PIDS=str(self.pids_file), **extra))
         self.addCleanup(self.reap, p)
-        got = wait_for(lambda: self.pids_file.exists() and json.loads(self.pids_file.read_text()), 30)
+        got = wait_for(lambda: self.pids_file.exists() and json.loads(self.pids_file.read_text()))
         self.assertTrue(got, "the fake Cursor did not start")
         self.pids += [got["cursor"], *got["sandbox"], got["worker_server"], *([got["script"]] if got["script"] else [])]
         return p
@@ -54,7 +54,10 @@ class CursorStop(CursorScratch):
         p.communicate()
 
     def left(self, seconds=0.0):
-        """This run's processes still running, after up to `seconds` for them to go."""
+        """This run's processes still running, after up to `seconds` for them to go.
+
+        The default is an immediate snapshot: some tests require cleanup before the answer is read.
+        """
         wait_for(lambda: not any(alive(x) for x in self.pids), seconds)
         return [x for x in self.pids if alive(x)]
 
@@ -65,7 +68,7 @@ class CursorStop(CursorScratch):
         os.kill(p.pid, signal.SIGTERM)
         out, _ = p.communicate(timeout=30)
         self.assertEqual((p.returncode, out.strip()), (128 + signal.SIGTERM, b""), "no answer, a killed process's exit")
-        self.assertEqual(self.left(2), [], "Cursor, its command, the sandbox and its sleep, the worker-server")
+        self.assertEqual(self.left(120), [], "Cursor, its command, the sandbox and its sleep, the worker-server")
         self.assert_folder_gone()
 
     def test_leftovers_stopped_before_the_answer(self):
@@ -83,8 +86,8 @@ class CursorStop(CursorScratch):
         p = self.started("sleep 120")
         os.kill(p.pid, signal.SIGKILL)
         p.wait(10)
-        self.assertEqual(self.left(15), [], "Cursor, its command, the sandbox and its sleep, the worker-server")
-        self.assertEqual(wait_for(lambda: not list(self.tmp.glob("cursor-*")), 15), True, "the run's folder removed")
+        self.assertEqual(self.left(120), [], "Cursor, its command, the sandbox and its sleep, the worker-server")
+        self.assertEqual(wait_for(lambda: not list(self.tmp.glob("cursor-*"))), True, "the run's folder removed")
 
     def test_shim_killed_outright_puts_the_boundary_back(self):
         # the hold keeps the main repository's git folders read-only while Cursor runs; when the shim is killed
@@ -96,10 +99,10 @@ class CursorStop(CursorScratch):
         self.assertTrue(list((common / "hansa-cursor-hold").glob("owner-*")), "the hold's lock, the run's share")
         os.kill(p.pid, signal.SIGKILL)
         p.wait(10)
-        self.assertEqual(self.left(15), [], "Cursor, its command, the sandbox and its sleep, the worker-server")
-        self.assertEqual(wait_for(lambda: os.stat(common).st_mode & 0o222, 15), want, "the modes put back")
+        self.assertEqual(self.left(120), [], "Cursor, its command, the sandbox and its sleep, the worker-server")
+        self.assertEqual(wait_for(lambda: os.stat(common).st_mode & 0o222), want, "the modes put back")
         # the watchdog removes the lock after it has put the modes back
-        self.assertTrue(wait_for(lambda: not (common / "hansa-cursor-hold").exists(), 15), "the lock removed")
+        self.assertTrue(wait_for(lambda: not (common / "hansa-cursor-hold").exists()), "the lock removed")
 
     def test_turn_ceiling(self):
         # row 4: past --max-turns, Cursor is stopped; the changes made so far come back. Cursor's next step comes

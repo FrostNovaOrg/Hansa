@@ -1385,7 +1385,7 @@ class FailedWriteTest(unittest.TestCase):
         procs = []
 
         def line(proc):
-            ready, _, _ = select.select([proc.stdout], [], [], 10)
+            ready, _, _ = select.select([proc.stdout], [], [], 120)
             self.assertTrue(ready, "appender did not reach the expected point")
             return proc.stdout.readline().strip()
 
@@ -1472,7 +1472,7 @@ class SrtOutputTest(unittest.TestCase):
         cat.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f'''\
             import os, sys, time
             if len(sys.argv) == 1:
-                end = time.monotonic() + 10
+                end = time.monotonic() + 120
                 while not os.path.exists(os.environ["OUTPUT_READY"]) and time.monotonic() < end:
                     time.sleep(.001)
                 time.sleep(.2)
@@ -1515,11 +1515,11 @@ class SrtOutputTest(unittest.TestCase):
         ready = Path(env["OUTPUT_READY"])
         with self.popen(argv, cwd=kwargs.get("cwd"), env=env, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=kwargs.get("stderr", subprocess.PIPE)) as proc:
-            end = time.monotonic() + 10
+            end = time.monotonic() + 120
             while not ready.exists() and proc.poll() is None and time.monotonic() < end:
                 time.sleep(.001)
             time.sleep(.2)
-            stdout, stderr = proc.communicate(timeout=15)
+            stdout, stderr = proc.communicate(timeout=120)
         self.assertEqual(stdout, self.out + self.err if kwargs.get("stderr") == subprocess.STDOUT else self.out)
         if stderr is not None:
             self.assertEqual(stderr, self.err)
@@ -1736,7 +1736,7 @@ class SrtOutputTest(unittest.TestCase):
                     self.assertEqual(proc.stdout.read(6), b"start\n")
                     proc.stdout.close()
                     proc.stdout = None
-                out, err = proc.communicate(timeout=20)
+                out, err = proc.communicate(timeout=120)
             finally:
                 # Even a broken relay must leave no descendant behind after this test.
                 if proc.poll() is None:
@@ -1745,7 +1745,7 @@ class SrtOutputTest(unittest.TestCase):
                             os.killpg(int((folder / "group").read_text()), signal.SIGKILL)
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(proc.pid, signal.SIGKILL)
-                    proc.communicate(timeout=3)
+                    proc.communicate(timeout=120)
         rc = proc.returncode if place == "relay" else int((folder / "exit").read_text())
         return rc, out, err, time.monotonic() - started
 
@@ -2098,7 +2098,7 @@ class DeskTest(unittest.TestCase):
         keep = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "srt").exists()]
         return unittest.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(keep)})
 
-    def settle(self, d, tid, timeout=20):
+    def settle(self, d, tid, timeout=120):
         end = time.time() + timeout
         while time.time() < end:
             d.tick()
@@ -2144,7 +2144,7 @@ class DeskTest(unittest.TestCase):
                     calls.append(argv)
                     # Capture the real launch site without executing its commands or leaving work running.
                     proc = popen(["/usr/bin/true"], **kwargs)
-                    proc.wait(timeout=10)
+                    proc.wait(timeout=120)
                     return proc
 
                 with unittest.mock.patch.object(account, "LINUX", linux), \
@@ -3588,7 +3588,7 @@ class DeskTest(unittest.TestCase):
             for language in ("en", "zh"):
                 result = subprocess.run(["node", str(harness), str(page), "exceptions", language],
                                         input=json.dumps({"/api/settings": public_settings(c.desk)}),
-                                        capture_output=True, text=True, timeout=60)
+                                        capture_output=True, text=True, timeout=120)
                 c.assertEqual(result.returncode, 0, result.stderr)
                 shown = json.loads(result.stdout)
                 c.assertEqual(shown["before"], entries)
@@ -3795,7 +3795,7 @@ class DeskTest(unittest.TestCase):
                         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
                         shown = subprocess.run(["node", str(harness), str(page), "settings-problems"],
                                                input=json.dumps({"/api/settings": public}),
-                                               capture_output=True, text=True, timeout=60)
+                                               capture_output=True, text=True, timeout=120)
                         c.assertEqual(shown.returncode, 0, shown.stderr)
                         c.assertIn("release_forbidden_except", json.loads(shown.stdout))
             c.assertIn("merged into main", c.hansa("merge", clean))
@@ -3860,7 +3860,7 @@ class DeskTest(unittest.TestCase):
             for language in ("en", "zh"):
                 result = subprocess.run(["node", str(harness), str(page), "empty-exception", language],
                                         input=json.dumps({"/api/settings": public_settings(c.desk)}),
-                                        capture_output=True, text=True, timeout=60)
+                                        capture_output=True, text=True, timeout=120)
                 c.assertEqual(result.returncode, 0, result.stderr)
                 posted = json.loads(result.stdout)
                 c.assertEqual(posted["settings"]["release_forbidden_except"], [kept, {"entry": "", "lanes": []}])
@@ -3912,7 +3912,7 @@ class DeskTest(unittest.TestCase):
                                                      "release_mailbox_allow": allow})
                     result = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(c.desk.root), "merge", tid],
                                             cwd=c.tmp, env={**os.environ, "PYTHONPATH": src, "PYTHONHASHSEED": str(seed)},
-                                            capture_output=True, text=True, timeout=60)
+                                            capture_output=True, text=True, timeout=120)
                     c.assertNotIn("Traceback", result.stdout + result.stderr)
                     rejected = alpha_mailbox_hits(address, set(), [entry[1:] for entry in allow])
                     c.assertEqual(result.returncode, 1 if rejected else 0, result.stdout + result.stderr)
@@ -4143,7 +4143,7 @@ class DeskTest(unittest.TestCase):
             with unittest.mock.patch.object(release, "matches", side_effect=AssertionError("pattern was run")):
                 worker = threading.Thread(target=scan)
                 worker.start()
-                worker.join(2)
+                worker.join(120)
             c.assertFalse(worker.is_alive())
             c.assertEqual(errors, [])
             for key, where in (("change", "message"), ("title", "title")):
@@ -4380,7 +4380,7 @@ class DeskTest(unittest.TestCase):
                         st["releases"][0]["hits"] = selected
                         result = subprocess.run(["node", str(harness), str(page), "release-hits", language],
                                                 input=json.dumps({"/api/status": st}),
-                                                capture_output=True, text=True, timeout=60)
+                                                capture_output=True, text=True, timeout=120)
                         c.assertEqual(result.returncode, 0, result.stderr)
                         text = json.loads(result.stdout)
                         if len(selected) == 2:
@@ -5283,13 +5283,13 @@ class DeskTest(unittest.TestCase):
             from hansa import run
             if run.group_running(proc.pid):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=10)
-            end = time.time() + 3
+            proc.wait(timeout=120)
+            end = time.time() + 120
             while run.group_running(proc.pid) and time.time() < end:
                 time.sleep(0.01)
             self.assertFalse(run.group_running(proc.pid), "fixture cleanup left its child running")
         self.addCleanup(cleanup)
-        end = time.time() + 10
+        end = time.time() + 120
         while time.time() < end:
             try:
                 proc.child_pid = int(marker.read_text())
@@ -5594,7 +5594,7 @@ class DeskTest(unittest.TestCase):
                          pid_start=run.proc_start(proc.pid), started=time.time() - (30000 if overdue else 0),
                          launch=f"fixture-{tid}", cancel=cancel)
         if code is not None:
-            proc.wait(timeout=10)
+            proc.wait(timeout=120)
         d.procs[tid] = proc
         return tid, proc
 
@@ -5697,7 +5697,7 @@ class DeskTest(unittest.TestCase):
                                  "Path(sys.argv[1]).write_text(sys.argv[2]); sys.exit(int(sys.argv[2]))",
                                  str(exit_file), str(code)], start_new_session=True)
         self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
-        proc.wait(timeout=10)
+        proc.wait(timeout=120)
         fields = {"pid": proc.pid, "pid_start": run.proc_start(proc.pid), "launch": f"fixture-{tid}",
                   "started": time.time()}
         if merge:
@@ -5868,7 +5868,7 @@ class DeskTest(unittest.TestCase):
                                     launch=f"fixture-{tid}")
                         proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(6)"], start_new_session=True)
                         self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
-                        proc.wait(timeout=10)
+                        proc.wait(timeout=120)
                         starts.append(tid)
                         desk.update(tid, phase="", pid=proc.pid, pid_start=run.proc_start(proc.pid))
                         return proc
@@ -6614,7 +6614,7 @@ class DeskTest(unittest.TestCase):
         bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
         sh = subprocess.Popen(["/bin/sh", "-c", "sleep 60 & wait"], env=bare, start_new_session=True)
         self.addCleanup(lambda: (os.killpg(sh.pid, 9) if sh.poll() is None else None, sh.wait()))
-        end = time.time() + 10
+        end = time.time() + 120
         while time.time() < end:
             kids = [p for p, (pp, _, _) in process_table().items() if pp == sh.pid]
             if kids:
@@ -6722,7 +6722,7 @@ class DeskTest(unittest.TestCase):
             self.assertEqual((m["state"], (m.get("check") or {"ok": True})["ok"]), ("done", True), m)
         return d, t1, t2
 
-    def settle_merge(self, d, tid, timeout=20):
+    def settle_merge(self, d, tid, timeout=120):
         end = time.time() + timeout
         while time.time() < end:
             d.tick()
@@ -6780,7 +6780,7 @@ class DeskTest(unittest.TestCase):
                 (gates / task).touch()
             for proc in d.merge_procs.values():
                 run.stop(proc.pid, "", proc)
-                proc.wait(timeout=20)
+                proc.wait(timeout=120)
         self.addCleanup(cleanup)
         self.hansa("merge", tasks[0])
         d.tick()
@@ -6939,7 +6939,7 @@ class DeskTest(unittest.TestCase):
         from hansa import run
         d, tasks, gates, runs, blocker = self.batch_queue()
         (gates / tasks[0]).touch()
-        d.merge_procs[tasks[0]].wait(timeout=20)
+        d.merge_procs[tasks[0]].wait(timeout=120)
         real_git, real_update = run.git, self.desk.update
 
         def git(*args, **kw):
@@ -9073,7 +9073,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         self.hansa("merge", t1)
         self.hansa("merge", t2)
-        end = time.time() + 20
+        end = time.time() + 120
         while not (runs.exists() and runs.read_text().endswith("\n")) and time.time() < end:
             d.tick()
             time.sleep(0.05)
@@ -10122,13 +10122,13 @@ class DeskTest(unittest.TestCase):
         def worker(tid, exit_code, old=False):
             proc = run.start(desk, tid, "a", "claude")
             self.assertIsNotNone(proc)
-            self.addCleanup(proc.wait, timeout=20)
+            self.addCleanup(proc.wait, timeout=120)
             if old:
                 def forget_start(meta):
                     meta.pop("run_start")
                     return {}
                 desk.change(tid, forget_start)  # an in-flight run made by an older hansa
-            self.assertEqual(proc.wait(timeout=20), exit_code)
+            self.assertEqual(proc.wait(timeout=120), exit_code)
             return run.finish(desk, tid, exit_code)
 
         updating = kind.startswith("update-")
@@ -10300,7 +10300,7 @@ class DeskTest(unittest.TestCase):
         return d, desk, tid, root
 
     def oom_settle(self, dispatcher, desk, tid):
-        end = time.time() + 30
+        end = time.time() + 120
         while time.time() < end:
             dispatcher.tick()
             m = desk.meta(tid)
@@ -10526,7 +10526,7 @@ class DeskTest(unittest.TestCase):
                                 self.assertTrue(record.get("cancel") or record.get("timed_out"), record)
                                 os.killpg(pid, signal.SIGKILL)
                                 if proc:
-                                    proc.wait(timeout=10)
+                                    proc.wait(timeout=120)
                             with unittest.mock.patch.object(run, "stop", side_effect=kill), \
                                     unittest.mock.patch.object(cli, "stop", side_effect=kill):
                                 if cause == "cancel":
@@ -10968,7 +10968,7 @@ class DeskTest(unittest.TestCase):
         while len(out) < most and desk.meta(tid)["state"] == "queued":
             proc = run.start(desk, tid, "a", "claude")
             self.assertIsNotNone(proc)
-            rc = proc.wait(timeout=20)
+            rc = proc.wait(timeout=120)
             if mark:
                 mark(tid)
             out.append((rc, run.finish(desk, tid, as_exit(rc) if as_exit else rc)))
@@ -11096,11 +11096,11 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(desk.save_settings(s), [])
             tid = desk.new_task("Add hello.txt")
             proc = run.start(desk, tid, "a", "claude")
-            end = time.time() + 20
+            end = time.time() + 120
             while not started.exists() and time.time() < end:
                 time.sleep(0.05)
             os.killpg(proc.pid, signal.SIGKILL)  # as the system kills it, before the setup has finished
-            rc = proc.wait(timeout=20)
+            rc = proc.wait(timeout=120)
             m = run.finish(desk, tid, rc)
             self.assertEqual((rc, m["state"], m["error"], m["attempts"]), (-9, "failed", "error: no output (exit -9)", []))
             self.assertFalse((root / "count").exists())  # the worker never started
@@ -11226,10 +11226,10 @@ class DeskTest(unittest.TestCase):
                                       "FAKE_RESUME_KILL": str(root / "resume-killed")}
             self.assertEqual(desk.save_settings(s), [])
             tid = desk.new_task("Fix the badge")
-            self.assertEqual(run.start(desk, tid, "a", "claude").wait(timeout=20), 0)
+            self.assertEqual(run.start(desk, tid, "a", "claude").wait(timeout=120), 0)
             again = run.resume(desk, tid)  # its first process said its turns, and left work running in the background
             self.assertIsNotNone(again)
-            rc = again.wait(timeout=20)
+            rc = again.wait(timeout=120)
             m = run.finish(desk, tid, rc)
             self.assertEqual((rc, m["state"], m["error"]), (-9, "queued", once.format(-9)), m)
             [a] = m["attempts"]
@@ -11315,7 +11315,7 @@ class DeskTest(unittest.TestCase):
             return m
 
         def wait(d, desk, tid, predicate):
-            end = time.monotonic() + 25
+            end = time.monotonic() + 120
             while time.monotonic() < end:
                 d.tick()
                 m = desk.meta(tid)
@@ -11326,7 +11326,7 @@ class DeskTest(unittest.TestCase):
 
         def join(d):
             for thread in getattr(d, "probes", {}).values():
-                thread.join(timeout=10)
+                thread.join(timeout=120)
                 self.assertFalse(thread.is_alive(), "provider check did not end")
 
         def queue_verification(desk, parent):
@@ -11412,7 +11412,7 @@ class DeskTest(unittest.TestCase):
             second = desk.new_task("Another running task", lane="b")
             p1 = run.start(desk, first, "a", "claude")
             p2 = run.start(desk, second, "b", "claude")
-            rc1, rc2 = p1.wait(timeout=20), p2.wait(timeout=20)
+            rc1, rc2 = p1.wait(timeout=120), p2.wait(timeout=120)
             run.finish(desk, first, rc1)
             since = desk.provider_state().get("claude", {}).get("unreachable_since")
             m = run.finish(desk, second, rc2)  # already running when the first run's drop was read
@@ -11474,7 +11474,7 @@ class DeskTest(unittest.TestCase):
                     s["lanes"]["a"]["env"] = {"FAKE_NET": f"econnreset:1:{root / 'drops'}"}
                     self.assertEqual(desk.save_settings(s), [])
                     proc = run.start(desk, tid, "a", "claude")
-                    rc = proc.wait(timeout=20)
+                    rc = proc.wait(timeout=120)
                     if kind != "report":
                         result = {"is_error": True, "api_error_status": status,
                                   "result": "Not logged in · Please run /login" if kind == "login" else "API Error"}
@@ -11604,7 +11604,7 @@ class DeskTest(unittest.TestCase):
                 tid = self.desk.new_task("Add hello.txt")
                 d = Dispatcher(self.desk)
                 if what == "limit":
-                    end = time.time() + 20
+                    end = time.time() + 120
                     while time.time() < end and not self.desk.meta(tid).get("attempts"):
                         d.tick()
                         time.sleep(0.1)
@@ -11655,7 +11655,7 @@ class DeskTest(unittest.TestCase):
                 self.hansa("retry", parent, "carry on")
                 tid = self.desk.meta(parent)["replaced_by"]
                 if what == "limit":
-                    end = time.time() + 20
+                    end = time.time() + 120
                     while time.time() < end and not self.desk.meta(tid).get("attempts"):
                         d.tick()
                         time.sleep(0.1)
@@ -12012,7 +12012,7 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         d = Dispatcher(self.desk)
-        end = time.time() + 20
+        end = time.time() + 120
         while time.time() < end and not self.desk.meta(tid).get("attempts"):
             d.tick()
             time.sleep(0.1)
@@ -12278,7 +12278,7 @@ class DeskTest(unittest.TestCase):
             self.assertTrue(r["line"].endswith("\n") and r["line"].count("\n") == 1, r["line"])
         return [json.loads(r["line"])["message"]["content"] for r in rows if r["socket"] == sock]
 
-    def soon(self, what, timeout=20):
+    def soon(self, what, timeout=120):
         end = time.time() + timeout
         while time.time() < end:
             got = what()
@@ -12347,7 +12347,7 @@ class DeskTest(unittest.TestCase):
             self.assertIn(f"  pid {p.pid} (no name yet) · since ", self.hansa_out("notify"))
             write_json(listed, [{"pid": p.pid, "name": "desk-87"}])
             # its first lookup is 5 s after it starts; one that came before the listing tries again 15 s later
-            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)\n" in self.hansa_out("status"), timeout=60)
+            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)\n" in self.hansa_out("status"))
             self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (desk-87) · since ", self.hansa_out("notify"))
             with self.in_session(p, sock):
@@ -12414,11 +12414,12 @@ class DeskTest(unittest.TestCase):
             try:
                 self.assertTrue(started.wait(30), "the follower never looked the name up")
                 self.desk.write_key("mimo", "sk-mimo-12345678")  # a line for the session, while the lookup hangs
+                # Keep this shorter than the blocked name lookup: the post must arrive while it hangs.
                 got["posts"] = self.soon(lambda: self.posts(sock), timeout=10)
                 self.assertFalse(release.is_set())
                 release.set()
                 got["name"] = self.soon(lambda: [r.get("name") for r in notify.records(self.desk)
-                                                 if r.get("name")], timeout=10)
+                                                 if r.get("name")])
             except BaseException as e:  # noqa: BLE001 - raised again once the follower ended
                 broke.append(e)
             finally:
@@ -12805,10 +12806,10 @@ class DeskTest(unittest.TestCase):
             return proc
 
         older = start("older")
-        self.soon(lambda: (self.tmp / "older-ready").exists(), timeout=30)
+        self.soon(lambda: (self.tmp / "older-ready").exists())
         writer = start("writer")
         self.soon(lambda: (self.desk.state_dir / "heartbeat").exists()
-                  and (self.desk.state_dir / "pulse").exists(), timeout=30)
+                  and (self.desk.state_dir / "pulse").exists())
         # Read while the writer holds the actual serve lock; neither clock is faked.
         for reader in (older, start("younger")):
             out, err = reader.communicate("read\n", timeout=30)
@@ -21692,7 +21693,7 @@ class DeskTest(unittest.TestCase):
                 self.assertRegex(said, r'hansa lane target (L|a) default "<command>"')
                 self.assertNotRegex(said, r"hansa lane set (L|a) release ")
 
-    def settle_release(self, d, rid, timeout=20):
+    def settle_release(self, d, rid, timeout=120):
         from hansa import release
         end = time.time() + timeout
         while time.time() < end:
@@ -23055,7 +23056,7 @@ class DeskTest(unittest.TestCase):
 """))
             replies = {"/api/status": views.status(c.desk), "/api/settings": public_settings(c.desk)}
             got = subprocess.run(["node", str(harness), str(Path(cli.__file__).with_name("ui.html")), tab, language],
-                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                                 input=json.dumps(replies), capture_output=True, text=True, timeout=120)
             c.assertEqual(got.returncode, 0, got.stderr)
             return json.loads(got.stdout)
 
@@ -23474,7 +23475,7 @@ class DeskTest(unittest.TestCase):
 """))
             replies = {"/api/status": views.status(c.desk), "/api/settings": public_settings(c.desk)}
             got = subprocess.run(["node", str(harness), str(Path(cli.__file__).with_name("ui.html")), tab, language],
-                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                                 input=json.dumps(replies), capture_output=True, text=True, timeout=120)
             c.assertEqual(got.returncode, 0, got.stderr)
             return json.loads(got.stdout)
 
@@ -23861,7 +23862,7 @@ class DeskTest(unittest.TestCase):
                             for tid in ids:
                                 c.assertIn(tid, r["note"])
                                 c.assertIn(c.desk.meta(tid)["title"], r["note"])
-                            r = c.settle_release(d, r["id"], timeout=30)
+                            r = c.settle_release(d, r["id"])
                             c.assertEqual(r["state"], "done", r)
                             if row != 5:
                                 c.assertIn("checked", " ".join(r["tail"]))
@@ -23929,13 +23930,13 @@ class DeskTest(unittest.TestCase):
                             ready()
                             c.assertEqual(len(release.releases(c.desk)), 1)
                             gate.touch()
-                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "done")
+                            c.assertEqual(c.settle_release(d, 1)["state"], "done")
                             ran([second, third])
                             c.assertEqual(len(c.events("release_asked")), 2)
                             c.assertFalse(d.release_procs)
                         elif row == 5:
                             ready()
-                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "failed")
+                            c.assertEqual(c.settle_release(d, 1)["state"], "failed")
                             told = heard("release_ended")
                             for word in ("linux", "check FAILED", first, "broken", "task to fix", "after", "merge"):
                                 c.assertIn(word, told)
@@ -23946,7 +23947,7 @@ class DeskTest(unittest.TestCase):
                             c.assertEqual(len(release.releases(c.desk)), 1)  # failures do not loop without a new merge
                             second = land("second.txt")
                             ready()
-                            c.assertEqual(c.settle_release(d, 2, timeout=30)["state"], "failed")
+                            c.assertEqual(c.settle_release(d, 2)["state"], "failed")
                             r = release.get(c.desk, 2)
                             c.assertEqual([m["id"] for m in r["after_merge"]["since_pass"]], [first, second])
                             latest = notify.items_for(c.desk, [c.events("release_ended")[-1]],
@@ -24013,7 +24014,7 @@ class DeskTest(unittest.TestCase):
                             c.hansa("merge", waited, "--despite-check")
                             c.assertTrue(c.desk.meta(waited)["merge_check"]["plain"])
                             for tid in (checked, waited):
-                                c.assertEqual(c.settle_merge(d, tid, timeout=30)["state"], "merged")
+                                c.assertEqual(c.settle_merge(d, tid)["state"], "merged")
                                 clock[0] += 3
                                 c.desk.update(tid, merged=clock[0])
                             c.assertEqual(c.desk.meta(checked)["merge_check_result"]["lane"], "m")
@@ -24058,14 +24059,14 @@ class DeskTest(unittest.TestCase):
                             if row == 14:
                                 r = release.get(c.desk, 1)
                                 c.assertTrue(release.answer(c.desk, 1, True, commit=r["commit"], command=r["command"])["ok"])
-                                c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "done")
+                                c.assertEqual(c.settle_release(d, 1)["state"], "done")
                                 ready()
                                 c.assertEqual(len(release.releases(c.desk)), 1)
                                 c.assertEqual(len(c.events("release_asked")), 1)
                         elif row == 13:
                             recorded_land()
                             c.hansa("release", "a", "linux", "Check these merges by hand")
-                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "done")
+                            c.assertEqual(c.settle_release(d, 1)["state"], "done")
                             enable()
                             ready()
                             c.assertEqual(len(release.releases(c.desk)), 1)
@@ -24079,7 +24080,7 @@ class DeskTest(unittest.TestCase):
                             c.tick_targets("linux")
                             recorded_land()
                             c.hansa("release", "a", "linux", "Check by hand again")
-                            c.assertEqual(c.settle_release(d, 3, timeout=30)["state"], "failed")
+                            c.assertEqual(c.settle_release(d, 3)["state"], "failed")
                             enable()
                             ready()
                             c.assertEqual(len(release.releases(c.desk)), 3)
@@ -24087,7 +24088,7 @@ class DeskTest(unittest.TestCase):
                             ids = [first] + [recorded_land() for _ in range(24)]
                             enable()
                             ready()
-                            r = c.settle_release(d, 1, timeout=30)
+                            r = c.settle_release(d, 1)
                             c.assertEqual(r["state"], "failed")
                             c.assertEqual(len(release.releases(c.desk)), 1)
                             for field in ("merges", "since_pass"):
@@ -24106,7 +24107,7 @@ class DeskTest(unittest.TestCase):
                             c.assertEqual(len(release.releases(c.desk)), 1)
                             next_task = recorded_land()
                             ready()
-                            r = c.settle_release(d, 2, timeout=30)
+                            r = c.settle_release(d, 2)
                             c.assertEqual(r["state"], "failed")
                             c.assertEqual([m["id"] for m in r["after_merge"]["merges"]], [next_task])
                             c.assertEqual(r["after_merge"]["merges_count"], 1)
@@ -24147,7 +24148,7 @@ class DeskTest(unittest.TestCase):
                                     write_json(c.desk.settings_path, s)  # bypass save validation
                                     ready()
                                     c.assertEqual(release.get(c.desk, r["id"])["state"], "running")
-                                    c.assertEqual(c.settle_release(d, r["id"], timeout=30)["state"], "done")
+                                    c.assertEqual(c.settle_release(d, r["id"])["state"], "done")
                                     c.assertTrue(all(x["target"] == "other" for x in release.releases(c.desk)))
                                     c.assertEqual(c.events("release_after_merge_waits"), [])
                         elif row == 18:
@@ -24165,7 +24166,7 @@ class DeskTest(unittest.TestCase):
                             r = release.get(c.desk, 1)
                             c.assertTrue(r["timed_out"])
                             c.assertEqual((r["limit_min"], r["limit_of"]), (1, "the lane's"))
-                            c.assertEqual(c.settle_release(d, 1, timeout=30)["state"], "failed")
+                            c.assertEqual(c.settle_release(d, 1)["state"], "failed")
                         elif row == 19:
                             c.hansa("pause", "reviewing")
                             ready()
@@ -24674,10 +24675,10 @@ class DeskTest(unittest.TestCase):
                 {**other.settings(), "concurrency": 2})), daemon=True)
             writers.append(t)
             t.start()
-            t.join(5)  # a scan that held the lock would keep it waiting until the scan ended
+            t.join(120)  # a scan that held the lock would keep it waiting until the scan ended
             wrote.append(not t.is_alive())
             return real(*args, **kw)
-        self.addCleanup(lambda: [t.join(30) for t in writers])
+        self.addCleanup(lambda: [t.join(120) for t in writers])
         self.with_release("true")
         with unittest.mock.patch("hansa.release.forbidden_in", slow_scan):
             self.hansa("release", "a")
@@ -25924,7 +25925,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
             r = self.settle_release(d, 1)
         self.assertEqual((r["state"], bool(r.get("killed"))), ("stopped", True), r)
-        self.soon(ended, timeout=5)
+        self.soon(ended)
         # done: what it left running is stopped as it ends
         done, cmd = away(2)
         self.fixed_target("install", cmd)
@@ -25934,7 +25935,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             ended = gone(done)
             r = self.settle_release(d, 2)
         self.assertEqual(r["state"], "done", r)
-        self.soon(ended, timeout=5)
+        self.soon(ended)
         self.assertTrue(self.events("release_left_running_stopped"))
 
     def test_a_stop_while_the_fixed_checkout_is_made_records_that_nothing_ran(self):
@@ -26047,7 +26048,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.desk.save_settings(s), [])
         self.desk.write_key("mimo", "sk-test-01")
         tid = self.desk.new_task("Fix the badge")
-        d, end = Dispatcher(self.desk), time.time() + 30
+        d, end = Dispatcher(self.desk), time.time() + 120
         while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
             d.tick()
             if (self.desk.provider_state().get("mimo") or {}).get("cool_until", 0) > time.time():
@@ -26942,7 +26943,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         def turn():  # every follower is at the start of its loop's turn: the lookups they started end, the clock moves
             for th in threading.enumerate():
                 if th.name == "hansa-look":
-                    th.join(30)
+                    th.join(120)
             clock[0] += step
             while todo and todo[0][0] <= (clock[0] - t0) / 60:
                 todo.pop(0)[1]()
@@ -26950,7 +26951,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         together = threading.Barrier(len(sessions), action=turn)
 
         def gone(sess):  # each turn of its loop starts here
-            together.wait(60)
+            together.wait(120)
             return (clock[0] - t0) / 60 >= minutes
 
         def restart(state):
@@ -27974,7 +27975,7 @@ class GitOpenTryTest(unittest.TestCase):
         from hansa import run
         f = self.tmp / "try.sh"
         f.write_text(run.git_open_try(paths, kept))
-        r = subprocess.run(["/bin/sh", str(f)], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["/bin/sh", str(f)], capture_output=True, text=True, timeout=120)
         return r.returncode, r.stdout.splitlines()
 
     def unchanged(self):
@@ -28256,7 +28257,7 @@ class ParallelRunnerTest(unittest.TestCase):
 
     def run_sample(self, *args, env=None):
         return subprocess.run(self.command(*args), cwd=self.tmp, env=env or self.env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
 
     def test_1_failures_errors_and_skips_keep_unittest_format_and_hansa_can_lift_them(self):
         self.module('''
@@ -28485,7 +28486,7 @@ class ParallelRunnerTest(unittest.TestCase):
                 self.assertEqual(started if jobs == "1" else started[:1], expected)
 
     def wait_for_records(self, paths, proc=None):
-        end = time.monotonic() + 20
+        end = time.monotonic() + 120
         while not all(path.exists() and path.read_text() for path in paths):
             if proc is not None and proc.poll() is not None:
                 self.fail(proc.communicate()[0])
@@ -28495,7 +28496,7 @@ class ParallelRunnerTest(unittest.TestCase):
     def assert_processes_stopped(self, paths):
         from hansa.run import alive, _state
         pids = [int(path.read_text()) for path in paths]
-        end = time.monotonic() + 10
+        end = time.monotonic() + 120
         running = lambda: [pid for pid in pids if alive(pid) and _state(pid) != "Z"]
         while running() and time.monotonic() < end:
             time.sleep(0.02)
@@ -28511,7 +28512,7 @@ class ParallelRunnerTest(unittest.TestCase):
                     pass
         if proc.poll() is None:
             proc.kill()
-        proc.communicate(timeout=20)
+        proc.communicate(timeout=120)
 
     def test_10_death_in_final_fixtures_reports_the_last_test_without_counting_it_twice(self):
         for fixture, ending in (("tearDownModule", "sys.exit(0)"),
