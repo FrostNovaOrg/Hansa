@@ -13298,6 +13298,7 @@ class DeskTest(unittest.TestCase):
                            capture_output=True, text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--permission-mode dontAsk", r.stdout)
+        self.assertIn("--effort max", r.stdout)
         repo = self.repo.resolve()
         self.assertIn(f"--add-dir {repo}", r.stdout)
         self.assertIn(f"Edit(//{str(repo).lstrip('/')}/**)", r.stdout)
@@ -14886,8 +14887,24 @@ class DeskTest(unittest.TestCase):
     def test_a_new_desks_claude_provider_and_coordinator_run_on_opus(self):
         with contextlib.redirect_stdout(io.StringIO()):
             main(["init", str(self.tmp / "new-desk")])
-        s = Desk.find(str(self.tmp / "new-desk")).settings()
+        desk = Desk.find(str(self.tmp / "new-desk"))
+        s = desk.settings()
         self.assertEqual((s["providers"]["claude"]["model"], s["coordinator"]["model"]), ("opus", "opus"))
+        self.assertEqual(s["coordinator"]["effort"], "max")
+        self.assertEqual(json.loads(desk.settings_path.read_text())["coordinator"]["effort"], "max")
+        self.assertEqual(public_settings(desk)["settings"]["coordinator"]["effort"], "max")
+
+    def test_settings_keep_the_coordinators_saved_effort(self):
+        for effort in ("", "low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                s = self.desk.settings()
+                s["coordinator"]["effort"] = effort
+                write_json(self.desk.settings_path, s)
+                before = self.desk.settings_path.read_bytes()
+                self.assertEqual(self.desk.settings()["coordinator"]["effort"], effort)
+                self.assertEqual(public_settings(self.desk)["settings"]["coordinator"]["effort"], effort)
+                self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["effort"], effort)
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
 
     def test_init_for_an_account_refuses_a_link_or_a_folder_with_things_in_it(self):
         self.as_root()
