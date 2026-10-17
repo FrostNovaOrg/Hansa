@@ -155,23 +155,26 @@ headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 ### Compaction
 
 `hansa coordinator` loads hansa's mod, a Claude Code plugin, into the coordinator's session only (workers,
-verifications never get it). The principal sets four values on the page, next to the
+verifications never get it). The principal sets two values on the page, next to the
 coordinator's model and effort; the coordinator cannot change them:
 
 - **Compact when idle at** (default 400,000 tokens): once a turn has ended with an answer and the session is idle
   (no turn running, and the last `Stop` listed no background tasks and no session crons), the mod compacts after 60
   seconds with no new turn, while the whole context is still in the prompt cache.
-- **Compact after a long idle at** (default 200,000 tokens) and **a long idle is** (default 50 minutes): the same,
-  after that long, before the prompt cache (an hour) lapses: the next turn starts from a short context.
 - **Compact while working at** (default 550,000 tokens): Claude Code's own auto-compact, given as `--autocompact`.
 
-Tokens take 100,000 to 1,000,000, minutes 1 to 240. A new turn cancels a wait; after a compact (done, skipped or
-refused) the mod asks again only after a new turn. It reads the first three in the desk's settings file at each
-decision (a turn or a wait ends): a missing value is its default, a file it cannot read or parse means no idle
-compact. The fourth applies from the next start. The mod needs Claude Code 2.1.290 or later; `--autocompact` is given
+Both take 100,000 to 1,000,000 tokens. A new turn cancels the wait; after a compact (done, skipped or refused) the
+mod asks again only after a new turn. It reads the first in the desk's settings file at each decision (a turn or a
+wait ends): a missing value is its default, a file it cannot read or parse means no idle compact. The second applies
+from the next start. The mod needs Claude Code 2.1.290 or later; `--autocompact` is given
 whenever Claude Code is new enough, whether or not the mod loads. When hansa skips it, the start, `hansa status` and
 the page say why. A session whose settings turn hooks off runs without the mod's rules, and hansa cannot see that;
 Claude Code's own auto-compact still applies to it.
+
+Below **compact when idle at**, what compacts an idle session is Claude Code's own idle compaction (Claude Code
+2.1.299 or later): a conversation of 200,000 tokens or more left idle about 54 minutes is compacted before its
+one-hour prompt cache lapses. `"idleCompaction": false` in Claude Code's settings, or its `/config`, turns it off.
+hansa neither sets nor reads it.
 
 ## Merge checks
 

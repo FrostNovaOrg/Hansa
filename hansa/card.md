@@ -215,7 +215,7 @@ the principal, and approve nothing. If your settings hold messages from other se
 (`crossSessionInbound`), you will not hear hansa; the principal can change that. More: `hansa help
 inbox`.
 `hansa coordinator --clear-daily HH-HH` clears your session once a day when idle, and hansa's mod
-compacts it when idle at the principal's thresholds: keep what must survive in the desk (tasks,
+compacts it when idle at the principal's threshold: keep what must survive in the desk (tasks,
 requests, notes). Your plan and findings go in files under `notes/`, which you write without asking.
 Keep the file you reread each time short: the current work and open items only. Move finished rounds
 out with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`). Do not `mv`, `cp` or `sed`

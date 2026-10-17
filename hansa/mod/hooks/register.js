@@ -3,17 +3,15 @@
 //
 // Compaction when idle: once a turn of the main conversation has ended with an answer and the Stop that ended it
 // listed no background tasks and no session crons, the session is idle. Then it compacts after IDLE_MS with no new
-// turn when the context is at or above hansa's idle_at, while the whole context is still in the prompt cache; and
-// after long_idle_min minutes when it is at or above long_idle_at, before the prompt cache (an hour) lapses, so the
-// next turn starts from a short context instead of reading a long one uncached. A new turn cancels any wait. While
-// the session works it never interrupts: Claude Code's own auto-compact, at the window hansa gives it with
-// --autocompact, does that.
+// turn when the context is at or above hansa's idle_at, while the whole context is still in the prompt cache. A new
+// turn cancels any wait. While the session works it never interrupts: Claude Code's own auto-compact, at the window
+// hansa gives it with --autocompact, does that.
 //
 // hansa gives it, in the environment, HANSA_MOD_SETTINGS: the desk's own settings file, the one hansa's page saves.
-// At each decision it reads there the three numbers under "coordinator_compact" (idle_at, long_idle_at in tokens,
-// long_idle_min in minutes), so a change on the page holds from the next decision; one absent, or out of the page's
-// range, is its default. It uses only those numbers: nothing else of the file is kept, logged or repeated. It writes
-// no file of its own, and keeps nothing in $.store.
+// At each decision it reads there the one number it uses under "coordinator_compact" (idle_at, in tokens), so a
+// change on the page holds from the next decision; absent, or out of the page's range, it is its default. It uses
+// only that number: nothing else of the file is kept, logged or repeated. It writes no file of its own, and keeps
+// nothing in $.store.
 //
 // The daily clear: with `hansa coordinator --clear-daily HH-HH`, hansa also gives it HANSA_MOD_CLEAR_DAILY, a window of
 // hours in local time (22-03 runs past midnight), for that start only. Once in each window it clears the session
@@ -26,11 +24,9 @@
 const IDLE_MS = 60_000 // shorter than the prompt cache's lifetime
 const MINUTE_MS = 60_000
 const CLEAR_IDLE_MS = 5 * MINUTE_MS
-// Each threshold's default and range, as hansa's (desk.py: COMPACT_DEFAULTS, COMPACT_MOST)
+// The threshold's default and range, as hansa's (desk.py: COMPACT_DEFAULTS, COMPACT_MOST)
 const THRESHOLDS = {
   idle_at: [400_000, 100_000, 1_000_000],
-  long_idle_at: [200_000, 100_000, 1_000_000],
-  long_idle_min: [50, 1, 240],
 }
 
 // What one loaded copy of the mod knows
@@ -68,8 +64,8 @@ function said(err) {
   return String(err && err.message ? err.message : err).slice(0, 300)
 }
 
-// The thresholds in the desk's settings file as it is now: { idle_at, long_idle_at, long_idle_min }, or null when
-// the file cannot be read or parsed (then nothing compacts while idle)
+// The threshold in the desk's settings file as it is now: { idle_at }, or null when the file cannot be read or
+// parsed (then nothing compacts while idle)
 async function thresholds($) {
   let x
   try {
@@ -121,7 +117,7 @@ function daily(win, now, st) {
   return { opensIn: (next.opened ?? next.opens) - now }
 }
 
-// The one decision, from the context's tokens, how long the session has been idle (ms), the thresholds (null: no
+// The one decision, from the context's tokens, how long the session has been idle (ms), the threshold (null: no
 // compact) and the daily clear (null: none): 'clear' or 'compact' now; { at } to decide again once it has been idle
 // that long (ms); or null, nothing. Inside a window still to clear in, only the clear: compaction waits for it
 function decide(tokens, idleMs, t, clear) {
@@ -129,9 +125,8 @@ function decide(tokens, idleMs, t, clear) {
     if (idleMs >= CLEAR_IDLE_MS) return 'clear'
     return { at: Math.min(CLEAR_IDLE_MS, idleMs + clear.endsIn) }
   }
-  const due = [] // how long idle each rule the context is over asks for
+  const due = [] // how long idle the idle rule asks for, when the context is over its threshold
   if (t && tokens >= t.idle_at) due.push(IDLE_MS)
-  if (t && tokens >= t.long_idle_at) due.push(t.long_idle_min * MINUTE_MS)
   if (due.some(d => idleMs >= d)) return 'compact'
   if (clear) due.push(idleMs + clear.opensIn) // the next window opening
   return due.length ? { at: Math.min(...due) } : null

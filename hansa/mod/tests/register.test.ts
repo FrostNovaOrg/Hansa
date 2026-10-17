@@ -3,7 +3,7 @@ import { register } from '../hooks/register.js'
 
 const SETTINGS = '/desk/settings.json'
 const MIN = 60_000
-const THRESHOLDS = { idle_at: 400_000, long_idle_at: 200_000, long_idle_min: 50, working_at: 550_000 }
+const THRESHOLDS = { idle_at: 400_000, working_at: 550_000 }
 // The desk's settings file, as hansa's page saves it: the thresholds among the desk's other settings
 const desk = (thresholds: Record<string, unknown>) => JSON.stringify({
   version: 1, concurrency: 2, coordinator: { provider: 'claude', model: 'opus' },
@@ -106,11 +106,11 @@ test('idle above the threshold: it compacts once, after a minute', async ($, on)
   expect(calls.compact).toBe(1)
 })
 
-// The exact edges: at the threshold itself, and at 60 seconds and 50 minutes to the millisecond
+// The exact edges: at the threshold itself, and at 60 seconds to the millisecond
 
 test('idle: at exactly 400,000 it compacts at exactly 60 seconds, not a millisecond before', async ($, on) => {
   const tokens = { value: 400_000 }
-  const { clock, calls } = setup(on, tokens, { long_idle_at: 1_000_000 })
+  const { clock, calls } = setup(on, tokens)
   await turn($, 't1')
   await clock.advance(59_999)
   expect(calls.compact).toBe(0)
@@ -120,32 +120,22 @@ test('idle: at exactly 400,000 it compacts at exactly 60 seconds, not a millisec
 
 test('idle: at 399,999 it does not compact at 60 seconds', async ($, on) => {
   const tokens = { value: 399_999 }
-  const { clock, calls } = setup(on, tokens, { long_idle_at: 1_000_000 })
+  const { clock, calls } = setup(on, tokens)
   await turn($, 't1')
   await clock.advance(120 * MIN)
   expect(calls.compact).toBe(0)
 })
 
-test('long idle: at exactly 200,000 it compacts at exactly 50 minutes, not a millisecond before', async ($, on) => {
-  const tokens = { value: 200_000 }
-  const { clock, calls } = setup(on, tokens)
-  await turn($, 't1')
-  await clock.advance(50 * MIN - 1)
-  expect(calls.compact).toBe(0)
-  await clock.advance(1)
-  expect(calls.compact).toBe(1)
-})
-
-for (const shrinks of [true, false]) { // also when the compact leaves the context above both thresholds
-  test(`at 400,000 or more: it compacts at 60 seconds, and nothing happens again at 50 minutes${shrinks ? '' :
-    ' (the compact left it above both)'}`, async ($, on) => {
+for (const shrinks of [true, false]) { // also when the compact leaves the context above the threshold
+  test(`at 400,000 or more: it compacts at 60 seconds, and not again however long it stays idle${shrinks ? '' :
+    ' (the compact left it above the threshold)'}`, async ($, on) => {
     const tokens = { value: 450_000 }
     const { clock, calls } = setup(on, tokens)
     calls.shrinks = shrinks
     await turn($, 't1')
     await clock.advance(61_000)
     expect(calls.compact).toBe(1)
-    await clock.advance(55 * MIN)
+    await clock.advance(120 * MIN)
     expect(calls.compact).toBe(1)
   })
 }
@@ -164,7 +154,7 @@ test('the Stop may come after the turn ends: it compacts all the same', async ($
   expect(calls.compact).toBe(1)
 })
 
-test('below both thresholds: no compact, however long', async ($, on) => {
+test('below the threshold: no compact, however long', async ($, on) => {
   const tokens = { value: 150_000 }
   const { clock, calls } = setup(on, tokens)
   await turn($, 't1')
@@ -172,50 +162,24 @@ test('below both thresholds: no compact, however long', async ($, on) => {
   expect(calls.compact).toBe(0)
 })
 
-// -- long idle: at or above long_idle_at, long_idle_min minutes with no new turn -----------------------------------
-
-test('long idle: above 200,000 it compacts after 50 minutes, not before', async ($, on) => {
-  const tokens = { value: 300_000 }
+test('a new turn cancels the idle\'s wait', async ($, on) => {
+  const tokens = { value: 450_000 }
   const { clock, calls } = setup(on, tokens)
   await turn($, 't1')
-  await clock.advance(2 * MIN)
-  expect(calls.compact).toBe(0) // under the idle threshold: not at a minute
-  await clock.advance(47 * MIN)
-  expect(calls.compact).toBe(0) // 49 minutes
-  await clock.advance(MIN + 1_000)
-  expect(calls.compact).toBe(1)
-  await clock.advance(120 * MIN)
-  expect(calls.compact).toBe(1)
-})
-
-test('long idle: below 200,000 it does not compact at 50 minutes', async ($, on) => {
-  const tokens = { value: 199_999 }
-  const { clock, calls } = setup(on, tokens)
-  await turn($, 't1')
-  await clock.advance(51 * MIN)
+  await clock.advance(MIN - 10_000)
+  await $.turn.start({ text: 'hansa posted', turnId: 't2' })
+  await clock.advance(5_000)
+  await held($, stopped())
+  await $.turn.complete(done('t2'))
+  const reads = calls.reads
+  await clock.advance(10_000) // when the first wait would have ended: no decision, no compact
+  expect(calls.reads).toBe(reads)
   expect(calls.compact).toBe(0)
+  await clock.advance(MIN - 20_000)
+  expect(calls.compact).toBe(0) // counted afresh from that turn's end
+  await clock.advance(11_000)
+  expect(calls.compact).toBe(1)
 })
-
-for (const [rule, value, after] of [['the long idle', 300_000, 50 * MIN], ['the idle', 450_000, MIN]] as const) {
-  test(`a new turn cancels ${rule}'s wait`, async ($, on) => {
-    const tokens = { value }
-    const { clock, calls } = setup(on, tokens)
-    await turn($, 't1')
-    await clock.advance(after - 10_000)
-    await $.turn.start({ text: 'hansa posted', turnId: 't2' })
-    await clock.advance(5_000)
-    await held($, stopped())
-    await $.turn.complete(done('t2'))
-    const reads = calls.reads
-    await clock.advance(10_000) // when the first wait would have ended: no decision, no compact
-    expect(calls.reads).toBe(reads)
-    expect(calls.compact).toBe(0)
-    await clock.advance(after - 20_000)
-    expect(calls.compact).toBe(0) // counted afresh from that turn's end
-    await clock.advance(11_000)
-    expect(calls.compact).toBe(1)
-  })
-}
 
 // Every way back to idle decides afresh and cancels the wait first, so only the wait itself shows that a new turn
 // cancelled it at once: the mod's handlers, given a $ whose waits say when they are cancelled
@@ -245,49 +209,19 @@ test('a new turn cancels the wait at once, as it starts', async () => {
 
 // -- thresholds: read at each decision -----------------------------------------------------------------------------
 
-test('a threshold changed during a wait is the one used when the wait ends', async ($, on) => {
-  const tokens = { value: 300_000 }
-  const { clock, calls, set } = setup(on, tokens)
-  await turn($, 't1')
-  await clock.advance(10 * MIN)
-  set({ long_idle_min: 90 }) // the long idle made longer while it waits: not at 50 minutes, at 90
-  await clock.advance(41 * MIN)
-  expect(calls.compact).toBe(0)
-  await clock.advance(39 * MIN)
-  expect(calls.compact).toBe(1)
-  // raised above the context while it waits: no compact when the wait ends
-  tokens.value = 300_000
-  set({})
-  await turn($, 't2')
-  await clock.advance(10 * MIN)
-  set({ long_idle_at: 350_000 })
-  await clock.advance(45 * MIN)
-  expect(calls.compact).toBe(1)
-  // the idle threshold lowered under the context while it waits for the long idle, and the long idle's raised above
-  // it: when that wait ends, only the idle rule can compact
-  set({})
-  await turn($, 't3')
-  await clock.advance(10 * MIN)
-  set({ idle_at: 250_000, long_idle_at: 350_000 })
-  await clock.advance(39 * MIN)
-  expect(calls.compact).toBe(1) // decided when the wait ends, not when the file changes
-  await clock.advance(2 * MIN)
-  expect(calls.compact).toBe(2)
-})
-
 test('the idle threshold raised while it waits: decided again when the wait ends, no compact', async ($, on) => {
   const tokens = { value: 450_000 }
   const { clock, calls, set } = setup(on, tokens)
   await turn($, 't1')
   await clock.advance(30_000)
-  set({ idle_at: 500_000, long_idle_at: 500_000 })
+  set({ idle_at: 500_000 })
   await clock.advance(60 * MIN)
   expect(calls.compact).toBe(0)
 })
 
-test('changed between turns: the next turn decides by the new thresholds', async ($, on) => {
+test('changed between turns: the next turn decides by the new threshold', async ($, on) => {
   const tokens = { value: 300_000 }
-  const { clock, calls, set } = setup(on, tokens, { long_idle_at: 400_000 })
+  const { clock, calls, set } = setup(on, tokens)
   await turn($, 't1')
   await clock.advance(120 * MIN)
   expect(calls.compact).toBe(0)
@@ -297,23 +231,18 @@ test('changed between turns: the next turn decides by the new thresholds', async
   expect(calls.compact).toBe(1)
 })
 
-// Each default, and each value out of range, in a case only its own rule can satisfy: the other rule is set out of reach
-// (idle_at or long_idle_at at 1,000,000), so a wrong default cannot pass through it
-const OFF = 1_000_000
+// The default, and a value out of the page's range or not a number, which is taken as the default: a wrong default
+// either compacts where it must not or does not where it must
 for (const [what, cc, tokens, notBefore, at] of [
-  ['idle_at absent: 400,000', { long_idle_at: OFF }, 400_000, MIN - 1, MIN],
-  ['idle_at absent: not 399,999', { long_idle_at: OFF }, 399_999, 120 * MIN, null],
-  ['long_idle_at absent: 200,000', { idle_at: OFF, long_idle_min: 50 }, 200_000, 50 * MIN - 1, 50 * MIN],
-  ['long_idle_at absent: not 199,999', { idle_at: OFF, long_idle_min: 50 }, 199_999, 120 * MIN, null],
-  ['long_idle_min absent: 50 minutes', { idle_at: OFF, long_idle_at: 200_000 }, 300_000, 50 * MIN - 1, 50 * MIN],
-  ['idle_at out of range (5)', { idle_at: 5, long_idle_at: OFF }, 300_000, 120 * MIN, null],
-  ['long_idle_at not a number (\'250000\')', { idle_at: OFF, long_idle_at: '250000' }, 200_000, 50 * MIN - 1, 50 * MIN],
-  ['long_idle_min out of range (0)', { idle_at: OFF, long_idle_min: 0 }, 300_000, 50 * MIN - 1, 50 * MIN],
+  ['idle_at absent: 400,000', {}, 400_000, MIN - 1, MIN],
+  ['idle_at absent: not 399,999', {}, 399_999, 120 * MIN, null],
+  ['idle_at out of range (5)', { idle_at: 5 }, 300_000, 120 * MIN, null],
+  ['idle_at not a number (\'250000\')', { idle_at: '250000' }, 300_000, 120 * MIN, null],
 ] as const) {
   test(`a threshold absent from the file, or out of the page's range, is its default: ${what}`, async ($, on) => {
     const value = { value: tokens }
     const { clock, calls, files } = setup(on, value)
-    files[SETTINGS] = JSON.stringify({ version: 1, coordinator_compact: cc }) // nothing else of the three
+    files[SETTINGS] = JSON.stringify({ version: 1, coordinator_compact: cc }) // nothing else in it
     await turn($, 't1')
     await clock.advance(notBefore)
     expect(calls.compact).toBe(0)
@@ -324,12 +253,26 @@ for (const [what, cc, tokens, notBefore, at] of [
   })
 }
 
-test('a desk saved before these settings: the defaults', async ($, on) => {
-  const tokens = { value: 300_000 } // under the idle default: only the long idle can compact, at 50 minutes
+test('a desk saved before these settings: the default', async ($, on) => {
+  const tokens = { value: 400_000 } // at the idle default: it compacts at a minute
   const { clock, calls, files } = setup(on, tokens)
   files[SETTINGS] = JSON.stringify({ version: 1 })
   await turn($, 't1')
-  await clock.advance(50 * MIN - 1)
+  await clock.advance(MIN - 1)
+  expect(calls.compact).toBe(0)
+  await clock.advance(1)
+  expect(calls.compact).toBe(1)
+})
+
+test('a desk saved with the long idle\'s values, which hansa no longer has: they change nothing', async ($, on) => {
+  const tokens = { value: 300_000 } // under idle_at, above what long_idle_at said
+  const { clock, calls } = setup(on, tokens, { long_idle_at: 100_000, long_idle_min: 1 })
+  await turn($, 't1')
+  await clock.advance(120 * MIN)
+  expect(calls.compact).toBe(0)
+  tokens.value = 400_000
+  await turn($, 't2')
+  await clock.advance(MIN - 1)
   expect(calls.compact).toBe(0)
   await clock.advance(1)
   expect(calls.compact).toBe(1)
@@ -348,7 +291,7 @@ test('a settings file that cannot be read or parsed: no compact while idle, and 
   await clock.advance(60 * MIN)
   expect(calls.compact).toBe(0)
   expect(calls.logs).toEqual([]) // nothing said of a file it could not read or parse: what is wrong may quote it
-  // the desk's other settings are never repeated: only the three numbers are used
+  // the desk's other settings are never repeated: only idle_at is used
   files[SETTINGS] = JSON.stringify({ providers: { x: { key: 'sk-secret-1234' } }, coordinator_compact: THRESHOLDS })
   await turn($, 't3')
   await clock.advance(61_000)
@@ -441,7 +384,7 @@ for (const how of ['skipped', 'refused']) {
     await clock.advance(61_000)
     await held($, stopped())
     await $.turn.complete(done('t1')) // and the turn's end again, with no new turn
-    await clock.advance(60 * MIN) // the long idle's time passes too
+    await clock.advance(60 * MIN) // however long it stays idle
     expect(calls.compact).toBe(1)
     calls.skip = ''
     calls.refuse = ''
@@ -687,7 +630,7 @@ test('a decision under way when the clear starts: it decides nothing once it see
   }
   await clock.advance(5 * MIN)
   expect(calls.clears.length).toBe(1)
-  expect(calls.compact).toBe(0) // the context is large and long idle, but a clear is under way
+  expect(calls.compact).toBe(0) // the context is large and idle past the minute, but a clear is under way
   release()
   await again
   expect(calls.compact).toBe(0)
@@ -743,14 +686,6 @@ test('outside the window, idle compaction is as before', async ($, on) => {
   await clock.advance(MIN)
   expect(calls.compact).toBe(1)
   expect(calls.clears).toEqual([])
-  // and the long idle, before a window opens
-  tokens.value = 300_000
-  await until(clock, 0, 12)
-  await turn($, 't2')
-  await clock.advance(50 * MIN - 1)
-  expect(calls.compact).toBe(1)
-  await clock.advance(1)
-  expect(calls.compact).toBe(2)
 })
 
 test('a compact before the window does not keep it from clearing when the window opens', async ($, on) => {

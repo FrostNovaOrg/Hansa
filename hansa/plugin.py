@@ -4,11 +4,12 @@
 both for that start only; hansa sets no environment variable but HANSA_MOD_SETTINGS, the path of the desk's own
 settings file, and HANSA_MOD_CLEAR_DAILY, the window of `--clear-daily HH-HH` when the start gives one, and changes no
 settings file, so no worker or `claude` the session starts gets it from hansa. The mod compacts the context once a turn has ended and the session is idle, at idle_at tokens after a minute
-and at long_idle_at after long_idle_min minutes (hooks/register.js says when exactly): it reads those three in the
-desk's settings file, the one the page saves, at each decision, so a change there needs nothing kept in step. While
-the session works, Claude Code's own auto-compact compacts it, at the window --autocompact gives (working_at, read
-when the session starts). All are the principal's, on the page (desk.COMPACT_DEFAULTS). With a window, the mod also
-clears the session once in each window, when it has been idle for 5 minutes (hooks/register.js says when exactly).
+(hooks/register.js says when exactly): it reads idle_at in the desk's settings file, the one the page saves, at each
+decision, so a change there needs nothing kept in step. While the session works, Claude Code's own auto-compact
+compacts it, at the window --autocompact gives (working_at, read when the session starts). Both are the principal's,
+on the page (desk.COMPACT_DEFAULTS). Below idle_at, Claude Code's own idle compaction (2.1.299 or later) may compact a
+session left idle long; hansa neither sets nor reads it. With a window, the mod also clears the session once in each
+window, when it has been idle for 5 minutes (hooks/register.js says when exactly).
 
 It needs Claude Code NEEDS or later (mods, and --autocompact, on any endpoint). On an older one the session starts
 without the mod and without --autocompact, and the start says so. --autocompact is given whenever Claude Code is new
@@ -59,8 +60,7 @@ HELP = "More: hansa help inbox"
 WINDOW = re.compile(r"^([0-9]{1,2})-([0-9]{1,2})$")
 MISSED = 2  # this many windows ended without a clear: the clear's line is a warning
 # The thresholds' names, the same in hansa status, the page and the docs
-WORDS = {"idle_at": ("compact when idle at", "tokens"), "long_idle_at": ("compact after a long idle at", "tokens"),
-         "long_idle_min": ("a long idle is", "minutes"), "working_at": ("compact while working at", "tokens")}
+WORDS = {"idle_at": ("compact when idle at", "tokens"), "working_at": ("compact while working at", "tokens")}
 
 
 def _read(path, default=None):
@@ -413,6 +413,6 @@ def clear_line(st: dict) -> str:
 def settings_line(s: dict) -> str:
     """hansa status's line on the desk's compaction settings, in their words."""
     v = compact_settings(s)
-    said = [f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS]
-    return ("coordinator's compaction, the desk's settings: " + ", ".join(said[:3]) + " (the mod reads these); "
-            + said[3] + " (hansa passes it as --autocompact at a start)")
+    idle, working = (f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS)
+    return (f"coordinator's compaction, the desk's settings: {idle} (the mod reads it); {working} (hansa passes it "
+            "as --autocompact at a start)")

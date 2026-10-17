@@ -236,13 +236,12 @@ def home_secrets() -> tuple:
     return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
 
 
-# When the coordinator's session compacts (hansa/plugin.py): idle_at and long_idle_at, in tokens, by the coordinator's
-# mod once a turn has ended and the session has been idle for a minute or for long_idle_min minutes (the mod reads
-# them here, in the desk's settings file, and keeps the same defaults and ranges: hansa/mod/hooks/register.js);
-# working_at, the window hansa gives Claude Code's own auto-compact (--autocompact), which takes 100k to 1M
-COMPACT_DEFAULTS = {"idle_at": 400_000, "long_idle_at": 200_000, "long_idle_min": 50, "working_at": 550_000}
-COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "long_idle_at": (100_000, 1_000_000), "long_idle_min": (1, 240),
-                "working_at": (100_000, 1_000_000)}
+# When the coordinator's session compacts (hansa/plugin.py): idle_at, in tokens, by the coordinator's mod once a turn
+# has ended and the session has been idle for a minute (the mod reads it here, in the desk's settings file, and keeps
+# the same default and range: hansa/mod/hooks/register.js); working_at, the window hansa gives Claude Code's own
+# auto-compact (--autocompact), which takes 100k to 1M
+COMPACT_DEFAULTS = {"idle_at": 400_000, "working_at": 550_000}
+COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "working_at": (100_000, 1_000_000)}
 # The principal's `coordinator` alert (hansa/alert.py): the minutes before it goes out, 0 for off, up to
 # COORDINATOR_ALERT_MOST, for each case: no session hears from hansa while something it would post waits; the
 # coordinator's session waits on its window (a permission dialog or a question) with something posted to it; a task
@@ -307,8 +306,8 @@ def default_settings() -> dict:
 
 
 def compact_settings(s: dict) -> dict:
-    """When the coordinator's session compacts, {idle_at, long_idle_at, long_idle_min, working_at}: the settings',
-    each one missing or out of range taken as its default."""
+    """When the coordinator's session compacts, {idle_at, working_at}: the settings', each one missing or out of
+    range taken as its default."""
     cc = s.get("coordinator_compact") if isinstance(s.get("coordinator_compact"), dict) else {}
     return {k: cc[k] if _is_int(cc.get(k), *COMPACT_MOST[k]) else v for k, v in COMPACT_DEFAULTS.items()}
 
@@ -580,6 +579,10 @@ def current_settings(settings: dict) -> dict:
     co = s.get("coordinator")
     if isinstance(co, dict):
         co.pop("audits_cost", None)
+    cc = s.get("coordinator_compact")
+    if isinstance(cc, dict):
+        for key in ("long_idle_at", "long_idle_min"):
+            cc.pop(key, None)
     for p in (s.get("providers", {}).values() if isinstance(s.get("providers"), dict) else ()):
         if isinstance(p, dict):
             p.pop("rest_minutes", None)
@@ -670,9 +673,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     cc = s.get("coordinator_compact", {})
     if not isinstance(cc, dict) or set(cc) - set(COMPACT_DEFAULTS) or not all(
             _is_int(v, *COMPACT_MOST[k]) for k, v in cc.items()):
-        p.append("coordinator_compact: compact when idle at, compact after a long idle at and compact while working "
-                 "at must be whole numbers of tokens from 100,000 to 1,000,000, and a long idle is a whole number of "
-                 "minutes from 1 to 240")
+        p.append("coordinator_compact: compact when idle at and compact while working at must be whole numbers of "
+                 "tokens from 100,000 to 1,000,000")
     ca = s.get("coordinator_alert", {})
     if not isinstance(ca, dict) or set(ca) - set(COORDINATOR_ALERT):
         p.append("coordinator_alert must hold " + ", ".join(COORDINATOR_ALERT) + ", each a whole number of minutes")
