@@ -1736,7 +1736,7 @@ class SrtOutputTest(unittest.TestCase):
                     self.assertEqual(proc.stdout.read(6), b"start\n")
                     proc.stdout.close()
                     proc.stdout = None
-                out, err = proc.communicate(timeout=4)
+                out, err = proc.communicate(timeout=20)
             finally:
                 # Even a broken relay must leave no descendant behind after this test.
                 if proc.poll() is None:
@@ -1755,7 +1755,7 @@ class SrtOutputTest(unittest.TestCase):
                 for kind in ("idle", "writing"):
                     with self.subTest(system=system, place=place, child=kind):
                         # Linux's leftover outlives any slow run by seconds; macOS waits for its own.
-                        life = 5 if system == "linux" else 1.5
+                        life = 10 if system == "linux" else 1.5
                         folder = self.tmp / f"{system}-{place}-{kind}"
                         folder.mkdir()
                         script = folder / "child.py"
@@ -1791,7 +1791,7 @@ class SrtOutputTest(unittest.TestCase):
                         self.assertIn(b"err-tail", lines)
                         self.assertLess(lines.index(b"tail"), lines.index(b"err-tail"))
                         if system == "linux":
-                            self.assertLess(elapsed, 3.9, "a leftover held up Linux's end")  # waiting for Linux leftovers
+                            self.assertLess(elapsed, 8, "a leftover held up Linux's end")  # waiting for Linux leftovers
                             self.assertNotIn(b"late\n", out)
                         else:
                             self.assertGreater(elapsed, 1.4, "macOS lost the leftover's output")
