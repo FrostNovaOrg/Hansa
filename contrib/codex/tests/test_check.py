@@ -41,7 +41,7 @@ class ProviderCheck(Scratch):
                 unittest.mock.patch.object(hansa_run, "provider_env", lambda *a: {**given(*a), **given_settings}), \
                 unittest.mock.patch.object(hansa_run, "isolated",
                                            lambda *a: isolated(*a) + ([] if tools is None else ["--tools", tools])):
-            return hansa_run.check_provider(self.desk, "codex", timeout=120)
+            return hansa_run.check_provider(self.desk, "codex", timeout=60)
 
     def assert_codex_ran(self):
         self.assertFalse((self.claude_record / "argv").exists(), "the real claude was called")
@@ -123,7 +123,7 @@ class CheckAnswer(Scratch):
         env = self.env(fixture)
         env.pop("CLAUDE_ENV_FILE")
         p = self.start(argv, env, task="Reply with the single word OK.")
-        out, err = p.communicate(timeout=120)
+        out, err = p.communicate(timeout=60)
         return json.loads(out), err.decode(errors="replace"), p.returncode
 
     def test_answer_fields(self):

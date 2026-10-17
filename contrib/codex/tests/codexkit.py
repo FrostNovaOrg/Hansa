@@ -176,7 +176,7 @@ class Scratch(unittest.TestCase):
             return subprocess.Popen([str(WRAPPER), *argv], cwd=str(cwd or self.wt), env=env, stdin=stdin,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
 
-    def run_worker(self, fixture="success.jsonl", timeout=120, argv=None, **extra):
+    def run_worker(self, fixture="success.jsonl", timeout=60, argv=None, **extra):
         p = self.start(argv or self.worker_argv(), self.env(fixture, **extra))
         out, err = p.communicate(timeout=timeout)
         self.err = err.decode(errors="replace")

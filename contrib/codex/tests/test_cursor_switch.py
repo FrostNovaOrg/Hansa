@@ -58,7 +58,7 @@ class Switch(unittest.TestCase):
             env["HANSA_CURSOR_ENABLE"] = enable
         p = subprocess.Popen([str(WRAPPER), *argv], cwd=str(self.work), env=env, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate(STDIN, timeout=120)
+        out, err = p.communicate(STDIN, timeout=60)
         return p, out, err.decode(errors="replace"), env
 
     def assert_real_claudes(self, p, out, err, env, argv):

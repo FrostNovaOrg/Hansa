@@ -26,7 +26,7 @@ class PassThrough(unittest.TestCase):
             env["ANTHROPIC_BASE_URL"] = base_url
         p = subprocess.Popen([str(WRAPPER), *argv], cwd=str(self.dir), env=env, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate(stdin, timeout=120)
+        out, err = p.communicate(stdin, timeout=60)
         self.assertTrue((self.record / "argv").exists(), f"the real claude was not called: {out!r} {err!r}")
         rec = {"argv": [os.fsdecode(a) for a in (self.record / "argv").read_bytes().split(b"\0")[:-1]],
                "stdin": (self.record / "stdin").read_bytes(), "pid": int((self.record / "pid").read_text()),

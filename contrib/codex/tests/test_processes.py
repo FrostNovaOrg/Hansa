@@ -27,7 +27,7 @@ class Kill(Scratch):
     def started(self, **extra):
         p = self.start(self.worker_argv(), self.env(FAKE_CODEX_HANG="1", **extra))
         self.addCleanup(self.reap, p)
-        end = time.time() + 120
+        end = time.time() + 20
         while time.time() < end:
             try:
                 rec = self.codex_called()
@@ -48,7 +48,7 @@ class Kill(Scratch):
             p.kill()
         p.communicate()
 
-    def wait_gone(self, pids, seconds=120):
+    def wait_gone(self, pids, seconds):
         end = time.time() + seconds
         while time.time() < end and any(alive(x) for x in pids):
             time.sleep(0.1)
@@ -59,13 +59,13 @@ class Kill(Scratch):
         self.assertTrue(all(alive(x) for x in self.pids))
         hansa_run.stop_group(p.pid)  # what hansa does at a run's time ceiling: SIGTERM, 5 s, SIGKILL, to the group
         p.wait(10)
-        self.assertEqual(self.wait_gone(self.pids), [], "codex, its child and a grandchild in its own session")
+        self.assertEqual(self.wait_gone(self.pids, 3), [], "codex, its child and a grandchild in its own session")
 
     def test_shim_killed_outright_still_stops_them(self):
         p, self.pids = self.started()
         os.kill(p.pid, signal.SIGKILL)  # no chance to pass anything on: the watchdog in srt's group does
         p.wait(10)
-        self.assertEqual(self.wait_gone(self.pids), [])
+        self.assertEqual(self.wait_gone(self.pids, 10), [])
 
     def test_sigterm_to_the_shim_alone_with_no_watchdog(self):
         # the shim's own handler, nothing else, passes the signal on: srt does not, and no watchdog runs
@@ -73,7 +73,7 @@ class Kill(Scratch):
         os.kill(p.pid, signal.SIGTERM)
         p.wait(10)
         self.assertEqual(p.returncode, 128 + signal.SIGTERM)
-        self.assertEqual(self.wait_gone(self.pids), [], "srt, codex, its child and a grandchild")
+        self.assertEqual(self.wait_gone(self.pids, 2), [], "srt, codex, its child and a grandchild")
 
     def test_signal_between_srts_start_and_run_proc(self):
         # SIGTERM lands while the shim pauses after Popen returns, before Run.proc is set: held back till then
@@ -92,4 +92,4 @@ class Kill(Scratch):
         if self.codex_record.exists():
             rec = self.codex_called()
             self.pids += [rec["pid"], *rec.get("children", [])]
-        self.assertEqual(self.wait_gone(self.pids), [], "srt and whatever it started")
+        self.assertEqual(self.wait_gone(self.pids, 2), [], "srt and whatever it started")

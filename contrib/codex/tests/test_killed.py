@@ -11,11 +11,11 @@ from .codexkit import Scratch, alive
 class Killed(Scratch):
     def run_killed(self, **extra):
         p = self.start(self.worker_argv(), self.env("many_items.jsonl", **extra))
-        out, err = p.communicate(timeout=120)
+        out, err = p.communicate(timeout=60)
         self.err = err.decode(errors="replace")
         return out.decode(errors="replace"), p.returncode
 
-    def wait_gone(self, pids, seconds=120):
+    def wait_gone(self, pids, seconds=5):
         end = time.time() + seconds
         while time.time() < end and any(alive(x) for x in pids):
             time.sleep(0.1)
