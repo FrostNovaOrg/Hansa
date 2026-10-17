@@ -230,6 +230,10 @@ command with the principal's permission; like you, it cannot read `secrets/` or 
 repositories. It reports what it changed, where, and how to undo it. Brief a helper as a task: one
 question, task id or job, and what you need back. Claude Code's general-purpose helpers are off;
 code changes go to workers.
+Each step of your session rereads your whole conversation, so a long run of commands here costs
+several times what the same run costs in a worker. When finding something out takes more than a few
+commands (trying what a lane's sandbox allows, say, or going through a repository), make it a task,
+or ask `scout` when reading is enough; say what you need back.
 
 ## What you change, and what only the principal changes
 - Yours: tasks; the lanes (`hansa lane`) and their standing instructions, which you read and change
