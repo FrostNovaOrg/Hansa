@@ -2804,6 +2804,22 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn("No recorded coordinator start", said)
         self.assertIn("trust", said)
         self.assertIn("attach and answer", said)
+        # with tmux or without, a desk that had a coordinator before starts were recorded starts nothing
+        for had in ("a task", "a follower"):
+            with self.subTest(had=had):
+                made = self.desk.tasks_dir / "t0001" if had == "a task" else \
+                    notify.register_dir(self.desk) / ("a" * 16 + ".json")
+                made.parent.mkdir(parents=True, exist_ok=True)
+                made.mkdir() if had == "a task" else made.write_text("{}")
+                for tmux in ("/tools/tmux", ""):
+                    said, calls, ok = self.coordinator_up(tmux=tmux)
+                    self.assertEqual((calls, ok), ([], False))
+                    self.assertIn("not recorded yet", said)
+                    self.assertIn("nothing started", said)
+                    self.assertIn("hansa notify on in it", said)
+                    self.assertIn("start it with hansa coordinator", said)
+                    self.assertNotIn("trust", said)
+                shutil.rmtree(made) if had == "a task" else made.unlink()
         # a record that says why the last start was not recorded starts nothing, and says why
         said, calls, ok = self.coordinator_up({"kind": "unrecorded", "why": "a word of its command holds one of the "
                                                "desk's keys", "session": {"pid": 0}})
@@ -2855,7 +2871,12 @@ class CoordinatorUpTest(unittest.TestCase):
                     "session": {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}})
         self.assertIn("still runs", up.coordinator_line(self.desk))
         (self.desk.state_dir / "coordinator-start.json").unlink()
-        self.assertEqual(up.coordinator_line(self.desk), "")
+        self.assertEqual(up.coordinator_line(self.desk), "")  # a new desk: hansa up starts a first one
+        (self.desk.tasks_dir / "t0001").mkdir()
+        line = up.coordinator_line(self.desk)
+        self.assertIn("hansa up starts no coordinator's session", line)
+        self.assertIn("not recorded yet", line)
+        self.assertIn("hansa notify on in it", line)
 
 
 class DeskTest(unittest.TestCase):

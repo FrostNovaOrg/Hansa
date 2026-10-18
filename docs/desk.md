@@ -120,9 +120,16 @@ variables, and runs in the recorded folder:
 `claude -p` runs (`hansa ping`) use a temporary folder, so they leave none
 there. A prompt given on the recorded command line is given again.
 
-With no record (a coordinator never started on this version), it starts
-`hansa coordinator` in the desk, without `--continue`, and says that the first
-start in a folder asks whether to trust it: attach and answer. It then waits
+With no record on a new desk (no task, and nothing under `.hansa/followers/`,
+as after `hansa init`), it starts `hansa coordinator` in the desk, without
+`--continue`, and says that the first start in a folder asks whether to trust
+it: attach and answer. With no record on any other desk, it starts nothing:
+that desk had a coordinator before hansa recorded its start, maybe a session
+in another folder that ran `hansa notify on`, and a fresh `hansa coordinator`
+would be a second coordinator, in the wrong folder, with a new conversation.
+It says that the start is not recorded yet, and what to do: start the
+coordinator as before and run `hansa notify on` in it, or start it with
+`hansa coordinator`; from then on `hansa up` starts it again. After a start, it waits
 three seconds and prints that the session started, with the attach command
 (`tmux -L NAME attach -t SESSION`, or `tmux attach -t SESSION` for tmux's
 default server); if the pane ended, it says that the start failed, with the
@@ -130,7 +137,7 @@ command to run by hand. Without tmux it starts no coordinator, and prints the
 command to run in a terminal of one's own. On another account's desk it starts
 nothing, as for the server. While no session hears from hansa, `hansa status`
 says in one line that `hansa up` starts the session again, and how, or why it
-does not.
+does not, including a start not recorded yet and what to do about it.
 
 ## A desk's files
 

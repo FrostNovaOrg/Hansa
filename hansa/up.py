@@ -29,6 +29,12 @@ LAUNCHER = "notify-launch"  # hansa's hidden command that starts a session hansa
 PICKS = {"-c": False, "--continue": False, "--fork-session": False, "-r": None, "--resume": None,
          "--session-id": True, "--messaging-socket-path": True}
 PRINTS = ("-p", "--print")  # claude's words for a run that is not an interactive session
+# With no record on a desk that has tasks or followers, its coordinator ran before hansa recorded starts: maybe a
+# session in another folder, so a fresh hansa coordinator would be a second one, in the wrong folder
+NOT_YET = ("its start is not recorded yet: this desk had a coordinator before hansa recorded its start, maybe a "
+           "session in another folder")
+TO_RECORD = ("Start it as before and run hansa notify on in it, or start it with hansa coordinator; from then on "
+             "hansa up starts it again")
 
 
 def hansa_command() -> str:
@@ -313,8 +319,20 @@ def restart_plan(desk: Desk, rec: dict) -> dict:
         claude = [argv[0], *resumed(argv[1:])]
         return {"cmd": [hansa, *desk_words, LAUNCHER, *claude], "hand": claude, "folder": rec["folder"],
                 "words": argv[1:], "kind": "notify"}
-    cmd = [hansa_command(), *desk_words, "coordinator"]  # never recorded: a first start, so nothing to continue
+    cmd = [hansa_command(), *desk_words, "coordinator"]  # a new desk's first start, so nothing to continue
     return {"cmd": cmd, "hand": cmd, "folder": str(desk.root), "words": [], "kind": ""}
+
+
+def new_desk(desk: Desk) -> bool:
+    """A desk that never had a coordinator, as after hansa init: no task, and nothing under .hansa/followers/."""
+    def has(d: Path, what) -> bool:
+        try:
+            return any(what(x) for x in d.iterdir())
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True  # cannot tell: not new
+    return not has(desk.tasks_dir, Path.is_dir) and not has(notify.register_dir(desk), lambda x: True)
 
 
 def by_hand(plan: dict) -> str:
@@ -357,12 +375,12 @@ def notify_on_line(desk: Desk) -> str:
 def coordinator_line(desk: Desk) -> str:
     """For hansa status while no session hears from hansa: what hansa up does about the coordinator's session."""
     rec = read_coordinator(desk)
-    if not rec:
-        return ""
     pid = still_runs(rec)
     if pid:
         return (f"the coordinator's session pid {pid} still runs and does not hear from hansa: hansa notify on in it "
                 "(hansa up starts no second one)")
+    if rec.get("kind") not in ("coordinator", "notify", "unrecorded"):
+        return "" if new_desk(desk) else f"hansa up starts no coordinator's session: {NOT_YET}. {TO_RECORD}"
     if rec.get("kind") == "unrecorded":
         return f"hansa up cannot start the coordinator's session again: its last start was not recorded ({rec.get('why')})"
     plan = restart_plan(desk, rec)
@@ -403,6 +421,9 @@ def coordinator_up(desk: Desk) -> bool:
               "then run hansa notify on in it")
         return False
     rec = rec if rec.get("kind") in ("coordinator", "notify") else {}
+    if not rec and not new_desk(desk):
+        print(f"coordinator: {NOT_YET}; nothing started. {TO_RECORD}")
+        return False
     plan = restart_plan(desk, rec)
     if prints(plan["words"]):
         print("coordinator: its last start ran claude with --print, which is not an interactive session; "
@@ -419,8 +440,8 @@ def coordinator_up(desk: Desk) -> bool:
               f"In a terminal of your own: {by_hand(plan)}")
         return True
     if not plan["kind"]:
-        print("No recorded coordinator start; starting hansa coordinator in the desk. The first start in a folder "
-              "asks whether to trust it: attach and answer.")
+        print("No recorded coordinator start, and a new desk; starting hansa coordinator in the desk. The first start "
+              "in a folder asks whether to trust it: attach and answer.")
     saved = rec.get("tmux") if isinstance(rec.get("tmux"), dict) else {}
     serve = (read_json(desk.state_dir / "serve-start.json", {}) or {}).get("tmux") or {}
     server = saved.get("server") or (serve.get("server") if isinstance(serve, dict) else None) or desk_server(desk)
